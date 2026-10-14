@@ -171,11 +171,11 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
    choices are recorded and valid: `-95`'s two and `-96`).
-2. Horgus (`docs/poc4/dialogue.md`, round 6): its two unmodelled draws (a random-track gate, the roaming waypoint
-   choices) need WrathOracle to record each draw's producer so the comparison can tie it to the sim's classification
-   (a per-run method exemption was withdrawn in review); then the awake states (record them in dialogue fixtures and
-   take them as inputs) and `OnIsInGameChanged`'s group membership (run the groups model in dialogue runs); then each
-   save's load tail (`coverage.json`).
+2. Horgus (`docs/poc4/dialogue.md`, rounds 6 and 7): on `poc4-horgus-4` the T0 stream is equal on all six runs,
+   awake states being recorded inputs. Left: the cutscene commands' timing (record `CommandAction.OnRun`, run a
+   cutscene's T0 steps when the game did), the random-track gate's and roaming's draws as recorded inputs tied to the
+   producers WrathOracle now records, `OnIsInGameChanged`'s group membership (run the groups model in dialogue runs);
+   then each save's load tail (`coverage.json`).
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
    features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them). They also offset every
    later fact id: `manual10-ids-1/ids-load.json` names each allocation the sim misses (working notes).
@@ -241,8 +241,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - Scene caches for POC-4: `scripts/scene-cache.sh <area> <guid>` (schema v2 since 2026-10-14, with roaming waypoints;
   rebuild both areas' caches after pulling).
 - The oracle regression: `scripts/regress.sh <label> <bindir>` then `scripts/regress-diff.sh <new> <base>`
-  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-mythic2` (release build: the mythic levels and
-  three components, only Manual_10 changed; before it `out-awake-start`, the fact pairing's `out-fact-pairing`,
+  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-awake2` (release build; the Horgus fixtures now from
+  `poc4-horgus-4`, with recorded awake states; before it `out-mythic2`: the mythic levels and three components, only
+  Manual_10 changed; before it `out-awake-start`, the fact pairing's `out-fact-pairing`,
   `out-slice-g`); pass the outputs' full paths to `regress-diff.sh`). Run parallel ones with a
   private `WR_CACHE` (symlink every `cache/*` entry except `sim` and `poc5`, which are copied).
 - Worktree agents sharing the main `target/` can bake their checkout path into `wr-paths`;

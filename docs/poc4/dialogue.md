@@ -449,11 +449,36 @@ The Horgus runs stay invalid on the two draws above, the awake states (180 repor
 (WrathOracle's `awake_set`/`awake` observation runs only in turn-based windows; record it in dialogue fixtures, with
 a spawned unit's blueprint, and take it as an input), then the groups model in dialogue runs.
 
+## Round 7: awake states as recorded inputs (2026-10-14, seventeenth session) [M]
+
+The 180 "area unit with a toggle to tick" reports a Horgus run came from units whose awake state needs fog of war
+(not modelled). They are now inputs, as in the combat replay:
+
+- **WrathOracle** (`AwakeObs.cs`): outside turn-based windows, one `aa_awake` observation per run of
+  `UnitActivatableAbilitiesController`, written at that controller's own tick prefix (`BaseUnitController.Tick`
+  filtered to it): the units it iterates, the whole set first, then changes, and a unit created in the run with its
+  blueprint. (`ProducerObs.cs` also records, before each, the producer of the global draws the sim doesn't make: a
+  cutscene gate's track choice, roaming's waypoint and idle choices. Not used yet.)
+- **The dialogue runner** (`spawn::RecordedAwake`, `World::recorded_awake`) parses them strictly (a malformed record is
+  reported and the input dropped), takes the oracle tick's set before the sim's controller (the sim counts ticks from
+  1, the oracle from 0), and matches each id to a live unit: a saved id as is, a run-created one by blueprint, the
+  match unique. `awake_state`'s unknown states take the recording's; a known state that disagrees is reported (the
+  sim keeps its own). A tick the recording's controller didn't run, or an id the sim can't match, is reported.
+
+On `poc4-horgus-4` (Manual_19, re-recorded with these observers) **the ordered T0 stream is equal on all six runs**
+(130/130, 125/125): the spawned unit's toggle now ticks as in the game. Left per run: the awake state of 62DE
+differs for 146 ticks (the closing cutscene's `HideUnit` takes it out of the game at tick 187 in the game, at the
+cutscene's start in the sim: cutscene timing is T1 and the sim runs a cutscene's T0 actions in order at its start),
+`OnIsInGameChanged`'s group membership, and the background cutscene's `RandomTrack` gate. Next: take the cutscene
+commands' timing from the recording (a `CommandAction.OnRun` observation), and the gate's draws as recorded inputs
+tied to their producer.
+
 ## Recordings (local, gitignored)
 
 | Capture | Fixtures | Runs |
 |---|---|---|
 | `fixtures/captures/oracle/poc4-seelah-1` (Manual_13) | `seelah-a` (Athletics, then `1cfe1ed0…`), `seelah-b` (question `7ce19f7c…`, Knowledge World), `seelah-c` (Diplomacy) | record, replay-1, perturbed replays (a: +8 on d20 #7; b: +8/+14 on #13, +8 on #7; c: +8/+14 on #7) |
+| `fixtures/captures/oracle/poc4-horgus-4` (Manual_19) | as `poc4-horgus-1`, with `aa_awake` and the draw producers | record, replay-1, perturbed (as below) |
 | `fixtures/captures/oracle/poc4-horgus-1` (Manual_19) | `horgus-check` (`905c535d…`, check `3ab56408…`, `d641426b…`, `7a580452…`), `horgus-alt` (`5422edfb…`, `db14014b…`, `905c535d…`, `e497fc46…`, `7a580452…`) | record, replay-1, perturbed (+7/+13 on d20 #3) |
 
 Specs: `oracle/tools/oracle-fixtures/poc4-seelah.spec.json`, `poc4-horgus.spec.json`

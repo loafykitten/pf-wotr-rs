@@ -234,7 +234,13 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
     }
     // 2b. UnitActivatableAbilitiesController (Default, Dialog, Cutscene, Rest).
     let dialog_or_cutscene = matches!(w.player.mode, "Dialog" | "Cutscene");
+    // (The sim's ticks count from 1, the oracle's from 0.)
+    let t = w.events.tick - 1;
+    crate::spawn::recorded_awake_for_tick(w, t);
     crate::spawn::activatable_abilities_tick(w, dialog_or_cutscene);
+    if let Some(r) = w.recorded_awake.as_mut() {
+        r.now = None;
+    }
     // 3. ScriptZoneController (Default mode).
     if let Some(z) = zone {
         enter_script_zone(w, z);
@@ -1062,6 +1068,14 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
             steps = steps_with_oracle_answers(&steps, &records)?;
         }
         w.rng = Box::new(crate::rng::Tape::new(tape_from_trace(&records)));
+        // The recording's awake states (newer recordings have them): inputs where the sim
+        // can't establish a unit's.
+        match crate::spawn::RecordedAwake::of(&records, runtime_ids.saved.clone()) {
+            Ok(r) => w.recorded_awake = r.map(Box::new),
+            Err(e) => {
+                w.coverage.unsupported(format!("dialogue replay: a malformed awake record ({e})"))
+            }
+        }
         // The window starts after the oracle's settle ticks: its clock.
         let start = read_json(&dir.join(format!("state-start-{}.json", o.run)))?;
         if let (Some(gt), Some(rt)) =

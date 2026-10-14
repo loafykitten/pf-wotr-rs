@@ -387,6 +387,9 @@ pub struct World {
     pub mods: Vec<Modifier>,
     pub by_id: HashMap<String, EntityIdx>,
     pub coverage: Coverage,
+    /// Awake states taken from a recording (a dialogue fixture's `awake_set`/`awake`), when the
+    /// run has one: [`crate::spawn::RecordedAwake`].
+    pub recorded_awake: Option<Box<crate::spawn::RecordedAwake>>,
     pub bus: EventBus,
     pub rulebook: crate::rulebook::Rulebook,
     pub rng: Box<dyn Rng>,
@@ -518,6 +521,7 @@ impl World {
             mods: Vec::new(),
             by_id: HashMap::new(),
             coverage: Coverage::default(),
+            recorded_awake: None,
             bus: EventBus::default(),
             rulebook: crate::rulebook::Rulebook::default(),
             rng: Box::new(PlayRng::new(0)),

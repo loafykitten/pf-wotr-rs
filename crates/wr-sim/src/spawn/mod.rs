@@ -838,6 +838,189 @@ fn area_hides_party(w: &World) -> bool {
 /// on the camera; a party member (`PartyAndPets`) isn't in the fog of war (the party reveals it),
 /// so it is awake whatever the timers; anything else depends on the fog of war, cutscene control
 /// and the unit's commands: unknown.
+/// `State.AwakeUnits` as `UnitActivatableAbilitiesController` read it in a recording
+/// (WrathOracle's `aa_awake`, one per run of the controller: the whole set first, then the
+/// changes; a unit created in the run listed under `new` with its blueprint), taken as an input
+/// where the sim can't establish a unit's state (fog of war, the camera).
+#[derive(Debug, Default)]
+pub struct RecordedAwake {
+    /// The awake unit ids per oracle tick in which the controller ran.
+    pub sets: std::collections::BTreeMap<i64, std::collections::BTreeSet<String>>,
+    /// A run-created unit's recorded id and blueprint.
+    pub new_bp: std::collections::HashMap<String, Guid>,
+    /// Recorded run-created ids matched to the sim's units.
+    pub mapped: std::collections::HashMap<String, EntityIdx>,
+    /// Ids the save holds (not created in the run).
+    pub saved: std::collections::HashSet<String>,
+    /// The tick being run: the units the controller ticks.
+    pub now: Option<std::collections::HashSet<EntityIdx>>,
+}
+
+impl RecordedAwake {
+    /// From a recording's records: `Ok(None)` without `aa_awake` records.
+    ///
+    /// # Errors
+    ///
+    /// A malformed record (fields of the wrong type, changes before the first set, two in one
+    /// tick, one before any tick).
+    pub fn of(
+        records: &[serde_json::Value],
+        saved: std::collections::HashSet<String>,
+    ) -> std::result::Result<Option<Self>, String> {
+        let strs =
+            |v: &serde_json::Value, what: &str| -> std::result::Result<Vec<String>, String> {
+                v.as_array()
+                    .ok_or_else(|| format!("aa_awake: {what} isn't an array"))?
+                    .iter()
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| format!("aa_awake: {what} entry {x}"))
+                    })
+                    .collect()
+            };
+        let mut out = Self { saved, ..Self::default() };
+        let mut tick: Option<i64> = None;
+        let mut cur: Option<std::collections::BTreeSet<String>> = None;
+        let mut any = false;
+        for r in records {
+            if r["k"] == "tick" {
+                tick = Some(r["t"].as_i64().ok_or("a tick record without t")?);
+                continue;
+            }
+            if r["k"] != "obs" || r["ev"] != "aa_awake" {
+                continue;
+            }
+            any = true;
+            let t = tick.ok_or("aa_awake before any tick")?;
+            if out.sets.contains_key(&t) {
+                return Err(format!("two aa_awake records in tick {t}"));
+            }
+            if r.get("set").is_some() {
+                if cur.is_some() {
+                    return Err(format!("aa_awake: a second whole set in tick {t}"));
+                }
+                cur = Some(strs(&r["set"], "set")?.into_iter().collect());
+            } else {
+                let c = cur.as_mut().ok_or("aa_awake: changes before the whole set")?;
+                for id in strs(&r["on"], "on")? {
+                    c.insert(id);
+                }
+                for id in strs(&r["off"], "off")? {
+                    if !c.remove(&id) {
+                        return Err(format!("aa_awake: {id} off but not awake"));
+                    }
+                }
+            }
+            for n in r["new"].as_array().ok_or("aa_awake: new isn't an array")? {
+                let (Some(id), Some(bp)) =
+                    (n[0].as_str(), n[1].as_str().and_then(wr_content::Guid::parse))
+                else {
+                    return Err(format!("aa_awake: new entry {n}"));
+                };
+                if out.new_bp.insert(id.to_owned(), bp).is_some() {
+                    return Err(format!("aa_awake: {id} announced twice"));
+                }
+            }
+            out.sets.insert(t, cur.clone().unwrap_or_default());
+        }
+        Ok(any.then_some(out))
+    }
+}
+
+/// Before the controllers of the oracle tick `tick`: the recorded awake units for it, each id
+/// matched to a live sim unit (a saved id as is, a run-created one by its blueprint, the match
+/// unique). A tick in which the recording's controller didn't run, or an id the sim can't
+/// match, is reported.
+pub fn recorded_awake_for_tick(w: &mut World, tick: i64) {
+    let Some(mut rec) = w.recorded_awake.take() else { return };
+    rec.now = None;
+    // A unit the controller can visit: in the state's pool (not queued for creation), live,
+    // indexed, not a preview.
+    let pool: std::collections::HashSet<EntityIdx> =
+        crate::scene::units_pool(w).into_iter().collect();
+    let live = |w: &World, e: EntityIdx| {
+        pool.contains(&e)
+            && !w.entity(e).is_disposed
+            && w.by_id.get(&w.entity(e).unique_id) == Some(&e)
+            && w.unit(e).is_some_and(|x| x.preview_of.is_none())
+    };
+    match rec.sets.get(&tick).cloned() {
+        None => w.coverage.unsupported("dialogue replay: no recorded awake state for a tick"),
+        Some(set) => {
+            let mut now = std::collections::HashSet::new();
+            for id in set {
+                let e = if let Some(bp) = rec.new_bp.get(&id).copied() {
+                    match rec.mapped.get(&id).copied() {
+                        Some(e) if live(w, e) => Some(e),
+                        Some(_) => None,
+                        None => {
+                            let taken: Vec<EntityIdx> = rec.mapped.values().copied().collect();
+                            let candidates: Vec<EntityIdx> = (0..w.entities.len())
+                                .map(|i| EntityIdx(u32::try_from(i).unwrap_or(u32::MAX)))
+                                .filter(|e| {
+                                    live(w, *e)
+                                        && w.unit(*e).is_some_and(|x| x.blueprint == Some(bp))
+                                        && !rec.saved.contains(&w.entity(*e).unique_id)
+                                        && !taken.contains(e)
+                                })
+                                .collect();
+                            if let [e] = candidates[..] {
+                                rec.mapped.insert(id.clone(), e);
+                                Some(e)
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                } else if rec.saved.contains(&id) {
+                    w.by_id.get(&id).copied().filter(|e| live(w, *e))
+                } else {
+                    None
+                };
+                match e {
+                    Some(e) => {
+                        now.insert(e);
+                    }
+                    None => w
+                        .coverage
+                        .unsupported("dialogue replay: a recorded awake unit the sim can't match"),
+                }
+            }
+            rec.now = Some(now);
+        }
+    }
+    w.recorded_awake = Some(rec);
+}
+
+/// [`awake_state`], with the recording's state for the tick when the run has one: an unknown
+/// state takes it; a known one must agree (else reported; the sim keeps its own, which its
+/// world is consistent with).
+fn awake_or_recorded(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake {
+    let sim = awake_state(w, u, party);
+    let Some(on) = w.recorded_awake.as_ref().and_then(|r| r.now.as_ref()).map(|n| n.contains(&u))
+    else {
+        return sim;
+    };
+    match sim {
+        Awake::Unknown => {
+            if on {
+                Awake::Yes
+            } else {
+                Awake::No
+            }
+        }
+        s => {
+            if (s == Awake::Yes) != on {
+                w.coverage.unsupported(
+                    "SleepingUnitsController: the sim's awake state differs from the recording's",
+                );
+            }
+            s
+        }
+    }
+}
+
 pub fn awake_state(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake {
     let Some(x) = w.unit(u) else { return Awake::No };
     if !w.entity(u).is_in_game || w.entity(u).is_disposed {
@@ -891,7 +1074,7 @@ pub fn activatable_abilities_tick(w: &mut World, dialog_or_cutscene: bool) {
     let party = crate::narrative::party::character_lists(w).party_and_pets;
     let pool = crate::scene::units_pool(w);
     for u in pool {
-        let mode = match awake_state(w, u, &party) {
+        let mode = match awake_or_recorded(w, u, &party) {
             Awake::No => continue,
             Awake::Yes => TickMode::Controller,
             Awake::Unknown => TickMode::AreaUnit,

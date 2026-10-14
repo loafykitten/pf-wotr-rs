@@ -287,3 +287,94 @@ fn the_load_pass_leaves_an_extras_toggle_alone_unless_it_is_sleepless() {
         assert_eq!(reported, !sleepless, "{:?}", w.coverage.unsupported);
     }
 }
+
+/// Recorded awake states (`aa_awake`, per oracle tick): a saved unit's id is taken as is; a
+/// unit created in the run is matched by its blueprint among live units (a disposed one doesn't
+/// count); a tick the recording's controller didn't run is reported.
+#[test]
+fn recorded_awake_states_match_units_and_fill_unknown_ones() {
+    use serde_json::json;
+    let (mut w, saved) = registry_world();
+    let bp = wr_content::Guid(0xB0B);
+    // A disposed unit of the same blueprint: not a candidate.
+    let gone = new_unit(&mut w, "1EFF");
+    w.unit_mut(gone).expect("unit").blueprint = Some(bp);
+    w.entity_mut(gone).is_disposed = true;
+    let spawned = new_unit(&mut w, "1F00");
+    w.unit_mut(spawned).expect("unit").blueprint = Some(bp);
+    w.by_id.insert("1F00".into(), spawned);
+    w.by_id.insert("u".into(), saved);
+    w.player.area_units.extend([saved, gone, spawned]);
+    let records = vec![
+        json!({"k": "tick", "t": 0}),
+        json!({"k": "obs", "ev": "aa_awake", "set": ["u", "9999"], "new": [["9999", bp.to_string()]]}),
+        json!({"k": "tick", "t": 1}),
+        json!({"k": "obs", "ev": "aa_awake", "on": [], "off": ["u"], "new": []}),
+        json!({"k": "tick", "t": 2}),
+    ];
+    let saved_ids: std::collections::HashSet<String> = ["u".to_owned()].into();
+    w.recorded_awake =
+        crate::spawn::RecordedAwake::of(&records, saved_ids).expect("well formed").map(Box::new);
+    let now = |w: &World| w.recorded_awake.as_ref().and_then(|r| r.now.clone()).expect("set");
+    crate::spawn::recorded_awake_for_tick(&mut w, 0);
+    assert!(now(&w).contains(&saved) && now(&w).contains(&spawned) && !now(&w).contains(&gone));
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    crate::spawn::recorded_awake_for_tick(&mut w, 1);
+    assert!(!now(&w).contains(&saved) && now(&w).contains(&spawned));
+    // Tick 2: the recording's controller didn't run.
+    crate::spawn::recorded_awake_for_tick(&mut w, 2);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("no recorded awake state")));
+}
+
+/// A unit indexed but not yet in the state's pool (queued for creation) can't be matched:
+/// the controller wouldn't visit it, so a recording that has it awake is reported.
+#[test]
+fn a_queued_unit_isnt_matched_to_a_recorded_awake_one() {
+    use serde_json::json;
+    let (mut w, _) = registry_world();
+    let bp = wr_content::Guid(0xB0C);
+    let queued = new_unit(&mut w, "1F01");
+    w.unit_mut(queued).expect("unit").blueprint = Some(bp);
+    w.by_id.insert("1F01".into(), queued);
+    let records = vec![
+        json!({"k": "tick", "t": 0}),
+        json!({"k": "obs", "ev": "aa_awake", "set": ["n"], "new": [["n", bp.to_string()]]}),
+    ];
+    w.recorded_awake = crate::spawn::RecordedAwake::of(&records, std::collections::HashSet::new())
+        .expect("well formed")
+        .map(Box::new);
+    crate::spawn::recorded_awake_for_tick(&mut w, 0);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("can't match")));
+}
+
+/// A malformed `aa_awake` record isn't taken as an input: units, changes and new units must
+/// be well formed, changes need a whole set first, one record per tick.
+#[test]
+fn malformed_awake_records_are_rejected() {
+    use serde_json::json;
+    let of = |recs: Vec<serde_json::Value>| {
+        crate::spawn::RecordedAwake::of(&recs, std::collections::HashSet::new())
+    };
+    let tick = |t: i64| json!({"k": "tick", "t": t});
+    assert!(
+        of(vec![tick(0), json!({"k": "obs", "ev": "aa_awake", "set": "u", "new": []})]).is_err()
+    );
+    assert!(
+        of(vec![tick(0), json!({"k": "obs", "ev": "aa_awake", "on": [], "off": [], "new": []})])
+            .is_err()
+    );
+    assert!(
+        of(vec![tick(0), json!({"k": "obs", "ev": "aa_awake", "set": ["u"], "new": [["x", 1]]})])
+            .is_err()
+    );
+    assert!(of(vec![json!({"k": "obs", "ev": "aa_awake", "set": [], "new": []})]).is_err());
+    let set = json!({"k": "obs", "ev": "aa_awake", "set": ["u"], "new": []});
+    assert!(of(vec![tick(0), set.clone(), set.clone()]).is_err(), "two in one tick");
+    let off = json!({"k": "obs", "ev": "aa_awake", "on": [], "off": ["v"], "new": []});
+    assert!(of(vec![tick(0), set.clone(), tick(1), off]).is_err(), "off but not awake");
+    let twice = json!({"k": "obs", "ev": "aa_awake", "on": [], "off": [], "new": [["n", wr_content::Guid(1).to_string()]]});
+    let first = json!({"k": "obs", "ev": "aa_awake", "set": ["u"], "new": [["n", wr_content::Guid(2).to_string()]]});
+    assert!(of(vec![tick(0), first, tick(1), twice]).is_err(), "a new unit announced twice");
+    assert!(matches!(of(vec![tick(0)]), Ok(None)), "no records: no input");
+    assert!(matches!(of(vec![tick(0), set]), Ok(Some(_))));
+}

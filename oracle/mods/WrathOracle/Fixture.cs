@@ -53,6 +53,7 @@ internal static class Fixture
         // gates and input checks (Sched, WallClock); other windows are unchanged.
         Sched.BeginWindow(stepsAhead.Any(x => x.StartsWith("tbm:", StringComparison.Ordinal)));
         Observe.ResetWindow();
+        AwakeObs.ResetWindow();
         GroupObs.ResetWindow();
         CommandObs.ResetWindow();
         PathSync.ResetWindow();
@@ -304,6 +305,8 @@ internal static class Fidelity
         CooldownObs.Install(h);
         TurnTickObs.Install(h);
         CommandObs.Install(h);
+        ProducerObs.Install(h);
+        AwakeObs.Install(h);
         if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets", "impatience" });
         OracleTime.Install(h);
         InstallSeconds = sw.Elapsed.TotalSeconds;
