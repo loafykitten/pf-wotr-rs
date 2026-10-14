@@ -238,7 +238,12 @@ impl Driver<'_> {
             "uc_ai" if r["nested"] == false => return self.ai_entry(w, i),
             "ai_nct" => self.ai_nct_input(w, r),
             "uc_eng" => return self.eng_entry(w, i),
-            "eng_init" => self.eng_init(w, r),
+            "eng_init" => {
+                self.tgt_eng_init_place(w, i);
+                self.eng_init(w, r);
+            }
+            "tgt_init" => self.tgt_init(w, i),
+            "tgt_w" => self.tgt_w(w, i),
             // A provoke outside an attack rule the sim fires: its handler's context isn't validated
             // (the rule handlers' provokes are taken inside their rule's span).
             "eng_prov" => w.coverage.unsupported(
@@ -272,6 +277,8 @@ impl Driver<'_> {
         let trace = self.trace;
         let recs = &trace.records;
         let was = std::mem::replace(&mut self.uc_skipping, true);
+        // The sim's writes not yet matched: the skipped records' writes are taken instead.
+        w.combat.targets.pending.clear();
         while let Some(r) = recs.get(self.i) {
             if end(r) {
                 self.i += 1;
@@ -705,6 +712,7 @@ impl Driver<'_> {
 
     /// `uc_ctl`: `UnitCommandController.Tick`, run by the sim.
     fn uc_ctl(&mut self, w: &mut World, i: usize) -> usize {
+        self.tgt_runs.clear();
         self.i = i + 1;
         if self.uc_ctl_tick.replace(self.tick) == Some(self.tick) {
             w.coverage.unsupported("driven replay: two command controller ticks in a frame");
@@ -786,6 +794,9 @@ impl Driver<'_> {
         self.i = i + 1;
         let origin = r["origin"].as_str().unwrap_or("");
         let outer = std::mem::replace(&mut self.uc_origin, origin.to_owned());
+        self.tgt_runs.clear();
+        let click = self.tgt_entry(w, i);
+        let running_before = r["u"].as_str().and_then(|u| w.combat.commands.is_running(u));
         match phase_of(origin) {
             Some(p) => self.place(w, p, "a command call"),
             None => w.coverage.unsupported(
@@ -822,12 +833,23 @@ impl Driver<'_> {
                         )));
                     }
                     self.out.commands_run += 1;
+                    self.tgt_run_push(i);
                     uc::run(w, self, s, c, fq, ncq)?;
+                    self.tgt_run_pop();
                     let at = self.uc_pull(w, "Run's end", |x| obs(x, "uc_run_end").is_some())?;
                     let e = &self.trace.records[at];
                     if id(&e["set"]) != Some(s) || id(&e["c"]) != Some(c) || e["exc"] != false {
                         return self
                             .uc_reject(at, "a Run's end of another command, or an exception");
+                    }
+                    let owner = r["u"].as_str().and_then(|u| w.by_id.get(u).copied());
+                    let Some(owner) = owner else {
+                        return Err(Desync("the Run's unit is unknown".into()));
+                    };
+                    self.tgt_after_entry(w, i, owner, Some(c), running_before)?;
+                    // The driver's click: `unit.CombatState.ManualTarget = target` after its `Run`.
+                    if let Some(input) = &click {
+                        self.tgt_driver_after(w, owner, c, input)?;
                     }
                 }
                 Entry::Queue => {
@@ -894,6 +916,9 @@ impl Driver<'_> {
                         return self
                             .uc_reject(at, "a mutator's end of another set, or an exception");
                     }
+                    if let Some(owner) = r["u"].as_str().and_then(|u| w.by_id.get(u).copied()) {
+                        self.tgt_after_entry(w, i, owner, None, running_before)?;
+                    }
                 }
             }
             Ok(())
@@ -918,6 +943,7 @@ impl Driver<'_> {
 
     /// `ReplaceCommands` (`UnitCommands.Temporary`: a prediction set in, then the unit's own back).
     fn uc_set(&mut self, w: &mut World, i: usize) -> usize {
+        self.tgt_runs.clear();
         let trace = self.trace;
         let r = &trace.records[i];
         let (Some(u), Some(to), Some(sim), Some(Some(origin)), Some(from)) = (
@@ -1149,6 +1175,52 @@ fn parse_running(s: &str) -> Option<Option<Vec<u32>>> {
 }
 
 impl Inputs for Driver<'_> {
+    fn leaf_next(&mut self, w: &mut World, f: &'static str, of: Of) -> R<bool> {
+        let r = self.trace.records.get(self.i);
+        if !r.is_some_and(|r| obs(r, "uc_v").is_some() && r["f"] == f) {
+            let d = r.map_or_else(|| "its end".to_owned(), describe);
+            return self
+                .uc_reject(self.i, format!("the sim reads {f} next, the recording has {d}"));
+        }
+        self.leaf(w, f, of)
+    }
+
+    fn tgt_write(&mut self, w: &mut World, x: &crate::combat::targets::Write) -> R<()> {
+        self.tgt_pull(w, x)
+    }
+
+    fn nct_zero(&mut self, w: &mut World, u: &str, site: &'static str) -> R<()> {
+        // `UpdateCombatTarget`'s reset follows its target writes (or reads) at once.
+        if site == "UpdateCombatTarget"
+            && !self
+                .trace
+                .records
+                .get(self.i)
+                .is_some_and(|r| obs(r, "ai_nct").is_some() && r["site"] == site)
+        {
+            let d = self.trace.records.get(self.i).map_or_else(|| "its end".to_owned(), describe);
+            return self.uc_reject(
+                self.i,
+                format!("{site}'s NextCommandTime next, the recording has {d}"),
+            );
+        }
+        let at = self.uc_pull(w, &format!("{site}'s NextCommandTime"), |r| {
+            obs(r, "ai_nct").is_some() && r["site"] == site
+        })?;
+        let r = &self.trace.records[at];
+        if !super::engage::fields(r, &["u", "site", "v"])
+            || r["u"].as_str() != Some(u)
+            || super::engage::float(&r["v"]).map(f32::to_bits) != Some(0f32.to_bits())
+        {
+            let d = describe(r);
+            return self.uc_reject(
+                at,
+                format!("{site} sets {u}'s NextCommandTime to 0, the recording has {d}"),
+            );
+        }
+        Ok(())
+    }
+
     fn leaf(&mut self, w: &mut World, f: &'static str, of: Of) -> R<bool> {
         let payload: &[&str] = match (&of, f) {
             (Of::Cmd(_), _) => &["c", "v"],
@@ -1388,10 +1460,12 @@ impl Inputs for Driver<'_> {
         {
             return self.uc_reject(at, "a nested Run of another command, or one it can't read");
         }
+        self.tgt_run_push(at);
         Ok(())
     }
 
     fn nested_run_end(&mut self, w: &mut World, set: u32, c: u32) -> R<()> {
+        self.tgt_run_pop();
         let at = self.uc_pull(w, "a nested Run's end", |r| obs(r, "uc_run_end").is_some())?;
         let r = &self.trace.records[at];
         if id(&r["set"]) != Some(set) || id(&r["c"]) != Some(c) || r["exc"] != false {

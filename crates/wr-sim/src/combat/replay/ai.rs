@@ -91,6 +91,7 @@ impl Driver<'_> {
     /// `uc_ai` from outside the AI (`AiBrainController.Tick`, the turn controller's `ForceTick`),
     /// placed by its caller.
     pub(super) fn ai_entry(&mut self, w: &mut World, i: usize) -> usize {
+        self.tgt_runs.clear();
         let trace = self.trace;
         let r = &trace.records[i];
         self.i = i + 1;
@@ -223,6 +224,13 @@ impl Driver<'_> {
                     "driven replay: an engagement's write of NextCommandTime the sim didn't make",
                 );
             }
+            (true, Some(_), Some("UpdateCombatTarget"), Some(_))
+                if self.tgt && !self.uc_skipping =>
+            {
+                w.coverage.unsupported(
+                    "driven replay: an UpdateCombatTarget write of NextCommandTime the sim didn't make",
+                );
+            }
             (
                 true,
                 Some(u),
@@ -307,7 +315,12 @@ impl AiInputs for Driver<'_> {
         let at = self.ai_leaf(w, f, with_unit(u))?;
         self.ai_unit_check(at, f, u)?;
         match unit_or_null(w, &self.trace.records[at]["v"]) {
-            Some(v) => Ok(v),
+            Some(v) => {
+                if let Some(u) = u {
+                    self.tgt_read(w, at, f, u, v.as_deref())?;
+                }
+                Ok(v)
+            }
             None => {
                 self.uc_reject(at, format!("a leaf {f} it can't read (or a unit the sim lacks)"))
             }
@@ -606,6 +619,7 @@ impl AiInputs for Driver<'_> {
             );
         }
         self.out.ai_runs += 1;
+        self.tgt_run_push(at);
         Ok(c)
     }
 

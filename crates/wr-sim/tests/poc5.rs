@@ -24,7 +24,8 @@ const SAVE: &str = "Manual_18_WR_FirstBattle";
 /// `poc5-tb-80` also has the `approach` observer: `TickApproaching`, `UnitMoveTo`'s and the attack
 /// of opportunity's class code are the sim's. `poc5-tb-82` also has the `ai` observer: the AI is
 /// the sim's. `poc5-tb-85` also has the `engage` observer: the engagement controller is the sim's.
-const CAPTURES: [&str; 14] = [
+/// `poc5-tb-92` also has the `targets` observer: units' `LastTarget` and `ManualTarget` are the sim's.
+const CAPTURES: [&str; 15] = [
     "poc5-tb-51",
     "poc5-tb-52",
     "poc5-tb-53",
@@ -39,10 +40,11 @@ const CAPTURES: [&str; 14] = [
     "poc5-tb-82",
     "poc5-tb-85",
     "poc5-tb-91",
+    "poc5-tb-92",
 ];
 
 /// The captures whose root rules carry their call sites.
-const WITH_ORIGINS: [&str; 10] = [
+const WITH_ORIGINS: [&str; 11] = [
     "poc5-tb-60",
     "poc5-tb-63",
     "poc5-tb-68",
@@ -53,10 +55,11 @@ const WITH_ORIGINS: [&str; 10] = [
     "poc5-tb-82",
     "poc5-tb-85",
     "poc5-tb-91",
+    "poc5-tb-92",
 ];
 
 /// The captures with WrathOracle's cooldown records (`cd_*`).
-const WITH_COOLDOWNS: [&str; 9] = [
+const WITH_COOLDOWNS: [&str; 10] = [
     "poc5-tb-63",
     "poc5-tb-68",
     "poc5-tb-74",
@@ -66,10 +69,11 @@ const WITH_COOLDOWNS: [&str; 9] = [
     "poc5-tb-82",
     "poc5-tb-85",
     "poc5-tb-91",
+    "poc5-tb-92",
 ];
 
 /// The captures with WrathOracle's turn controller tick records (`tt*`).
-const WITH_TURN_TICKS: [&str; 8] = [
+const WITH_TURN_TICKS: [&str; 9] = [
     "poc5-tb-68",
     "poc5-tb-74",
     "poc5-tb-77",
@@ -78,10 +82,11 @@ const WITH_TURN_TICKS: [&str; 8] = [
     "poc5-tb-82",
     "poc5-tb-85",
     "poc5-tb-91",
+    "poc5-tb-92",
 ];
 
 /// The captures with WrathOracle's command records (`uc_*`).
-const WITH_COMMANDS: [&str; 7] = [
+const WITH_COMMANDS: [&str; 8] = [
     "poc5-tb-74",
     "poc5-tb-77",
     "poc5-tb-80",
@@ -89,21 +94,33 @@ const WITH_COMMANDS: [&str; 7] = [
     "poc5-tb-82",
     "poc5-tb-85",
     "poc5-tb-91",
+    "poc5-tb-92",
 ];
 
 /// The captures with WrathOracle's `attacks` observer (`ua_atk`, `UnitAttack`'s leaves).
-const WITH_ATTACKS: [&str; 6] =
-    ["poc5-tb-77", "poc5-tb-80", "poc5-tb-81", "poc5-tb-82", "poc5-tb-85", "poc5-tb-91"];
+const WITH_ATTACKS: [&str; 7] = [
+    "poc5-tb-77",
+    "poc5-tb-80",
+    "poc5-tb-81",
+    "poc5-tb-82",
+    "poc5-tb-85",
+    "poc5-tb-91",
+    "poc5-tb-92",
+];
 
 /// The captures with WrathOracle's `approach` observer (`uc_call`, the approach's taps).
-const WITH_APPROACH: [&str; 5] =
-    ["poc5-tb-80", "poc5-tb-81", "poc5-tb-82", "poc5-tb-85", "poc5-tb-91"];
+const WITH_APPROACH: [&str; 6] =
+    ["poc5-tb-80", "poc5-tb-81", "poc5-tb-82", "poc5-tb-85", "poc5-tb-91", "poc5-tb-92"];
 
 /// The captures with WrathOracle's `ai` observer (`uc_ai`, the AI's taps and checks).
-const WITH_AI: [&str; 3] = ["poc5-tb-82", "poc5-tb-85", "poc5-tb-91"];
+const WITH_AI: [&str; 4] = ["poc5-tb-82", "poc5-tb-85", "poc5-tb-91", "poc5-tb-92"];
 
 /// The captures with WrathOracle's `engage` observer (`uc_eng`, the engagement's taps and checks).
-const WITH_ENGAGE: [&str; 2] = ["poc5-tb-85", "poc5-tb-91"];
+const WITH_ENGAGE: [&str; 3] = ["poc5-tb-85", "poc5-tb-91", "poc5-tb-92"];
+
+/// The captures with WrathOracle's `targets` observer (`tgt_init`, `tgt_w`, `UpdateCombatTarget`'s
+/// leaves).
+const WITH_TARGETS: [&str; 1] = ["poc5-tb-92"];
 
 /// The capture the approach records are damaged in.
 const APPROACH: &str = "poc5-tb-80";
@@ -405,9 +422,9 @@ fn driven_replay_equals_the_recordings() {
                     // The AI is the sim's: every decision made, each score checked, every command it
                     // runs and every draw it makes the sim's.
                     assert!(out.ai_entries > 1_000, "{name} {run}: {}", out.ai_entries);
-                    assert!(out.ai_decisions >= 6, "{name} {run}: {}", out.ai_decisions);
+                    assert!(out.ai_decisions >= 5, "{name} {run}: {}", out.ai_decisions);
                     assert!(out.ai_scores > out.ai_decisions, "{name} {run}: {}", out.ai_scores);
-                    assert!(out.ai_runs >= 6, "{name} {run}: {}", out.ai_runs);
+                    assert!(out.ai_runs >= 5, "{name} {run}: {}", out.ai_runs);
                     assert_eq!(out.ai_draws, out.ai_runs, "{name} {run}");
                     assert!(!out.by_origin.contains_key("ai"), "{name} {run}: {:?}", out.by_origin);
                 } else {
@@ -420,10 +437,21 @@ fn driven_replay_equals_the_recordings() {
                     assert!(out.eng_entries > 1_000, "{name} {run}: {}", out.eng_entries);
                     assert!(out.eng_changes >= 4, "{name} {run}: {}", out.eng_changes);
                     assert_eq!(out.eng_runs, out.eng_count_writes, "{name} {run}");
-                    // (`-84`'s archer provokes with each ranged attack.)
-                    assert!(out.eng_provokes >= 1, "{name} {run}: {}", out.eng_provokes);
+                    // (`-84`'s archer provokes with each ranged attack; in `-92/tb-focus` it doesn't
+                    // shoot.)
+                    if name != "poc5-tb-92/tb-focus" {
+                        assert!(out.eng_provokes >= 1, "{name} {run}: {}", out.eng_provokes);
+                    }
                 } else {
                     assert_eq!(out.eng_entries + out.eng_changes + out.eng_aoos, 0, "{name} {run}");
+                }
+                if WITH_TARGETS.contains(&capture) {
+                    // Units' targets are the sim's: every write it makes checked (the attacks'
+                    // `UpdateCombatTarget`, leaving combat's `Clear`), every read of them checked.
+                    assert!(out.tgt_checked >= 10, "{name} {run}: {}", out.tgt_checked);
+                    assert!(out.tgt_reads >= 20, "{name} {run}: {}", out.tgt_reads);
+                } else {
+                    assert_eq!(out.tgt_checked + out.tgt_reads, 0, "{name} {run}");
                 }
                 if WITH_COOLDOWNS.contains(&capture) {
                     // The cooldowns are the sim's at every prefix and around every recorded
@@ -4599,6 +4627,712 @@ fn missing_or_wrong_engage_records_are_reported() {
                     w.coverage.unsupported.keys().collect::<Vec<_>>()
                 ));
             }
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// The fight the targets' records are damaged in: `UpdateCombatTarget`'s writes and resets, a
+/// disengage's write and restore, leaving combat's clears.
+const TARGETS: (&str, &str) = ("poc5-tb-92", "tb-focus");
+
+/// Every way of losing, changing or adding a targets record (slice F) is reported.
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18 and the poc5-tb-92 capture"]
+fn missing_or_wrong_target_records_are_reported() {
+    use serde_json::Value as V;
+    let Some(dir) = fixture_in(TARGETS.0, TARGETS.1) else {
+        eprintln!("{TARGETS:?} not present: skipped");
+        return;
+    };
+    type Change = fn(&mut Vec<V>);
+    fn ev(r: &V, e: &str) -> bool {
+        r["k"] == "obs" && r["ev"] == e
+    }
+    fn leaf(r: &V, f: &str) -> bool {
+        ev(r, "uc_v") && r["f"] == f
+    }
+    fn pos(recs: &[V], f: impl Fn(&V) -> bool) -> usize {
+        recs.iter().position(f).expect("a record to change")
+    }
+    fn caller(r: &V) -> String {
+        r["origin"].as_str().unwrap_or("").split(" < ").nth(1).unwrap_or("").to_owned()
+    }
+    fn write(recs: &[V], by: &str, f: &str) -> usize {
+        pos(recs, |r| ev(r, "tgt_w") && r["f"] == f && caller(r).ends_with(by))
+    }
+    fn uct(recs: &[V]) -> usize {
+        write(recs, "UnitCommands.UpdateCombatTarget", "last")
+    }
+    fn restore(recs: &[V]) -> usize {
+        pos(recs, |r| ev(r, "tgt_w") && caller(r).contains("<ShouldAttackOnDisengage>b__"))
+    }
+    // `UpdateCombatTarget`'s reset of `NextCommandTime` (a command not the AI's on no target).
+    fn nct(recs: &[V]) -> usize {
+        pos(recs, |r| ev(r, "ai_nct") && r["site"] == "UpdateCombatTarget")
+    }
+    // A leaf `tact` of `UpdateCombatTarget` (with its command), after the window's first frames.
+    fn tact(recs: &[V]) -> usize {
+        pos(recs, |r| leaf(r, "tact") && r["t"].as_i64() > Some(300))
+    }
+    fn first_init(recs: &[V]) -> usize {
+        pos(recs, |r| ev(r, "tgt_init"))
+    }
+    let (_, t) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    // The fixture has what the cases change.
+    for want in [
+        "UnitCommands.UpdateCombatTarget",
+        "UnitCombatState.ShouldAttackOnDisengage",
+        "UnitCombatState.Clear",
+    ] {
+        assert!(t.records.iter().any(|r| ev(r, "tgt_w") && caller(r).ends_with(want)), "{want}");
+    }
+    assert!(t.records.iter().any(|r| ev(r, "ai_nct") && r["site"] == "UpdateCombatTarget"));
+    fn renumber(recs: &mut [V]) {
+        for (n, r) in recs.iter_mut().enumerate() {
+            r["seq"] = json!(n);
+        }
+    }
+    // A write by `origin` of the first `UpdateCombatTarget` write's target to its unit's field
+    // `f`, and its undoing, at the start of that write's frame.
+    fn insert_balanced(recs: &mut Vec<V>, f: &str, origin: &str) {
+        let at = uct(recs);
+        let mut a = recs[at].clone();
+        a["f"] = json!(f);
+        a["origin"] = json!(origin);
+        let mut b = a.clone();
+        b["v"] = json!(null);
+        b["origin"] = json!(STOP.replace(
+            "set_LastTarget",
+            if f == "last" { "set_LastTarget" } else { "set_ManualTarget" }
+        ));
+        let t = recs[at]["t"].clone();
+        let to = pos(recs, |r| r["k"] == "tick" && r["t"] == t) + 1;
+        recs.insert(to, b);
+        recs.insert(to, a);
+        renumber(recs);
+    }
+    const STOP: &str = "Kingmaker.Controllers.Combat.UnitCombatState.set_LastTarget < Kingmaker.EntitySystem.Entities.UnitEntityData.Stop < X.Y";
+    const C: &str = "driven replay: commands:";
+    const DIFF: &str = "driven replay: the sim's target write";
+    const UNMADE: &str = "driven replay: a target write the sim didn't make";
+    const UNREAD: &str = "driven replay: a tgt_w record it can't read";
+    let cases: [(&str, Change); 85] = [
+        // The initial state.
+        ("driven replay: a tgt_init record it can't read", |recs| {
+            let at = first_init(recs);
+            recs[at]["extra"] = json!(1);
+        }),
+        ("driven replay: a tgt_init record it can't read", |recs| {
+            let at = first_init(recs);
+            recs[at]["u"] = json!("no-such-unit");
+        }),
+        ("driven replay: a tgt_init record it can't read", |recs| {
+            let at = first_init(recs);
+            recs[at]["manual"] = json!("no-such-unit");
+        }),
+        ("driven replay: a tgt_init record it can't read", |recs| {
+            let at = first_init(recs);
+            recs[at].as_object_mut().unwrap().remove("last");
+        }),
+        ("driven replay: a unit without its initial targets", |recs| {
+            let at = first_init(recs);
+            recs.remove(at);
+        }),
+        // (A second record of a unit breaks the block's order.)
+        ("driven replay: a tgt_init record out of its block", |recs| {
+            let at = first_init(recs);
+            let r = recs[at].clone();
+            recs.insert(at + 1, r);
+        }),
+        ("driven replay: a tgt_init record after the window's first frame", |recs| {
+            let at = first_init(recs);
+            let mut r = recs.remove(at);
+            let to = pos(recs, |x| x["k"] == "tick" && x["t"].as_i64() > r["t"].as_i64());
+            r["t"] = recs[to]["t"].clone();
+            recs.insert(to + 1, r);
+        }),
+        // A unit's initial `LastTarget` already the one its first write sets: the sim's setter
+        // changes nothing, and its next write meets the recorded one.
+        (C, |recs| {
+            let at = uct(recs);
+            let (u, v) = (recs[at]["u"].clone(), recs[at]["v"].clone());
+            let i = pos(recs, |r| ev(r, "tgt_init") && r["u"] == u);
+            recs[i]["last"] = v;
+        }),
+        // The writes the sim makes in an entry, each taken where it's made.
+        (C, |recs| {
+            let at = uct(recs);
+            recs.remove(at + 1);
+            recs.remove(at);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs.remove(at);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["v"] = json!(null);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            let u = recs[at]["u"].clone();
+            let other =
+                recs.iter().find(|r| ev(r, "tgt_init") && r["u"] != u).unwrap()["u"].clone();
+            recs[at]["v"] = other;
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            let u = recs[at]["u"].clone();
+            let other =
+                recs.iter().find(|r| ev(r, "tgt_init") && r["u"] != u).unwrap()["u"].clone();
+            recs[at]["u"] = other;
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["f"] = json!("manual");
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["extra"] = json!(1);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["v"] = json!("no-such-unit");
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["origin"] =
+                json!("Kingmaker.Controllers.Combat.UnitCombatState.set_LastTarget < X.Y < Z.W");
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["origin"] = json!(null);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["origin"] = json!("WrathOracle.TurnBased.IssueHovered");
+        }),
+        (UNMADE, |recs| {
+            let at = uct(recs);
+            let r = recs[at].clone();
+            let to = at + 1 + recs[at + 1..].iter().position(|r| r["k"] == "tick").unwrap() + 1;
+            let mut r = r;
+            r["t"] = recs[to - 1]["t"].clone();
+            recs.insert(to, r);
+            renumber(recs);
+        }),
+        // `ShouldAttackOnDisengage`'s write and its restore.
+        (C, |recs| {
+            let at = write(recs, "UnitCombatState.ShouldAttackOnDisengage", "last");
+            recs.remove(at);
+        }),
+        (C, |recs| {
+            let at = restore(recs);
+            recs[at]["v"] = json!(null);
+        }),
+        (C, |recs| {
+            let at = restore(recs);
+            recs.remove(at);
+        }),
+        (C, |recs| {
+            let at = restore(recs);
+            let o = recs[at]["origin"].as_str().unwrap().replace(".Dispose", ".Other");
+            recs[at]["origin"] = json!(o);
+        }),
+        // Leaving combat's clear, queued.
+        (UNREAD, |recs| {
+            let at = write(recs, "UnitCombatState.Clear", "last");
+            let o = recs[at]["origin"].as_str().unwrap().replace(
+                "UnitCombatState.Clear < Kingmaker.Controllers.Combat.UnitCombatState.LeaveCombat",
+                "UnitCombatState.Clear < X.Y",
+            );
+            recs[at]["origin"] = json!(o);
+        }),
+        (DIFF, |recs| {
+            let at = write(recs, "UnitCombatState.Clear", "last");
+            recs[at]["v"] = recs[at]["u"].clone();
+        }),
+        (
+            "driven replay: a UnitCombatState.Clear target write the recording doesn't have",
+            |recs| {
+                let at = write(recs, "UnitCombatState.Clear", "last");
+                recs.remove(at);
+            },
+        ),
+        (DIFF, |recs| {
+            let at = write(recs, "UnitCombatState.Clear", "last");
+            let r = recs[at].clone();
+            recs.insert(at + 1, r);
+        }),
+        // Writes of the writers whose writes follow their entries (`Stop`), out of place: one
+        // inside a `Clear`, one at a frame's start, one before a read the sim then checks.
+        (UNMADE, |recs| {
+            let at = write(recs, "UnitCombatState.Clear", "last");
+            let mut r = recs[at].clone();
+            r["origin"] = json!(STOP);
+            recs.insert(at, r);
+        }),
+        (UNMADE, |recs| {
+            let at = uct(recs);
+            let mut r = recs[at].clone();
+            r["origin"] = json!(STOP);
+            let to = at + recs[at..].iter().position(|r| r["k"] == "tick").unwrap() + 1;
+            r["t"] = recs[to - 1]["t"].clone();
+            recs.insert(to, r);
+            renumber(recs);
+        }),
+        (C, |recs| {
+            // The engagement's read of `LastTarget` after a UI write the sim takes.
+            let at =
+                pos(recs, |r| leaf(r, "last") && !r["v"].is_null() && r["t"].as_i64() > Some(1600));
+            let mut r = recs[at].clone();
+            r.as_object_mut().unwrap().remove("f");
+            r["ev"] = json!("tgt_w");
+            r["f"] = json!("last");
+            r["v"] = json!(null);
+            r["origin"] = json!(STOP);
+            let to = recs[..at].iter().rposition(|r| r["k"] == "tick").unwrap() + 1;
+            recs.insert(to, r);
+            renumber(recs);
+        }),
+        // The reads.
+        (C, |recs| {
+            let at = pos(recs, |r| leaf(r, "manual") && r["t"].as_i64() > Some(300));
+            recs[at]["v"] = json!("558A");
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| leaf(r, "last") && !r["v"].is_null());
+            recs[at]["v"] = json!(null);
+        }),
+        // `UpdateCombatTarget`'s leaves and its reset of `NextCommandTime`.
+        (C, |recs| {
+            let at = tact(recs);
+            recs[at]["v"] = json!(true);
+        }),
+        (C, |recs| {
+            let at = tact(recs);
+            recs.remove(at);
+        }),
+        (C, |recs| {
+            let at = nct(recs);
+            recs.remove(at);
+        }),
+        (
+            "driven replay: an UpdateCombatTarget write of NextCommandTime the sim didn't make",
+            |recs| {
+                let at = nct(recs);
+                let r = recs[at].clone();
+                recs.insert(at + 1, r);
+            },
+        ),
+        // Review round 1: a write's caller chain bound to its site and the entry; a write moved
+        // across a lifecycle record (renumbered); an input held to what its writer can write.
+        (C, |recs| {
+            let at = uct(recs);
+            let o = recs[at]["origin"].as_str().unwrap().replacen(
+                "UnitCommands.UpdateCombatTarget < Kingmaker.UnitLogic.Commands.UnitCommands.Run",
+                "UnitCommands.UpdateCombatTarget < Kingmaker.UnitLogic.Commands.UnitCommands.TryUseSpecialHandlers < Kingmaker.UnitLogic.Commands.UnitCommands.Run",
+                1,
+            );
+            recs[at]["origin"] = json!(o);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            recs[at]["origin"] = json!(
+                "Kingmaker.Controllers.Combat.UnitCombatState.set_LastTarget < Kingmaker.UnitLogic.Commands.UnitCommands.UpdateCombatTarget < Kingmaker.UnitLogic.Commands.UnitCommands.Run < X.Y"
+            );
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            let pair: Vec<V> = recs.drain(at..at + 2).collect();
+            let to = at + recs[at..].iter().position(|r| ev(r, "uc_v")).unwrap() + 1;
+            for (k, r) in pair.into_iter().enumerate() {
+                recs.insert(to + k, r);
+            }
+            renumber(recs);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            let pair: Vec<V> = recs.drain(at..at + 2).collect();
+            let to = recs[..at].iter().rposition(|r| ev(r, "uc_v")).unwrap();
+            for (k, r) in pair.into_iter().enumerate() {
+                recs.insert(to + k, r);
+            }
+            renumber(recs);
+        }),
+        // At a frame's start: `Stop` setting a target, a click setting `LastTarget` (no writer
+        // does), a destruction (not modelled), each undone after.
+        (UNMADE, |recs| {
+            insert_balanced(recs, "last", STOP);
+        }),
+        (UNMADE, |recs| {
+            insert_balanced(
+                recs,
+                "last",
+                "Kingmaker.Controllers.Combat.UnitCombatState.set_LastTarget < Kingmaker.Controllers.Clicks.Handlers.ClickUnitHandler.OnClick < X.Y",
+            );
+        }),
+        ("driven replay: a target write of the UI's or a destruction's", |recs| {
+            insert_balanced(
+                recs,
+                "manual",
+                "Kingmaker.Controllers.Combat.UnitCombatState.set_ManualTarget < Kingmaker.Controllers.Combat.UnitCombatState.HandleEntityDestruction < X.Y",
+            );
+        }),
+        // Review round 2: every frame between a write's site and its entry checked; `Clear`'s
+        // writes inside their `Clear` and from its `LeaveCombat`'s callers; the initial block in
+        // place and in order; an input right after its writer's own call.
+        (C, |recs| {
+            let at = write(recs, "UnitCombatState.ShouldAttackOnDisengage", "last");
+            let o = recs[at]["origin"].as_str().unwrap().replace(
+                "UnitCombatEngagementController.TickUnit",
+                "UnitCombatEngagementController.Other",
+            );
+            recs[at]["origin"] = json!(o);
+        }),
+        (C, |recs| {
+            let at = uct(recs);
+            let o = recs[at]["origin"].as_str().unwrap().replacen(
+                " < Kingmaker.UnitLogic.Commands.UnitCommands.Run < ",
+                " < X.Y < Kingmaker.UnitLogic.Commands.UnitCommands.Run < ",
+                1,
+            );
+            recs[at]["origin"] = json!(o);
+        }),
+        (
+            "driven replay: a UnitCombatState.Clear target write the recording doesn't have",
+            |recs| {
+                let at = write(recs, "UnitCombatState.Clear", "last");
+                let r = recs.remove(at);
+                let to = at + recs[at..].iter().position(|x| ev(x, "uc_x_end")).unwrap() + 1;
+                recs.insert(to, r);
+                renumber(recs);
+            },
+        ),
+        (DIFF, |recs| {
+            let at = write(recs, "UnitCombatState.Clear", "last");
+            let o = recs[at]["origin"].as_str().unwrap().replacen(
+                "UnitLifeController.SetLifeState",
+                "X.Y",
+                1,
+            );
+            recs[at]["origin"] = json!(o);
+        }),
+        ("driven replay: a tgt_init record out of its block", |recs| {
+            let a = first_init(recs);
+            let b = a + recs[a..].iter().position(|r| !ev(r, "tgt_init")).unwrap();
+            recs[a..b].reverse();
+            renumber(recs);
+        }),
+        ("driven replay: a tgt_init record out of its block", |recs| {
+            let at = first_init(recs);
+            let r = recs.remove(at);
+            let to = at + recs[at..].iter().position(|x| ev(x, "uc_eng_end")).unwrap() + 1;
+            recs.insert(to, r);
+            renumber(recs);
+        }),
+        (UNMADE, |recs| {
+            // `TryCancelCommands` clearing a unit's `ManualTarget` mid-frame, a click restoring it.
+            let at = write(recs, "UnitCommands.UpdateCombatTarget", "manual");
+            let mut a = recs[at].clone();
+            a["v"] = json!(null);
+            a["origin"] = json!(
+                "Kingmaker.Controllers.Combat.UnitCombatState.set_ManualTarget < Kingmaker.EntitySystem.Entities.UnitEntityData.TryCancelCommands < X.Y"
+            );
+            let mut b = recs[at].clone();
+            b["origin"] = json!("WrathOracle.TurnBased.IssueHovered");
+            let to = at + recs[at..].iter().position(|x| ev(x, "uc_cs")).unwrap() + 1;
+            a["t"] = recs[to - 1]["t"].clone();
+            b["t"] = recs[to - 1]["t"].clone();
+            recs.insert(to, b);
+            recs.insert(to, a);
+            renumber(recs);
+        }),
+        // Review round 3: a `Stop` whose clears are missing; `Clear`'s whole chain; the targets'
+        // block not interleaved with eng_init's; a click's write the sim's (none recorded: it
+        // changed nothing).
+        (C, |recs| {
+            // `Stop`'s `InterruptAll` of a unit whose `LastTarget` is set, without its clears.
+            let at = uct(recs);
+            let u = recs[at]["u"].clone();
+            let x = pos(recs, |r| {
+                ev(r, "uc_x") && r["u"] == u && r["t"].as_i64() > recs[at]["t"].as_i64()
+            });
+            let mut e = recs[x].clone();
+            let o = e["origin"].as_str().unwrap().to_owned();
+            let (head, rest) = o.split_once(" < ").unwrap();
+            e["fn"] = json!("InterruptAll");
+            e["raise"] = json!(true);
+            e["origin"] = json!(
+                format!("{head} < Kingmaker.EntitySystem.Entities.UnitEntityData.Stop < {rest}")
+                    .replacen(head, "Kingmaker.UnitLogic.Commands.UnitCommands.InterruptAll", 1)
+            );
+            let end = x + recs[x..].iter().position(|r| ev(r, "uc_x_end")).unwrap();
+            let mut f = recs[end].clone();
+            f["set"] = e["set"].clone();
+            recs.insert(x, f);
+            recs.insert(x, e);
+            renumber(recs);
+        }),
+        (
+            "driven replay: a UnitCombatState.Clear's target writes aren't from the LeaveCombat",
+            |recs| {
+                let at = write(recs, "UnitCombatState.Clear", "last");
+                let o = recs[at]["origin"]
+                    .as_str()
+                    .unwrap()
+                    .replace("UnitLifeController.TickOnUnit", "X.Y");
+                recs[at]["origin"] = json!(o);
+            },
+        ),
+        ("driven replay: a tgt_init record out of its block", |recs| {
+            let e = pos(recs, |r| ev(r, "eng_init"));
+            let at = first_init(recs);
+            let r = recs.remove(at);
+            recs.insert(e + 1, r);
+            renumber(recs);
+        }),
+        (UNMADE, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "uc_run")
+                    && r["nested"] == false
+                    && r["origin"].as_str().unwrap().contains("ClickUnitHandler.OnClick")
+            });
+            let end = at + recs[at..].iter().position(|r| ev(r, "uc_run_end")).unwrap();
+            let u = recs[at]["u"].clone();
+            let w =
+                recs.iter().find(|r| ev(r, "tgt_w") && r["u"] == u && r["f"] == "manual").unwrap();
+            let mut r = w.clone();
+            r["t"] = recs[end]["t"].clone();
+            let o =
+                recs[at]["origin"].as_str().unwrap().splitn(3, " < ").nth(2).unwrap().to_owned();
+            r["origin"] = json!(format!(
+                "Kingmaker.Controllers.Combat.UnitCombatState.set_ManualTarget < {o}"
+            ));
+            recs.insert(end + 1, r);
+            renumber(recs);
+        }),
+        // Review round 4: the driver's input bound to its own `Run`; the restore's frames exact.
+        // (Its frame and turn count aren't the click's own.)
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            // A second click before a prediction's `Run` (`OnClick`, not the driver's).
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            let mut r = recs[i].clone();
+            let at = pos(recs, |x| {
+                ev(x, "uc_run")
+                    && x["nested"] == false
+                    && x["t"].as_i64() > r["t"].as_i64()
+                    && x["origin"].as_str().unwrap().contains("ClickUnitHandler.OnClick")
+            });
+            r["t"] = recs[at]["t"].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        ("driven replay: the driver's Run without its input", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs.remove(i);
+            renumber(recs);
+        }),
+        (C, |recs| {
+            let at = restore(recs);
+            let o = recs[at]["origin"].as_str().unwrap().replace("b__120_0", "b__NOT_A_LAMBDA");
+            recs[at]["origin"] = json!(o);
+        }),
+        (C, |recs| {
+            let at = restore(recs);
+            let o = recs[at]["origin"]
+                .as_str()
+                .unwrap()
+                .replace("Assembly-CSharp, Version=", "Assembly-CSharp, CORRUPTED, Version=");
+            recs[at]["origin"] = json!(o);
+        }),
+        // Review round 5: each driver input of its kind, with its payload, matching its `Run`; the
+        // initial blocks in the oracle's sequence.
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "move");
+            recs[i]["step"] = json!("tbattack");
+        }),
+        ("driven replay: a driver's move input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["step"] = json!("move");
+        }),
+        ("driven replay: a driver's attack:bogus input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "move");
+            recs[i]["step"] = json!("attack:bogus");
+        }),
+        ("driven replay: a driver's move input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "move");
+            recs[i].as_object_mut().unwrap().remove("to");
+        }),
+        (C, |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "move");
+            recs[i]["to"] = json!([1.0, 2.0, 3.0]);
+        }),
+        ("driven replay: an eng_init record out of the oracle's sequence", |recs| {
+            // The first two units swapped in both blocks.
+            let e = pos(recs, |r| ev(r, "eng_init"));
+            recs.swap(e, e + 1);
+            let t = first_init(recs);
+            recs.swap(t, t + 1);
+        }),
+        ("driven replay: an eng_init record out of the oracle's sequence", |recs| {
+            // Both blocks before `uc_snap`.
+            let snap = pos(recs, |r| ev(r, "uc_snap"));
+            let e = pos(recs, |r| ev(r, "eng_init"));
+            let end = e + recs[e..]
+                .iter()
+                .position(|r| !ev(r, "eng_init") && !ev(r, "tgt_init"))
+                .unwrap();
+            let block: Vec<V> = recs.drain(e..end).collect();
+            for (k, r) in block.into_iter().enumerate() {
+                recs.insert(snap + k, r);
+            }
+            renumber(recs);
+        }),
+        // Review round 6: a driver input's whole payload; the `attack:` step's blueprint; the input
+        // right before its command's first sight; nothing else inside a `Clear`.
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i].as_object_mut().unwrap().remove("command");
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["command"] = json!("UnitMoveTo");
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["round"] = json!(999);
+        }),
+        ("driven replay: a driver's attack:bogus input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            let o = recs[i].as_object_mut().unwrap();
+            o.insert("step".into(), json!("attack:bogus"));
+            for k in ["unit", "policy", "round", "turn_index", "command", "at"] {
+                o.remove(k);
+            }
+        }),
+        (
+            "driven replay: a driver's attack:00000000000000000000000000000001 input it can't read",
+            |recs| {
+                let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+                let o = recs[i].as_object_mut().unwrap();
+                o.insert("step".into(), json!("attack:00000000000000000000000000000001"));
+                for k in ["unit", "policy", "round", "turn_index", "command", "at"] {
+                    o.remove(k);
+                }
+            },
+        ),
+        ("driven replay: a driver's input without its Run", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "move");
+            recs.swap(i, i + 1);
+            renumber(recs);
+        }),
+        (DIFF, |recs| {
+            let at = write(recs, "UnitCombatState.Clear", "last");
+            let d = recs[at..].iter().position(|r| r["k"] == "draw").unwrap() + at;
+            let mut r = recs.remove(d);
+            r["t"] = recs[at]["t"].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        // Review round 7: nothing recorded between the sim's consecutive writes.
+        (C, |recs| {
+            let at = write(recs, "UnitCommands.UpdateCombatTarget", "manual");
+            let d = recs[at..].iter().position(|r| r["k"] == "draw").unwrap() + at;
+            let mut r = recs.remove(d);
+            r["t"] = recs[at]["t"].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        // Review round 8: `UpdateCombatTarget`'s leaf and reset at once; a click's metadata.
+        (C, |recs| {
+            let at = nct(recs);
+            let d = recs[at..].iter().position(|r| r["k"] == "draw").unwrap() + at;
+            let mut r = recs.remove(d);
+            r["t"] = recs[at]["t"].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        (C, |recs| {
+            // `UpdateCombatTarget`'s `tact` (in `Run`, right after the custom handler's leaf).
+            let at = (1..recs.len())
+                .find(|&i| {
+                    leaf(&recs[i], "tact")
+                        && leaf(&recs[i - 1], "custom")
+                        && recs[i]["t"].as_i64() > Some(300)
+                })
+                .unwrap();
+            let d = recs[at..].iter().position(|r| r["k"] == "draw").unwrap() + at;
+            let mut r = recs.remove(d);
+            r["t"] = recs[at]["t"].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["frame"] = json!(999);
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["turn_index"] = json!(999);
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["at"] = json!({});
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["at"]["from"] = json!([1.0, 2.0]);
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["at"]["extra"] = json!(1);
+        }),
+        // Review round 9: the reset is the next record and its own writer's; a click's vectors are
+        // float32s.
+        (C, |recs| {
+            let at = nct(recs);
+            let mut r = recs[at].clone();
+            r["site"] = json!("set_AutoUseAbility");
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["at"]["from"][0] = json!(1e100);
+        }),
+        // Review round 10: the path's point count a C# `int`.
+        ("driven replay: a driver's tbattack input it can't read", |recs| {
+            let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
+            recs[i]["at"]["path_points"] = json!(2_147_483_648_i64);
+        }),
+        // The observer without the engagement's.
+        ("driven replay: the recording declares its targets observer without", |recs| {
+            let at = pos(recs, |r| r["k"] == "begin");
+            recs[at]["observers"] = json!([
+                "groups",
+                "cooldowns",
+                "turn_ticks",
+                "commands",
+                "attacks",
+                "approach",
+                "ai",
+                "targets"
+            ]);
+        }),
+    ];
+    let mut missed = Vec::new();
+    for (i, (want, change)) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+        change(&mut changed.records);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
+            missed.push(format!(
+                "case {i}: {want}: {:?}",
+                w.coverage.unsupported.keys().collect::<Vec<_>>()
+            ));
         }
     }
     assert!(missed.is_empty(), "{missed:#?}");

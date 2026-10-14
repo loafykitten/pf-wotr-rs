@@ -356,7 +356,7 @@ fn is_offensive(w: &mut World, executor: EntityIdx, c: &Command) -> Option<bool>
 
 /// `UnitEntityData.CanAttack(unit)`: a neutral target, or an enemy of the executor's group, or
 /// (not an enemy) a confused executor attacking the nearest (confusion isn't modelled: reported).
-fn can_attack(w: &mut World, executor: EntityIdx, target: EntityIdx) -> bool {
+pub(crate) fn can_attack(w: &mut World, executor: EntityIdx, target: EntityIdx) -> bool {
     if super::units::faction_neutral(w, target) {
         return true;
     }

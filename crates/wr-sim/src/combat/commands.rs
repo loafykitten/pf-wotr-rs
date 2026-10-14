@@ -553,6 +553,16 @@ pub trait Inputs {
     fn call(&mut self, w: &mut World, call: &approach::Call) -> R<()>;
     /// `TickApproaching`'s `Random.Range(0.2f, 0.6f)` for `c`.
     fn approach_draw(&mut self, w: &mut World, c: u32) -> R<f32>;
+    /// `NextCommandTime = 0` of `u`, written by `site` (`Engage`, `Disengage`,
+    /// `UpdateCombatTarget`).
+    fn nct_zero(&mut self, w: &mut World, u: &str, site: &'static str) -> R<()>;
+    /// A write that changed a unit's `LastTarget` or `ManualTarget` ([`super::targets`]).
+    fn tgt_write(&mut self, w: &mut World, x: &super::targets::Write) -> R<()>;
+    /// A boolean leaf read right after the last record taken (code that records nothing in
+    /// between): `UpdateCombatTarget`'s.
+    fn leaf_next(&mut self, w: &mut World, f: &'static str, of: Of) -> R<bool> {
+        self.leaf(w, f, of)
+    }
 }
 
 fn cmd(w: &World, c: u32) -> R<&Cmd> {
@@ -1590,7 +1600,7 @@ fn try_special_handlers<I: Inputs>(
             x.ai = ai;
             x.s.target = target;
             x.s.target_ref = target_ref;
-            // `UpdateCombatTarget` (the unit's last and manual targets) isn't modelled.
+            update_combat_target(w, inp, cur, true)?;
             return Ok(true);
         }
     }
@@ -1699,11 +1709,72 @@ pub fn run<I: Inputs>(
             set_mut(w, s)?.slots[slot] = None;
         }
     }
-    // `UpdateCombatTarget` isn't modelled.
+    if t == ty::STANDARD || set(w, s)?.slots[usize::from(ty::STANDARD)].is_none() {
+        update_combat_target(w, inp, c, false)?;
+    }
     if cmd(w, c)?.overrides("OnRun") {
         class_code(w, inp, "OnRun", c, None)?;
     } else {
         on_run_base(w, inp, c)?;
+    }
+    Ok(())
+}
+
+/// `UpdateCombatTarget(cmd)`: the executor's `LastTarget` and `ManualTarget`, when the targets are
+/// modelled ([`super::targets`]). Only `UnitAttack` marks its target as the manual one. `merge`:
+/// from `TryUseSpecialHandlers`.
+fn update_combat_target<I: Inputs>(w: &mut World, inp: &mut I, c: u32, merge: bool) -> R<()> {
+    use super::targets::{self, Field};
+    if !w.combat.targets.on {
+        return Ok(());
+    }
+    let site = if merge {
+        super::targets::Site::UpdateCombatTargetMerge
+    } else {
+        super::targets::Site::UpdateCombatTarget
+    };
+    let set = |w: &mut World, inp: &mut I, e, f, v| -> R<()> {
+        match targets::set(w, e, f, v, site)? {
+            Some(x) => inp.tgt_write(w, &x),
+            None => Ok(()),
+        }
+    };
+    // `cmd is UnitUseAbility && (IsAutoUseAbility(...) || !ShouldUpdateManualTarget)`.
+    if cmd(w, c)?.is(class::USE_ABILITY) {
+        return unsupported(w, "UnitCommands.UpdateCombatTarget for a UnitUseAbility");
+    }
+    if inp.leaf_next(w, "tact", Of::Cmd(c))? {
+        return unsupported(w, "UnitCommands.UpdateCombatTarget in tactical combat");
+    }
+    let exec_id = cmd(w, c)?.s.executor.clone();
+    let Some(e) = unit(w, exec_id.as_deref()).filter(|e| w.unit(*e).is_some()) else {
+        return desync(format!("command {c}'s executor is unknown"));
+    };
+    let exec_id = exec_id.unwrap_or_default();
+    let target = target_in_world(w, c)?.and_then(|t| unit(w, Some(&t)));
+    let hit = match target {
+        Some(t) if t != e => {
+            (super::units::is_conscious(w, t)
+                || !inp.leaf_next(w, "aien", Of::Unit(Some(exec_id.clone())))?)
+                && super::groups::can_attack(w, e, t)
+        }
+        _ => false,
+    };
+    let x = cmd(w, c)?;
+    let (ai, mark) = (x.ai, x.is(class::ATTACK));
+    if let Some(t) = target.filter(|_| hit) {
+        set(w, inp, e, Field::Last, Some(t))?;
+        if !ai && mark {
+            set(w, inp, e, Field::Manual, Some(t))?;
+        } else if targets::value(w, e, Field::Manual)? != Some(t) {
+            set(w, inp, e, Field::Manual, None)?;
+        }
+    } else {
+        set(w, inp, e, Field::Manual, None)?;
+        if !ai {
+            inp.nct_zero(w, &exec_id, "UpdateCombatTarget")?;
+            w.combat.ai.nct.insert(e, 0.0);
+        }
     }
     Ok(())
 }

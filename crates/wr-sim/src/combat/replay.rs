@@ -139,6 +139,9 @@ pub struct Outcome {
     pub eng_count_writes: usize,
     pub eng_counts_adopted: usize,
     pub eng_provokes: usize,
+    /// Units' targets (`targets` observer): the sim's writes checked, the reads checked.
+    pub tgt_checked: usize,
+    pub tgt_reads: usize,
 }
 
 /// Who triggered a root rule, from its recorded call site (`origin`: the game's methods,
@@ -845,6 +848,20 @@ struct Driver<'t> {
     /// window's initial engagement (`eng_init`) is closed (the first engagement tick ran).
     eng_prov_seen: Vec<(EntityIdx, &'static str)>,
     eng_init_closed: bool,
+    /// The targets are the sim's (the `targets` observer); the window's initial targets
+    /// (`tgt_init`) are closed (its first frame ended).
+    tgt: bool,
+    tgt_init_closed: bool,
+    /// `eng_init`'s units in order (`tgt_init` follows them) and the `tgt_init`s seen.
+    tgt_init_units: Vec<EntityIdx>,
+    tgt_init_n: usize,
+    /// The `UnitCombatState.Clear` writing (after its `cd_clear`), and each unit's last
+    /// `leave_combat` callers.
+    tgt_clear: targets::TgtClear,
+    tgt_leave_by: std::collections::HashMap<EntityIdx, String>,
+    /// The driver's click waiting for its `Run`; the active `Run`s' recorded chains.
+    tgt_click: Option<targets::TgtClick>,
+    tgt_runs: Vec<String>,
     /// The frame of the last `AiBrainController.Tick` entry; the turn controller's `ForceTick`
     /// entries since its last tick start (its forced AI tick) and since its last `Prepare`; the
     /// active `ForceTick`'s call site.
@@ -1069,6 +1086,14 @@ impl<'t> Driver<'t> {
             eng_tick_frame: None,
             eng_prov_seen: Vec::new(),
             eng_init_closed: false,
+            tgt: false,
+            tgt_init_closed: false,
+            tgt_init_units: Vec::new(),
+            tgt_init_n: 0,
+            tgt_clear: targets::TgtClear::default(),
+            tgt_leave_by: std::collections::HashMap::new(),
+            tgt_click: None,
+            tgt_runs: Vec::new(),
             ai_tick_frame: None,
             ai_forced: 0,
             ai_prepared: 0,
@@ -1201,6 +1226,16 @@ impl<'t> Driver<'t> {
                 "driven replay: the recording declares its engage observer without the ai, command, attack and approach records",
             );
         }
+        // Units' targets are the sim's with the `targets` observer.
+        w.combat.targets.on = w.combat.engage.on && declared.contains(&"targets");
+        d.tgt = w.combat.targets.on;
+        if declared.contains(&"targets")
+            && (!w.combat.targets.on || !declared.contains(&"cooldowns"))
+        {
+            w.coverage.unsupported(
+                "driven replay: the recording declares its targets observer without the engage and cooldown records",
+            );
+        }
         if declared.contains(&"ai") && (!w.combat.ai.on || !declared.contains(&"groups")) {
             w.coverage.unsupported(
                 "driven replay: the recording declares its ai observer without the group, command, attack and approach records",
@@ -1236,6 +1271,7 @@ impl<'t> Driver<'t> {
     fn finish(mut self, w: &mut World) -> Outcome {
         self.cd_frame_end(w);
         self.uc_frame_end(w);
+        self.tgt_frame_end(w);
         self.uc_finish(w);
         let outgoing = self.frame.mode;
         let rest = self.frame.finish();
@@ -1393,6 +1429,9 @@ impl Driver<'_> {
             return;
         }
         let u = r["u"].as_str().and_then(|id| w.by_id.get(id).copied());
+        if let Some(u) = u {
+            self.tgt_leave(u, by);
+        }
         match w.combat.leave_log.pop_front() {
             Some(x) if Some(x) == u => {}
             Some(_) => w.coverage.unsupported(
@@ -2521,6 +2560,7 @@ impl Driver<'_> {
                     return;
                 }
                 if caller.contains("UnitCombatState.Clear") {
+                    self.tgt_clear_open(w, u);
                     let logged = w
                         .combat
                         .cooldown_clears
@@ -2601,6 +2641,7 @@ impl Driver<'_> {
         let trace = self.trace;
         let recs = &trace.records;
         let r = &recs[i];
+        self.tgt_clear_boundary(w, r);
         match r["k"].as_str() {
             // A frame starts at the `tick` record (`GameMode.Tick`'s prefix): the previous
             // frame's remaining phases run first.
@@ -2616,6 +2657,7 @@ impl Driver<'_> {
                 self.mode = Some(m);
                 self.cd_frame_end(w);
                 self.uc_frame_end(w);
+                self.tgt_frame_end(w);
                 let outgoing = self.frame.mode;
                 let rest = self.frame.start(m);
                 self.draining = outgoing;
@@ -2665,6 +2707,7 @@ impl Driver<'_> {
                             || e.starts_with("ua_")
                             || e.starts_with("ai_")
                             || e.starts_with("eng_")
+                            || e.starts_with("tgt_")
                     }) =>
             {
                 return self.uc_record(w, i);
@@ -2707,6 +2750,8 @@ impl Driver<'_> {
             Some("input") => {
                 self.place(w, Phase::Post, "an input");
                 match r["step"].as_str() {
+                    Some("tbattack" | "move") => self.tgt_driver_input(w, i),
+                    Some(x) if x.starts_with("attack:") => self.tgt_driver_input(w, i),
                     Some("tbm:on") => {
                         w.combat.tb_mode_on = true;
                         super::life::update_turn_based(w);
@@ -4090,6 +4135,7 @@ fn pos_pair(at: &J) -> Option<([f32; 3], [f32; 3])> {
 mod ai;
 mod commands;
 mod engage;
+mod targets;
 
 #[cfg(test)]
 mod tests;

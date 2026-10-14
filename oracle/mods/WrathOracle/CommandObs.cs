@@ -89,6 +89,7 @@ internal static partial class CommandObs
         _fxCmd.Clear();
         _atk.Clear();
         _atkCfg.Clear();
+        Uct.Clear();
     }
 
     // ---- fields ----
@@ -308,6 +309,7 @@ internal static partial class CommandObs
             Digest();
             Sched.Obs("uc_snap");
             if (EngOn) EngInit();
+            if (TgtOn) TgtInit();
         }
         catch (Exception e) { Trace.HookFailed("observe uc_snap", e); }
     }
@@ -1669,5 +1671,8 @@ internal static partial class CommandObs
 
         // The engagement controller (observer "engage", CommandObsEngage.cs).
         InstallEngage(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+
+        // LastTarget and ManualTarget (observer "targets", CommandObsTarget.cs).
+        InstallTargets(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
     }
 }

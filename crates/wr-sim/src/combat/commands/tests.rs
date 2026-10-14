@@ -52,6 +52,12 @@ impl Script {
 }
 
 impl Inputs for Script {
+    fn tgt_write(&mut self, _: &mut World, x: &crate::combat::targets::Write) -> R<()> {
+        Err(Desync(format!("a target write {x:?}: the script has none")))
+    }
+    fn nct_zero(&mut self, _: &mut World, u: &str, site: &'static str) -> R<()> {
+        Err(Desync(format!("{site} sets {u}'s NextCommandTime: the script has none")))
+    }
     fn leaf(&mut self, _: &mut World, f: &'static str, of: Of) -> R<bool> {
         match self.next(f)? {
             Ev::Leaf(g, o, v) if g == f && o == of => Ok(v),

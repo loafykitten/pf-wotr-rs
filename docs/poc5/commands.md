@@ -1,4 +1,4 @@
-# POC-5 commands: survey and plan (round 8: slice A done 2026-10-13, eleventh session; round 9: slice B done, twelfth session; slice C done, thirteenth session; slice D done, fourteenth session; slice E done, fifteenth session)
+# POC-5 commands: survey and plan (round 8: slice A done 2026-10-13, eleventh session; round 9: slice B done, twelfth session; slice C done, thirteenth session; slice D done, fourteenth session; slice E done, fifteenth session; slice F done, sixteenth session)
 
 Round 7 left the units' commands as the main recorded input of the turn controller: whether a rider's commands are
 empty or running, the turn's running commands (`HasRunningCommands`), and when a command acts (`SpendAction`'s call from
@@ -86,6 +86,9 @@ others). Most runs never start: they're replaced or interrupted (the AI re-decid
 - **D (done 2026-10-13: "Slice D: result" below): the AI** (`AiBrainController`), whose choices are the runs above.
 - **E (done 2026-10-14: "Slice E: result" below): the engagement controller** (`UnitCombatEngagementController`,
   `Engage`/`Disengage`, attacks of opportunity and their count).
+- **F (done 2026-10-14: "Slice F: result" below): units' targets** (`LastTarget`, `ManualTarget`:
+  `UnitCommands.UpdateCombatTarget` and the other writers).
+- **G (next): the impatience controller** (`UnitImpatienceController`: what the AI reads as `ipt` and `disliked`).
 
 Before slice A's first review, walk the fail-closed checklist (every field, frame id, finite values, declared
 observers, completeness at each boundary; hooks never call side-effecting game methods).
@@ -642,3 +645,125 @@ compared at the run's end; a provoke accepted only inside its rule's handler; th
 count write's caller checked. Round 3: each provoke tied to the rule whose handler made it (at most one a rule); every
 frame of the nested run's and the count write's caller chains; the damage test on a fight with an attack of
 opportunity. Round 4: an additional limb's threat item bound to its recorded id (as the commands' reads). Round 5 found nothing (residual gaps: the branches no capture exercises, above).
+
+## Slice F: design (2026-10-14, sixteenth session)
+
+`UnitCombatState.LastTarget` and `ManualTarget` become the sim's (`combat/targets.rs`), so the AI's and the
+engagement's `last`/`manual` reads become checks, and so do `UpdateCombatTarget`'s `NextCommandTime` resets (`ai_nct`,
+276 of them in `tb-nearest`: 5198's follow moves). Neither field is saved; a unit's constructor clears both.
+
+The writers [C]: `UnitCommands.UpdateCombatTarget` (from `Run` when the command is a standard one or the standard slot is
+empty, and from `TryUseSpecialHandlers`' merge, on the merged-into command); `ShouldAttackOnDisengage` (turn-based, not
+simulated: `LastTarget = target`, and its `ScopedVariableModification` restoring the old value on every exit);
+`UnitCombatState.Clear()` (leaving combat, the constructor); `HandleEntityDestruction` (a destroyed `ManualTarget`);
+the UI's (`ClickUnitHandler.OnClick` after its `Run`, which WrathOracle's driver does as well, `Stop`,
+`TryCancelCommands`, `SelectionManagerBase.InterruptActions`); touch spells (`TouchSpellsController`, `UnitPartTouch`,
+`RemoveUnitPartTouchOnAllCompanions`) and tactical combat. `LastTarget`'s setter raises `ICombatTargetChangeHandler`
+(no implementers); `ManualTarget`'s, set to null, clears the rider's and the mount's (mounts: reported).
+
+`UpdateCombatTarget(cmd)`: nothing for a `UnitUseAbility` (reported: not modelled) or in tactical combat; the target
+unit (`cmd.Target?.Unit`) when it isn't the executor, is conscious (or the executor's AI is off: `IsAIEnabled`) and the
+executor `CanAttack` it: `LastTarget` is it, `ManualTarget` too for the player's attack (`AiAction == null &&
+MarkManualTarget`: only `UnitAttack` marks), else `ManualTarget` cleared unless it's that unit; otherwise
+`ManualTarget` cleared and, for a command not the AI's, `NextCommandTime = 0`.
+
+The sim: each unit's `LastTarget`/`ManualTarget` (known from `tgt_init` or constructed in the window); `UpdateCombatTarget`
+ported in `Run` and the merge, `Clear()`'s and `ShouldAttackOnDisengage`'s writes, `CanAttack` the sim's
+(`groups::can_attack`), `IsAIEnabled` and `TacticalCombatHelper.IsActive` leaves. Each write that changes a field is
+queued and checked, in order, against the recorded writes (`tgt_w`) of the sim's sites; a recorded write of another site
+is an input (the UI's, the driver's, a destruction's) or reported (touch spells, tactical combat, an unknown caller). A
+sim write the recording doesn't have is reported at the next frame. The AI's and the engagement's reads (`manual`,
+`last`) are checked against the sim's fields.
+
+WrathOracle (`CommandObsTarget.cs`, observer `targets`, which requires `engage`):
+- `tgt_init` at the window's first tick: each unit's `LastTarget` and `ManualTarget`.
+- `tgt_w`: every write that changes either field (a prefix on each setter, comparing references as the setters do:
+  unit, field, value), with its writer's call chain (`origin`, the setter first); the driver's own write is
+  `WrathOracle.TurnBased.IssueHovered`. The replay names the writer from the chain: the sim's (`UpdateCombatTarget`
+  from `Run` or `TryUseSpecialHandlers`, `ShouldAttackOnDisengage` from `Disengage`, its scope's lambda from
+  `ScopedVariableModification<UnitEntityData>.Dispose`, `Clear` from `LeaveCombat`), an input's (`ClickUnitHandler.OnClick`
+  and the driver, `Stop`, `TryCancelCommands`, `InterruptActions`' lambda, `HandleEntityDestruction`), or another
+  (reported).
+- `UpdateCombatTarget` is base lifecycle code; its leaves `tact` and `aien` (`uc_v`, with the command).
+
+## Slice F: result (2026-10-14, sixteenth session) [M]
+
+On **`poc5-tb-92`** (idle, Manual_18; `tb-nearest` and `tb-focus`, record and two replays) **every run is valid with
+units' `LastTarget` and `ManualTarget` the sim's**: T0-equal, end state 1.0000, nothing reported. `tb-nearest`: 16
+writes (`UpdateCombatTarget`'s and leaving combat's `Clear`), each checked, 123 reads (the AI's `manual`/`last`, the
+engagement's) checked against the sim's fields; `tb-focus`: 20 writes (a disengage's `ShouldAttackOnDisengage` write
+and its scope's restore among them), 58 reads, and its 403 `UpdateCombatTarget` resets of `NextCommandTime` (5198's
+follow moves) are checks now. The writes that follow an entry from outside the lifecycle are the sim's too: the turn
+controller's predictions click (`ClickUnitHandler.OnClick` after each `Run`: `ManualTarget` the clicked unit) and
+combat's end (`TryCancelCommands` after its `InterruptAll`: both cleared) both run in these fights, and the driver
+writes `ManualTarget` after its click's `Run` (its `tbattack`); none of those changed anything here, so they're
+computed and found unchanged. Every unit's targets start null at the window (`tgt_init`).
+
+How the writes are checked: one the sim makes takes the next `tgt_w` where the sim makes it (nothing recorded between), its call chain exactly
+the setter, the writer's frames and the chain it's checked against (the innermost `Run`'s recorded chain, a stack of
+the `Run` records the sim took; the engagement tick's; the entry's for a click's, `TryCancelCommands`' or `Stop`'s;
+the driver's own). `Clear`'s writes (leaving combat, outside entries) are queued and accepted only inside that unit's
+`Clear` (after its `cd_clear`, before the next lifecycle record), their chain the `leave_combat`'s callers and the
+one the `InterruptAiCommands` that `UnitEntityData.LeaveCombat` calls next has. `InterruptActions`' writes and a
+destroyed target's aren't modelled (reported; the replay reports a destruction anyway). The driver's inputs that run a command
+(`tbattack`, the plan's `move` and `attack:`) pair one-to-one with the `Run` right after them (only the new command's
+`uc_new` between), which has the driver's coroutine origin, its frame, and its command (an attack on the target, a
+move to the point); each input has exactly its writer's fields (a click's round the sim's, its frame the tick's, its turn count the window's, its `at` its writer's fields, an `attack:` step's
+target of its blueprint). Nothing else is recorded inside a `Clear` between `cd_clear` and its target writes. `tgt_init` is one block
+right after `eng_init`'s, over the same units in order, and `eng_init`'s comes right after `uc_snap` in ordinal id
+order (the oracle's `StateDump.AllUnits`). The targets observer requires `engage` and `cooldowns`.
+
+`missing_or_wrong_target_records_are_reported` damages `-92/tb-focus` 85 ways (the initial block, every field of a
+write, its chain, reorders across lifecycle records with the sequence renumbered, the restore, `Clear`'s window and
+chain, a `Stop` without its clears, the driver's inputs and their `Run`s, the initial blocks' sequence, writes the sim didn't make, the reads, `UpdateCombatTarget`'s leaves and resets, the observers); each is reported. The regression
+(`out-slice-f`) is identical to `out-slice-e`; the older captures replay as before.
+
+Not exercised by a capture: a click, `Stop` or `TryCancelCommands` write that changes a field, a merge's `UpdateCombatTarget`, an unconscious target (the
+`aien` leaf), a `UnitUseAbility` (reported), mounts (reported), touch spells and tactical combat (reported).
+
+**Reviews:** gpt-6.1-sol (high, Fast mode), eleven rounds, every finding confirmed against the code and fixed. Round
+1: each write pulled where the sim makes it (it had been matched in order among themselves), its caller chain checked,
+the merge its own site, the input writers held to their writer's semantics. Round 2: every frame between a write's
+site and its entry exact (the innermost `Run`'s recorded chain), `Clear`'s writes inside their `Clear` and from its
+`leave_combat`'s callers, the initial block contiguous and in order. Round 3: the UI path's writes computed rather
+than accepted (the predictions' `OnClick`, combat end's `TryCancelCommands`, `Stop`, the driver's), `InterruptActions`'
+and a destruction's reported, `Clear`'s whole chain via the `InterruptAiCommands` that follows, `eng_init` not
+reopened. Round 4: the driver's click bound to its own `Run`, the restore's frames exact. Round 5: the driver's inputs
+typed with their payloads, the initial blocks in the oracle's fixed sequence. Round 6: every input field, the `attack:`
+step's blueprint, the input right before its command's first sight, nothing else inside a `Clear`. Round 7: nothing
+recorded between the sim's consecutive writes. Round 8: `UpdateCombatTarget`'s leaves and reset taken strictly, a
+click's frame, turn count and `at`. Rounds 9 and 10: the reset's own writer, float32 vectors, a C# `int` count. Round
+11 found nothing (residual gaps: the paths no capture exercises, above). Left as is: the other slices' leaves are
+still pulled with records processed on the way (a reordered presentation draw between them isn't reported).
+
+## Slice G: design draft (2026-10-14, sixteenth session; not started)
+
+The AI reads the impatience controller's state as inputs: `ipt` (`CombatAiData.ImpatiencePriorityTarget`) and
+`disliked` (`DislikedTargets.Contains`). Slice G ports `UnitImpatienceController` so both become checks [C]:
+- **State** (`CombatAiData`, per unit, cleared by `UnitCombatState.Clear`): `HardTargets`, `DislikedTargets`,
+  `BotherUnits` (.NET `HashSet`s: `SetupPriorityTarget` enumerates `BotherUnits`, so its slot order matters, as the
+  engagement's dictionaries' did: `csharp/dict.rs`), `ConsequentAttacksWithoutEffect` (a list of commands),
+  `LastOffensiveStandardActionTarget`, `ImpatiencePriorityTarget`, `ConsequentInefficientAttacksCount`. None is saved:
+  the window's initial state is recorded (as `eng_init`, `tgt_init`).
+- **Tick** (registered right before `AiBrainController`, so a phase before the AI's): in combat, for each awake unit in
+  combat, `UpdatePriorityTarget`, then a priority target that is unconscious or not visible in the unit's memory
+  (`Memory.ContainsVisible`: an input) is set up again. `TurnController.Prepare` calls `UpdatePriorityTarget(Rider)`
+  before its forced AI tick.
+- **`UpdatePriorityTarget`**: the count of the consequent attacks without effect whose command succeeded and has no
+  projectile on the way (`LaunchedProjectiles`' `OnTheWay`: the sim's pending projectiles, or an input); against the
+  threshold of the unit's `Impatience` (`UnitState.Impatience` from `ChangeImpatience`; the thresholds and switch
+  chances from `BlueprintRoot.SystemMechanics.Impatience`); a hard target switched on `Random.Range(0, 100)` (a draw
+  from the tape where the sim draws) to disliked, then `SetupPriorityTarget`: a weighted pick over the bother units
+  (`1 / DistanceTo`: an input) with `Random.Range(0f, sum)` when the sum is at least 1.
+- **Handlers**: `HandleUnitCommandDidStart` (the commands model's `Start`: a standard `UnitAttack` on an enemy appends
+  to the attacks without effect, resetting them on a new target); `RuleDealDamage`'s `OnEventDidTrigger` (damage of 1
+  or more on an enemy clears the attacks up to the one whose attack roll or projectile it is, then adds the initiator
+  as a bother unit); heals (`RuleHealDamage`, `RuleHealStatDamage`, `RuleHealEnergyDrain`); `RuleSummonUnit` (reported
+  until summons are ported); `HandleUnitMakeOffensiveAction` (raised by `OffensiveActionsController` on
+  `RuleAttackRoll`); `HandleUnitDeath`/`HandleUnitDestroyed` (the unit leaves every awake unit's bother units: today a
+  stub in `combat/life.rs`). `TryAddBotherUnit` reads `IsInCombat`, `IsEnemy` and `Memory.ContainsVisible`.
+- **WrathOracle** (observer `impatience`, requiring `targets`): the controller's tick as an entry; its reads the sim
+  can't compute as leaves (`ContainsVisible`, `DistanceTo`, projectiles on the way); checks of each handler's effect
+  and of `UpdatePriorityTarget`/`SetupPriorityTarget`'s results; the initial state at the window's first tick.
+- **Fixture**: the current fights may not reach a hard target (the threshold of misses); a fight where an enemy keeps
+  missing one target would exercise the switch draw. Check what `-92` exercises before recording more.

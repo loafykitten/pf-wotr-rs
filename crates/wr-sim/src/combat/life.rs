@@ -371,8 +371,8 @@ pub(crate) fn leave_combat(w: &mut World, u: EntityIdx) {
 }
 
 /// `UnitCombatState.Clear()` for what the sim keeps: the cooldowns, `Initiative` and `Prepared`
-/// (`InitiativeRandom` stays), and the engagement when it's modelled (`engage::clear`). The AI's
-/// combat data and targets aren't modelled.
+/// (`InitiativeRandom` stays), the engagement and the targets when they're modelled
+/// (`engage::clear`, `targets::clear`). The AI's combat data isn't modelled.
 fn combat_state_clear(w: &mut World, u: EntityIdx) {
     let before = w.unit(u).map(|x| x.combat.cooldown).unwrap_or_default();
     if let Some(q) = &mut w.combat.cooldown_clears {
@@ -384,6 +384,7 @@ fn combat_state_clear(w: &mut World, u: EntityIdx) {
         x.combat.prepared = false;
     }
     super::engage::clear(w, u);
+    super::targets::clear(w, u);
 }
 
 /// `if (SettingsRoot.Difficulty.RemoveAnnoyingBuffsAfterCombat) Buffs.RemoveAnnoyingBuffs()`:

@@ -28,6 +28,7 @@ pub mod order;
 pub mod project;
 pub mod replay;
 pub mod rules;
+pub mod targets;
 pub mod turn_tick;
 pub mod turns;
 pub mod units;
@@ -60,6 +61,8 @@ pub struct UnitCombat {
     pub had_turn: bool,
     /// The engagement (`m_EngagedUnits`, `m_EngagedBy`, the attacks of opportunity's count).
     pub eng: engage::UnitEngage,
+    /// `LastTarget`, `ManualTarget`.
+    pub tgt: targets::UnitTargets,
 }
 
 /// A timer (UniRx `Observable.Timer`) that removes a buff when it fires
@@ -142,6 +145,8 @@ pub struct CombatWorld {
     pub ai: ai::Ai,
     /// The engagement controller (`UnitCombatEngagementController`; docs/poc5/commands.md, slice E).
     pub engage: engage::Engage,
+    /// Units' `LastTarget` and `ManualTarget`, when modelled ([`targets::Targets::on`]).
+    pub targets: targets::Targets,
     /// `Game.Instance.IsPaused` (the pause mode), for the commands' lifecycle.
     pub commands_paused: bool,
 }

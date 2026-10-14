@@ -98,8 +98,6 @@ pub trait EngInputs: Inputs {
     fn eng_done(&mut self, w: &mut World, check: &EngageCheck) -> R<()>;
     /// `AttackOfOpportunity` returned.
     fn eng_aoo(&mut self, w: &mut World, check: &AooCheck) -> R<()>;
-    /// `NextCommandTime = 0` of `u`, written by `site` (`Engage`, `Disengage`).
-    fn eng_nct(&mut self, w: &mut World, u: &str, site: &'static str) -> R<()>;
     /// The count's setter changed `u`'s cooldowns row (`cd_write`): `before` and `after`.
     fn eng_count_write(
         &mut self,
@@ -433,7 +431,7 @@ fn engage<I: EngInputs>(w: &mut World, inp: &mut I, u: EntityIdx, t: EntityIdx) 
         eng_mut(w, t)?.engaged_by.insert(u, now);
         for x in [u, t] {
             let id = uid(w, x);
-            inp.eng_nct(w, &id, "Engage")?;
+            inp.nct_zero(w, &id, "Engage")?;
             w.combat.ai.nct.insert(x, 0.0);
         }
     }
@@ -476,27 +474,54 @@ fn disengage<I: EngInputs>(w: &mut World, inp: &mut I, u: EntityIdx, t: EntityId
     let hit = inp.eng_unit(w, "last", &a)?.as_deref() == Some(b.as_str())
         || inp.eng_unit(w, "manual", &a)?.as_deref() == Some(b.as_str());
     if hit {
-        inp.eng_nct(w, &a, "Disengage")?;
+        inp.nct_zero(w, &a, "Disengage")?;
         w.combat.ai.nct.insert(u, 0.0);
     }
     // (`HandleUnitDisengaged` when the target is left unengaged: the real-time auto-pause's.)
     done(w, inp, "Disengage", u, t)
 }
 
-/// `ShouldAttackOnDisengage(target, simulate: false)`. `LastTarget` is an input: the scope sets
-/// it to the target in turn-based combat and restores it after (its change handlers: none).
+/// `ShouldAttackOnDisengage(target, simulate: false)`: in turn-based combat the scope sets
+/// `LastTarget` to the target and restores it on every exit (its change handlers: none). With the
+/// targets modelled ([`super::targets`]) both writes are the sim's; otherwise `LastTarget` is an
+/// input.
 fn should_attack_on_disengage<I: EngInputs>(
     w: &mut World,
     inp: &mut I,
     u: EntityIdx,
     t: EntityIdx,
 ) -> R<bool> {
-    let (a, b) = (uid(w, u), uid(w, t));
+    use super::targets::{self, Field, Site};
+    let a = uid(w, u);
     // `ScopedVariableModification.Create(LastTarget, ...)`.
     inp.eng_unit(w, "last", &a)?;
+    let saved = if w.combat.targets.on { Some(targets::value(w, u, Field::Last)?) } else { None };
+    let v = should_attack_scoped(w, inp, u, t)?;
+    if let Some(s) = saved
+        && let Some(x) = targets::set(w, u, Field::Last, s, Site::Restore)?
+    {
+        inp.tgt_write(w, &x)?;
+    }
+    Ok(v)
+}
+
+fn should_attack_scoped<I: EngInputs>(
+    w: &mut World,
+    inp: &mut I,
+    u: EntityIdx,
+    t: EntityIdx,
+) -> R<bool> {
+    use super::targets::{self, Field, Site};
+    let (a, b) = (uid(w, u), uid(w, t));
     let tb = w.combat.turn_based;
     if tb {
         // `LastTarget = target`, then `target.IsCurrentUnit() && CurrentTurn.Immune...`.
+        if w.combat.targets.on
+            && let Some(x) =
+                targets::set(w, u, Field::Last, Some(t), Site::ShouldAttackOnDisengage)?
+        {
+            inp.tgt_write(w, &x)?;
+        }
         if is_current_unit(w, t)? {
             // `CurrentTurn.ImmuneAttackOfOpportunityOnDisengage`: the sim's, checked.
             let v = inp.eng_bool(w, "immune", None, None)?;

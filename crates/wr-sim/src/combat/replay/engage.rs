@@ -14,12 +14,12 @@ use crate::combat::engage::{self, AooCheck, EngInputs, EngageCheck};
 use crate::world::{EntityIdx, World};
 
 /// A `float` written round-trip as a string (finite).
-fn float(v: &J) -> Option<f32> {
+pub(super) fn float(v: &J) -> Option<f32> {
     v.as_str().and_then(|s| s.parse::<f32>().ok()).filter(|f| f.is_finite())
 }
 
 /// Exactly these fields besides the envelope (`seq`, `k`, `t`, `ev`).
-fn fields(r: &J, payload: &[&str]) -> bool {
+pub(super) fn fields(r: &J, payload: &[&str]) -> bool {
     const BASE: [&str; 4] = ["seq", "k", "t", "ev"];
     r.as_object().is_some_and(|o| {
         o.len() == BASE.len() + payload.len()
@@ -84,6 +84,7 @@ impl Driver<'_> {
             w.coverage.unsupported("driven replay: an eng_init record it can't read");
             return;
         };
+        self.tgt_eng_init(w, u);
         if w.unit(u).is_some_and(|x| x.combat.eng.known) {
             w.coverage.unsupported("driven replay: a unit's engagement given twice");
             return;
@@ -140,6 +141,7 @@ impl Driver<'_> {
 
     /// `uc_eng`: the engagement controller's tick, placed by its caller.
     pub(super) fn eng_entry(&mut self, w: &mut World, i: usize) -> usize {
+        self.tgt_runs.clear();
         let trace = self.trace;
         let r = &trace.records[i];
         self.i = i + 1;
@@ -309,11 +311,13 @@ impl EngInputs for Driver<'_> {
 
     fn eng_unit(&mut self, w: &mut World, f: &'static str, u: &str) -> R<Option<String>> {
         let at = self.eng_leaf(w, f, &["u", "v"], &[("u", Some(u))])?;
-        match &self.trace.records[at]["v"] {
-            J::Null => Ok(None),
-            J::String(s) if is_unit(w, s) => Ok(Some(s.clone())),
-            _ => self.uc_reject(at, format!("a leaf {f} it can't read")),
-        }
+        let v = match &self.trace.records[at]["v"] {
+            J::Null => None,
+            J::String(s) if is_unit(w, s) => Some(s.clone()),
+            _ => return self.uc_reject(at, format!("a leaf {f} it can't read")),
+        };
+        self.tgt_read(w, at, f, u, v.as_deref())?;
+        Ok(v)
     }
 
     fn eng_conc(&mut self, w: &mut World, u: &str, to: &str) -> R<i64> {
@@ -445,24 +449,6 @@ impl EngInputs for Driver<'_> {
         Ok(())
     }
 
-    fn eng_nct(&mut self, w: &mut World, u: &str, site: &'static str) -> R<()> {
-        let at = self.uc_pull(w, &format!("{site}'s NextCommandTime"), |r| {
-            obs(r, "ai_nct").is_some() && r["site"] == site
-        })?;
-        let r = &self.trace.records[at];
-        if !fields(r, &["u", "site", "v"])
-            || r["u"].as_str() != Some(u)
-            || float(&r["v"]).map(f32::to_bits) != Some(0f32.to_bits())
-        {
-            let d = describe(r);
-            return self.uc_reject(
-                at,
-                format!("{site} sets {u}'s NextCommandTime to 0, the recording has {d}"),
-            );
-        }
-        Ok(())
-    }
-
     fn eng_count_write(
         &mut self,
         w: &mut World,
@@ -580,6 +566,7 @@ impl EngInputs for Driver<'_> {
             );
         }
         self.out.eng_runs += 1;
+        self.tgt_run_push(at);
         Ok(c)
     }
 }

@@ -7,10 +7,21 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-14, fifteenth session): start here
+## Where things stand (2026-10-14, sixteenth session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-5 round 13, slice F (sixteenth session, `docs/poc5/commands.md`): units' targets computed.** On `poc5-tb-92`
+  (both fights, record and two replays) every run is valid with `UnitCombatState.LastTarget` and `ManualTarget` the
+  sim's (`combat/targets.rs`, `combat/replay/targets.rs`): `UnitCommands.UpdateCombatTarget` in `Run` and the merge (its
+  `NextCommandTime` resets now checks: 403 in `-92/tb-focus`), `ShouldAttackOnDisengage`'s write and its scope's
+  restore, leaving combat's `Clear`, and the writes that follow an outside entry (the predictions' `OnClick` after its
+  `Run`, combat end's `TryCancelCommands` and `Stop` after their `InterruptAll`, the driver's after its click). The AI's
+  and the engagement's `last`/`manual` reads are checks. WrathOracle's observer `targets` (`CommandObsTarget.cs`):
+  `tgt_init`, `tgt_w` (each changing write with its writer's call chain, checked exactly), `UpdateCombatTarget`'s leaves
+  `tact`/`aien`. gpt-6.1-sol's reviews converged after eleven rounds; 85 damage cases. Impatience
+  (next) never triggers in `-92`'s fights (`ipt` null, `disliked` false throughout): its draws need a fight where an
+  enemy keeps missing one target.
 - **POC-5 round 12, slice E (fifteenth session, `docs/poc5/commands.md`): the engagement controller computed.** On
   `poc5-tb-85` and `-91` (both fights, record and two replays) every run is valid with `UnitCombatEngagementController`
   the sim's (`combat/engage.rs`): who engages whom (`m_EngagedUnits`/`m_EngagedBy` in .NET `Dictionary` order, freed
@@ -135,9 +146,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - **POC-6:** realtime spot and point shadows (pack format v2: rerun `wr-import pack`), FLIP mean 0.1246.
 
 **Next, in order:**
-1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): `UnitCommands.UpdateCombatTarget`
-   next (`LastTarget`/`ManualTarget`, which the AI and the engagement read as inputs, and its `NextCommandTime` resets),
-   then the impatience controller. A fixture whose enemies start out of reach would
+1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): the impatience controller next
+   (`UnitImpatienceController`: the AI's `ipt` and `disliked` reads, its rule and command-start handlers, two
+   `Random.Range` draws; `docs/poc5/commands.md` has no design for it yet). A fixture whose enemies start out of reach would
    exercise the AI's movement simulation (`ScorePath`). The movement agent waits for the nav port. The UI's requests
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks; POC-5's pass needs three recorded
@@ -178,8 +189,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - Driven replay of one run: `target/debug/wr-combat replay fixtures/captures/oracle/<capture>/fixtures/<fight> --run
   record` (its `commands:` line counts what the commands model computed); `WR_DEBUG_COMMANDS=1` prints each command
   desync and state difference, `WR_DEBUG_UNSUPPORTED=1` each report under its frame. The POC-5 suite:
-  `cargo nextest run -p wr-sim --test poc5 --run-ignored only` (about three minutes). The current captures are `poc5-tb-85`
-  and `-91` (the engagement computed; the summary's `engagement:` line); `-82` replays as slice D, `-80` and `-81` as slice C, `-77` as slice B, `-74` as slice A. The superseded ones
+  `cargo nextest run -p wr-sim --test poc5 --run-ignored only` (about three minutes). The current capture is `poc5-tb-92`
+  (the targets computed; the summary's `targets:` line); `-85` and `-91` replay as slice E, `-82` as slice D, `-80` and `-81` as slice C, `-77` as slice B, `-74` as slice A. The superseded ones
   (`poc5-tb-69` to `-73`, `-75`, `-76`, `-78`, `-79`, `-83`, `-84`, `-86` to `-90`) were deleted on 2026-10-14. Fights vary by capture: disengages (and so
   attacks of opportunity) were in 3 of 18 fights recorded this session; record again for one.
 - A recording that "hangs at startup" may be the main menu's gamepad/keyboard prompt waiting for a click (2026-10-14):

@@ -316,6 +316,12 @@ pub(crate) fn construct(
     {
         x.combat.eng = crate::combat::engage::UnitEngage { known: true, ..Default::default() };
     }
+    // (`Clear()`: neither target.)
+    if w.combat.targets.on
+        && let Some(x) = w.unit_mut(e)
+    {
+        x.combat.tgt = crate::combat::targets::UnitTargets { known: true, ..Default::default() };
+    }
     // `new CharacterStats(descriptor)`: every stat's initial value goes through its
     // `BaseValue` setter (AC 10, attacks of opportunity 1), in `CollectAllStats` order.
     let types: Vec<StatType> = w.stats(e).all.iter().map(|s| s.ty).collect();

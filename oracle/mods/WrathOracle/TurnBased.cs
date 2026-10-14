@@ -429,7 +429,7 @@ internal static class TurnBased
             EventBus.RaiseEvent((IClickActionHandler h) => h.OnAttackRequested(unit, view));
         }
         unit.Commands.Run(cmd);
-        unit.CombatState.ManualTarget = target;
+        CommandObs.DriverSetManualTarget(unit, target);
         return cmd;
     }
 
