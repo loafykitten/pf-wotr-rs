@@ -42,6 +42,8 @@ pub struct Progression {
     pub race: Option<Guid>,
     pub classes: Vec<ClassData>,
     pub experience: i64,
+    /// `MythicExperience` (the unit's: `AddClassLevel` raises it to the mythic level).
+    pub mythic_experience: i32,
     /// `m_CharacterLevel` / `m_MythicLevel` caches (`SetupLevelsIfNecessary`).
     pub character_level: Option<i32>,
     pub mythic_level: Option<i32>,
@@ -270,6 +272,19 @@ pub fn mythic_level(w: &World, u: EntityIdx) -> i32 {
         return l;
     }
     levels(w, u).1
+}
+
+/// `SetupLevelsIfNecessary()`: unless both caches are set, both are computed from the
+/// classes and stored.
+pub fn setup_levels_if_necessary(w: &mut World, u: EntityIdx) {
+    let p = &w.unit(u).expect("unit").progression;
+    if p.character_level.is_some() && p.mythic_level.is_some() {
+        return;
+    }
+    let (c, m) = levels(w, u);
+    let p = &mut w.unit_mut(u).expect("unit").progression;
+    p.character_level = Some(c);
+    p.mythic_level = Some(m);
 }
 
 fn levels(w: &World, u: EntityIdx) -> (i32, i32) {

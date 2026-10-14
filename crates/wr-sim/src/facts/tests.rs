@@ -486,3 +486,134 @@ fn empty_params_start_unknown_in_every_world_until_written_or_supplied() {
     );
     assert_eq!(crate::hydrate::ability_params_empty_of(&serde_json::json!({ "units": [] })), None);
 }
+
+/// `AddMythicEnemyHitPointsBonus`: on, the owner's hit points get `CR * 2 * MythicLevel`
+/// (`Mythic`); the level-up reapply event recomputes it; off, it goes.
+#[test]
+fn mythic_enemy_hit_points_follow_cr_and_mythic_level() {
+    let (mut w, u) = registry_world();
+    let exp = Node::Object(Box::new(obj(
+        "Kingmaker.Blueprints.Classes.Experience.Experience",
+        &[("CR", Node::Int(3)), ("Modifier", Node::F32(1.0))],
+    )));
+    let o = obj("Kingmaker.Blueprints.BlueprintUnit", &[("Components", Node::Seq(vec![exp]))]);
+    w.content.insert(Blueprint {
+        guid: Guid(810),
+        name: "U810".into(),
+        obj: o,
+        source: crate::content::Source::Bbp,
+    });
+    {
+        let x = w.unit_mut(u).expect("unit");
+        x.blueprint = Some(Guid(810));
+        x.progression.character_level = Some(5);
+        x.progression.mythic_level = Some(2);
+    }
+    let comp = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.FactLogic.AddMythicEnemyHitPointsBonus",
+        &[("name", Node::Str("$AddMythicEnemyHitPointsBonus$a".into()))],
+    )));
+    let bp = feature(&w, 811, vec![comp]);
+    let f = loaded_fact(&mut w, u, &bp, true);
+    crate::stats::ops::set_base_value(&mut w, u, S::HitPoints, 20);
+    let hp = w.stats(u).v(S::HitPoints).modified_value;
+    fl::manager_restore_owner_link(&mut w, u);
+    fl::manager_post_load(&mut w, u);
+    fl::manager_turn_on(&mut w, u);
+    assert_eq!(w.stats(u).v(S::HitPoints).modified_value, hp + 12);
+    let from = |w: &World| {
+        w.stats(u)
+            .v(S::HitPoints)
+            .modifiers()
+            .filter(|m| w.mods[m.i()].source == Some(f))
+            .map(|m| (w.mods[m.i()].desc, w.mods[m.i()].value))
+            .collect::<Vec<_>>()
+    };
+    let mythic = crate::stats::types::ModifierDescriptor::Mythic;
+    assert_eq!(from(&w), [(mythic, 12)]);
+    w.unit_mut(u).expect("unit").progression.mythic_level = Some(3);
+    crate::rulebook::bus::raise_unit(&mut w, u, "IUnitReapplyFeaturesOnLevelUpHandler");
+    assert_eq!(w.stats(u).v(S::HitPoints).modified_value, hp + 18);
+    assert_eq!(from(&w), [(mythic, 18)]);
+    fl::manager_turn_off(&mut w, u);
+    assert_eq!(w.stats(u).v(S::HitPoints).modified_value, hp);
+}
+
+/// `AddFeatureOnAlignment`: activated, its facts are added when the owner's alignment has
+/// the component (a lawful good unit: `Lawful`), and removed with the fact; an alignment
+/// without it adds nothing.
+#[test]
+fn alignment_features_follow_the_owners_alignment() {
+    let (mut w, u) = registry_world();
+    w.unit_mut(u).expect("unit").alignment =
+        Some(crate::narrative::alignment::UnitAlignment::initialized(0));
+    feature(&w, 820, Vec::new());
+    let comp = |mask: i64| {
+        Node::Object(Box::new(obj(
+            "Kingmaker.Designers.Mechanics.Facts.AddFeatureOnAlignment",
+            &[
+                ("name", Node::Str("$AddFeatureOnAlignment$a".into())),
+                ("Alignment", Node::Enum(mask)),
+                ("m_Facts", Node::Seq(vec![Node::BpRef(Guid(820))])),
+            ],
+        )))
+    };
+    let has = |w: &World| {
+        w.entity(u).facts.list.iter().filter(|f| w.fact(**f).blueprint == Some(Guid(820))).count()
+    };
+    let lawful = feature(&w, 821, vec![comp(8)]);
+    let chaotic = feature(&w, 822, vec![comp(16)]);
+    let f = crate::unit_facts::add_fact(&mut w, u, &lawful).expect("added");
+    assert_eq!(has(&w), 1);
+    crate::unit_facts::add_fact(&mut w, u, &chaotic).expect("added");
+    assert_eq!(has(&w), 1);
+    crate::unit_facts::remove(&mut w, u, f);
+    assert_eq!(has(&w), 0);
+    // An empty reference adds nothing but keeps its null in `AppliedFacts`.
+    let with_null = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.Mechanics.Facts.AddFeatureOnAlignment",
+        &[
+            ("name", Node::Str("$AddFeatureOnAlignment$b".into())),
+            ("Alignment", Node::Enum(8)),
+            ("m_Facts", Node::Seq(vec![Node::BpRef(Guid::EMPTY), Node::BpRef(Guid(820))])),
+        ],
+    )));
+    let bp = feature(&w, 823, vec![with_null]);
+    let f = crate::unit_facts::add_fact(&mut w, u, &bp).expect("added");
+    assert_eq!(has(&w), 1);
+    let c = crate::world::CompRef { fact: f, comp: 0 };
+    let list = w.component(c).fact_refs.get("AppliedFacts").cloned().expect("applied");
+    assert_eq!(list.len(), 2);
+    assert!(list[0].is_none() && list[1].is_some());
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// `HasArmorFeatureUnlock`: without filters its fact is added on activation and removed with
+/// the owner fact; a filter by armor type on a unit without armor keeps it off.
+#[test]
+fn armor_unlocks_add_their_fact_when_every_filter_passes() {
+    let (mut w, u) = registry_world();
+    feature(&w, 830, Vec::new());
+    let comp = |by_type: bool| {
+        Node::Object(Box::new(obj(
+            "Kingmaker.Designers.Mechanics.Buffs.HasArmorFeatureUnlock",
+            &[
+                ("name", Node::Str("$HasArmorFeatureUnlock$a".into())),
+                ("m_NewFact", Node::BpRef(Guid(830))),
+                ("FilterByBlueprintArmorTypes", Node::Bool(by_type)),
+            ],
+        )))
+    };
+    let has = |w: &World| {
+        w.entity(u).facts.list.iter().filter(|f| w.fact(**f).blueprint == Some(Guid(830))).count()
+    };
+    let plain = feature(&w, 831, vec![comp(false)]);
+    let filtered = feature(&w, 832, vec![comp(true)]);
+    crate::unit_facts::add_fact(&mut w, u, &filtered).expect("added");
+    assert_eq!(has(&w), 0);
+    let f = crate::unit_facts::add_fact(&mut w, u, &plain).expect("added");
+    assert_eq!(has(&w), 1);
+    crate::unit_facts::remove(&mut w, u, f);
+    assert_eq!(has(&w), 0);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}

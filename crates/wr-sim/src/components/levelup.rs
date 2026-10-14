@@ -3,7 +3,7 @@
 //! `Kingmaker.UnitLogic.FactLogic/AddSkillPointPerCharacterLevel.cs`,
 //! `Kingmaker.Designers.Mechanics.Facts/AddFeatureOnClassLevel.cs`, `AddFeatureIfHasFact.cs`,
 //! `ReplaceCasterLevelOfAbility.cs` (`CalculateClassLevel`), `SavesFixerRecalculate.cs`,
-//! `Kingmaker.Blueprints/PretendUnit.cs`.
+//! `Kingmaker.Blueprints/PretendUnit.cs`, `Kingmaker.UnitLogic.FactLogic/AddMythicEnemyHitPointsBonus.cs`.
 
 use serde_json::{Value, json};
 
@@ -45,6 +45,49 @@ pub fn register(r: &mut Registry) {
         bits(&[Hook::Activate, Hook::Deactivate]),
         pretend_unit,
     )));
+    let mut p = Port::new(
+        "AddMythicEnemyHitPointsBonus",
+        bits(&[Hook::TurnOn, Hook::TurnOff]),
+        mythic_enemy_hp_hook,
+    );
+    p.handlers = &["IUnitReapplyFeaturesOnLevelUpHandler"];
+    p.ev = Some(mythic_enemy_hp_event);
+    r.register(Box::new(p));
+}
+
+/// `AddMythicEnemyHitPointsBonus.SetActive(active)`: on, the owner's hit points get
+/// `CR * 2 * MythicLevel` (`Mythic`) when positive; off, the component's modifiers go.
+fn mythic_enemy_hp_set_active(w: &mut World, c: CompRef, active: bool) {
+    let Some(u) = owner_unit(w, c) else { return };
+    if active {
+        // `Owner.CR`: `Blueprint.CR`.
+        let cr = super::difficulty::blueprint_cr(w, w.unit(u).and_then(|x| x.blueprint));
+        let n = crate::csharp::arith::mul(
+            crate::csharp::arith::mul(cr, 2),
+            crate::unit::mythic_level(w, u),
+        );
+        if n > 0 {
+            ops::add_modifier_from_component(w, u, StatType::HitPoints, n, c, D::Mythic);
+        }
+    } else {
+        ops::remove_modifiers_from(w, u, StatType::HitPoints, c);
+    }
+}
+
+fn mythic_enemy_hp_hook(w: &mut World, c: CompRef, h: Hook) {
+    match h {
+        Hook::TurnOn => mythic_enemy_hp_set_active(w, c, true),
+        Hook::TurnOff => mythic_enemy_hp_set_active(w, c, false),
+        _ => {}
+    }
+}
+
+/// `HandleUnitReapplyFeaturesOnLevelUp`: if the fact is on, off and on again.
+fn mythic_enemy_hp_event(w: &mut World, c: CompRef, _iface: &str) {
+    if w.fact(c.fact).is_turned_on {
+        mythic_enemy_hp_set_active(w, c, false);
+        mythic_enemy_hp_set_active(w, c, true);
+    }
 }
 
 /// `ToughnessLogic.Apply`: the owner's hit points get `max(3, level)` (mythic level when

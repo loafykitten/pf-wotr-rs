@@ -7,10 +7,15 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-14, sixteenth session): start here
+## Where things stand (2026-10-14, seventeenth session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-5: three recorded fights with different choices, every run valid (seventeenth session).** The third fight,
+  `poc5-tb-96/tb-hold` (the focus reversed, the archer ending its turns), replays valid on its record and both replays
+  with every slice computed, like `-95`'s `tb-nearest` and `tb-focus` (`docs/poc5/commands.md`, "A third fight"). That
+  meets POC-5's pass as worded, given the inputs that remain recorded (movement agent and pathing, group memory and
+  visibility, animation, the Unity clock, the UI's requests). No impatience hard target in it either.
 - **POC-5 round 14, slice G (sixteenth session, `docs/poc5/commands.md`): the impatience controller computed.** On
   `poc5-tb-95` (both fights, record and two replays) every run is valid with `UnitImpatienceController` the sim's
   (`combat/impatience.rs`, `combat/replay/impatience.rs`, `csharp/hashset.rs`): its tick (a phase before the AI's) and
@@ -163,26 +168,40 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    for their own ports (memory, nav); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
    exercise the AI's movement simulation (`ScorePath`). The movement agent waits for the nav port. The UI's requests
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
-   five-foot step, a full attack), with call sites and the cooldown and tick hooks; POC-5's pass needs three recorded
-   fights with different choices.
+   five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
+   choices are recorded and valid: `-95`'s two and `-96`).
 2. Horgus: the background cutscene's gate-track selection (`CutscenePlayerGateData.SelectTrackToStart`)
    and the spawned unit's awake state; then each save's load tail (`coverage.json`).
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
-   features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them).
+   features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them). They also offset every
+   later fact id: `manual10-ids-1/ids-load.json` names each allocation the sim misses (working notes).
 4. POC-6 (booklab is unavailable for now: on this Mac, after item 1, if at all): a Metal frame capture of the original (round 3's open shadow
    questions), light probes, the rest of post. The timing benchmarks stay on this Mac (screen unlocked).
 5. Oracle, when it bites: Unity's absolute clock (animation timing, AI deadlines); real-time fixtures
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
-- **Sixteenth session's loose ends (2026-10-14):** a third fight is ready to record:
-  `scripts/oracle-record.sh poc5-tb-96 Manual_18 oracle/tools/oracle-fixtures/poc5-tb3.plan.json --deadline 3600
-  --allow-unhooked 5` (`poc5-tb3.spec.json`: `tb-hold`, focus in the reverse order, the archer 5198 ending its turns:
-  different choices, maybe a hard target for the impatience draws); it wasn't recorded because the screen had locked.
-  Replay it with the POC-5 suite's lists (add it like `-95`) and see what it exercises. Captures `poc5-tb-93` and `-94`
-  are superseded by `-95` (made while the impatience hooks changed): delete with Ember's say-so. Manual_10's 72
-  remaining one-sided facts are behind reported components (mythic class levels in `AddClassLevels`, pets and mounts,
-  `AddFeatureOnAlignment`).
+- **Seventeenth session (2026-10-14):** `poc5-tb-96` recorded and in the suite; `-93`/`-94` deleted (Ember's say-so).
+  Ember agrees with the assumption that non-extra units spawned at load are awake, but Manual_10 shows its limit: about
+  15 vendors and officers there sleep in the game (`SleepingUnitsController.ShouldBeSleeping`: in fog of war with no
+  commands), so the toggle the load pass starts for them stays off in the oracle. Fog of war isn't modelled.
+  Manual_10's fact ids: `manual10-ids-1` (WrathOracle `IdTrace`, plan `dump-manual10-ids.json`) has every id the load
+  allocates with its call chain (18,518; its state dump is the old one's). The sim allocates 64 fewer, the facts it
+  doesn't create: 5 before the first spawned unit (the main character's three `ShifterFuryWeaponList` from
+  `UnitHelper.AddFact`, two enchantments from `BuffEnchantSpecificWeaponWorn.OnTurnOn` in `SceneEntitiesState.TurnOn`),
+  then the mythic levels (Mephisto 14, Galfrey 18), mounts (Seilkind, Ciar), `ResiliencyJudgmentAbility*`,
+  `HellknightInfernalArmorResistance`/`FireImmunity`, `KitsuneChangeShapeBiteBuff`, `SacredWeaponEnchantAnarchicChoice`.
+  Every id after a missing one is offset by them (17,696 of Manual_10's 21,845 fact ids differ), so closing those
+  closes most of the ids. Not all: about 14 buffs are recreated later in the game (a toggle's `ReapplyBuff` in a
+  controller tick: Trever's `PowerAttackBuff` is `1E69AC` there, `1E2137` in the sim), a separate follow-up.
+  **Done this session:** mythic class levels (`AddClassLevels` through `SelectClass`, `ApplyClassMechanics`'
+  5 hit points, no skill points, `Classes.Sort`, the unit's `MythicExperience`, `SetupLevelsIfNecessary`),
+  `AddMythicEnemyHitPointsBonus`, `AddFeatureOnAlignment` and `HasArmorFeatureUnlock`: Mephisto and Galfrey match,
+  Liotr, Hurlun and Morveg's alignment facts and the Hellknights' too; facts on one side 72 -> 35, match 0.9099 (ids
+  still offset until the rest is closed). Left: `ShiftersFury` (3), `BuffEnchantAnyWeapon` (2), `AddFeatureOnApply`
+  (the mounts: during a level-up its `UpdateProgression` runs on the live `LevelUpController`'s state, which
+  `spawn/levelup.rs` passes down as a local, so the port needs that state reachable from the world), the Kitsune's
+  `AddFactContextActions` buff, the sleeping vendors' toggles; Hurlun's difficulty modifier (-29 vs -25) predates this.
 - **booklab, the second Mac (set up 2026-10-12; details in `docs/booklab.md`):** `ssh booklab`, an Apple M1 (8-core
   GPU, 16 GB), dedicated to this project, kept awake and plugged in. It runs the game (without Steam:
   `WR_NO_STEAM=1`) for **correctness work in parallel with this Mac**: oracle recordings, and POC-6's render work

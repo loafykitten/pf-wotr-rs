@@ -12,7 +12,7 @@
 //! features granted by a progression still check their rank and the prerequisites flagged
 //! `CheckInProgression`, and a selection's `CanSelect` skips the prerequisites. Parts not on
 //! the paths of the units ported so far report unsupported: spellbooks (the sim keeps no
-//! spellbook state), stat-distribution presets, attribute points, mythic classes' levels,
+//! spellbook state), stat-distribution presets, attribute points, higher mythic classes,
 //! parametrized features and spell selections.
 
 use std::collections::HashSet;
@@ -313,16 +313,15 @@ pub fn add_class_levels(w: &mut World, c: CompRef, u: EntityIdx) {
     }
     let mut history: History = vec![None; cfg.entries.len()];
     for j in 0..levels {
+        // The C# getters store both level caches on their first read
+        // (`SetupLevelsIfNecessary`), before the level changes any class data.
+        crate::unit::setup_levels_if_necessary(w, u);
         let current = if mythic {
             crate::unit::mythic_level(w, u)
         } else {
             crate::unit::character_level(w, u)
         };
         if current < limit {
-            if mythic {
-                w.coverage.unsupported("AddClassLevels: mythic class level");
-                break;
-            }
             add_level(w, u, &cfg, c, &mut history, true);
             if !mythic && j == 0 {
                 configured_deity(w, u, &cfg);
@@ -398,6 +397,8 @@ fn add_level(
     ignore_prerequisites: bool,
 ) {
     let class = cfg.class.clone();
+    // `new LevelUpState(unit)` reads `CharacterLevel` and `MythicLevel`, storing the caches.
+    crate::unit::setup_levels_if_necessary(w, u);
     let mut st = State {
         next_character_level: crate::unit::character_level(w, u) + 1,
         ignore_prerequisites,
@@ -723,31 +724,45 @@ fn select_class(w: &mut World, u: EntityIdx, class: &Rc<Blueprint>, st: &mut Sta
         cd.level += 1;
         cd.level
     };
-    if w.unit(u).is_some_and(|x| x.progression.classes.len() > 1) {
-        w.coverage
-            .unsupported("UnitProgressionData.AddClassLevel: Classes.Sort with several classes");
-    }
-    let cl = crate::unit::character_level(w, u) + 1;
-    {
+    // (`m_ClassesOrder.Add`: not modelled; no `ObligatoryMythicClassesQueue` on these units.)
+    // `MythicLevel++` / `CharacterLevel++` read the levels first (`SetupLevelsIfNecessary`).
+    crate::unit::setup_levels_if_necessary(w, u);
+    if mythic {
+        // `MythicLevel++; MythicExperience = Math.Max(MythicExperience, MythicLevel)`.
+        let ml = crate::unit::mythic_level(w, u) + 1;
         let p = &mut w.unit_mut(u).expect("unit").progression;
-        p.character_level = Some(cl);
-    }
-    // `Experience = Math.Max(Experience, XPTable.Bonuses[Math.Min(len - 1, level)])`.
-    let xp = super::root_ref(w, "Progression", "m_XPTable")
-        .map(|t| {
-            let b: Vec<i64> = t
-                .view()
-                .seq("Bonuses")
-                .iter()
-                .filter_map(|n| if let wr_content::Node::Int(i) = n { Some(*i) } else { None })
-                .collect();
-            let i = usize::try_from(cl).unwrap_or(0).min(b.len().saturating_sub(1));
-            b.get(i).copied().unwrap_or(0)
-        })
-        .unwrap_or(0);
-    {
+        p.mythic_level = Some(ml);
+        p.mythic_experience = p.mythic_experience.max(ml);
+    } else {
+        let cl = crate::unit::character_level(w, u) + 1;
+        {
+            let p = &mut w.unit_mut(u).expect("unit").progression;
+            p.character_level = Some(cl);
+        }
+        // `Experience = Math.Max(Experience, XPTable.Bonuses[Math.Min(len - 1, level)])`.
+        let xp = super::root_ref(w, "Progression", "m_XPTable")
+            .map(|t| {
+                let b: Vec<i64> = t
+                    .view()
+                    .seq("Bonuses")
+                    .iter()
+                    .filter_map(|n| if let wr_content::Node::Int(i) = n { Some(*i) } else { None })
+                    .collect();
+                let i = usize::try_from(cl).unwrap_or(0).min(b.len().saturating_sub(1));
+                b.get(i).copied().unwrap_or(0)
+            })
+            .unwrap_or(0);
         let p = &mut w.unit_mut(u).expect("unit").progression;
         p.experience = p.experience.max(xp);
+    }
+    // `Classes.Sort()`: `List<ClassData>.Sort` with `ClassData.CompareTo` (higher levels first;
+    // `other.Level.CompareTo(Level)`), the framework's introspective sort.
+    {
+        let classes = &mut w.unit_mut(u).expect("unit").progression.classes;
+        let cap = crate::csharp::sort::grown_capacity(classes.len());
+        crate::csharp::sort::introsort(classes, cap, &mut |a: &crate::unit::ClassData, b| {
+            b.level.cmp(&a.level) as i32
+        });
     }
     // `Features.AddFeature(Owner.GetProgression(characterClass)).SetSource(characterClass, 1)`.
     if let Some(prog) = bp(w, class.view().guid("m_Progression"))
@@ -808,26 +823,31 @@ fn apply_class_mechanics(w: &mut World, u: EntityIdx, class: &Rc<Blueprint>, st:
         let base = w.stats(u).v(stat).base_value;
         ops::set_base_value(w, u, stat, base.wrapping_add(d));
     }
-    // `ApplyHitPoints(state.NextCharacterLevel, class, unit)`.
-    let hit_die = i32::try_from(v.int("HitDie")).unwrap_or(0);
-    if w.entity(u).parts.iter().any(|p| p.clr == "ChangeHitDie+HitDiePart") {
-        w.coverage.unsupported("ApplyHitPoints: ChangeHitDie");
-    }
-    let available = super::root(w)
-        .and_then(|r| r.view().obj("Progression").map(|p| p.guids("m_CharacterClasses")))
-        .is_some_and(|l| l.contains(&class.guid));
-    let player = w.unit(u).is_some_and(|x| x.is_player_faction);
-    let level = st.next_character_level;
-    let add = if !available || !player {
-        hit_die / 2 + level % 2
-    } else if level > 1 {
-        hit_die / 2 + 1
+    // `ApplyHitPoints(state.NextCharacterLevel, class, unit)`: a mythic level adds 5.
+    if v.bool("IsMythic") {
+        let base = w.stats(u).v(StatType::HitPoints).base_value;
+        ops::set_base_value(w, u, StatType::HitPoints, base.wrapping_add(5));
     } else {
-        hit_die
-    };
-    let base = w.stats(u).v(StatType::HitPoints).base_value;
-    ops::set_base_value(w, u, StatType::HitPoints, base.wrapping_add(add));
-    ops::update_value(w, u, StatType::HitPoints);
+        let hit_die = i32::try_from(v.int("HitDie")).unwrap_or(0);
+        if w.entity(u).parts.iter().any(|p| p.clr == "ChangeHitDie+HitDiePart") {
+            w.coverage.unsupported("ApplyHitPoints: ChangeHitDie");
+        }
+        let available = super::root(w)
+            .and_then(|r| r.view().obj("Progression").map(|p| p.guids("m_CharacterClasses")))
+            .is_some_and(|l| l.contains(&class.guid));
+        let player = w.unit(u).is_some_and(|x| x.is_player_faction);
+        let level = st.next_character_level;
+        let add = if !available || !player {
+            hit_die / 2 + level % 2
+        } else if level > 1 {
+            hit_die / 2 + 1
+        } else {
+            hit_die
+        };
+        let base = w.stats(u).v(StatType::HitPoints).base_value;
+        ops::set_base_value(w, u, StatType::HitPoints, base.wrapping_add(add));
+        ops::update_value(w, u, StatType::HitPoints);
+    }
     // `ApplyClassSkills`: the first archetype that replaces them, else the class's.
     let replace = archetypes.iter().find(|a| a.view().bool("ReplaceClassSkills"));
     let class_skills: Vec<StatType> = replace
@@ -1837,9 +1857,7 @@ fn apply_spellbook(w: &mut World, u: EntityIdx, class: &Rc<Blueprint>, st: &mut 
         }
         crate::spellbook::delete_spellbook(w, u, class_sb);
     }
-    let mythic = class.view().bool("IsMythic");
     crate::spellbook::add_level_from_class(w, u, sb, class.guid);
-    let _ = mythic;
     // The spell selections (`DemandSpellSelection`, `SetLevelSpells`, custom spells) feed
     // `SelectSpell`, which only `AddClassLevels.SelectSpells` makes.
     if cfg.select_spells {
@@ -1863,6 +1881,11 @@ fn prepare_spellbook(w: &mut World, u: EntityIdx, cfg: &Cfg) {
 
 /// `ApplySkillPoints.Apply`.
 fn apply_skill_points(w: &mut World, u: EntityIdx, st: &mut State) {
+    // `state.IsMythicClassSelected`: no skill points.
+    if st.selected_class.and_then(|c| w.content.get(c)).is_some_and(|c| c.view().bool("IsMythic")) {
+        st.total_skill_points = 0;
+        return;
+    }
     let total = total_skill_points(w, u, st.next_character_level);
     let spent: i32 = SKILLS.iter().fold(0i32, |a, s| a.wrapping_add(w.stats(u).v(*s).base_value));
     // `IUnitCalculateSkillPointsOnLevelupHandler` (unit event): extra points.
@@ -2015,5 +2038,71 @@ mod param_tests {
         // Reported, and treated as unrestricted.
         assert!(!w.coverage.valid());
         assert_eq!(items.len(), 1);
+    }
+
+    /// A mythic class level (`SelectClass`, `ApplyClassMechanics`, `ApplySkillPoints`): the
+    /// mythic level and the unit's mythic experience go up, not the character level or the
+    /// experience; hit points get 5; no skill points; `Classes.Sort` puts higher levels first.
+    #[test]
+    fn a_mythic_level_raises_the_mythic_level_and_gives_five_hit_points() {
+        let (mut w, u) = crate::stats::tests::world_with_unit();
+        let class = put(&w, 80, "Kingmaker.Blueprints.Classes.BlueprintCharacterClass", &[]);
+        let mythic = put(
+            &w,
+            81,
+            "Kingmaker.Blueprints.Classes.BlueprintCharacterClass",
+            &[("IsMythic", Node::Bool(true))],
+        );
+        {
+            let p = &mut w.unit_mut(u).expect("unit").progression;
+            p.classes.push(crate::unit::ClassData {
+                class: class.guid,
+                level: 1,
+                archetypes: Vec::new(),
+                spellbook: None,
+            });
+            p.experience = 7;
+            // The caches as a constructed unit has them (`SetupLevelsIfNecessary` done).
+            p.character_level = Some(1);
+            p.mythic_level = Some(0);
+        }
+        let hp = w.stats(u).v(StatType::HitPoints).base_value;
+        let mut levels = Vec::new();
+        for _ in 0..2 {
+            let mut st = State { next_character_level: 2, ..State::default() };
+            select_class(&mut w, u, &mythic, &mut st);
+            apply_class_mechanics(&mut w, u, &mythic, &mut st);
+            apply_skill_points(&mut w, u, &mut st);
+            assert_eq!(st.total_skill_points, 0);
+            assert_eq!(st.attribute_points, 0);
+            levels.push(st.next_class_level);
+        }
+        assert_eq!(levels, [1, 2]);
+        assert_eq!(crate::unit::mythic_level(&w, u), 2);
+        assert_eq!(crate::unit::character_level(&w, u), 1);
+        let p = &w.unit(u).expect("unit").progression;
+        assert_eq!((p.mythic_experience, p.experience), (2, 7));
+        // Sorted after each level: the mythic class (2) before the other (1).
+        let order: Vec<(Guid, i32)> = p.classes.iter().map(|c| (c.class, c.level)).collect();
+        assert_eq!(order, [(mythic.guid, 2), (class.guid, 1)]);
+        assert_eq!(w.stats(u).v(StatType::HitPoints).base_value, hp + 10);
+        // A hydrated unit's caches are unset: read before the class data changes
+        // (`AddClassLevels.LevelUp`'s limit check), they count the levels once.
+        let (mut w2, u2) = crate::stats::tests::world_with_unit();
+        let mythic2 = put(
+            &w2,
+            81,
+            "Kingmaker.Blueprints.Classes.BlueprintCharacterClass",
+            &[("IsMythic", Node::Bool(true))],
+        );
+        assert_eq!(w2.unit(u2).expect("unit").progression.mythic_level, None);
+        crate::unit::setup_levels_if_necessary(&mut w2, u2);
+        let mut st = State { next_character_level: 1, ..State::default() };
+        select_class(&mut w2, u2, &mythic2, &mut st);
+        assert_eq!(crate::unit::mythic_level(&w2, u2), 1);
+        assert_eq!(w2.unit(u2).expect("unit").progression.mythic_experience, 1);
+        // (The hit points' size bonus reads the root, which the test world doesn't have.)
+        let left: Vec<&String> = w.coverage.unsupported.keys().collect();
+        assert_eq!(left, ["BlueprintRoot not found"]);
     }
 }

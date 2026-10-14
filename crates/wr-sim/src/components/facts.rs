@@ -1,10 +1,12 @@
 //! Components that add facts (decompiled, not copied): `AddFacts`
 //! (`Kingmaker.UnitLogic.FactLogic/AddFacts.cs`), `AddFeatureToNPC`
 //! (`Kingmaker.Designers.Mechanics.Facts/AddFeatureToNPC.cs`), `FactSinglify`
-//! (`Kingmaker.Designers.Mechanics.Facts/FactSinglify.cs`).
+//! (`Kingmaker.Designers.Mechanics.Facts/FactSinglify.cs`), `AddFeatureOnAlignment`
+//! (`Kingmaker.Designers.Mechanics.Facts/AddFeatureOnAlignment.cs`).
 //!
 //! Each keeps its applied facts in its runtime data, as the C# does (`AddFactsData.
-//! AppliedFacts`, `AddFeatureToNPCData.AppliedFact`, `FactSinglifyData.AppliedFacts`), in
+//! AppliedFacts`, `AddFeatureToNPCData.AppliedFact`, `FactSinglifyData.AppliedFacts`,
+//! `AddFeatureOnAlignmentData.AppliedFacts`), in
 //! the component's `fact_refs`.
 
 use super::{Port, bits, owner_unit, with_settings};
@@ -24,6 +26,99 @@ pub fn register(r: &mut Registry) {
         add_feature_to_npc,
     )));
     r.register(Box::new(Port::new("FactSinglify", bits(&[Activate, Deactivate]), fact_singlify)));
+    let mut p = Port::new(
+        "AddFeatureOnAlignment",
+        bits(&[Activate, Deactivate, ApplyPostLoadFixes]),
+        add_feature_on_alignment,
+    );
+    p.handlers = &["IAlignmentChangeHandler"];
+    p.ev = Some(add_feature_on_alignment_event);
+    r.register(Box::new(p));
+}
+
+/// `AddFeatureOnAlignment.OnActivate` / `OnDeactivate` / `OnApplyPostLoadFixes`.
+fn add_feature_on_alignment(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    match h {
+        // `if (Owner.Alignment.ValueRaw.HasComponent(Alignment))`: each fact added
+        // (`Data.AppliedFacts.Add(Owner.AddFact(f))`, nulls included).
+        Hook::Activate => {
+            let Some((component, facts)) =
+                with_settings(w, c, |v| (v.int("Alignment"), v.guids_with_nulls("m_Facts")))
+            else {
+                return;
+            };
+            let Some((al, locked)) =
+                w.unit(u).and_then(|x| x.alignment.as_ref()).map(|a| (a.value(), a.locked_mask))
+            else {
+                w.coverage.unsupported("AddFeatureOnAlignment: owner without an alignment");
+                return;
+            };
+            // `ValueRaw` resolves through the lock mask, which isn't modelled.
+            if locked != 0 {
+                w.coverage.unsupported("AddFeatureOnAlignment: locked alignment mask");
+                return;
+            }
+            // `Alignment.HasComponent(component)`: `None` (0) always; otherwise a shared bit.
+            let value = i64::from(crate::narrative::alignment::enum_value(al));
+            if component != 0 && value & component == 0 {
+                return;
+            }
+            // (`Owner.AddFact(null)` returns null, which is kept.)
+            for g in facts {
+                let f = g
+                    .and_then(|g| w.content.get(g))
+                    .and_then(|bp| crate::unit_facts::add_fact(w, u, &bp));
+                let mut v = applied(w, c, "AppliedFacts");
+                v.push(f);
+                set_applied(w, c, "AppliedFacts", v);
+            }
+        }
+        // `Data.AppliedFacts.ForEach(Owner.RemoveFact)`, then `Clear()`.
+        Hook::Deactivate => {
+            for f in applied(w, c, "AppliedFacts") {
+                remove_fact(w, u, f);
+            }
+            set_applied(w, c, "AppliedFacts", Vec::new());
+        }
+        // A later applied fact with an earlier one's blueprint is removed.
+        Hook::ApplyPostLoadFixes => {
+            let mut v = applied(w, c, "AppliedFacts");
+            let mut i = 0;
+            while i < v.len() {
+                let mut j = i + 1;
+                while j < v.len() {
+                    // `entityFact.Blueprint == entityFact2.Blueprint`: a null fact throws here.
+                    let (Some(a), Some(b)) = (v[i], v[j]) else {
+                        set_applied(w, c, "AppliedFacts", v);
+                        w.coverage.unsupported(
+                            "AddFeatureOnAlignment.OnApplyPostLoadFixes: a null applied fact",
+                        );
+                        return;
+                    };
+                    if w.fact(a).blueprint == w.fact(b).blueprint {
+                        remove_fact(w, u, v[j]);
+                        v.remove(j);
+                    } else {
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+            set_applied(w, c, "AppliedFacts", v);
+        }
+        _ => {}
+    }
+}
+
+/// `AddFeatureOnAlignment.HandleAlignmentChange(unit, new, prev)`: the sim's event doesn't
+/// carry the unit or the alignments, so a change is reported.
+fn add_feature_on_alignment_event(w: &mut World, c: CompRef, iface: &str) {
+    let unit = w.bus.call.last().and_then(|x| x.1);
+    if unit.is_some() && unit != owner_unit(w, c) {
+        return;
+    }
+    w.coverage.unsupported(format!("AddFeatureOnAlignment: {iface}"));
 }
 
 fn applied(w: &World, c: CompRef, key: &str) -> Vec<Option<FactIdx>> {

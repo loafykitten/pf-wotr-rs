@@ -1,6 +1,7 @@
 //! Components that follow a unit's equipment (decompiled, not copied): `ShieldFocus`,
-//! `ArmorFocus`, `MonkNoArmorFeatureUnlock`, `MonkNoArmorAndMonkWeaponFeatureUnlock`
-//! (`Kingmaker.Designers.Mechanics.Buffs/*.cs`) and `DeflectArrows`
+//! `ArmorFocus`, `MonkNoArmorFeatureUnlock`, `MonkNoArmorAndMonkWeaponFeatureUnlock`,
+//! `HasArmorFeatureUnlock` (`Kingmaker.Designers.Mechanics.Buffs/*.cs`, its checks from
+//! `Kingmaker.UnitLogic.ActivatableAbilities.Restrictions/RestrictionsHelper.cs`) and `DeflectArrows`
 //! (`Kingmaker.UnitLogic.FactLogic/DeflectArrows.cs`). Each reacts to
 //! `IUnitEquipmentHandler.HandleEquipmentSlotUpdated(slot, previousItem)` (the slot's owner
 //! and activity are in [`crate::rulebook::bus::EventBus::slot`]) and to
@@ -50,6 +51,18 @@ pub fn register(r: &mut Registry) {
             "IPolymorphDeactivatedHandler",
         ],
         ev: Some(monk_no_armor_event),
+    }));
+    r.register(Box::new(Port {
+        name: "HasArmorFeatureUnlock",
+        bits: bits(&[Hook::Activate, Hook::Deactivate]),
+        f: has_armor_unlock,
+        handlers: &[
+            EQUIPMENT_SET,
+            EQUIPMENT,
+            "IPolymorphActivatedHandler",
+            "IPolymorphDeactivatedHandler",
+        ],
+        ev: Some(has_armor_unlock_event),
     }));
     r.register(Box::new(Port {
         name: "MonkNoArmorAndMonkWeaponFeatureUnlock",
@@ -325,6 +338,62 @@ fn monk_no_armor_event(w: &mut World, c: CompRef, iface: &str) {
     let _ = iface;
     if event_unit(w) == Some(u) {
         monk_no_armor_check(w, c, u);
+    }
+}
+
+fn has_armor_unlock(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    match h {
+        Hook::Activate => has_armor_unlock_check(w, c, u),
+        Hook::Deactivate => monk_remove_fact(w, c, u),
+        _ => {}
+    }
+}
+
+/// `HasArmorFeatureUnlock.CheckEligibility()`: each filter that is set must pass (the armor's
+/// type among `m_BlueprintArmorTypes`; its proficiency group's bit in
+/// `m_ArmorProficiencyGroupEntries`; no shield), then the fact is on, else off.
+fn has_armor_unlock_check(w: &mut World, c: CompRef, u: EntityIdx) {
+    let Some((by_type, types, by_group, groups, no_shield)) = super::with_settings(w, c, |v| {
+        (
+            v.bool("FilterByBlueprintArmorTypes"),
+            v.guids("m_BlueprintArmorTypes"),
+            v.bool("FilterByArmorProficiencyGroup"),
+            v.int("m_ArmorProficiencyGroupEntries"),
+            v.bool("m_DisableWhenHasShield"),
+        )
+    }) else {
+        return;
+    };
+    // `RestrictionsHelper.CheckArmor(unit, types)`: `CheckHasArmor`, then the armor's type.
+    let type_ok = !by_type
+        || has_armor(w, u).is_some_and(|it| {
+            w.item(it)
+                .and_then(|i| i.blueprint)
+                .and_then(|g| w.content.get(g))
+                .and_then(|b| b.view().guid("m_Type"))
+                .is_some_and(|t| types.contains(&t))
+        });
+    // `CheckArmor(unit, groupFlags)`: `(1 << (int)ArmorType()) & flags`, as uint.
+    let group_ok = !by_group
+        || has_armor(w, u).is_some_and(|it| {
+            let g = crate::armor::item_armor_type(w, it);
+            let bit = u32::try_from(g).ok().and_then(|g| 1u32.checked_shl(g)).unwrap_or(0);
+            u64::from(bit) & (groups as u64 & 0xFFFF_FFFF) != 0
+        });
+    let shield_ok = !no_shield || !secondary_has_shield(w, u);
+    if type_ok && group_ok && shield_ok {
+        monk_add_fact(w, c, u);
+    } else {
+        monk_remove_fact(w, c, u);
+    }
+}
+
+fn has_armor_unlock_event(w: &mut World, c: CompRef, _iface: &str) {
+    let Some(u) = owner_unit(w, c) else { return };
+    // Every handler is `UpdateBuffStateIfCorrectUnit(unit)`.
+    if event_unit(w) == Some(u) {
+        has_armor_unlock_check(w, c, u);
     }
 }
 

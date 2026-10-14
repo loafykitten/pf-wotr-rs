@@ -95,14 +95,22 @@ pub fn create_preview(w: &mut World, original: EntityIdx) -> Option<EntityIdx> {
 
 /// `UnitProgressionData.CopyFrom(other)`.
 fn copy_progression(w: &mut World, from: EntityIdx, to: EntityIdx) {
-    let (race, experience, classes, progressions, selections) = {
+    let (race, experience, mythic_experience, classes, progressions, selections) = {
         let p = &w.unit(from).expect("unit").progression;
-        (p.race, p.experience, p.classes.clone(), p.progressions.clone(), p.selections.clone())
+        (
+            p.race,
+            p.experience,
+            p.mythic_experience,
+            p.classes.clone(),
+            p.progressions.clone(),
+            p.selections.clone(),
+        )
     };
     if let Some(r) = race {
         super::levelup::set_race(w, to, r);
     }
     w.unit_mut(to).expect("unit").progression.experience = experience;
+    w.unit_mut(to).expect("unit").progression.mythic_experience = mythic_experience;
     for cd in &classes {
         let have = w
             .unit(to)

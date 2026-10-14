@@ -666,6 +666,10 @@ impl Loader<'_> {
                 })
                 .collect(),
             experience: prog.and_then(|p| p.int("Experience")).unwrap_or(0),
+            mythic_experience: prog
+                .and_then(|p| p.int("MythicExperience"))
+                .and_then(|x| i32::try_from(x).ok())
+                .unwrap_or(0),
             character_level: None,
             mythic_level: None,
             progressions: Vec::new(),
