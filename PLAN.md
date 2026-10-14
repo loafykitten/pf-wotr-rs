@@ -103,9 +103,10 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   the restored background cutscene's `RandomTrack` gate (the oracle draws there) and the awake state of
   the unit the cutscene spawns aren't ported (`docs/poc4/dialogue.md`, round 5).
 - **Hydration:** Manual_13 100% with nothing unsupported at load; Manual_19 1.0000; Manual_18 100%;
-  Manual_10 0.9067 (sixteenth session: `compare` pairs facts by blueprint and occurrence, the ids their own field: every
-  paired fact's fields agree, 4,149 of 21,845 ids do (the run's id offset), 483 facts are on one side only; it was 0.8206
-  pairing by id). Placeholders leave the game through `entity::set_is_in_game` (the one IsInGame
+  Manual_10 0.9097 (sixteenth session: `compare` pairs facts by blueprint and occurrence, the ids their own field:
+  every paired fact's fields agree, 4,149 of 21,843 ids do (the run's id offset); it was 0.8206 pairing by id. Then the
+  load pass stopped starting extras' toggles (`MarkExtra` now sets `IsExtra`; an extra sleeps out of the camera, so its
+  toggle isn't started, reported): facts on one side only 483 -> 72). Placeholders leave the game through `entity::set_is_in_game` (the one IsInGame
   setter). `AbilityParams.Empty` is modelled as process state: the oracle records it at load start, and
   Manual_10 ends at caster level 16 in both.
 - **POC-5 round 5 (eighth session, `docs/poc5/combat.md`): the first valid POC-5 runs.** On `poc5-tb-60` (both fights,
@@ -166,7 +167,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    fights with different choices.
 2. Horgus: the background cutscene's gate-track selection (`CutscenePlayerGateData.SelectTrackToStart`)
    and the spawned unit's awake state; then each save's load tail (`coverage.json`).
-3. Manual_10's 483 facts on one side only (the fact pairing, done in the sixteenth session, shows them).
+3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
+   features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them).
 4. POC-6 (booklab is unavailable for now: on this Mac, after item 1, if at all): a Metal frame capture of the original (round 3's open shadow
    questions), light probes, the rest of post. The timing benchmarks stay on this Mac (screen unlocked).
 5. Oracle, when it bites: Unity's absolute clock (animation timing, AI deadlines); real-time fixtures
@@ -208,8 +210,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - Scene caches for POC-4: `scripts/scene-cache.sh <area> <guid>` (it failed from the main checkout on
   2026-10-12, with "no scene bundles"; the caches were copied from the agent's build; investigate).
 - The oracle regression: `scripts/regress.sh <label> <bindir>` then `scripts/regress-diff.sh <new> <base>`
-  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-fact-pairing` (release build, the fact pairing's
-  re-baseline; `out-slice-g` before it); pass the outputs' full paths to `regress-diff.sh`). Run parallel ones with a
+  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-awake-start` (release build: the fact pairing's re-baseline
+  `out-fact-pairing`, then the extras' load pass; `out-slice-g` before them); pass the outputs' full paths to `regress-diff.sh`). Run parallel ones with a
   private `WR_CACHE` (symlink every `cache/*` entry except `sim` and `poc5`, which are copied).
 - Worktree agents sharing the main `target/` can bake their checkout path into `wr-paths`;
   `touch crates/wr-paths/src/lib.rs` before building in the main tree.

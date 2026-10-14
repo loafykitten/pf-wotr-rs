@@ -266,3 +266,24 @@ fn destroying_a_unit_with_dropped_loot_is_reported() {
         w.coverage.unsupported
     );
 }
+
+/// The load pass ticks the units the first tick keeps awake: an extra sleeps out of the camera,
+/// which the sim doesn't know, so its toggle isn't started (reported); a sleepless extra is
+/// awake and its toggle starts.
+#[test]
+fn the_load_pass_leaves_an_extras_toggle_alone_unless_it_is_sleepless() {
+    for sleepless in [false, true] {
+        let (mut w, u) = registry_world();
+        w.player.area_units.push(u);
+        w.unit_mut(u).expect("unit").is_extra = true;
+        if sleepless {
+            let id = w.entity(u).unique_id.clone();
+            w.player.counters.insert(format!("unit:{id}.Sleepless"), 1);
+        }
+        let f = toggle_unit(&mut w, 320 + u128::from(sleepless), &[], (true, false));
+        super::after_area_load(&mut w, &[], &[u]);
+        assert_eq!(w.fact(f).activatable.map(|a| a.1), Some(sleepless), "{sleepless}");
+        let reported = w.coverage.unsupported.keys().any(|k| k.contains("area unit"));
+        assert_eq!(reported, !sleepless, "{:?}", w.coverage.unsupported);
+    }
+}

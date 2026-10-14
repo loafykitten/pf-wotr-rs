@@ -198,8 +198,12 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
     }
     // `SetStealthData(m_Stealth)` replaces the unit's fresh `UnitStealth`: a saved state
     // that differs from it is reported with the placeholder's unmodelled members.
-    if p.is_extra {
-        w.coverage.unsupported("BecomeUnit: MarkExtra");
+    // `MarkExtra()`: `IsExtra` (an extra sleeps out of the camera's frustum: its awake state is
+    // unknown where it matters, `awake_state`).
+    if p.is_extra
+        && let Some(u) = w.unit_mut(e)
+    {
+        u.is_extra = true;
     }
     // `unit.Ensure<UnitPartRoaming>().RestoreFrom(m_Roaming)`: the roaming state (next point,
     // idle cutscene and time, direction) steers the unit's movement between waypoints
@@ -722,9 +726,10 @@ fn setup_unit(w: &mut World, e: EntityIdx, p: &PlaceholderData) {
 }
 
 /// After the area loaded: placeholders' fixes (unit upgraders), the creation queue's
-/// units joining the scene state, then the activatable-abilities controller's pass over
-/// awake units (`UnitActivatableAbilitiesController.cs:76`: a toggle that is on but not
-/// started, activated immediately and not waiting for combat, is started).
+/// units joining the scene state, then the activatable-abilities controller's pass over the
+/// spawned units the first tick keeps awake (`UnitActivatableAbilitiesController.cs:76`: a
+/// toggle that is on but not started, activated immediately and not waiting for combat, is
+/// started).
 pub fn after_area_load(w: &mut World, order: &[AreaEntry], spawned: &[EntityIdx]) {
     // `UnitUpgraderHelper.ApplyUpgraders(unit, m_Blueprint, fromPlaceholder: true,
     // ref m_AppliedUpgraders)`: the blueprint's upgraders meant for placeholders that the
@@ -747,14 +752,21 @@ pub fn after_area_load(w: &mut World, order: &[AreaEntry], spawned: &[EntityIdx]
             }
         }
     }
+    // (The first tick's `SleepingUnitsController` runs before the controller: only the units it
+    // keeps awake tick. An extra sleeps out of the camera's frustum, which the sim doesn't
+    // know: it acts on nothing and is reported if it would (as in the controller's tick; the
+    // extras of Manual_10's crowds sleep). Another unit in the game is taken as awake, as the
+    // recordings have it (its fog of war isn't modelled).)
+    let party = crate::narrative::party::character_lists(w).party_and_pets;
     for &e in spawned {
-        // A unit that isn't in game is asleep (`SleepingUnitsController.ShouldBeSleeping`),
-        // not one of `AwakeUnits` the controller ticks.
-        if !w.entity(e).is_in_game {
-            continue;
-        }
+        let extra = w.unit(e).is_some_and(|x| x.is_extra);
+        let mode = match awake_state(w, e, &party) {
+            Awake::No => continue,
+            Awake::Unknown if extra => TickMode::AreaUnit,
+            Awake::Yes | Awake::Unknown => TickMode::StartPass,
+        };
         w.coverage.context = Some(w.entity(e).unique_id.clone());
-        activatable_abilities_unit_tick(w, e, false, TickMode::StartPass);
+        activatable_abilities_unit_tick(w, e, false, mode);
     }
     w.coverage.context = None;
 }
@@ -817,7 +829,7 @@ fn area_hides_party(w: &World) -> bool {
 /// while the area hides the party and is awake in a pit; then `AwakeTimer`/`FadeAwakeTimer`
 /// keep a unit awake. Those are set by `Unit.Wake`, which view fades (`EntityFader`), proning
 /// and death call and the sim doesn't follow, so a branch that would put the unit to sleep
-/// after them is unknown: a finally dead unit; a unit in combat is awake; an extra unit depends
+/// after them is unknown: a finally dead unit; a sleepless unit or one in combat is awake; an extra unit depends
 /// on the camera; a party member (`PartyAndPets`) isn't in the fog of war (the party reveals it),
 /// so it is awake whatever the timers; anything else depends on the fog of war, cutscene control
 /// and the unit's commands: unknown.
@@ -848,7 +860,14 @@ pub fn awake_state(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake {
     if finally_dead || summoned {
         return Awake::Unknown;
     }
-    if in_combat {
+    // `unit.Sleepless` (a `CountableFlag`: etudes, `UnitPartFollowUnit`) or combat: awake, before
+    // an extra's camera check.
+    let sleepless = w
+        .player
+        .counters
+        .get(&format!("unit:{}.Sleepless", w.entity(u).unique_id))
+        .is_some_and(|n| *n > 0);
+    if sleepless || in_combat {
         return Awake::Yes;
     }
     if w.unit(u).is_some_and(|x| x.is_extra) {
