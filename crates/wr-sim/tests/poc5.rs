@@ -26,8 +26,9 @@ const SAVE: &str = "Manual_18_WR_FirstBattle";
 /// the sim's. `poc5-tb-85` also has the `engage` observer: the engagement controller is the sim's.
 /// `poc5-tb-92` also has the `targets` observer: units' `LastTarget` and `ManualTarget` are the sim's.
 /// `poc5-tb-95` also has the `impatience` observer: the impatience controller is the sim's.
-/// `poc5-tb-96` is a third fight (`tb-hold`: the focus reversed, the archer ending its turns).
-const CAPTURES: [&str; 17] = [
+/// `poc5-tb-96` is a third fight (`tb-hold`: the focus reversed, the archer ending its turns),
+/// `poc5-tb-97` a fourth (`tb-solo`: one party member fights, the others end their turns).
+const CAPTURES: [&str; 18] = [
     "poc5-tb-51",
     "poc5-tb-52",
     "poc5-tb-53",
@@ -45,10 +46,11 @@ const CAPTURES: [&str; 17] = [
     "poc5-tb-92",
     "poc5-tb-95",
     "poc5-tb-96",
+    "poc5-tb-97",
 ];
 
 /// The captures whose root rules carry their call sites.
-const WITH_ORIGINS: [&str; 13] = [
+const WITH_ORIGINS: [&str; 14] = [
     "poc5-tb-60",
     "poc5-tb-63",
     "poc5-tb-68",
@@ -62,10 +64,11 @@ const WITH_ORIGINS: [&str; 13] = [
     "poc5-tb-92",
     "poc5-tb-95",
     "poc5-tb-96",
+    "poc5-tb-97",
 ];
 
 /// The captures with WrathOracle's cooldown records (`cd_*`).
-const WITH_COOLDOWNS: [&str; 12] = [
+const WITH_COOLDOWNS: [&str; 13] = [
     "poc5-tb-63",
     "poc5-tb-68",
     "poc5-tb-74",
@@ -78,10 +81,11 @@ const WITH_COOLDOWNS: [&str; 12] = [
     "poc5-tb-92",
     "poc5-tb-95",
     "poc5-tb-96",
+    "poc5-tb-97",
 ];
 
 /// The captures with WrathOracle's turn controller tick records (`tt*`).
-const WITH_TURN_TICKS: [&str; 11] = [
+const WITH_TURN_TICKS: [&str; 12] = [
     "poc5-tb-68",
     "poc5-tb-74",
     "poc5-tb-77",
@@ -93,10 +97,11 @@ const WITH_TURN_TICKS: [&str; 11] = [
     "poc5-tb-92",
     "poc5-tb-95",
     "poc5-tb-96",
+    "poc5-tb-97",
 ];
 
 /// The captures with WrathOracle's command records (`uc_*`).
-const WITH_COMMANDS: [&str; 10] = [
+const WITH_COMMANDS: [&str; 11] = [
     "poc5-tb-74",
     "poc5-tb-77",
     "poc5-tb-80",
@@ -107,10 +112,11 @@ const WITH_COMMANDS: [&str; 10] = [
     "poc5-tb-92",
     "poc5-tb-95",
     "poc5-tb-96",
+    "poc5-tb-97",
 ];
 
 /// The captures with WrathOracle's `attacks` observer (`ua_atk`, `UnitAttack`'s leaves).
-const WITH_ATTACKS: [&str; 9] = [
+const WITH_ATTACKS: [&str; 10] = [
     "poc5-tb-77",
     "poc5-tb-80",
     "poc5-tb-81",
@@ -120,10 +126,11 @@ const WITH_ATTACKS: [&str; 9] = [
     "poc5-tb-92",
     "poc5-tb-95",
     "poc5-tb-96",
+    "poc5-tb-97",
 ];
 
 /// The captures with WrathOracle's `approach` observer (`uc_call`, the approach's taps).
-const WITH_APPROACH: [&str; 8] = [
+const WITH_APPROACH: [&str; 9] = [
     "poc5-tb-80",
     "poc5-tb-81",
     "poc5-tb-82",
@@ -132,25 +139,33 @@ const WITH_APPROACH: [&str; 8] = [
     "poc5-tb-92",
     "poc5-tb-95",
     "poc5-tb-96",
+    "poc5-tb-97",
 ];
 
 /// The captures with WrathOracle's `ai` observer (`uc_ai`, the AI's taps and checks).
-const WITH_AI: [&str; 6] =
-    ["poc5-tb-82", "poc5-tb-85", "poc5-tb-91", "poc5-tb-92", "poc5-tb-95", "poc5-tb-96"];
+const WITH_AI: [&str; 7] = [
+    "poc5-tb-82",
+    "poc5-tb-85",
+    "poc5-tb-91",
+    "poc5-tb-92",
+    "poc5-tb-95",
+    "poc5-tb-96",
+    "poc5-tb-97",
+];
 
 /// The captures with WrathOracle's `engage` observer (`uc_eng`, the engagement's taps and checks).
-const WITH_ENGAGE: [&str; 5] =
-    ["poc5-tb-85", "poc5-tb-91", "poc5-tb-92", "poc5-tb-95", "poc5-tb-96"];
+const WITH_ENGAGE: [&str; 6] =
+    ["poc5-tb-85", "poc5-tb-91", "poc5-tb-92", "poc5-tb-95", "poc5-tb-96", "poc5-tb-97"];
 
 /// The captures with WrathOracle's `targets` observer (`tgt_init`, `tgt_w`, `UpdateCombatTarget`'s
 /// leaves).
-const WITH_TARGETS: [&str; 3] = ["poc5-tb-92", "poc5-tb-95", "poc5-tb-96"];
+const WITH_TARGETS: [&str; 4] = ["poc5-tb-92", "poc5-tb-95", "poc5-tb-96", "poc5-tb-97"];
 
 /// The captures with WrathOracle's `impatience` observer (`imp_init`, `uc_imp`, `imp_s`, its leaves).
-const WITH_IMPATIENCE: [&str; 2] = ["poc5-tb-95", "poc5-tb-96"];
+const WITH_IMPATIENCE: [&str; 3] = ["poc5-tb-95", "poc5-tb-96", "poc5-tb-97"];
 
-/// Each capture's fights (a capture has the ones its plan ran: `poc5-tb-96` only `tb-hold`).
-const FIGHTS: [&str; 3] = ["tb-nearest", "tb-focus", "tb-hold"];
+/// Each capture's fights (a capture has the ones its plan ran: `poc5-tb-96` only `tb-hold`, `-97` only `tb-solo`).
+const FIGHTS: [&str; 4] = ["tb-nearest", "tb-focus", "tb-hold", "tb-solo"];
 
 /// The capture the approach records are damaged in.
 const APPROACH: &str = "poc5-tb-80";

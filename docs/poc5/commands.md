@@ -831,3 +831,8 @@ PLAN (movement agent and pathing, group memory and visibility, animation, the Un
 
 Not exercised by this fight either: an impatience hard target (`hard` and `ipt` stay empty in every `imp_s`), so the
 switch and setup draws and `SetupPriorityTarget` are still untested by a capture.
+
+A fourth, `poc5-tb-97` (`tb-solo`, `oracle/tools/oracle-fixtures/poc5-tb4.spec.json`: after the same move, 5671 fights
+the nearest enemy and everyone else ends their turns) is clean and valid on every run too. It was meant to draw the
+fight out so an enemy keeps missing one target, but the AI-controlled archer 5198 finishes the centipedes in round 2:
+no impatience hard target again. A longer fight needs stronger enemies than this fixture's.

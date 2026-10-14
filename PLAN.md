@@ -15,7 +15,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   `poc5-tb-96/tb-hold` (the focus reversed, the archer ending its turns), replays valid on its record and both replays
   with every slice computed, like `-95`'s `tb-nearest` and `tb-focus` (`docs/poc5/commands.md`, "A third fight"). That
   meets POC-5's pass as worded, given the inputs that remain recorded (movement agent and pathing, group memory and
-  visibility, animation, the Unity clock, the UI's requests). No impatience hard target in it either.
+  visibility, animation, the Unity clock, the UI's requests). No impatience hard target in it either, nor in the fourth,
+  `poc5-tb-97/tb-solo` (one party member fights; the AI archer ends it in round 2), also valid on every run.
 - **POC-5 round 14, slice G (sixteenth session, `docs/poc5/commands.md`): the impatience controller computed.** On
   `poc5-tb-95` (both fights, record and two replays) every run is valid with `UnitImpatienceController` the sim's
   (`combat/impatience.rs`, `combat/replay/impatience.rs`, `csharp/hashset.rs`): its tick (a phase before the AI's) and
@@ -237,8 +238,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - Scene caches for POC-4: `scripts/scene-cache.sh <area> <guid>` (it failed from the main checkout on
   2026-10-12, with "no scene bundles"; the caches were copied from the agent's build; investigate).
 - The oracle regression: `scripts/regress.sh <label> <bindir>` then `scripts/regress-diff.sh <new> <base>`
-  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-awake-start` (release build: the fact pairing's re-baseline
-  `out-fact-pairing`, then the extras' load pass; `out-slice-g` before them); pass the outputs' full paths to `regress-diff.sh`). Run parallel ones with a
+  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-mythic2` (release build: the mythic levels and
+  three components, only Manual_10 changed; before it `out-awake-start`, the fact pairing's `out-fact-pairing`,
+  `out-slice-g`); pass the outputs' full paths to `regress-diff.sh`). Run parallel ones with a
   private `WR_CACHE` (symlink every `cache/*` entry except `sim` and `poc5`, which are copied).
 - Worktree agents sharing the main `target/` can bake their checkout path into `wr-paths`;
   `touch crates/wr-paths/src/lib.rs` before building in the main tree.

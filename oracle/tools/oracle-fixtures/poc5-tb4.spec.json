@@ -1,0 +1,20 @@
+{
+ "plan": {
+  "fixedDelta": 0.016666668,
+  "seed": 20261011
+ },
+ "fixtures": [
+  {
+   "name": "tb-solo",
+   "steps": [
+    "tbm:on",
+    "wait:5",
+    "move:57,34.5,155.5",
+    "tbwaitcombat:3600",
+    "tbfight:default=end,5671=nearest:30000",
+    "wait:60"
+   ],
+   "replays": 2
+  }
+ ]
+}
