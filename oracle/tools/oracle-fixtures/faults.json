@@ -1,0 +1,26 @@
+{
+ "fidelity": true,
+ "faults": {
+  "throwAboutAt": 3,
+  "dropAboutAt": 2,
+  "disableSite": "PostProcessUtils|ConfigureDithering"
+ },
+ "steps": [
+  "load",
+  "wait:30",
+  "prepare",
+  "reload",
+  "seed:20261011",
+  "wait:60",
+  "fixture:faults",
+  "wait:10",
+  "rolldice:3:6",
+  "wait:5",
+  "d20reroll",
+  "wait:5",
+  "skillcheck:SkillPerception:12",
+  "wait:10",
+  "end",
+  "quit"
+ ]
+}

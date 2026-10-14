@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <WrathRef Include="Assembly-CSharp;Assembly-CSharp-firstpass;Owlcat.Runtime.Core;Owlcat.Runtime.Visual;AstarPathfindingProject;Newtonsoft.Json;UnityEngine;UnityEngine.CoreModule;UnityEngine.ScreenCaptureModule;UnityEngine.ImageConversionModule;UnityEngine.PhysicsModule;UnityEngine.AssetBundleModule;UnityEngine.UIModule;UnityEngine.UI;Owlcat.Runtime.Validation;UnityEngine.AnimationModule;Owlcat.SharedTypes;Owlcat.Runtime.UniRx;UniRx;Rewired_Core;UnityEngine.InputLegacyModule;UnityEngine.IMGUIModule;DOTween" />
+    <UmmRef Include="UnityModManager;0Harmony" />
+  </ItemGroup>
+</Project>

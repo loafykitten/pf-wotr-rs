@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <WrathRef Include="Assembly-CSharp;Owlcat.Runtime.Core;UnityEngine;UnityEngine.CoreModule;UnityEngine.IMGUIModule;UnityEngine.InputLegacyModule" />
+    <UmmRef Include="UnityModManager;0Harmony" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "render-spike"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+description = "POC-0 rendering spike: Bevy 0.20 on Metal (skinning, 240 Hz pacing, GPU timing, pipelines, Owlcat MSL passthrough, MetalFX)"
+
+[dependencies]
+bevy = "=0.20.0"
+# Same wgpu as Bevy 0.20 uses, for raw-device experiments (passthrough MSL, as_hal).
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "metal", "wgsl", "parking_lot"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = { version = "0.3", features = ["block2", "objc2-core-foundation"] }
+objc2-quartz-core = { version = "0.3", features = ["CABase", "CALayer", "CAMetalLayer", "objc2-core-foundation"] }
+objc2-metal-fx = "0.3"
+block2 = "0.6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+# Bevy's recommendation: keep our code quick to build, optimise dependencies.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

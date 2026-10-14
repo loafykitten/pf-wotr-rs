@@ -1,0 +1,5 @@
+{
+  "fidelity": false,
+  "blueprintList": "cache/oracle/blueprint-corpus.txt",
+  "steps": ["load", "settle:2", "state:manual18-after-load", "blueprints:manual18", "quit"]
+}

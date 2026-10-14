@@ -1,0 +1,11 @@
+# Restored from the session log (the original directory was removed while reorganising).
+# First-ever compile of these sources on this Mac, no salt: front end AND back end cold.
+# Older pairing heuristic (largest keyword subset), first 400 GBuffer fragment variants, 1 thread.
+# owlcat-bench pass=GBUFFER: 400 fragment variants tried (of 2018), 400 built, wall 29.27 s
+vs module (MSL compile)    n=400 mean=0.234 p01=0.019 p50=0.046 p95=0.068 p99=6.957 p99.9=40.291 max=40.291 sd=2.153 sum=93.4
+fs module (MSL compile)    n=400 mean=64.843 p01=0.018 p50=63.394 p95=115.649 p99=118.553 p99.9=120.525 max=120.525 sd=44.841 sum=25937.0
+render pipeline (PSO)      n=400 mean=7.674 p01=0.083 p50=9.228 p95=14.382 p99=17.402 p99.9=24.687 max=24.687 sd=5.017 sum=3069.6
+total per pipeline         n=400 mean=72.766 p01=0.127 p50=72.528 p95=128.641 p99=135.496 p99.9=183.587 max=183.587 sd=49.774 sum=29106.4
+# Same 400, second run (OS Metal shader cache warm):
+# owlcat-bench pass=GBUFFER: 400 fragment variants tried (of 2018), 400 built, wall 0.10 s
+total per pipeline         n=400 mean=0.127 p01=0.097 p50=0.120 p95=0.173 p99=0.241 p99.9=0.335 max=0.335 sd=0.029 sum=51.0

@@ -1,0 +1,39 @@
+# scene run results/scene/quiet-fifo-l2-150
+config: Args { count: 150, parts: 1, present: Fifo, latency: 2, seconds: 20.0, warmup: 2.0, gate: true, windowed: false, variants: true, refresh_hz: 240.0, shadows: true, owlcat: false, pipelined: true, out: "results/scene/quiet-fifo-l2-150" }
+layer: maximumDrawableCount=3 displaySyncEnabled=true
+instances: 150 skinned scene instances (150 characters x 1 parts)
+load: 0.853 s to first visible frame (gate=true)
+pipelines: 62 at load, 62 at end (62 ok, 0 pending, 0 err); timed: created 58 in 234.3 ms of process_queue (4.04 ms/pipeline); untimed (built elsewhere, e.g. upscaling's block_on): 4
+pipelines added to the cache after the first visible frame (all creation paths): 0
+  of which timed: 0 (in 0 frames, max 0.0 ms)
+drawables acquired while recording: 3001; presented handlers: 3001; shown: 3001; dropped (presentedTime=0): 0
+
+## intervals (ms)
+displayed (presentedTime)  n=3000 mean=6.668 p01=4.167 p50=4.167 p95=12.502 p99=12.502 p99.9=12.502 max=12.502 sd=2.764
+app frame (First schedule) n=3000 mean=6.668 p01=4.009 p50=6.996 p95=12.128 p99=12.840 p99.9=13.160 max=13.470 sd=2.417
+acquire->displayed         n=3001 mean=12.949 p01=11.444 p50=12.176 p95=16.353 p99=16.365 p99.9=17.329 max=24.326 sd=1.730
+GPU frame (timestamps)     n=3003 mean=4.252 p01=3.508 p50=4.142 p95=5.181 p99=5.525 p99.9=6.388 max=9.413 sd=0.521
+GPU frame (MTLCommandBuffer) n=3003 mean=4.199 p01=3.456 p50=4.078 p95=5.088 p99=5.483 p99.9=5.927 max=9.665 sd=0.493
+displayed: >5.0ms 1500 | >8.33ms 1500 | >16.7ms 0 | >33ms 0 | >50ms 0
+app frame: >5.0ms 1626 | >8.33ms 566 | >16.7ms 0 | >33ms 0 | >50ms 0
+displayed vsync multiples (period 4.167 ms): 1x 1500 | 2x 1200 | 3x 300 | 4x 0 | >=5x 0
+displayed rate: 150.0 Hz (from mean interval)
+
+## Bevy RenderDiagnosticsPlugin (mean over its history window)
+spans: 10 (0 elapsed_gpu)
+render/auxiliary_views/elapsed_cpu: 0.4714
+render/bin_unpacking/elapsed_cpu: 0.0009
+render/clustering/elapsed_cpu: 0.0073
+render/early_mesh_preprocessing/elapsed_cpu: 0.0009
+render/main_opaque_pass_3d/elapsed_cpu: 0.0085
+render/main_transparent_pass_3d/elapsed_cpu: 0.0096
+render/per_view_shadow_pass/elapsed_cpu: 0.0069
+render/ui/elapsed_cpu: 0.0056
+render/uniform_allocation/elapsed_cpu: 0.0012
+render/upscaling/elapsed_cpu: 0.0014
+
+summary columns: n,mean,min,p01,p50,p95,p99,p999,max,stddev
+displayed,3000,6.6676,4.1650,4.1671,4.1674,12.5017,12.5017,12.5018,12.5018,2.7642
+app_frame,3000,6.6675,3.7624,4.0086,6.9957,12.1279,12.8400,13.1605,13.4698,2.4169
+gpu_ts,3003,4.2521,3.2831,3.5078,4.1425,5.1811,5.5250,6.3885,9.4129,0.5207
+gpu_cb,3003,4.1993,3.2691,3.4556,4.0781,5.0882,5.4835,5.9269,9.6647,0.4933

@@ -1,0 +1,5 @@
+{
+  "fidelity": true,
+  "steps": ["load", "wait:30", "state:after-load", "fixture:smoke", "reload", "wait:120", "skillcheck:SkillPerception:15", "rolldice:3:6", "wait:30", "end",
+            "replay:smoke", "reload", "wait:120", "skillcheck:SkillPerception:15", "rolldice:3:6", "wait:30", "end", "sites", "quit"]
+}

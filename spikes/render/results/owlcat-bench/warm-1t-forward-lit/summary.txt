@@ -1,0 +1,9 @@
+# owlcat-bench pass=FORWARD LIT: 1738 fragment variants tried (of 1738), 1738 built, 0 failed; 796 unique MSL sources; 1 thread(s); salt "c1-forward-lit-1791685406"; wall 0.28 s
+vertex pairing: 1738 exact (Unity's per-stage keyword rule), 0 fallback; 49 of 63 vertex variants used
+vs module (MSL compile)     n=1738 mean=0.019 p01=0.016 p50=0.018 p95=0.025 p99=0.045 p99.9=0.088 max=0.139 sd=0.006 sum=33.3
+fs module (MSL compile)     n=1738 mean=0.048 p01=0.032 p50=0.049 p95=0.065 p99=0.083 p99.9=0.238 max=0.291 sd=0.013 sum=84.2
+render pipeline (PSO)       n=1738 mean=0.083 p01=0.066 p50=0.077 p95=0.124 p99=0.209 p99.9=0.297 max=0.317 sd=0.025 sum=145.0
+total per pipeline          n=1738 mean=0.156 p01=0.119 p50=0.148 p95=0.226 p99=0.325 p99.9=0.457 max=0.606 sd=0.038 sum=271.9
+total, first use of fs src  n=784 mean=0.165 p01=0.124 p50=0.154 p95=0.236 p99=0.353 p99.9=0.606 max=0.606 sd=0.042 sum=129.2
+PSO, first use of fs src    n=784 mean=0.089 p01=0.069 p50=0.081 p95=0.131 p99=0.235 p99.9=0.317 max=0.317 sd=0.028 sum=69.8
+total, repeated fs src      n=954 mean=0.150 p01=0.118 p50=0.143 p95=0.214 p99=0.292 p99.9=0.457 max=0.457 sd=0.033 sum=142.8

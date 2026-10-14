@@ -1,0 +1,20 @@
+{
+ "plan": {"fixedDelta": 0.016666668, "seed": 20261011},
+ "fixtures": [
+  {"name": "seelah-a",
+   "steps": ["move:109,40.3,129.5", "waitdialog",
+             "dialogrun:9cd8308b0fc6506459bf1e98456b94bf,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "wait:120", "dialogrun", "wait:60"],
+   "replays": 1, "perturb": ["d20#7:+8"]},
+  {"name": "seelah-b",
+   "steps": ["move:109,40.3,129.5", "waitdialog",
+             "dialogrun:7ce19f7c9cce54d458833a5d98f77e62,99d18ab52a1e3a84f9e4b787eb02a743,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "wait:120", "dialogrun", "wait:60"],
+   "replays": 1, "perturb": ["d20#13:+8", "d20#13:+14", "d20#7:+8"]},
+  {"name": "seelah-c",
+   "steps": ["move:109,40.3,129.5", "waitdialog",
+             "dialogrun:ac8a98a286c2d664fbf93297bc1d557a,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "wait:120", "dialogrun", "wait:60"],
+   "replays": 1, "perturb": ["d20#7:+8", "d20#7:+14"]}
+ ]
+}

@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Mutation self-test for oracle/tools/oracle-trace-diff's certification level (--t0).
+
+usage: oracle/tools/oracle-trace-diff-selftest RECORD.trace.jsonl.gz REPLAY.trace.jsonl.gz [--allow-unhooked N]
+
+Takes a recording and a replay that certify at --t0 (e.g. cert-9's attack fixture), checks
+that they pass, then writes mutated copies of the replay and checks that each mutation is
+caught (or, for an audited T1 site, tolerated):
+
+  control             unchanged replay                                   expect pass
+  ai-draw             value of the first sim draw outside a rule at a    expect fail
+                      site that isn't an audited T1 site (e.g. AI target
+                      selection)
+  buff-duration       a non-permanent end_time pushed 60 s later         expect fail
+  audited-t1-draw     value of a draw at an audited T1 site              expect pass
+  projectile-pose     a launched projectile's launch position moved      expect pass
+                      10 cm (skeleton-derived, T1 under --t0)
+  projectile-result   the same projectile's AttackResult changed         expect fail
+  projectile-strict   the recording against its projectile-pose copy,   expect fail
+                      without --t0 (the unmutated pair must pass strict)
+  late-hit            the attack rule holding a projectile, and all     expect fail
+                      records after it, 10 ticks later (T0 tick bound)
+and that --check rejects a recording with a rule parent that isn't open (bad-parent) or a handler that
+closes while a rule it opened is still open (crossed-closures).
+Exit status 0 if every case behaves as expected, 1 otherwise.
+"""
+import copy
+import gzip
+import importlib.machinery
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DIFF = os.path.join(HERE, "oracle-trace-diff")
+NO_END = (2**63 - 1, -(2**63))
+SIXTY_S = 60 * 10_000_000  # TimeSpan ticks
+
+
+def diff_module():
+    loader = importlib.machinery.SourceFileLoader("oracle_trace_diff", DIFF)
+    spec = importlib.util.spec_from_loader("oracle_trace_diff", loader)
+    m = importlib.util.module_from_spec(spec)
+    loader.exec_module(m)
+    return m
+
+
+def read(path):
+    with gzip.open(path, "rt") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def write(recs, path):
+    with gzip.open(path, "wt") as f:
+        for r in recs:
+            f.write(json.dumps(r, separators=(",", ":")) + "\n")
+
+
+def run(record, replay, extra, t0=True):
+    p = subprocess.run([sys.executable, DIFF, record, replay, *(["--t0"] if t0 else []), *extra],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return p.returncode
+
+
+def main(argv):
+    extra = []
+    if "--allow-unhooked" in argv:
+        i = argv.index("--allow-unhooked")
+        extra = argv[i:i + 2]
+        argv = argv[:i] + argv[i + 2:]
+    if len(argv) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    record, replay = argv
+    m = diff_module()
+    recs = read(replay)
+    keys = {}
+    for r in recs:
+        if r.get("k") == "begin":
+            keys = {str(e[0]): e[1] for e in r.get("rng_sites") or []}
+
+    def outside_rule_sim(r):
+        return r.get("k") == "draw" and r.get("c") == "sim" and not r.get("rule")
+
+    def bump(r):
+        v = r.get("v")
+        if isinstance(v, bool) or v is None:
+            return False
+        r["v"] = v + 1 if isinstance(v, int) else v + 0.25
+        return True
+
+    cases = [("control", None, 0)]
+
+    def mutate_draw(audited):
+        out = [dict(r) for r in recs]
+        for r in out:
+            if outside_rule_sim(r) and m.audited_t1(keys.get(str(r.get("site")), str(r.get("site")))) == audited and bump(r):
+                return out, f"site {r.get('site')} seq {r.get('seq')}"
+        return None, None
+
+    def mutate_duration():
+        out = [dict(r) for r in recs]
+        for r in out:
+            if isinstance(r.get("end_time"), int) and r["end_time"] not in NO_END:
+                r["end_time"] += SIXTY_S
+                return out, f"{r.get('k')}/{r.get('what')} seq {r.get('seq')}"
+        return None, None
+
+    def mutate_late_hit():
+        # Every record from the first rule holding a projectile on moves 10 ticks later.
+        out = [dict(r) for r in recs]
+        start = next((i for i, r in enumerate(out) if r.get("k") in ("rule", "trig_end", "rule_end")
+                      and next(projectiles(r), None) is not None), None)
+        if start is None:
+            return None, None
+        for r in out[start:]:
+            if isinstance(r.get("t"), int):
+                r["t"] += 10
+        return out, f"{out[start].get('k')} seq {out[start].get('seq')} and after"
+
+    def projectiles(x):
+        # Projectile snapshots nested anywhere in a record.
+        if isinstance(x, dict):
+            if m.PROJECTILE_MARK <= set(x):
+                yield x
+            for v in x.values():
+                yield from projectiles(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from projectiles(v)
+
+    def mutate_projectile(change):
+        out = [dict(r) for r in recs]
+        for i, r in enumerate(out):
+            if r.get("k") not in ("trig_end", "rule_end", "did", "about", "trig"):
+                continue
+            r = copy.deepcopy(r)
+            p = next((p for p in projectiles(r) if change(p, dry=True)), None)
+            if p is None:
+                continue
+            change(p, dry=False)
+            out[i] = r
+            return out, f"{r.get('k')} seq {r.get('seq')}"
+        return None, None
+
+    def move_launch(p, dry):
+        if not (isinstance(p.get("m_LaunchPosition"), list) and isinstance(p.get("CorePosition"), list)):
+            return False
+        if not dry:
+            p["m_LaunchPosition"] = [v + 0.1 for v in p["m_LaunchPosition"]]
+            p["CorePosition"] = [v + 0.1 for v in p["CorePosition"]]
+        return True
+
+    def change_result(p, dry):
+        if not isinstance(p.get("AttackResult"), int) or isinstance(p.get("AttackResult"), bool):
+            return False
+        if not dry:
+            p["AttackResult"] += 1
+        return True
+
+    cases += [("ai-draw", lambda: mutate_draw(False), 1),
+              ("buff-duration", mutate_duration, 1),
+              ("audited-t1-draw", lambda: mutate_draw(True), 0),
+              ("projectile-pose", lambda: mutate_projectile(move_launch), 0),
+              ("projectile-result", lambda: mutate_projectile(change_result), 1),
+              ("late-hit", mutate_late_hit, 1)]
+
+    # Strict mode on a pair that is equal to begin with: the recording against itself (control) and
+    # against a copy with only the projectile geometry moved.
+    def strict_projectile():
+        out = [dict(r) for r in rec]
+        for i, r in enumerate(out):
+            if r.get("k") not in ("trig_end", "rule_end", "did", "about", "trig"):
+                continue
+            r = copy.deepcopy(r)
+            p = next((p for p in projectiles(r) if move_launch(p, dry=True)), None)
+            if p is None:
+                continue
+            move_launch(p, dry=False)
+            out[i] = r
+            return out, f"{r.get('k')} seq {r.get('seq')}"
+        return None, None
+
+
+    # Structure (--check on the recording): a rule with a parent that isn't open, and two
+    # handler closures crossed.
+    rec = read(record)
+
+    def bad_parent():
+        out = [dict(r) for r in rec]
+        for r in out:
+            if r.get("k") == "rule" and r.get("parent"):
+                r["parent"] = 99999
+                return out, f"rule {r.get('id')}"
+        return None, None
+
+    def crossed():
+        # A handler whose span holds a nested rule: swap the handler's h_end with that rule's
+        # rule_end, so the handler closes while the rule it opened is still open.
+        out = [dict(r) for r in rec]
+        for i, r in enumerate(out):
+            if r.get("k") != "h":
+                continue
+            j = next((x for x in range(i + 1, len(out)) if out[x].get("k") == "h_end" and out[x].get("id") == r.get("id")), None)
+            if j is None:
+                continue
+            x = next((x for x in range(i + 1, j) if out[x].get("k") == "rule"), None)
+            if x is None:
+                continue
+            y = next(y for y in range(x, j) if out[y].get("k") == "rule_end" and out[y].get("id") == out[x].get("id"))
+            out[j], out[y] = dict(out[y], seq=out[j]["seq"]), dict(out[j], seq=out[y]["seq"])
+            return out, f"handler {r.get('id')} / rule {out[x].get('id')}"
+        return None, None
+
+    checks = [("bad-parent", bad_parent), ("crossed-closures", crossed)]
+
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        # Strict projectile comparison: control (recording against itself) passes, the mutated copy fails.
+        mutated, where = strict_projectile()
+        if mutated is None:
+            print(f"{'projectile-strict':16} SKIPPED (no projectile in this recording)")
+        else:
+            path = os.path.join(tmp, "projectile-strict.trace.jsonl.gz")
+            write(mutated, path)
+            rc0 = run(record, record, extra, t0=False)
+            rc = run(record, path, extra, t0=False)
+            good = rc0 == 0 and rc == 1
+            ok &= good
+            print(f"{'projectile-strict':16} {'ok  ' if good else 'FAIL'} control exit {rc0}, mutated exit {rc}, expected 0 then 1 ({where})")
+        for name, make in checks:
+            mutated, where = make()
+            if mutated is None:
+                print(f"{name:16} SKIPPED (no suitable record in this recording)")
+                continue
+            path = os.path.join(tmp, f"{name}.trace.jsonl.gz")
+            write(mutated, path)
+            rc = subprocess.run([sys.executable, DIFF, "--check", path, *extra],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+            good = rc == 1
+            ok &= good
+            print(f"{name:16} {'ok  ' if good else 'FAIL'} --check exit {rc}, expected fail ({where})")
+        for name, make, expect, *mode in cases:
+            if make is None:
+                path, where = replay, "unchanged"
+            else:
+                mutated, where = make()
+                if mutated is None:
+                    print(f"{name:16} SKIPPED (no suitable record in this replay)")
+                    continue
+                path = os.path.join(tmp, f"{name}.trace.jsonl.gz")
+                write(mutated, path)
+            rc = run(record, path, extra, t0=mode[0] if mode else True)
+            good = (rc == 0) == (expect == 0)
+            ok &= good
+            print(f"{name:16} {'ok  ' if good else 'FAIL'} exit {rc}, expected {'pass' if expect == 0 else 'fail'} ({where})")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

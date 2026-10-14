@@ -1,0 +1,9 @@
+# owlcat-bench pass=GBUFFER: 2018 fragment variants tried (of 2018), 2018 built, 0 failed; 1157 unique MSL sources; 1 thread(s); salt "c1-gbuffer-1791685302"; wall 102.90 s
+vertex pairing: 1762 exact (Unity's per-stage keyword rule), 256 fallback; 216 of 389 vertex variants used
+vs module (MSL compile)     n=2018 mean=0.210 p01=0.016 p50=0.045 p95=0.081 p99=7.920 p99.9=21.482 max=49.900 sd=1.686 sum=422.9
+fs module (MSL compile)     n=2018 mean=50.295 p01=0.018 p50=62.614 p95=115.279 p99=134.352 p99.9=221.350 max=277.884 sd=48.982 sum=101496.3
+render pipeline (PSO)       n=2018 mean=0.452 p01=0.065 p50=0.244 p95=1.128 p99=7.796 p99.9=26.684 max=28.969 sd=1.497 sum=912.9
+total per pipeline          n=2018 mean=50.972 p01=0.104 p50=63.116 p95=116.077 p99=134.991 p99.9=222.250 max=278.841 sd=49.365 sum=102861.1
+total, first use of fs src  n=1126 mean=91.055 p01=61.281 p50=107.611 p95=117.918 p99=159.619 p99.9=268.221 max=278.841 sd=26.987 sum=102527.5
+PSO, first use of fs src    n=1126 mean=0.649 p01=0.216 p50=0.295 p95=1.234 p99=8.122 p99.9=26.684 max=28.969 sd=1.660 sum=731.1
+total, repeated fs src      n=892 mean=0.374 p01=0.102 p50=0.121 p95=0.303 p99=14.083 p99.9=49.553 max=49.553 sd=2.350 sum=333.6

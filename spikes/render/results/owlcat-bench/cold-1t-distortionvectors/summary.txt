@@ -1,0 +1,9 @@
+# owlcat-bench pass=DistortionVectors: 24 fragment variants tried (of 24), 24 built, 0 failed; 12 unique MSL sources; 1 thread(s); salt "c1-distortionvectors-1791685544"; wall 0.66 s
+vertex pairing: 24 exact (Unity's per-stage keyword rule), 0 fallback; 4 of 6 vertex variants used
+vs module (MSL compile)     n=24 mean=2.203 p01=0.017 p50=0.027 p95=7.763 p99=44.325 p99.9=44.325 max=44.325 sd=8.918 sum=52.9
+fs module (MSL compile)     n=24 mean=24.193 p01=0.011 p50=0.019 p95=58.931 p99=60.442 p99.9=60.442 max=60.442 sd=28.615 sum=580.6
+render pipeline (PSO)       n=24 mean=0.949 p01=0.062 p50=0.104 p95=5.516 p99=14.051 p99.9=14.051 max=14.051 sd=2.936 sum=22.8
+total per pipeline          n=24 mean=27.356 p01=0.095 p50=0.180 p95=70.880 p99=116.434 p99.9=116.434 max=116.434 sd=34.112 sum=656.5
+total, first use of fs src  n=10 mean=65.461 p01=57.163 p50=58.543 p95=116.434 p99=116.434 p99.9=116.434 max=116.434 sd=17.420 sum=654.6
+PSO, first use of fs src    n=10 mean=2.159 p01=0.209 p50=0.261 p95=14.051 p99=14.051 p99.9=14.051 max=14.051 sd=4.263 sum=21.6
+total, repeated fs src      n=14 mean=0.138 p01=0.095 p50=0.106 p95=0.294 p99=0.294 p99.9=0.294 max=0.294 sd=0.053 sum=1.9

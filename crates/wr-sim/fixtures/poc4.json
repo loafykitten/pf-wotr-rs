@@ -1,0 +1,41 @@
+{
+ "_note": "POC-4 dialogue fixtures for `wr-sim dialog`: the WrathOracle plan steps of each fixture (oracle/tools/oracle-fixtures/poc4-*.spec.json), with the T1 `move` into a trigger replaced by the T0 event it causes, `zone:<script zone blueprint>`. GUIDs only.",
+ "fixtures": {
+  "dialog-checks": {
+   "save": "Manual_13",
+   "steps": ["zone:69c8d5fe0e4a02f42b70a3b067925bb7", "waitdialog", "answer:0", "answer:0", "answer:0",
+             "answerbp:9cd8308b0fc6506459bf1e98456b94bf", "answer?:0", "answer?:0", "answer?:0", "answer?:0",
+             "answer?:0", "answer?:0", "wait:30"]
+  },
+  "seelah-a": {
+   "save": "Manual_13",
+   "steps": ["zone:69c8d5fe0e4a02f42b70a3b067925bb7", "waitdialog",
+             "dialogrun:9cd8308b0fc6506459bf1e98456b94bf,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "wait:120", "dialogrun", "wait:60"]
+  },
+  "seelah-b": {
+   "save": "Manual_13",
+   "steps": ["zone:69c8d5fe0e4a02f42b70a3b067925bb7", "waitdialog",
+             "dialogrun:7ce19f7c9cce54d458833a5d98f77e62,99d18ab52a1e3a84f9e4b787eb02a743,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "wait:120", "dialogrun", "wait:60"]
+  },
+  "seelah-c": {
+   "save": "Manual_13",
+   "steps": ["zone:69c8d5fe0e4a02f42b70a3b067925bb7", "waitdialog",
+             "dialogrun:ac8a98a286c2d664fbf93297bc1d557a,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "wait:120", "dialogrun", "wait:60"]
+  },
+  "horgus-check": {
+   "save": "Manual_19",
+   "steps": ["wait:30", "dialog:7c26eaf59be4e5848927d73526e20748", "waitdialog",
+             "dialogrun:905c535dfde1fd448a75a1e1ba423283,3ab564082485b034a9d0a7b550e1a3e2,d641426bf858321449c5178be150db22,7a580452d0019f2428e86e0ad2aa83dc",
+             "wait:120", "dialogrun", "wait:60"]
+  },
+  "horgus-alt": {
+   "save": "Manual_19",
+   "steps": ["wait:30", "dialog:7c26eaf59be4e5848927d73526e20748", "waitdialog",
+             "dialogrun:5422edfb2195fbb4d94c4c4773f9fe27,db14014b10293e04fb0fec66652e5fb3,905c535dfde1fd448a75a1e1ba423283,e497fc464b56df946bb85afb0ef920fe,7a580452d0019f2428e86e0ad2aa83dc",
+             "wait:120", "dialogrun", "wait:60"]
+  }
+ }
+}

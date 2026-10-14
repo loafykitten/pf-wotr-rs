@@ -1,0 +1,50 @@
+# POC-0 Wwise spike: drive the game's own AkSoundEngine.bundle from Rust.
+# A standalone workspace (own Cargo.lock and target/), excluded from the root workspace.
+# The library half is the seed of a future `crates/wr-audio`.
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "wwise-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+description = "Spike: the game's Wwise runtime (AkSoundEngine.bundle) over FFI from Rust."
+
+[lib]
+name = "wwise_spike"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wwise-spike"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+hound = "3.5.1"
+libc = "0.2.190"
+libloading = "0.9.0"
+quick-xml = "0.42.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
+
+# Same lints as the root workspace, so the code can be promoted into crates/ unchanged.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = "line-tables-only"

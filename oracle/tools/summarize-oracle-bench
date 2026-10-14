@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Summarize WrathOracle bench runs (tools/oracle-run.sh bench) as markdown.
+
+usage: oracle/tools/summarize-oracle-bench RUN_DIR [RUN_DIR...] [-o OUT.md]
+
+Per run: load times (WrathOracle's call-to-idle boundary and WrathStats' load span),
+the two route passes' frame statistics, memory at the plan's fixed points, and the timed
+manual save. With several runs, a spread line per metric (median, min-max).
+Standard library only.
+"""
+import argparse
+import json
+import os
+import statistics
+import sys
+
+
+def load_run(d):
+    run = json.load(open(os.path.join(d, "run.json")))
+    finished = bool(run["steps"]) and run["steps"][-1]["step"] == "quit"
+    out = {"dir": d, "label": run.get("label") or os.path.basename(d), "aborted": run["aborted"] or not finished,
+           "errors": run["errors"], "health": run["health"], "loads": [], "mem": {}, "save": None}
+    for s in run["steps"]:
+        if "load" in s:
+            out["loads"].append(s["load"])
+        elif "memory" in s:
+            out["mem"][s["memory"]["label"]] = s["memory"]
+        elif "save" in s:
+            out["save"] = s["save"]
+    out["routes"] = []
+    for p in (1, 2):
+        f = os.path.join(d, f"route-pass{p}.json")
+        if os.path.exists(f):
+            r = json.load(open(f))
+            out["routes"].append({"pass": p, "frames": r.get("pass_frames"),
+                                  "points": [(x["sample"], x.get("frames"), x.get("frames_after_warmup")) for x in r["points"]]})
+    ws = os.path.join(d, "wrathstats", "events.jsonl")
+    out["ws_loads"] = []
+    if os.path.exists(ws):
+        for line in open(ws):
+            e = json.loads(line)
+            if e.get("kind") == "load":
+                out["ws_loads"].append((e.get("reason"), e["ms"] / 1000.0))
+    return out
+
+
+def spread(vals):
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return "n/a"
+    if len(vals) == 1:
+        return f"{vals[0]:.3g}"
+    return f"{statistics.median(vals):.4g} ({min(vals):.4g}–{max(vals):.4g}, n={len(vals)})"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("runs", nargs="+")
+    ap.add_argument("-o", "--out")
+    a = ap.parse_args()
+    runs = [load_run(d) for d in a.runs]
+    def f2(v, fmt=".2f"):
+        return "n/a" if v is None else format(v, fmt)
+
+    L = []
+    for r in runs:
+        if r["aborted"] or r["errors"] or r["health"]["records_failed"] or r["health"]["records_dropped"]:
+            L.append(f"**{r['label']}: FAILED or incomplete** (aborted={r['aborted']}, errors={r['errors']}, health={r['health']}); excluded from spreads.\n")
+    def complete(r):
+        sv = r["save"] or {}
+        return (not (r["aborted"] or r["errors"] or r["health"]["records_failed"] or r["health"]["records_dropped"])
+                and len(r["loads"]) == 4 and len(r["routes"]) == 2 and sv.get("valid", True) and sv.get("deleted"))
+    for r in runs:
+        if not complete(r) and not (r["aborted"] or r["errors"]):
+            L.append(f"**{r['label']}: incomplete** (loads={len(r['loads'])}, routes={len(r['routes'])}, save={r['save']}); excluded from spreads.\n")
+    good = [r for r in runs if complete(r)]
+    L.append("| run | first load s | reloads s | WrathStats load_save spans s | save total s (routine / commit) | save max frame ms |")
+    L.append("|---|---|---|---|---|---|")
+    for r in runs:
+        loads = r["loads"]
+        first = loads[0]["call_to_idle_s"] if loads else None
+        rel = " / ".join(f"{l['call_to_idle_s']:.2f}" for l in loads[1:])
+        wsl = " / ".join(f"{s:.2f}" for reason, s in r["ws_loads"] if reason == "load_save")
+        sv = r["save"] or {}
+        L.append(f"| {r['label']} | {f2(first)} | {rel} | {wsl} | {f2(sv.get('total_s'), '.3f')} "
+                 f"({f2(sv.get('routine_end_s'), '.3f')} / {f2(sv.get('commit_end_s'), '.3f')}) | {f2(sv.get('max_frame_ms'), '.1f')} |")
+    L.append("")
+    L.append("| run | pass | frames | fps | p50 | p95 | p99 | max ms | ≥33 ms | ≥50 ms | GC frames |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for r in runs:
+        for rt in r["routes"]:
+            f = rt["frames"] or {}
+            L.append(f"| {r['label']} | {rt['pass']} | {f.get('count')} | {f.get('fps', 0):.1f} | {f.get('p50_ms', 0):.2f} | {f.get('p95_ms', 0):.2f} | "
+                     f"{f.get('p99_ms', 0):.2f} | {f.get('max_ms', 0):.1f} | {f.get('over_33ms')} | {f.get('over_50ms')} | {f.get('gc_frames')} |")
+    L.append("")
+    labels = []
+    for r in runs:
+        for k in r["mem"]:
+            if k not in labels:
+                labels.append(k)
+    L.append("| run | " + " | ".join(f"{k} resident GB / Mono heap GB" for k in labels) + " |")
+    L.append("|---|" + "---|" * len(labels))
+    for r in runs:
+        cells = []
+        for k in labels:
+            m = r["mem"].get(k)
+            cells.append(f"{m['resident_bytes'] / 1e9:.2f} / {m['mono_heap_bytes'] / 1e9:.2f}" if m else "")
+        L.append(f"| {r['label']} | " + " | ".join(cells) + " |")
+    runs_all, runs = runs, good
+    if len(runs) > 1:
+        L.append("")
+        L.append("Spread (median, min–max):")
+        L.append(f"- first load: {spread([r['loads'][0]['call_to_idle_s'] for r in runs if r['loads']])} s")
+        L.append(f"- warm reloads: {spread([l['call_to_idle_s'] for r in runs for l in r['loads'][1:]])} s")
+        for p in (1, 2):
+            sel = [rt['frames'] for r in runs for rt in r['routes'] if rt['pass'] == p and rt['frames']]
+            for key in ("fps", "p50_ms", "p95_ms", "p99_ms", "max_ms", "over_33ms", "over_50ms"):
+                L.append(f"- route pass {p} {key}: {spread([f.get(key) for f in sel])}")
+        L.append(f"- save total: {spread([r['save'].get('total_s') for r in runs if r['save']])} s")
+        for k in labels:
+            L.append(f"- resident at {k}: {spread([r['mem'][k]['resident_bytes'] / 1e9 for r in runs if k in r['mem']])} GB; "
+                     f"Mono heap {spread([r['mem'][k]['mono_heap_bytes'] / 1e9 for r in runs if k in r['mem']])} GB")
+    text = "\n".join(L) + "\n"
+    if a.out:
+        open(a.out, "w").write(text)
+    sys.stdout.write(text)
+
+
+if __name__ == "__main__":
+    main()

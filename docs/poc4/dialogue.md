@@ -1,0 +1,455 @@
+# POC-4: dialogue, headless — handoff
+
+Second round, written 2026-10-11. Tags: **[M]** measured, **[C]** read in the decompiled C#,
+**[I]** inferred. No game text here: GUIDs, type names and counts only. Nothing committed (the
+coordinator commits after review). Captures are local and gitignored
+(`fixtures/captures/oracle/`); sim outputs go to `cache/sim/dialog/<fixture>-<run>/`.
+
+## Headline
+
+| | Result |
+|---|---|
+| Certification fixture `dialog-checks` (cert-9: record, replay, perturbed replay) | **The whole ordered T0 stream equal on all three runs [M]**: 78/78 records (47 dialogue records and answers, 6 narrative mutations, 18 rule records with their results, 7 rule draws, in one order), failure and success branch of the Athletics check; character sheets 2,372/2,372 fields; narrative end state equal except one etude (ToyBox, below) |
+| Seelah/Anevia meeting, paths A, B, C (12 runs: record, replay, perturbed replays); **round 3 below: now the whole stream equal to the end** | **Every run's dialogue stream equal [M]** (71, 81, 76 records per path), every rule draw equal (7, 13, 7), every rule result equal up to the recruitment; the ordered stream equal up to the recruitment (102/354, 130/382, 108/357 records), where the oracle builds the companion's new unit (`ChangeUnitBlueprint`) and applies a buff (`AttachBuff`), both reported unsupported by the sim. Character sheets 100% on every run (3 units, 1,737 fields) |
+| The three reachable Seelah checks on success and failure tapes | **Yes [M]**: Athletics `ded4aae5…`, Knowledge World `d530baf0…`, Diplomacy `d0ef7c0d…`, each recorded failing and passing (perturbed d20), each matched by the sim. The fourth (Oread-only Athletics) is unreachable from Manual_13 (Kitsune PC) |
+| Horgus (Manual_19, Prologue_Neathholm), check path and alternative path (6 runs) | **Dialogue streams equal on every run [M]** (52 and 64 records); the party Diplomacy check (authored DC 16) passing in the record (flag `ddfedbde…` = 2000) and failing in a perturbed replay (= 1000), the alternative path setting 500; all 10 rule records before the closing cutscene equal (roller, stat 8, DC 16, d20, total); character sheets 100% (7 units, 4,269 fields); narrative end state equal except the ToyBox etude. The ordered stream diverges at the closing cutscene (`HideUnit`, `Spawn`: reported unsupported) |
+| POC-4 pass criterion | **Met on 15 of 21 runs (round 5 below, after its review)**: the 12 Seelah and 3 `dialog-checks` runs are valid (nothing unsupported, whole ordered stream equal). The 6 Horgus runs are not valid: they report the cutscenes' random-track gates (the oracle draws there and in roaming, which the sim doesn't run) and the awake state of the unit the closing cutscene spawns, whose toggle the sim therefore doesn't tick (stream 127/130, the 3 records that toggle) |
+| Hydration, sheets after load | Manual_13 2,372/2,372 (100%); **Manual_19 4,269/4,269 (100%, first measurement)**; Manual_10 98.46% (was 97.35%) |
+
+**Found: ToyBox changes the oracle's results [M, via gpt-6.1-sol, verified in the installed
+DLL].** The oracle build loads ToyBox 1.7.27 with `toggleAllowAnyGenderRomance` on
+(`Wrath-Mac/builds/arm64/Mods/ToyBox/Settings.xml:89`). ToyBox's Harmony postfix on
+`PcFemale.CheckCondition` returns true for conditions owned by the etude `LannRomance`
+(`d9baf40d…`), so in the oracle that etude stays playing with a male PC while the
+unmodded C# (and the sim) stops it at the first `UpdateEtudes`. That is the one narrative
+difference in every run. **The oracle should run without gameplay mods** (or the comparison
+must model them); needs Ember/the coordinator.
+
+## How a run is compared
+
+`wr-sim dialog <fixture> --oracle <capture>/fixtures/<fixture> --run <record|replay-N|…>`
+(fixtures in `crates/wr-sim/fixtures/poc4.json`; `--oracle-inputs` replays the oracle's
+recorded answers, for fixtures whose optional steps depend on T1 timing):
+
+1. Hydrate the save, then `Game.AfterSceneLoaderFinishedArea`'s stages (`area_activated`).
+2. Replace the RNG with a tape of the oracle run's sim draws at the sites the sim models; set
+   the clock to the oracle's window-start game time; compare the narrative state at the
+   start.
+3. Run the steps on the sim clock (`runner.rs`): before-tick tasks, `TimeController`,
+   script zone input, `DialogController`, `EtudeSystemController`. Steps are WrathOracle's,
+   with the T1 walk into a trigger replaced by `zone:<script zone>`.
+4. Compare: **one ordered T0 stream** (dialogue records and answers, narrative mutations
+   in WrathOracle's postfix/prefix positions, rules and their results per class, draws at
+   modelled sites, run-time ids renamed by first appearance); oracle sim draws at the
+   audited T1 sites (`oracle-trace-diff`'s list) are counted and left out, any other sim
+   draw the sim doesn't make fails the comparison; the narrative end state
+   (`narrative/dump.rs`: etudes, etude facts and their component data, flags, quests,
+   dialogue history, alignment, party and XP by unit, area/mode, structure; game time
+   reported as T1); and every unit's character sheet.
+
+## Done and measured
+
+- **Etude brackets [C, M]** (`components/etudes.rs`): the generic `EtudeBracketRuntime`
+  (activate/deactivate/post-load, `MaybeEnter`, enter/exit/resume with linked-area and
+  read-only checks), the proxy subscription (`Sub::Runtime`: the delegate's interfaces
+  through the runtime, then the runtime's own; delivery prefers the delegate, so
+  `EtudePlayTrigger`'s handler runs twice per raise, as in the C#), `EtudePlayTrigger`,
+  `EtudeInvokeActionsDelayed`, and 24 bracket types (unit and area `CountableFlag`s as named
+  counters, interaction overrides, tutorials, follow-unit state, camp/skip-time overrides;
+  audio, music and weather as stubs; locator placement, party changes, capital logic and
+  corruption clearing reported unsupported when they would act). The etude bracket kinds
+  are gone from both saves' load reports (Manual_13 had 64 unsupported kinds, Manual_19
+  74); what remains is listed below [M].
+- **Area activation after load [C]** (`hydrate::area_activated`): `OnAreaScenesLoaded`,
+  `OnAreaDidLoad`, the entity-creation queue (placeholders not built: reported), the area's
+  main fact (no components in these areas), `UpdateEtudes`, `OnAreaActivated`,
+  `Player.OnAreaLoaded`. Area scene documents not hydrated are now reported.
+- **Elements [C]**: 26 conditions (`CompanionInParty`, `CueSeen`, `DialogSeen`,
+  `FlagInRange`, `FlagUnlocked`, `IsDLCEnabled`, `LessThan`, `ObjectiveStatus`,
+  `OrAndLogic`, `PcFemale`, `QuestStatus`, `UnitClass`, `UnitArchetypes`, `HasFact`,
+  `IsCampaign`, `IsCampaignImported`, `IsEqual`, `PartyUnits`, `UnitIsDead`,
+  `CompanionIsDead`, `KingdomStatCheck`, `PlayerTopClassIs`, …), evaluators `FlagValue`,
+  `PartyUnit` (and `UnitFromSpawner` fixed: it read the wrong field name and never
+  resolved), action `UnlockFlag`. DLC availability is platform state:
+  `cache/sim/dlc-rewards.json` (four rewards, inferred from the oracle's after-load etude
+  states [M, I]).
+- **Unit state [C, M]**: conditions and immunities as `UnitState` counters (saved arrays
+  hydrated, `State.PostLoad`'s Fatigued/DifficultTerrain reset, `SpellcastingForbidden`
+  fix), status effects (Fatigued ported; saved ones and the others reported), `Prone`,
+  `CanAct`; components `AddCondition`, `AddConditionImmunity`, `BuffAllSkillsBonus`,
+  `BuffAllSavesBonus`, `ForbidSpellbookOnAlignmentDeviation`, `AreaDidLoadTrigger`,
+  `DeathActions`/`EvaluatedUnitDeathTrigger` (spawn events; deaths reported). These took
+  Manual_19's sheets to 100%.
+- **Quests**: `Experience` objective and quest callbacks; trace records moved to
+  WrathOracle's positions (etude start/complete, flags, XP and fact attach as postfixes;
+  fact detach and dialogue stop as prefixes; check end after the nested cue).
+- **Runner, dumps, comparison** (`runner.rs`, `narrative/dump.rs`, `wr-sim dialog`), the
+  before-tick task queue (`BeforeTick`: `ScheduleAction`, `StartMode`, `StopMode` in one
+  FIFO, as `Game.ExecuteBeforeTickActions`).
+- **Speakers built from placeholders**: dialogue speakers that the load builds from
+  `UnitPlaceholderEntityData` (Horgus) are found by blueprint and position (finally dead
+  excluded), and reported unsupported (the unit isn't built).
+- **Tests**: 60 unit tests (11 new, synthetic: bracket runtime and subscriptions, play
+  trigger semantics, conditions, flags, unit conditions and `CanAct`, the Fatigued effect,
+  runner helpers, narrative compare) and 4 ignored real-data tests (Manual_13 ×2; cert-9 on
+  three runs: whole stream equal; 10 of the POC-4 runs: dialogue and draws equal, sheets
+  100%). fmt, clippy `-D warnings`, nextest pass for `wr-sim`.
+
+## What every run still reports (why no run is valid yet)
+
+After round 4 (`cbe8d15`) [M]:
+- Seelah runs (all 12): `ActivateTrigger.OnActivate` (2) and the area's script zone (`ScriptZone: scene state
+  and OnUnitEntered callbacks not hydrated`).
+- Horgus runs: the closing cutscene's `HideUnit` and `Spawn`.
+- `dialog-checks`: the script zone.
+- At load: Manual_13 9 kinds, Manual_19 29, Manual_10 210 (each save's `coverage.json` lists them): the
+  area's other scene documents and entities (script zones, map objects, cutscene players, unit groups),
+  units not built from placeholders, and unit components outside the dialogue.
+- Other narrative differences: Seelah runs end in Pause mode in the oracle (the tutorial pop-up the sim
+  stubs pauses the game) [I].
+
+## Review
+
+GPT 6 Astra (high). **Round 1: 23 findings**, each checked against the C# and the oracle.
+22 were real and are fixed (comparison soundness: one ordered stream, consistent id
+correspondence, unmodelled draws failing, full rule results; the before-tick queue order;
+saved conditions, status effects and posture; placeholder speakers and omitted load stages,
+zone and cutscene actions made fail-closed; follow-unit state; `CompanionInParty`
+finally-dead; optional-step waits; oracle-input mapping; party and XP by unit identity;
+`dlg_check_end` fields; quest XP float rounding; DLC-restricted classes; disposal guards; a
+test's tolerance; a fabricated log). One (the delayed etude's recalculation) was a false
+positive, which round 2 confirmed.
+
+**Round 2: 13 findings** on the fixes; round 1 confirmed resolved for 14, partly for 8.
+Fixed: the oracle recording's health is now checked (missing begin/end, failed or dropped
+records, structural errors, hook exceptions, unknown unhooked RNG steps fail the
+comparison); saved fact ids (UUID-form) count as saved; recognized saved status effects and
+saved posture are reported at hydration; main-scene entities not hydrated (script zones,
+map objects, cutscene players, unit groups) are reported; rule results fold handler and
+final deltas; transition skill-check payloads use the oracle's form; the follow-unit part
+keeps the leader it was initialized with and the leader's part goes when empty; flattened
+`dialogrun` steps keep their wait for the dialogue to end; a fact removed during its own
+activation gets no `fact_attach` record; dialogue inputs (initiator, unit, first speaker,
+manual unit) and rule initiators are compared; the dump's structure is type-checked; the
+certification test asserts the start state and the exact load gaps; the placeholder-speaker
+fallback (left as a stub by an edit that missed) now reports unsupported. All results above
+are after these fixes, unchanged. **Open, documented, not fixed:** (a) the sim records a
+rule's results at the end of `OnTrigger`, the oracle after its did-handlers: equal for every
+rule in these fixtures (no handler changes a compared field), but a rule whose handler does
+would compare wrongly until the sim records at the final phase; (b) custom runtimes' own
+members (`EtudeInvokeActionDelayedData`'s timer, brackets' processed flag) aren't in either
+dump (the oracle dumps only delegate `Data`), so they're outside the narrative comparison.
+No round 3 was run.
+
+## Round 3: run-time items (2026-10-11)
+
+Tags as above. Captures: the clean-build `poc4-seelah-2` and `poc4-horgus-2` (no ToyBox).
+
+| | Before (round 2 merged with unit creation) | Now [M] |
+|---|---|---|
+| Seelah path A, ordered T0 stream (record, replay-1, perturbed) | 337/351, equal prefix 328 | **351/351 equal on all three runs** |
+| Seelah path B (record, 4 replays) | 365/382, equal prefix 356 | **382/382 equal on all five runs** (the perturbed ones 379/379, 382/382) |
+| Seelah path C (record, 3 replays) | 343/357, equal prefix 334 | **357/357 equal on all four runs** (the perturbed one 355/355) |
+| Character sheets after the run, Seelah A/B/C | 0.9967 / 0.9938 / 0.9967 | **1.0000** on every run: 21 units, the recruited companion's AC, skill penalties, speed and modifiers included |
+| Seelah C, narrative end state | money 411 (oracle 611) | money equal (`AddItemToPlayer`'s +200) |
+| Horgus (`horgus-check`, `horgus-alt`) | 80/130, prefix 80 | unchanged (80/130): they stop at unit creation for Horgus's speaker |
+
+What the stream needed, all read in the C# [C] and ported in `crates/wr-sim`:
+
+- **`ItemsEntityFactory.CreateEntity`** and the `ItemEntity` constructors: weapon, armor,
+  shield (an armor and a weapon component of its own), usable and simple items, fresh ids,
+  the blueprint's enchantments (a weapon's or armor's type enchantments, then its own), charges,
+  identification. The shield's components are entities, the order the C# creates them in.
+- **`UnitBody` constructor and `Initialize`**: the empty-hand weapon entity, the four hands
+  sets (inactive sets don't equip), limbs, quick slots, then the named slots.
+  `TryInsertItem` → `ItemSlot.CanInsertItem` (slot support, `CanBeEquippedBy` with class and
+  stat restrictions, weapon/armor/shield proficiencies, the hand pair rules) → `InsertItem`
+  (the item enters the unit's inventory collection first: the player's shared inventory for a
+  party member, where an identified item **merges into an existing stack** and a stack **splits
+  one off**; then the slot, `OnDidEquipped`, `HandSlot.OnItemInserted`, the equipment events).
+  `AddStartingInventory`.
+- **Equipping**: `ItemEntity.OnDidEquipped`/`OnWillUnequip` with the subclass overrides: an armor
+  recalculates its stats (the armor check penalty and max-Dex rules show in the stream), a shield
+  does the same for its two components, enchantments activate with a context for the wielder, a
+  usable item's ability is added to the wielder (the potion's `Ability` fact).
+- **Equipment events** now reach their subscribers: `ShieldFocus` (its +1 AC in the oracle's
+  sheet), `ArmorFocus`, `DeflectArrows`, `MonkNoArmorFeatureUnlock`,
+  `MonkNoArmorAndMonkWeaponFeatureUnlock` are ported; `PartyInventoryTrigger` and the
+  `TutorialTriggerNewItem` family handle the collection events (a tutorial trigger that would
+  fire is reported).
+- **Disposal**: `EntityDataBase.Dispose` generally (also the level-up plan unit), and
+  `EntityDestructionController` for the replaced NPC: `Destroy` (`HandleUnitDestroyed`), then
+  `Dispose`, whose `Body.Dispose` disposes each slot item, which leaves its collection and its
+  slot (`OnWillUnequip`): the item's `Ability` detaches (the last record of every Seelah
+  stream), then the state, `HandleEntityDestruction`.
+- **`UnitActivatableAbilitiesController`** runs each tick before the script zones and the
+  dialogue (`TickAbility`: the start of a toggle that is on and not started, with the group
+  capacity of `TryStart`): the recruited companion's `InspiredRage` toggle buff attaches in the
+  first tick after the answer. Awake units are the party's units in game [I]: fog of war is
+  not modelled, so area units aren't ticked outside the load pass.
+- **`AttachBuff`** (path B's buff) and **`AddItemToPlayer`** (item creation, `MoneyReplacement`
+  gaining money; equipping isn't ported and is reported).
+- Fixes found on the way: `MechanicsFeatureType` values `ImprovedUnarmedStrike` (21),
+  `FighterOnHandedGrip` (112) and `ShieldBash` (4) were wrong in `combat/weapon.rs`; a
+  constructed unit starts with `UnitProficiency`'s default armor and weapon proficiencies; a
+  placeholder's saved body isn't resolvable while the unit's facts turn on (`ArmorFocus` and
+  `ShieldFocus` see no armor: the oracle's Manual_10 units without the +1 agree); the unit sheet
+  comparison renames the ids of items created at run time (`Guid.NewGuid()`, different in every
+  run) by order of first appearance, as the stream comparison does.
+- Not built, reported unsupported: double weapons, `ItemFact` (runtime components on an item's
+  blueprint), unidentified items entering the player's inventory (`TryIdentify`), slot locks,
+  polymorph, `AddItemToPlayer` with `Equip`, explicit grips on insertion, the per-round tick of a
+  started toggle (now ported, below), spellbook disposal (now ported, below).
+
+Tests: `tests/poc4.rs::seelah_streams_equal_the_oracle_to_the_end` (ignored; every Seelah run's
+T0 stream equal and the sheets above 0.9999), the synthetic item tests in `items.rs`.
+
+### Round 3, part 2: review fixes, spellbooks and ability resources
+
+**Review of run-time items** (GPT 6 Astra, nine findings, each checked against the C#): simple
+equipment and usable items return their own enchantments (`CollectEnchantments`); the unit sheet
+comparison renames only ids positively created during the run (the dump lists the ids that came
+from the save, `sim.saved_item_ids`; a modifier from the wrong saved item still differs); a
+started toggle keeps its round timer and runs `OnNewRound` (deactivation of an off toggle, first
+round, combat end), `ShouldBeDisabled` applies the Rest mode on its own, an area unit with a
+toggle to tick and a unit destroyed with dropped loot are reported; moving an equipped item
+notifies the vacated slot first; an item with an overridden visual doesn't stack; stack counts
+wrap like C#.
+
+**Spellbooks and ability resources.** `crates/wr-sim/src/spellbook.rs`, `resources.rs`,
+`hydrate/books.rs`, `components/books.rs` (architecture.md has the list). The sheet dump and
+`compare` now carry `spellbooks[]` (blueprint, caster level, the oracle writer's rendering of the
+persisted spellbook, depth limit and `$cycle` markers included) and `resources[]` (amount,
+`RetainCount`); spells created during the run are compared with their random ids renamed in each
+spellbook, spells from the save strictly. Match per field, equal/total [M]:
+
+| | Spellbooks present | Caster level | Spellbook persisted | Resources present | Amount | Resource persisted |
+|---|---|---|---|---|---|---|
+| Manual_13, before → now | 0/2 → 2/2 | – → 2/2 | – → 2/2 | 3/6 → 6/6 | 3/3 → 6/6 | 0/3 → 6/6 |
+| Manual_19 | 0/39 → 39/39 | – → 39/39 | – → 39/39 | 6/6 → 6/6 | 6/6 → 6/6 | 0/6 → 6/6 |
+| Manual_18 (placeholders spawned) | 0/2 → 2/2 | – → 2/2 | – → 2/2 | 6/6 → 6/6 | 6/6 → 6/6 | 0/6 → 6/6 |
+| Manual_10 | 0/102 → 101/102 | – → 101/101 | – → 87/101 | 90/320 → 320/320 | 90/90 → 302/320 | 0/90 → 302/320 |
+| Seelah A, B, C (all 12 runs) | 0/2 → 2/2 | – → 2/2 | – → 2/2 | 2/6 → 6/6 | 2/2 → 6/6 | 0/2 → 6/6 |
+| Horgus (6 runs) | 0/39 → 39/39 | – → 39/39 | – → 39/39 | 6/6 → 6/6 | 6/6 → 6/6 | 0/6 → 6/6 |
+| `dialog-checks` (3 runs) | 0/2 → 2/2 | – → 2/2 | – → 2/2 | 3/6 → 6/6 | 3/3 → 6/6 | 0/3 → 6/6 |
+
+("Before" is the previous binary's dump measured with the new comparison: no spellbooks, and
+resources without their persisted members. The 3/6 and 2/6 are the companion units built from
+placeholders, which had no resources before.) Manual_10 is the late-game save with 539 units:
+every unit that still differs reports a cause: attribute points of `AddClassLevels.LevelsStat`
+(the casting stat differs, so slots and the Wisdom-based resources do), spell selections,
+mythic spellbook selection, `AddOppositionSchool`, `SpontaneousSpellConversion`.
+
+What the C# does that the stream needed [C]: `DemandSpellbook`, `AddLevelFromClass` /
+`LearnSpellsOnRaiseLevel` (cantrips on the first level, special lists), `AddKnown` (a second
+entry for a known spell), `UpdateSlotsSize` (grow, hide and restore slots through the two hidden
+dictionaries, resorting), `Memorize` (free slot by type, `RemoveMemorizedSpells`), `Rest`, the
+casting stat's `OnChanged` handler installed by `Spellbook.PostLoad` (a stat change shrinks or
+grows the slots, also while a unit's facts turn on), `UnitPartExtraSpellsPerDay`;
+`AddClassLevels` raises `ILevelUpCompleteUIHandler`, so `AddKnownSpell` of every unit runs;
+`AddAbilityResources` (not while a feature reapplies), the max amount of a resource from class
+levels, stat bonus and the `IResourceAmountBonusHandler` components. The sheets of the Seelah and
+Horgus runs stay 1.0000 and the streams equal.
+
+New unsupported kinds: `CompanionBoon: ILevelUpCompleteUIHandler` and `ShareFeaturesWithPet:
+ILevelUpCompleteUIHandler` (Manual_10 only, on units that already report the components'
+`OnActivate`/`OnTurnOn`). Gone from every Seelah run: `ApplySpellbook`, `PrepareSpellbook`,
+`LearnSpells`, `AddSpecialSpellListForArchetype`, `AddAbilityResources` (both),
+`IncreaseActivatableAbilityGroupSize`, `AutoMetamagic`, `Replenish`, `CopySpellbook`,
+`UnitDescriptor.Dispose: spellbooks`. What the Seelah runs still report: the parametrized
+feature selection, the mythic-spellbook selection items, `AddClassLevels` attribute points,
+`AddDamageResistancePhysical`, `AuraFeatureComponent`, the tutorial pop-up stub, the recruit's
+`RemoveNegativeEffects` over buffs.
+
+## Round 4: validity (2026-10-11, fourth session)
+
+Porting what the runs reported, in three pieces, each reviewed by GPT 6 Astra (high) until no finding was
+left (merged into `poc` at `cbe8d15`):
+- Attribute points from automatic levels (`AddClassLevels.LevelsStat`, wrapping increments), DLC-restricted
+  selection items, `ContextCalculateAbilityParams` (`rules/ability_params.rs`: `SpellSource` Unknown, the
+  result recorded and compared on its stored members) and item enchantment repair at turn-on. Review rounds
+  fixed `ContextRankConfig` reading `context.Params` (`RankBonus` for class levels, `CasterLevel`;
+  `m_Params ?? ParentContext?.Params ?? AbilityParams.Empty`, saved nulls and `$ref`s resolved at
+  hydration, `CloneFor` children inheriting rather than copying), and null-reward `DlcCondition`s reported
+  wherever nothing handles the original's exception.
+- Parametrized features and mythic-spellbook selection (`feature_param.rs`: the saved param form,
+  `Items`/`CanSelect` by parameter type, `PrerequisiteConditionForWeaponCategory`, `CanSelectAny`,
+  `PrepareFactForAttach`, the `ParamContextData` scope, `SelectFeature.Apply`, `GetReplaceSpellbook`).
+- `AddDamageResistancePhysical` (the shared base runtime, `UnitPartDamageReduction`, saved pools kept at
+  load), `AuraFeatureComponent`, `AddLoot`, `Replenish`'s `RemoveNegativeEffects`, the auto-cast gate;
+  cloned contexts' ranks start at zero as in `MechanicsContext`'s constructor.
+
+Regression against the round-3 build [M]: every dialogue run's stream and sheets unchanged; Manual_13 1.0000,
+Manual_19 0.9988 and Manual_18 unchanged; **Manual_10 0.8134 → 0.8177** (62 units better, none worse). The
+Seelah runs report two kinds (was 15). Four Manual_10 placeholder units' `ShieldOfFaithBuff` (inactive and
+`IsFromSpell` in the oracle) is built active and not from a spell by the placeholder spawn path: open, see
+next steps.
+
+## Round 5: scene entities and the closing cutscene (2026-10-12)
+
+**15 of the 21 dialogue runs are valid now [M]** (12 Seelah, 3 `dialog-checks`: `coverage.unsupported` empty at load
+and in the run, no oracle draw missed), streams and sheets as before. The 6 Horgus runs report nothing unsupported
+but are **not valid**: a run is valid only if the oracle draws nowhere the sim doesn't (`FixtureRun::valid`). Manual_13 and Manual_19 hydrate valid with no
+unsupported kind (was 9 and 29). (This was the state before the review below, which changes the Horgus runs and
+Manual_19's load.)
+
+What was ported (all [C] from the decompiled C#; the cached scene data [M] from the importer):
+- **Scene cache** (`scene.rs`, `hydrate/scene.rs`; `scripts/scene-cache.sh <area> <guid>`): the area's
+  scene documents come from the importer's Unity scene read (`wr-import import --area`), then
+  `wr-sim scene-import` writes `cache/sim/scenes/<guid>.json` (script zone shapes, map object components,
+  cutscene players, unit groups). Cylinder and box `Contains` (with the game's quirks) match hundreds of
+  importer probes (ignored real-data test). A missing cache or view is reported, never guessed.
+- **Load order** as in the original: `SceneEntitiesState.PostLoad`, `SceneLoader.MatchStateWithScene` (view
+  attach by UniqueId, `scene_parts.rs`: part set check, `SetSource`, loot tables, `InteractionLootPart`,
+  `KingdomLootPart`, `UnitPartCorruption`, `UnitPartVendor`), then `TurnOn`; visibilities (`AreaTransitionPart.
+  UpdateVisibility`) follow flag and etude changes and the area load.
+- **`ScriptZone`**: `TryAddUnit`, `OnceOnly`, `PlayersOnly`, inside units, `OnAreaDidLoad`, trigger
+  conditions/actions, `IScriptZoneHandler`; **`ActivateTrigger`** (conditions outside the `FactData` scope,
+  actions inside, `AlreadyTriggered`); `FactOwner` and `SpawnedUnit` evaluators.
+- **Closing cutscene** (`scene_spawn.rs`, `elements/cutscene.rs`): `Spawn` (`UnitSpawnerBase.Spawn`,
+  `UnitSpawner.SpawnUnit`, `EntityCreator.SpawnUnit`, `OnSpawn` handlers) and `HideUnit`
+  (`UnitEntityData.OnIsInGameChanged`: buffs, activatable abilities, abilities deactivate). The cutscene's T0
+  steps run in order (a gate's tracks, each track's commands, end gates), queued at `PlayCutscene` and run at
+  the next tick's cutscene step; more T1 commands classified (`CommandCameraShake`, `MarkUnitControlled`,
+  `ActivateGate`, `RequireUnits`, `AddFogOfWarRevealer`; `SpawnFx`).
+- Long tail that the two saves reported: `AddBuffActions`, `AddUndetectableAlignment`, `AddUnitFactEquipment`,
+  `ArmorCheckPenaltyIncrease`, `MaxDexBonusIncrease`, `ArmorSpeedPenaltyRemoval`, `WeaponTraining(Bonuses)`
+  with `UnitPartWeaponTraining`, `AddVendorItems`, `EmptyHandWeaponOverride` with the empty-hand stack
+  (`UnitBody.SetEmptyHandWeapon`, `RemoveEmptyHandWeapon`), `RuleIdentifyItem` (the player inventory is a
+  global subscriber), summon pools, difficulty requirements on `AddFacts`, and `AddFacts.CasterLevel` writing
+  the shared `AbilityParams.Empty` (the merged `World::empty_params`, `context::set_params_caster_level`).
+
+Measured against the poc build [M]: Seelah and `dialog-checks` streams equal as before (351/351, 382, 357,
+78/78), sheets 1.0000 unchanged. **Horgus: ordered T0 stream 130/130 equal (125/125 on the perturbed replay),
+units 47 at 1.0000 (was 80/130, 0.9984)**. Horgus stays invalid because the oracle draws at
+`CutscenePlayerGateData.SelectTrackToStart` (x68-70; `StopExtraTracksOnStart`: `Random.Range(0, count)` over a
+background cutscene's started tracks unless the gate is `FirstTrack`) and `RoamingWaypointData.SelectPrevPoint`
+(x1; `PrevWaypoints.Random()` in `UnitRoamingController.AdvancePoint`). Neither is on `AUDITED_T1_SITES` and neither
+is ported: the comparison lists them as `UNMODELLED sim draws`, `TraceDiff::equal()` is false, and the run is not
+valid. Roaming: its siblings `SelectIdleTime` and `RollNextPoint` are audited T1 (durations and positions), but
+`SelectPrevPoint`/`SelectNextPoint` choose the unit's next waypoint, so they are not argued into T1 here [C].
+Porting them means running the background cutscene players and the roaming controller (their start times come
+from the game clock), which is the next step. Manual_19 0.9988 -> 1.0000. Manual_18 and the combat compares unchanged.
+
+After merging `poc` (`a97aef3`: `entity::set_is_in_game`, `World::empty_params`, placeholders leaving the game): one
+implementation of each (`HideUnit` and `Spawn` use `set_is_in_game`, which also raises `IInGameHandler` and
+the T1 event), and against that base no unit's match count drops: Manual_10 0.8196 -> 0.8206 (9 units up),
+Manual_19 0.9988 -> 1.0000. The exception measured against the older base was:
+
+**One exception, older base [M]:** Manual_10 0.8177 -> 0.8187 (9 units up, 1 down): unit 62460 AC 26 -> 27. With the
+`AbilityParams.Empty` caster-level quirk the placeholder's `ShieldOfFaithBuff` Deflection is 5 instead of 2;
+the oracle holds that buff inactive (the known open issue above), so the old number matched by coincidence.
+Kept: the port is the faithful one.
+
+Gaps at the end of the first part (superseded by the review below): units spawned by the area's awake
+spawners ticked as `Controller` units [I]; `HideUnit` is supported only inside a cutscene step (25 etude
+`HideUnit`s hide units the oracle keeps in game); shared stash items are not hydrated; the cutscene player's ticking
+is classified (T1) not run; `InteractionSkillCheckPart`'s load-time re-roll was a stub.
+
+### Round 5, review: paths accepted as supported that skipped or approximated the original (2026-10-12)
+
+GPT 6 Astra (high) reviewed `poc...133dccb`; its findings were of one kind: paths taken as supported that skip or
+approximate the original. Each was checked against the decompiled C# and fixed, or the path is now reported
+(`coverage.unsupported`); each fix has a test that fails with the fix reverted (checked).
+- **Audited T1 draws excluded from validity** (`runner.rs`): not a finding. The fidelity contract's T1 tier
+  (`AUDITED_T1_SITES`: cutscene delays, animation, roaming idle times) needn't be reproduced; left as is.
+- **`InteractionSkillCheckPart.OnSettingsDidSet(true)`** at every load [C]: ported (`scene_parts.rs`).
+  `DCOverride = DC == 0 || Exact ? DC : DC + Math.Abs(UniqueId.GetHashCode()) % (2v+1) - v`
+  (`InteractionDCVariation` v = 2), `SkillOverride` the empty pool's `Unknown`; a pool's draw from the global
+  RNG, a calculated DC, DC modifiers and the dungeon generator are reported. `String.GetHashCode` is the shipped
+  Mono `mscorlib`'s legacy two-lane hash (`csharp/string_hash.rs`, decompiled with `ilspycmd` into the
+  scratchpad) [C]; every saved part of Manual_13 and Manual_19 (9, five with a hashed DC) is what the sim
+  recomputes [M] (ignored real-data test).
+- **`ScriptZone.OnAreaDidLoad` enumerates `Game.State.Units`** [C]: the `NotFake` pool, each unit tested as the
+  `EntityPoolEnumerator` reaches it (`m_IsInGame && !m_Suppressed`; suppression is only set in areas with parts,
+  reported there) (`scene::units_pool`, `enumerated_by_pool`). A zone firing at load is reported: it runs among
+  the other `IAreaHandler.OnAreaDidLoad` subscribers, whose order isn't modelled (none fires in the fixtures).
+- **Cutscene classification** (`elements/cutscene.rs`) [C]: commands with an `EntryCondition`, `RandomTrack`
+  gates (`SelectTrackToStart` draws) and `CommandStartDialog` (it blocks its track until the dialogue ends; the sim
+  never started a cutscene's dialogue, so the dead `cutscene_dialogs` queue is gone) are always reported. A
+  closure with T0 actions must also have its T0 tracks on one chain of `And` gates (they're ordered by that
+  chain, not by the walk), no T0 action on a continuous or repeating track, no `FirstTrack`/`Or` gates, gate
+  reactivations, command signals or `CommandRequireUnits`, and every T0 gate reached. `CommandActivateGate`'s
+  gate is now read from `SignalData.m_Gate` (it was missed). Audit: `CutsceneCommandFadeout`'s in-fade actions
+  were skipped (now classified), `CommandDismountSpan` is reported while any unit has a rider part, a nested
+  cutscene with T0 actions of its own is reported, and stopping a cutscene with pending T0 actions is reported.
+- **A restored running cutscene with T0 actions** (`CutscenePlayerData.Restore` resumes saved track positions,
+  which aren't read): reported, not dropped.
+- **A unit's `IsInGame` at construction is its view's `IsInGameBySettings`** [C]: `wr-import unit-prefabs`
+  writes `cache/sim/unit-prefabs.json` (every `.unit` bundle's `UnitEntityView.m_IsInGame`: 3,463 prefabs with
+  one view, all in game [M]); spawners, placeholders (`m_PrefabId`, else the blueprint's prefab, or the
+  optimization dummy when spawned hidden and simplified) and `ChangeUnitBlueprint` (the old unit's view prefab:
+  the spawned one, `CustomPrefabGuid` or the blueprint's; polymorph, doll and dummy views reported) pass it to
+  `spawn::construct`; a missing table or prefab is reported. `Spawn` then sets `IsInGame` through the setter.
+  Placeholders spawned simplified get `UnitPartOptimizeWhenHidden` (was missing).
+- **Awake state** (`spawn::awake_state`, `SleepingUnitsController.ShouldBeSleeping` [C]): out of game or fake
+  sleeps; a companion while the area hides the party sleeps, in a pit wakes; the wake timers (set by view fades,
+  proning, death) are unknown, so a finally dead unit is unknown; in combat or in the party is awake; anything
+  else (fog of war, cutscene control, commands) is unknown and reported when its toggle would tick. A spawned unit
+  is no longer assumed awake. `IsExtra` is hydrated.
+- **`SceneLoader.LoadSceneEntities` both ways** (`hydrate/scene.rs`) [C]: each state matches the views of its
+  own scene (`SceneEntitiesState.SceneName`); a saved scene entity (any hydrated kind but cutscene players, and
+  spawners' data) without a view there is reported (removed in the original), and an active view of a
+  `CreatesDataOnLoad` class with no saved data is reported (`CreateDataForView`).
+- **Load order** (`hydrate::load_area_states`) [C]: `AreaPersistentState.PostLoad` post-loads every state first,
+  then each state is matched with its scene and turned on (was state by state).
+- **`AddUndetectableAlignment`** retains and releases the unit's own `UnitAlignment.Undetectable`
+  (`CountableFlag`: a `short`, `Release` floors at zero), no side counter.
+- **`WeaponTraining`'s rank** reads the hands through `combat::weapon::hand_weapon` (the empty-hand weapon, double
+  weapons and shields reported) and the limbs as `WeaponSlot.MaybeWeapon` (empty or inactive: the empty-hand
+  weapon); the fighter group's flag is an `int` shift. Manual_10 now reports a shield in hand there.
+- Also: `entity::set_is_in_game` raises `IInGameHandler` for every entity and runs `MapObjectEntityData.
+  OnIsInGameChanged` (the area transition's visibility), which `AreaTransitionPart` now goes through.
+
+Measured [M] (`scripts/regress.sh` against `poc` `a97aef3`, private caches with the scene caches and the prefab
+table; `scripts/regress-diff.sh`, per-unit counts compared): **no unit's match count drops** (0 drops, 12 gains).
+Seelah (12) and `dialog-checks` (3) valid, streams 351/382/357 and 78 equal, sheets unchanged. Horgus (6) invalid,
+reporting the random-track gates and the spawned unit's awake state; stream 127/130 (122/125 on the perturbed
+replay), the three differing records being the spawned unit's toggle the sim no longer ticks on a guess; its sheet
+444/446 (the unit didn't exist at the base; 446/446 when it was assumed awake). Manual_13 1.0000 and valid;
+Manual_19 1.0000, now reporting the restored background cutscenes' random-track gates at load (the oracle draws
+there); Manual_10 0.8196 -> 0.8206; Manual_18 and the combat compare unchanged.
+
+Known gaps left [I] (pre-existing, outside the review): restored roaming (`UnitPartRoaming.RestoreFrom`) is stubbed
+as T1, but the roaming controller's waypoint choices draw from the global RNG (`SelectPrevPoint`/`SelectNextPoint`,
+not audited T1): the comparison catches those as unmodelled oracle draws, a play run wouldn't. A plain toggle's
+round timer on a unit whose awake state is unknown isn't advanced. A cutscene moving a unit into a script zone
+(`CommandMoveUnit`) doesn't trigger the zone in the sim.
+
+Next: (1) run the background cutscene players (`SelectTrackToStart`), roaming (`SelectPrevPoint`) and fog of war
+(the awake state) so Horgus is valid; (2) HideUnit outside cutscene steps (etude triggers) once the etude conditions
+are ported; (3) record Camelia's meeting; (4) `crates/wr-text`.
+
+## Recordings (local, gitignored)
+
+| Capture | Fixtures | Runs |
+|---|---|---|
+| `fixtures/captures/oracle/poc4-seelah-1` (Manual_13) | `seelah-a` (Athletics, then `1cfe1ed0…`), `seelah-b` (question `7ce19f7c…`, Knowledge World), `seelah-c` (Diplomacy) | record, replay-1, perturbed replays (a: +8 on d20 #7; b: +8/+14 on #13, +8 on #7; c: +8/+14 on #7) |
+| `fixtures/captures/oracle/poc4-horgus-1` (Manual_19) | `horgus-check` (`905c535d…`, check `3ab56408…`, `d641426b…`, `7a580452…`), `horgus-alt` (`5422edfb…`, `db14014b…`, `905c535d…`, `e497fc46…`, `7a580452…`) | record, replay-1, perturbed (+7/+13 on d20 #3) |
+
+Specs: `oracle/tools/oracle-fixtures/poc4-seelah.spec.json`, `poc4-horgus.spec.json`
+(plans beside them). They use a new WrathOracle plan step, **`dialogrun[:G1,G2,…]`**
+(`mods/WrathOracle/Driver.cs`, additive): answer until the dialogue ends, the first listed
+answer shown (each used once) else answer 0, up to 3600 frames per answer, at most 200
+answers. Built and installed. The Horgus replays report tape mismatches at T1 sites
+(cutscene delays, animation); the oracle also writes a stale `perturbation` note into some
+non-perturbed runs' `begin` records (cosmetic, oracle side).
+
+## Exact next steps
+
+1. (Done in round 5.) Remaining: the cutscene player's `SelectTrackToStart`/`SelectPrevPoint` draws.
+2. See round 5's next steps.
+3. The load-time long tail per save (`coverage.json`), and placeholder spawning's pre-cast buffs
+   (`ShieldOfFaithBuff` above: `IsFromSpell` and inactive in the oracle).
+4. Camelia's meeting (not recorded: needs her trigger zone position), `crates/wr-text` (not started).
+
+## Files
+
+- New: `crates/wr-sim/src/components/{etudes,logic}.rs`, `narrative/{dump,tests}.rs`,
+  `runner.rs`, `fixtures/poc4.json`, `tests/poc4.rs`.
+- Changed in `crates/wr-sim`: `registry.rs`, `rulebook/bus.rs`, `components/{mod,stats}.rs`,
+  `elements/*`, `dialog/{mod,recruit}.rs`, `narrative/*`, `hydrate/{mod,narrative}.rs`,
+  `facts/{lifecycle,mod,tests}.rs`, `entity.rs`, `unit.rs`, `world.rs`, `events.rs`,
+  `rng.rs`, `rules/checks.rs`, `xp.rs`, `bin/wr-sim.rs`, `Cargo.toml` (`flate2`).
+- Wrath-Mac: `mods/WrathOracle/Driver.cs` (`dialogrun`), `tools/oracle-fixtures/poc4-*`.
+- Local: `cache/sim/dlc-rewards.json`.

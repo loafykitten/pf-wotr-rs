@@ -1,0 +1,10 @@
+{
+  "Id": "WrathOracle",
+  "DisplayName": "WrathOracle (Wrath-Rust oracle)",
+  "Author": "Ember",
+  "Version": "0.2.0",
+  "ManagerVersion": "0.32.0",
+  "LoadAfter": ["WrathStats"],
+  "AssemblyName": "WrathOracle.dll",
+  "EntryMethod": "WrathOracle.Main.Load"
+}

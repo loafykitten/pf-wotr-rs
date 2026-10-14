@@ -1,0 +1,11 @@
+[package]
+name = "wr-paths"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Where Ember's Wrath install, saves and our local caches live."
+
+[lints]
+workspace = true

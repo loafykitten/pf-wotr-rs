@@ -1,0 +1,2 @@
+before: load1=5.94 game=no 21:34:18
+after: load1=6.90 game=no 21:34:41

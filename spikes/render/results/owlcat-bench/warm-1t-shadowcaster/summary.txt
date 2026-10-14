@@ -1,0 +1,9 @@
+# owlcat-bench pass=SHADOWCASTER: 12 fragment variants tried (of 12), 12 built, 0 failed; 8 unique MSL sources; 1 thread(s); salt "c1-shadowcaster-1791685544"; wall 0.00 s
+vertex pairing: 4 exact (Unity's per-stage keyword rule), 8 fallback; 6 of 12 vertex variants used
+vs module (MSL compile)     n=12 mean=0.026 p01=0.019 p50=0.022 p95=0.038 p99=0.038 p99.9=0.038 max=0.038 sd=0.006 sum=0.3
+fs module (MSL compile)     n=12 mean=0.012 p01=0.007 p50=0.012 p95=0.022 p99=0.022 p99.9=0.022 max=0.022 sd=0.004 sum=0.1
+render pipeline (PSO)       n=12 mean=0.089 p01=0.058 p50=0.073 p95=0.223 p99=0.223 p99.9=0.223 max=0.223 sd=0.043 sum=1.1
+total per pipeline          n=12 mean=0.133 p01=0.088 p50=0.112 p95=0.305 p99=0.305 p99.9=0.305 max=0.305 sd=0.057 sum=1.6
+total, first use of fs src  n=2 mean=0.238 p01=0.171 p50=0.171 p95=0.305 p99=0.305 p99.9=0.305 max=0.305 sd=0.067 sum=0.5
+PSO, first use of fs src    n=2 mean=0.170 p01=0.117 p50=0.117 p95=0.223 p99=0.223 p99.9=0.223 max=0.223 sd=0.053 sum=0.3
+total, repeated fs src      n=10 mean=0.112 p01=0.088 p50=0.111 p95=0.154 p99=0.154 p99.9=0.154 max=0.154 sd=0.018 sum=1.1

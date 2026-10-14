@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Line up the passive observations ("obs" records) of two WrathOracle turn-based traces.
+
+usage: oracle/tools/oracle-obs-diff RECORD.trace.jsonl.gz REPLAY.trace.jsonl.gz [--max N]
+
+Prints, in tick order, the first N differences between a recording and its replay:
+  gates      (ui_guard, ui_guard_poll, delayed_schedule/fire, turn_status): same event, text and tick?
+  unit rows  (ev "u": position, movement, combat flag, commands, queue, animation blocking,
+              memory size, written whenever a unit's row changes)
+  events     (path_to, path_done, join_combat, mem_add), compared as sequences per kind
+and the first difference of each. Observations are T1 (oracle-trace-diff leaves them out); this
+tool is how the first unequal movement/controller observation before combat is found.
+"""
+import gzip
+import json
+import sys
+
+
+def load(path):
+    out = []
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                r = json.loads(line)
+                if r.get("k") == "obs":
+                    out.append(r)
+    return out
+
+
+def key(r):
+    d = {k: v for k, v in r.items() if k not in ("seq", "t")}
+    return json.dumps(d, sort_keys=True)
+
+
+def main(argv):
+    mx = 12
+    if "--max" in argv:
+        i = argv.index("--max")
+        mx = int(argv[i + 1])
+        argv = argv[:i] + argv[i + 2:]
+    if len(argv) != 2:
+        print(__doc__)
+        return 2
+    a, b = load(argv[0]), load(argv[1])
+    print(f"obs records: {len(a)} / {len(b)}")
+    diffs = []
+    # gates: strictly in order, with ticks
+    ga = [r for r in a if r.get("g")]
+    gb = [r for r in b if r.get("g")]
+    for i in range(max(len(ga), len(gb))):
+        x = ga[i] if i < len(ga) else None
+        y = gb[i] if i < len(gb) else None
+        if x is None or y is None or key(x) != key(y) or x["t"] != y["t"]:
+            diffs.append((min(x["t"] if x else 10**9, y["t"] if y else 10**9), "gate", i, x, y))
+            break
+    # unit rows: per unit, the (tick, row) sequences
+    def rows(rs):
+        d = {}
+        for r in rs:
+            if r.get("ev") == "u":
+                d.setdefault(r["u"], []).append((r["t"], r["s"]))
+        return d
+    ra, rb = rows(a), rows(b)
+    for u in sorted(set(ra) | set(rb)):
+        x, y = ra.get(u, []), rb.get(u, [])
+        for i in range(max(len(x), len(y))):
+            p = x[i] if i < len(x) else None
+            q = y[i] if i < len(y) else None
+            if p != q:
+                diffs.append((min(p[0] if p else 10**9, q[0] if q else 10**9), "unit " + u, i, p, q))
+                break
+    # events
+    for kind in ("path_to", "path_done", "join_combat", "mem_add"):
+        x = [r for r in a if r.get("ev") == kind]
+        y = [r for r in b if r.get("ev") == kind]
+        for i in range(max(len(x), len(y))):
+            p = x[i] if i < len(x) else None
+            q = y[i] if i < len(y) else None
+            if (p is None) != (q is None) or (p and (key(p) != key(q) or p["t"] != q["t"])):
+                diffs.append((min(p["t"] if p else 10**9, q["t"] if q else 10**9), kind, i, p, q))
+                break
+    inv = [r for r in b if r.get("ev") == "invalid"]
+    if inv:
+        print("replay invalid at tick", inv[0]["t"], ":", inv[0].get("why"))
+    if not diffs:
+        print("observations equal" + (" but the replay is invalid" if inv else ""))
+        return 1 if inv else 0
+    diffs.sort(key=lambda d: d[0])
+    for t, what, i, x, y in diffs[:mx]:
+        print(f"--- tick {t}: {what} #{i}")
+        print("  record:", json.dumps(x))
+        print("  replay:", json.dumps(y))
+    return 1  # any difference, or an invalidated replay, fails
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,17 @@
+[package]
+name = "wr-oracle-canon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Compares WrathOracle's live blueprint dumps with wr-content's canonical form of the same .bbp records."
+
+[dependencies]
+wr-paths.workspace = true
+wr-content.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

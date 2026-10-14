@@ -1,0 +1,60 @@
+# wgpu 30.0.1 adapter report
+adapter: Apple M2 Max (Metal, IntegratedGpu)
+driver:  
+
+## features
+TIMESTAMP_QUERY: true
+TIMESTAMP_QUERY_INSIDE_ENCODERS: false
+TIMESTAMP_QUERY_INSIDE_PASSES: false
+PIPELINE_STATISTICS_QUERY: false
+PASSTHROUGH_SHADERS: true
+TEXTURE_COMPRESSION_BC: true
+TEXTURE_COMPRESSION_BC_SLICED_3D: true
+TEXTURE_COMPRESSION_ASTC: true
+TEXTURE_COMPRESSION_ETC2: true
+FLOAT32_FILTERABLE: true
+DEPTH32FLOAT_STENCIL8: true
+INDIRECT_FIRST_INSTANCE: true
+MULTI_DRAW_INDIRECT_COUNT: false
+IMMEDIATES: true
+TEXTURE_BINDING_ARRAY: true
+DUAL_SOURCE_BLENDING: true
+SHADER_F16: true
+EXPERIMENTAL_RAY_QUERY: true
+
+## limits (selected)
+max_color_attachments: 8
+max_color_attachment_bytes_per_sample: 64
+max_bind_groups: 8
+max_sampled_textures_per_shader_stage: 96
+max_samplers_per_shader_stage: 16
+max_uniform_buffers_per_shader_stage: 29
+max_uniform_buffer_binding_size: 4294967295
+max_texture_dimension_2d: 16384
+max_vertex_buffers: 16
+max_immediate_size: 256
+
+## BC format features
+Bc1RgbaUnormSrgb: usages=TextureUsages(COPY_SRC | COPY_DST | TEXTURE_BINDING | STORAGE_BINDING) flags=TextureFormatFeatureFlags(FILTERABLE | STORAGE_READ_ONLY)
+Bc3RgbaUnormSrgb: usages=TextureUsages(COPY_SRC | COPY_DST | TEXTURE_BINDING | STORAGE_BINDING) flags=TextureFormatFeatureFlags(FILTERABLE | STORAGE_READ_ONLY)
+Bc5RgUnorm: usages=TextureUsages(COPY_SRC | COPY_DST | TEXTURE_BINDING | STORAGE_BINDING) flags=TextureFormatFeatureFlags(FILTERABLE | STORAGE_READ_ONLY)
+Bc7RgbaUnormSrgb: usages=TextureUsages(COPY_SRC | COPY_DST | TEXTURE_BINDING | STORAGE_BINDING) flags=TextureFormatFeatureFlags(FILTERABLE | STORAGE_READ_ONLY)
+
+## raw MTLDevice
+name: Apple M2 Max
+supportsFamily(Apple7): true
+supportsFamily(Apple8): true
+supportsFamily(Apple9): false
+supportsFamily(Mac2): true
+supportsFamily(Metal3): true
+supportsCounterSampling(AtStageBoundary): true
+supportsCounterSampling(AtDrawBoundary): false
+supportsCounterSampling(AtDispatchBoundary): false
+supportsCounterSampling(AtTileDispatchBoundary): false
+supportsCounterSampling(AtBlitBoundary): false
+supportsBCTextureCompression: true
+hasUnifiedMemory: true
+recommendedMaxWorkingSetSize: 25.0 GiB
+metalfx: spatial=true temporal=true frame_interpolator=true
+
+## present modes (wgpu-hal metal/adapter.rs: Fifo always; Immediate where CAMetalLayer.displaySyncEnabled exists, i.e. all current macOS). Mailbox: not offered.

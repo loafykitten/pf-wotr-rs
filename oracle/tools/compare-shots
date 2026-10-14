@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Compare two WrathOracle screenshot sets point by point (the perceptual noise floor).
+
+usage:
+  <venv>/bin/python oracle/tools/compare-shots A_ROUTE.json B_ROUTE.json [-o OUT.json] [--maps DIR]
+
+A_ROUTE/B_ROUTE are route-passN.json files from WrathOracle runs (mode "shots"); their
+screenshots are found next to them. Per point it reports pixel statistics (mean absolute
+difference, RMSE, PSNR, share of pixels differing by more than 8 and 32 levels in any
+channel, max) and, if the flip-evaluator package is installed, NVIDIA FLIP (LDR, sRGB,
+viewing conditions of Ember's display: 0.7 m from a 0.597 m wide 2560 px panel): the mean
+and the share of pixels with FLIP error above 0.05, 0.1 and 0.2. It also checks that the
+two runs' resolved camera poses match.
+Needs numpy and Pillow. venv: Wrath-Rust/cache/tools/flip-venv (pip install numpy pillow
+flip-evaluator).
+"""
+import argparse
+import json
+import math
+import os
+import sys
+
+import numpy as np
+from PIL import Image
+
+try:
+    import flip_evaluator
+except ImportError:  # optional
+    flip_evaluator = None
+
+VIEWING = [0.7, 2560, 0.597]  # metres to display, display width px, display width m
+
+
+def load(route):
+    with open(route, encoding="utf-8") as f:
+        r = json.load(f)
+    base = os.path.dirname(os.path.abspath(route))
+    return r, base
+
+
+def pose_delta(a, b):
+    if not a or not b:
+        return None
+    pa, pb = np.array(a["position"], dtype=np.float64), np.array(b["position"], dtype=np.float64)
+    qa, qb = np.array(a["rotation"], dtype=np.float64), np.array(b["rotation"], dtype=np.float64)
+    na, nb = np.linalg.norm(qa), np.linalg.norm(qb)
+    if na == 0 or nb == 0:
+        raise ValueError("zero quaternion in a camera pose")
+    dot = min(1.0, abs(float(np.dot(qa / na, qb / nb))))
+    return {
+        "position_m": float(np.linalg.norm(pa - pb)),
+        "angle_deg": math.degrees(2 * math.acos(dot)),
+        "fov_deg": abs(a["fov_vertical_deg"] - b["fov_vertical_deg"]),
+        "projection_max_abs": float(np.max(np.abs(np.array(a["projection"]) - np.array(b["projection"])))),
+        "view_max_abs": float(np.max(np.abs(np.array(a["world_to_camera"]) - np.array(b["world_to_camera"])))),
+    }
+
+
+def compare(pa, pb, maps_dir, name):
+    a = np.asarray(Image.open(pa).convert("RGB"), dtype=np.int16)
+    b = np.asarray(Image.open(pb).convert("RGB"), dtype=np.int16)
+    if a.shape != b.shape:
+        return {"error": f"size mismatch {a.shape} vs {b.shape}"}
+    d = np.abs(a - b)
+    dmax = d.max(axis=2)
+    mse = float(np.mean((a - b).astype(np.float64) ** 2))
+    out = {
+        "size": [int(a.shape[1]), int(a.shape[0])],
+        "identical": bool(dmax.max() == 0),
+        "mean_abs_diff": float(d.mean()),
+        "rmse": math.sqrt(mse),
+        "psnr_db": None if mse == 0 else 10 * math.log10(255.0 ** 2 / mse),  # None: identical
+        "share_over_8": float(np.mean(dmax > 8)),
+        "share_over_32": float(np.mean(dmax > 32)),
+        "max_abs_diff": int(dmax.max()),
+    }
+    if flip_evaluator is not None:
+        fa = (a.astype(np.float32) / 255.0)
+        fb = (b.astype(np.float32) / 255.0)
+        err, mean, _ = flip_evaluator.evaluate(fa, fb, "LDR", inputsRGB=True, applyMagma=False,
+                                               parameters={"vc": VIEWING})
+        err = np.asarray(err)
+        if err.ndim == 3:
+            err = err[..., 0]
+        out["flip_mean"] = float(mean)
+        out["flip_p99"] = float(np.percentile(err, 99))
+        out["flip_max"] = float(err.max())
+        for t in (0.05, 0.1, 0.2):
+            out[f"flip_share_over_{t}"] = float(np.mean(err > t))
+        if maps_dir:
+            os.makedirs(maps_dir, exist_ok=True)
+            Image.fromarray(np.clip(err * 255, 0, 255).astype(np.uint8)).save(os.path.join(maps_dir, name + "-flip.png"))
+    if maps_dir:
+        os.makedirs(maps_dir, exist_ok=True)
+        Image.fromarray(np.clip(dmax * 4, 0, 255).astype(np.uint8)).save(os.path.join(maps_dir, name + "-absdiff-x4.png"))
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("a")
+    ap.add_argument("b")
+    ap.add_argument("-o", "--out")
+    ap.add_argument("--maps")
+    args = ap.parse_args()
+    ra, ba = load(args.a)
+    rb, bb = load(args.b)
+    problems = []
+    if not ra["points"] or not rb["points"]:
+        problems.append("a route has no points")
+    for name, r in (("A", ra), ("B", rb)):
+        ids = [p["sample"] for p in r["points"]]
+        if len(ids) != len(set(ids)):
+            problems.append(f"route {name} has duplicate samples")
+    if len(ra["points"]) != len(rb["points"]):
+        problems.append(f"point counts differ: {len(ra['points'])} vs {len(rb['points'])}")
+    points = []
+    for x, y in zip(ra["points"], rb["points"]):
+        if x["sample"] != y["sample"] or x["name"] != y["name"]:
+            problems.append(f"point identity differs: {x['sample']}/{x['name']} vs {y['sample']}/{y['name']}")
+            continue
+        if x.get("screenshot") is None or y.get("screenshot") is None or not x.get("camera") or not y.get("camera"):
+            problems.append(f"point {x['sample']}: missing screenshot or camera pose")
+            continue
+        name = f"point{x['sample']}"
+        res = {"sample": x["sample"], "name": x["name"], "pose_delta": pose_delta(x["camera"], y["camera"])}
+        res.update(compare(os.path.join(ba, x["screenshot"]), os.path.join(bb, y["screenshot"]), args.maps, name))
+        points.append(res)
+        if "error" in res:
+            problems.append(f"point {x['sample']}: {res['error']}")
+            continue
+        flip = f" FLIP mean {res['flip_mean']:.4f} p99 {res['flip_p99']:.3f} >0.1 {res['flip_share_over_0.1'] * 100:.2f}%" if "flip_mean" in res else ""
+        psnr = "inf" if res["psnr_db"] is None else f"{res['psnr_db']:.1f}"
+        pd = res["pose_delta"]
+        print(f"point {x['sample']}: MAD {res['mean_abs_diff']:.3f} PSNR {psnr} dB "
+              f">8 {res['share_over_8'] * 100:.3f}% max {res['max_abs_diff']}{flip} "
+              f"pose dpos {pd['position_m']:.2e} m dang {pd['angle_deg']:.2e} deg")
+    if not points:
+        problems.append("nothing was compared")
+    for p in problems:
+        print("PROBLEM:", p, file=sys.stderr)
+    summary = {"a": os.path.abspath(args.a), "b": os.path.abspath(args.b), "viewing_conditions": VIEWING,
+               "flip": flip_evaluator is not None, "complete": not problems, "problems": problems, "points": points}
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, allow_nan=False)
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

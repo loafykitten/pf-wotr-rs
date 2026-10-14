@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Join WrathOracle's runtime RNG call-site table with a static classification.
+
+usage: oracle/tools/oracle-rng-table RNG-SITES.json CLASSIFICATION.tsv [TRACE.jsonl.gz ...] > table.md
+
+RNG-SITES.json is the rng-sites.json a fidelity run writes (every managed call site of
+UnityEngine.Random the oracle found by scanning IL, with whether it was transpiled).
+CLASSIFICATION.tsv is the static per-site classification (Codex's TSV: assembly, file,
+line, containing type, containing method, member, arguments, category, t0, note).
+Traces, if given, add how often each site drew in those fixtures. Prints a summary by
+category and coverage, then one row per site.
+"""
+import collections
+import gzip
+import json
+import sys
+
+
+def short(t):
+    t = (t or "").split("+")[0]
+    return t.split(".")[-1]
+
+
+def last(t):
+    return (t or "").replace("+", ".").split(".")[-1]
+
+
+def main(argv):
+    sites = json.load(open(argv[0]))
+    rows = []
+    with open(argv[1]) as f:
+        for line in f:
+            p = line.rstrip("\n").split("\t")
+            if len(p) >= 9 and p[0] != "assembly":
+                rows.append(p)
+    by_key = collections.defaultdict(list)
+    for p in rows:
+        m = p[4].split("(")[0].split("<")[0]
+        by_key[(short(p[3]), m)].append(p)
+        by_key[(last(p[3]), m)].append(p)
+    draws = collections.Counter()
+    for t in argv[2:]:
+        with gzip.open(t, "rt") as f:
+            for line in f:
+                if '"k":"draw"' in line:
+                    r = json.loads(line)
+                    draws[r.get("key") or r["site"]] += 1
+    out = []
+    summary = collections.defaultdict(lambda: collections.Counter())
+    for s in sites["sites"]:
+        typ = s["type"] or ""
+        method = s["method"].split("(")[0].split("`")[0]
+        outer = typ.split("+")[0]
+        inner = typ.replace("+", ".").split(".")[-1]
+        cand = by_key.get((short(outer), method)) or by_key.get((inner, method)) or by_key.get((short(typ), method))
+        if cand is None and "<" in typ:  # compiler-generated: lambdas, iterators
+            host = typ.split("+")[0]
+            cand = [p for (k, m), ps in by_key.items() if k == short(host) for p in ps]
+        cat = cand[0][7] if cand else "unclassified"
+        t0 = cand[0][8] if cand else "?"
+        cov = "transpiled" if s["transpiled"] else ("global hook" if s["generic"] and s["member"].startswith(("Range(int", "get_inside", "get_onUnit", "get_rotation")) else ("gap-detected only" if not s["disabled"] else "disabled"))
+        cls = "pres" if s.get("presentation") else "sim"
+        summary[cat][cov] += 1
+        summary[cat]["sim" if cls == "sim" else "pres"] += 1
+        summary[cat]["t0=" + t0] += 1
+        out.append((cat, typ, s["method"], s["member"], cov, cls, t0, draws.get(s["id"], 0)))
+    print("| Category | Sites | Transpiled | Global hook only | Gap-detected only | Class sim / pres | T0 yes / maybe / no |")
+    print("|---|---|---|---|---|---|---|")
+    for cat in sorted(summary):
+        c = summary[cat]
+        n = c["transpiled"] + c["global hook"] + c["gap-detected only"] + c["disabled"]
+        print(f"| {cat} | {n} | {c['transpiled']} | {c['global hook']} | {c['gap-detected only']} | {c['sim']} / {c['pres']} | {c['t0=yes']} / {c['t0=maybe']} / {c['t0=no']} |")
+    print()
+    print("| Category | Type | Method | Member | Coverage | Class | T0 | Draws in the given traces |")
+    print("|---|---|---|---|---|---|---|---|")
+    for r in sorted(out):
+        print("| " + " | ".join(str(x).replace("|", "/") for x in r) + " |")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

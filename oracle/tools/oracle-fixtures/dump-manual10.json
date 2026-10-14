@@ -1,0 +1,6 @@
+{
+  "fidelity": false,
+  "save": "Manual_10_Defender_s_Heart",
+  "area": "any",
+  "steps": ["load", "settle:2", "state:manual10-after-load", "quit"]
+}

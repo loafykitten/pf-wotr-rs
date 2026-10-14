@@ -1,0 +1,4 @@
+/target/
+/assets/
+# Raw per-frame and per-pipeline CSVs stay local; summaries are committed.
+results/**/*.csv

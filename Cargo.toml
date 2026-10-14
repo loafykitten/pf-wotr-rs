@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+# Spikes are standalone workspaces (own lockfile and target/) so they build in
+# parallel without contending for this workspace's lock. Promote code out of them
+# into crates/ once a spike has decided something.
+exclude = ["spikes/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+wr-paths = { path = "crates/wr-paths" }
+wr-content = { path = "crates/wr-content" }
+anyhow = "1.0"
+libc = "0.2"
+clap = { version = "4.6", features = ["derive"] }
+memmap2 = "0.9"
+rayon = "1.12"
+rkyv = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+zstd = { version = "0.13", default-features = false }
+wr-save = { path = "crates/wr-save" }
+wr-assets = { path = "crates/wr-assets" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+# Bevy's recommendation: keep our code quick to build, optimise dependencies.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

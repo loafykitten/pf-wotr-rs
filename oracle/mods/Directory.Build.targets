@@ -1,0 +1,23 @@
+<Project>
+  <!-- Game references: list names in @(WrathRef) (from Managed/) or @(UmmRef) (from Managed/UnityModManager/). -->
+  <ItemGroup>
+    <Reference Include="@(WrathRef)" HintPath="$(WrathManaged)/%(Identity).dll" Private="false" />
+    <Reference Include="@(UmmRef)" HintPath="$(WrathManaged)/UnityModManager/%(Identity).dll" Private="false" />
+  </ItemGroup>
+
+  <!-- Copy the mod into <build>/Mods/<Project>/ after every build. -->
+  <Target Name="InstallMod" AfterTargets="Build" Condition="Exists('$(WrathBuild)/Mods')">
+    <ItemGroup>
+      <ModFiles Include="$(TargetPath);$(TargetDir)$(TargetName).pdb;Info.json" />
+    </ItemGroup>
+    <!-- Don't swap a DLL under a running game; rebuild after quitting. -->
+    <Exec Command="pgrep -qx 'Pathfinder Wrath Of The Righteous'" IgnoreExitCode="true" StandardOutputImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="WrathRunningCode" />
+    </Exec>
+    <!-- pgrep: 0 = running, 1 = not running, anything else = couldn't tell (don't install). -->
+    <Warning Condition="'$(WrathRunningCode)' == '0'" Text="Wrath is running: not installing $(MSBuildProjectName). Quit the game and rebuild." />
+    <Warning Condition="'$(WrathRunningCode)' != '0' and '$(WrathRunningCode)' != '1'" Text="pgrep failed (exit $(WrathRunningCode)): not installing $(MSBuildProjectName)." />
+    <Copy Condition="'$(WrathRunningCode)' == '1'" SourceFiles="@(ModFiles)" DestinationFolder="$(ModInstallDir)" SkipUnchangedFiles="true" />
+    <Message Condition="'$(WrathRunningCode)' == '1'" Importance="high" Text="Installed $(MSBuildProjectName) -> $(ModInstallDir)" />
+  </Target>
+</Project>

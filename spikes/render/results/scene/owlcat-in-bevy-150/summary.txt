@@ -1,0 +1,52 @@
+# scene run results/scene/owlcat-in-bevy-150
+config: Args { count: 150, parts: 1, present: Fifo, latency: 2, seconds: 5.0, warmup: 1.0, gate: true, windowed: true, variants: true, refresh_hz: 240.0, shadows: true, owlcat: true, pipelined: true, out: "results/scene/owlcat-in-bevy-150" }
+layer: maximumDrawableCount=3 displaySyncEnabled=true
+instances: 150 skinned scene instances (150 characters x 1 parts)
+load: 0.923 s to first visible frame (gate=true)
+pipelines: 62 at load, 62 at end (62 ok, 0 pending, 0 err); timed: created 58 in 274.3 ms of process_queue (4.73 ms/pipeline); untimed (built elsewhere, e.g. upscaling's block_on): 4
+pipelines added to the cache after the first visible frame (all creation paths): 0
+  of which timed: 0 (in 0 frames, max 0.0 ms)
+drawables acquired while recording: 644; presented handlers: 644; shown: 644; dropped (presentedTime=0): 0
+
+## intervals (ms)
+displayed (presentedTime)  n=643 mean=7.758 p01=4.167 p50=8.334 p95=12.502 p99=16.669 p99.9=20.836 max=20.836 sd=3.442
+app frame (First schedule) n=643 mean=7.767 p01=4.658 p50=7.014 p95=12.988 p99=16.570 p99.9=18.088 max=18.088 sd=2.945
+acquire->displayed         n=644 mean=18.777 p01=11.742 p50=15.921 p95=28.375 p99=28.449 p99.9=32.568 max=32.568 sd=4.667
+GPU frame (timestamps)     n=647 mean=6.210 p01=3.165 p50=4.235 p95=11.570 p99=12.621 p99.9=14.917 max=14.917 sd=3.144
+GPU frame (MTLCommandBuffer) n=647 mean=6.000 p01=3.046 p50=4.100 p95=11.447 p99=12.780 p99.9=13.319 max=13.319 sd=3.024
+displayed: >5.0ms 390 | >8.33ms 390 | >16.7ms 2 | >33ms 0 | >50ms 0
+app frame: >5.0ms 580 | >8.33ms 181 | >16.7ms 6 | >33ms 0 | >50ms 0
+displayed vsync multiples (period 4.167 ms): 1x 253 | 2x 241 | 3x 136 | 4x 11 | >=5x 2
+displayed rate: 128.9 Hz (from mean interval)
+
+## Bevy RenderDiagnosticsPlugin (mean over its history window)
+spans: 10 (0 elapsed_gpu)
+render/auxiliary_views/elapsed_cpu: 0.4735
+render/bin_unpacking/elapsed_cpu: 0.0009
+render/clustering/elapsed_cpu: 0.0076
+render/early_mesh_preprocessing/elapsed_cpu: 0.0009
+render/main_opaque_pass_3d/elapsed_cpu: 0.0100
+render/main_transparent_pass_3d/elapsed_cpu: 0.0105
+render/per_view_shadow_pass/elapsed_cpu: 0.0076
+render/ui/elapsed_cpu: 0.0064
+render/uniform_allocation/elapsed_cpu: 0.0012
+render/upscaling/elapsed_cpu: 0.0015
+
+## Owlcat passthrough inside Bevy
+owlcat in Bevy: built on Bevy's RenderDevice
+vs: 4 bindings, 4 vertex inputs; fs: 10 bindings, 6 colour outputs
+create: vs module 0.07 ms, fs module 0.05 ms, render pipeline 0.33 ms
+constant-buffer members written by name: 24
+after 60 Bevy frames:
+checks at 81 interior pixels:
+  normals: worst dot(decoded RT1, analytic) = 0.99997
+  BC1 albedo (RT0): 64/64 exact texel colour at the analytic UV (17 near cell edges skipped)
+  metallic, smoothness, emission, baked GI, shadowmask, translucency: expected values (bytes within 1, floats within 0.002)
+verdict: normals PASS | BC1 albedo PASS | other targets PASS
+
+
+summary columns: n,mean,min,p01,p50,p95,p99,p999,max,stddev
+displayed,643,7.7577,4.1671,4.1672,8.3344,12.5017,16.6689,20.8361,20.8361,3.4420
+app_frame,643,7.7666,4.2919,4.6580,7.0138,12.9878,16.5703,18.0878,18.0878,2.9455
+gpu_ts,647,6.2098,2.9572,3.1652,4.2349,11.5702,12.6207,14.9171,14.9171,3.1438
+gpu_cb,647,6.0003,2.9996,3.0465,4.1000,11.4465,12.7800,13.3192,13.3192,3.0238

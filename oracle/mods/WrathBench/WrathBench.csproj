@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <WrathRef Include="Assembly-CSharp;DXTCompressor;UnityEngine;UnityEngine.CoreModule;UnityEngine.JSONSerializeModule;UnityEngine.ScreenCaptureModule" />
+    <UmmRef Include="UnityModManager;0Harmony" />
+    <Reference Include="WrathStats" HintPath="$(WrathBuild)/Mods/WrathStats/WrathStats.dll" Private="false" />
+  </ItemGroup>
+</Project>

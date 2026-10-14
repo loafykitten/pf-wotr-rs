@@ -1,0 +1,68 @@
+{
+ "plan": {
+  "fixedDelta": 0.016666668,
+  "seed": 20261011,
+  "blueprintList": "cache/oracle/blueprint-corpus.txt"
+ },
+ "fixtures": [
+  {
+   "name": "dialog-checks",
+   "steps": [
+    "move:109,40.3,129.5",
+    "waitdialog",
+    "answer:0",
+    "answer:0",
+    "answer:0",
+    "answerbp:9cd8308b0fc6506459bf1e98456b94bf",
+    "answer?:0",
+    "answer?:0",
+    "answer?:0",
+    "answer?:0",
+    "answer?:0",
+    "answer?:0",
+    "wait:30"
+   ],
+   "replays": 1,
+   "perturb": [
+    "d20#7:+8"
+   ]
+  },
+  {
+   "name": "dice",
+   "steps": [
+    "wait:10",
+    "rolldice:3:6",
+    "wait:5",
+    "d20reroll",
+    "wait:5",
+    "skillcheck:SkillAthletics:30:true",
+    "wait:5",
+    "skillcheck:SkillAthletics:5:false",
+    "wait:5",
+    "skillcheck:SkillPerception:12",
+    "wait:5",
+    "tempmod:SkillPerception:15:4",
+    "wait:5",
+    "savebonus:Fortitude:14:2",
+    "wait:10"
+   ],
+   "replays": 1,
+   "perturb": [
+    "d20#1:+5"
+   ]
+  },
+  {
+   "name": "attack",
+   "steps": [
+    "teleport:50.4,34.5,154.2",
+    "run:60",
+    "attack:cd057d4d28be9fc46949fa1148bece7f",
+    "run:900"
+   ],
+   "replays": 1
+  }
+ ],
+ "after": [
+  "blueprints:slice"
+ ]
+}

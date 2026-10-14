@@ -1,0 +1,11 @@
+{
+  "Id": "WrathBench",
+  "DisplayName": "WrathBench (benchmark driver)",
+  "Author": "Ember",
+  "Version": "0.1.1",
+  "ManagerVersion": "0.32.0",
+  "Requirements": ["WrathStats"],
+  "LoadAfter": ["WrathStats"],
+  "AssemblyName": "WrathBench.dll",
+  "EntryMethod": "WrathBench.Main.Load"
+}

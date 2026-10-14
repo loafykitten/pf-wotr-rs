@@ -1,0 +1,9 @@
+{
+  "Id": "WrathStats",
+  "DisplayName": "WrathStats",
+  "Author": "Ember",
+  "Version": "0.2.5",
+  "ManagerVersion": "0.32.0",
+  "AssemblyName": "WrathStats.dll",
+  "EntryMethod": "WrathStats.Main.Load"
+}

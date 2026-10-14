@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""Summarize a WrathStats session folder as markdown, or compare two sessions.
+
+usage:
+  oracle/tools/summarize-run [RUN_DIR] [-o OUT.md]
+  oracle/tools/summarize-run --compare RUN_A RUN_B [-o OUT.md]
+
+RUN_DIR defaults to the newest session under the game's WrathStats folder. Standard
+library only (runs on macOS's /usr/bin/python3, 3.9).
+"""
+import argparse
+import csv
+import json
+import math
+import os
+import struct
+import sys
+from collections import Counter, defaultdict
+
+DEFAULT_ROOT = os.path.expanduser(
+    "~/Library/Application Support/Owlcat Games/Pathfinder Wrath Of The Righteous/WrathStats")
+
+# frames.bin flag bits (mods/WrathStats/Core/Records.cs, FrameFlags)
+GAME, MENU, LOADING, COMBAT, TURN_BASED, PAUSED, GC, EXTERNAL = (1 << i for i in range(8))
+# WSFRAME1 (0.1.x): uint32 us + flags. WSFRAME2 (0.2+): + game mode index byte.
+FRAME_FORMATS = {b"WSFRAME1": "<IB", b"WSFRAME2": "<IBB"}
+
+CUTSCENE = {"Cutscene", "CutsceneGlobalMap"}
+
+# Predicates take (flags, mode name or None). Groups marked True need per-frame modes
+# (WSFRAME2, WrathStats 0.2+); they're shown as unavailable for older runs rather than
+# silently including cutscenes and dialogs.
+NEEDS_MODE = {"cutscenes", "dialogs", "exploring (real-time, no combat)"}
+GROUPS = [
+    ("all in-game", lambda f, m: f & GAME),
+    ("cutscenes", lambda f, m: f & GAME and m in CUTSCENE),
+    ("dialogs", lambda f, m: f & GAME and m == "Dialog"),
+    ("exploring (real-time, no combat)",
+     lambda f, m: f & GAME and not f & COMBAT and m not in CUTSCENE and m != "Dialog"),
+    ("real-time combat", lambda f, m: f & GAME and f & COMBAT and not f & TURN_BASED),
+    ("turn-based combat", lambda f, m: f & GAME and f & TURN_BASED),
+]
+
+
+class Run:
+    def __init__(self, path):
+        self.path = os.path.abspath(path)
+        self.has_modes = False
+        self.session = self._json("session.json")
+        self.seconds = self._seconds()
+        self.events = self._events()
+        self.frames = self._frames()
+        self.hitch_ms = float(self.session.get("hitch_threshold_ms", 50))
+
+    def _json(self, name):
+        with open(os.path.join(self.path, name), encoding="utf-8") as f:
+            return json.load(f)
+
+    def _seconds(self):
+        p = os.path.join(self.path, "seconds.csv")
+        if not os.path.exists(p):
+            return []
+        with open(p, encoding="utf-8", newline="") as f:
+            return list(csv.DictReader(f))
+
+    def _events(self):
+        out = []
+        p = os.path.join(self.path, "events.jsonl")
+        if not os.path.exists(p):
+            return out
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        pass  # a line cut off by a crash
+        return out
+
+    def _frames(self):
+        p = os.path.join(self.path, "frames.bin")
+        if not os.path.exists(p):
+            return []
+        with open(p, "rb") as f:
+            data = f.read()
+        fmt_ = FRAME_FORMATS.get(data[:8])
+        if fmt_ is None:
+            raise SystemExit(f"{p}: not a WrathStats frames file")
+        size = struct.calcsize(fmt_)
+        body = data[8:]
+        body = body[: len(body) - len(body) % size]
+        modes = self.session.get("modes", {})
+        # (frame ms, flags, mode name or None, session seconds at the end of the frame)
+        out, t = [], 0.0
+        for rec in struct.iter_unpack(fmt_, body):
+            ms = rec[0] / 1000.0
+            t += ms / 1000.0
+            mode = modes.get(str(rec[2])) if len(rec) > 2 else None
+            out.append((ms, rec[1], mode, t))
+        self.has_modes = fmt_ == FRAME_FORMATS[b"WSFRAME2"]
+        return out
+
+    def name(self):
+        return os.path.basename(self.path)
+
+    def dropped_frames(self):
+        """Frame records the recorder had to drop (from the session-end note), or None."""
+        for e in self.events:
+            text = e.get("text", "")
+            if e.get("kind") == "note" and "dropped frames=" in text:
+                try:
+                    return int(text.split("dropped frames=")[1].split()[0])
+                except (IndexError, ValueError):
+                    return None
+        return None
+
+    def kind(self, k):
+        return [e for e in self.events if e.get("kind") == k]
+
+
+def pct(sorted_vals, p):
+    if not sorted_vals:
+        return float("nan")
+    idx = max(0, min(len(sorted_vals) - 1, math.ceil(p * len(sorted_vals)) - 1))
+    return sorted_vals[idx]
+
+
+def median(vals):
+    vals = sorted(vals)
+    return pct(vals, 0.5) if vals else float("nan")
+
+
+def frame_stats(run, pred, label=None):
+    if label in NEEDS_MODE and not run.has_modes:
+        return None
+    ms = sorted(ms for ms, f, mode, _ in run.frames if pred(f, mode))
+    n = len(ms)
+    if n == 0:
+        return None
+    total_s = sum(ms) / 1000.0
+    mean = sum(ms) / n
+    return {
+        "frames": n,
+        "minutes": total_s / 60.0,
+        "fps": 1000.0 / mean if mean else float("nan"),
+        "mean": mean,
+        "p50": pct(ms, 0.50),
+        "p95": pct(ms, 0.95),
+        "p99": pct(ms, 0.99),
+        "p999": pct(ms, 0.999),
+        "max": ms[-1],
+        "over33": 100.0 * sum(1 for m in ms if m > 33.3) / n,
+        "over50": 100.0 * sum(1 for m in ms if m > 50.0) / n,
+        "hitches_per_min": sum(1 for m in ms if m >= run.hitch_ms) / (total_s / 60.0) if total_s else 0.0,
+    }
+
+
+def passes(run, min_game_s=1.0):
+    """In-game stretches between loads. Each benchmark pass (e.g. a cold and a warm play
+    of the same cutscene) is one of these, so they can be compared side by side."""
+    # Saves pause play briefly (their frames are flagged loading, so they're excluded
+    # anyway); they don't start a new pass.
+    loads = sorted((e for e in run.kind("load") if e.get("reason") != "save"), key=lambda e: e["t"])
+    bounds, start, after = [], 0.0, None
+    for e in loads:
+        bounds.append((start, e["t"], after))
+        start, after = e["t"] + e["ms"] / 1000.0, e
+    bounds.append((start, float("inf"), after))
+    # 0.2.1+ load events carry frame indices (frame k is run.frames[k - 1]); use those,
+    # since summed frame durations drift slightly from the loads' own timestamps.
+    by_index = bool(loads) and all("frame" in e and "end_frame" in e for e in loads) and not run.dropped_frames()
+    if by_index:
+        bounds, first, after = [], 1, None
+        for e in loads:
+            bounds.append((first, e["frame"] - 1, after))
+            first, after = e["end_frame"] + 1, e
+        bounds.append((first, len(run.frames), after))
+    out = []
+    for lo, hi, after in bounds:
+        if by_index:
+            seg = run.frames[max(0, lo - 1):max(0, hi)]
+            frames = [(ms, f, mode) for ms, f, mode, _ in seg if f & GAME]
+            start_t = run.frames[lo - 1][3] if 0 < lo <= len(run.frames) else 0.0
+        else:
+            frames = [(ms, f, mode) for ms, f, mode, t in run.frames if lo < t <= hi and f & GAME]
+            start_t = lo
+        game_s = sum(ms for ms, _, _ in frames) / 1000.0
+        if game_s < min_game_s:
+            continue
+        ms_sorted = sorted(ms for ms, _, _ in frames)
+        cut = [ms for ms, _, mode in frames if mode in CUTSCENE]
+        out.append({
+            "start": start_t,
+            "after": (after.get("reason") or "?") if after else "session start",
+            "area": (after.get("area") if after else None) or "",
+            "game_s": game_s,
+            "cutscene_s": sum(cut) / 1000.0,
+            "hitches": sum(1 for ms in ms_sorted if ms >= run.hitch_ms),
+            "cutscene_hitches": sum(1 for ms in cut if ms >= run.hitch_ms),
+            "p95": pct(ms_sorted, 0.95),
+            "p99": pct(ms_sorted, 0.99),
+            "max": ms_sorted[-1],
+        })
+    return out
+
+
+def fmt(v, d=1):
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return "–"
+    return f"{v:,.{d}f}"
+
+
+def mb(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+    return v / (1024 * 1024) if v >= 0 else float("nan")
+
+
+def table(headers, rows):
+    out = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+    out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
+    return "\n".join(out)
+
+
+def memory(run):
+    game_rows = [s for s in run.seconds if s.get("state") == "game"]
+    rows = game_rows or run.seconds
+    if not rows:
+        return None
+
+    def series(col):
+        return [mb(r.get(col)) for r in rows if r.get(col) not in (None, "")]
+
+    out = {}
+    for col, label in (("resident_bytes", "resident"), ("mono_heap_bytes", "mono heap"),
+                       ("mono_used_bytes", "mono used"), ("unity_reserved_bytes", "unity reserved")):
+        s = [v for v in series(col) if not math.isnan(v)]
+        if s:
+            out[label] = (s[0], s[-1], max(s))
+    # dt_s: the row's interval (longer than 1 s after a stall); older files lack it.
+    game_s = sum(float(r.get("dt_s") or 1.0) for r in rows)
+    gcs = sum(int(r.get("gc_count") or 0) for r in rows)
+    out["gc_per_min"] = gcs / (game_s / 60.0) if game_s else float("nan")
+    out["scope"] = "in-game seconds" if game_rows else "whole session; no in-game seconds"
+    return out
+
+
+def summarize(run):
+    s = run.session
+    plat = s.get("platform", {})
+    sysi = s.get("system", {})
+    disp = s.get("display", {})
+    q = s.get("quality", {})
+    lines = [f"# WrathStats run {run.name()}", ""]
+    rosetta = plat.get("rosetta")
+    lines.append(
+        f"- **Build:** game {s.get('game_version')}, Unity {s.get('unity_version')}, "
+        f"process {plat.get('process_arch')} ({'Rosetta' if rosetta else 'native'}), "
+        f"`{s.get('data_path', '').replace('/Contents/Resources/Data', '')}`")
+    lines.append(
+        f"- **Machine:** {plat.get('hw_model')} ({plat.get('cpu_brand')}), {sysi.get('graphics_device_name')} "
+        f"via {sysi.get('graphics_device_type')}, macOS {plat.get('os_version')}")
+    lines.append(
+        f"- **Display:** {disp.get('screen_width')}x{disp.get('screen_height')} "
+        f"({disp.get('fullscreen_mode')}), vsync {q.get('vsync_count')}, target fps {q.get('target_frame_rate')}, "
+        f"quality '{q.get('level_name')}'")
+    mods = ", ".join(f"{m['id']} {m['version']}" for m in s.get("mods", []) if m.get("active"))
+    lines.append(f"- **Mods:** {mods or 'none'}")
+    gc = s.get("gc", {})
+    lines.append(f"- **GC:** {gc.get('mode')}, incremental={gc.get('incremental')}")
+    lines.append("")
+
+    lines.append("## Frame times (ms)")
+    lines.append("")
+    rows = []
+    for label, pred in GROUPS:
+        st = frame_stats(run, pred, label)
+        if st is None:
+            rows.append([label, "–"] + ["–"] * 9)
+            continue
+        rows.append([label, fmt(st["minutes"]), fmt(st["fps"]), fmt(st["p50"]), fmt(st["p95"]), fmt(st["p99"]),
+                     fmt(st["p999"]), fmt(st["max"]), fmt(st["over33"], 2), fmt(st["over50"], 2),
+                     fmt(st["hitches_per_min"], 2)])
+    lines.append(table(["context", "min", "fps", "p50", "p95", "p99", "p99.9", "max", "% >33", "% >50",
+                        f"hitches/min (≥{run.hitch_ms:g})"], rows))
+    lines.append("")
+
+    ps = passes(run)
+    if len(ps) > 1:
+        lines.append("## Passes (in-game stretches between loads)")
+        lines.append("")
+        rows = [[i + 1, fmt(p_["start"]), p_["after"], p_["area"], fmt(p_["game_s"] / 60.0),
+                 fmt(p_["cutscene_s"] / 60.0), p_["hitches"], p_["cutscene_hitches"],
+                 fmt(p_["p95"]), fmt(p_["p99"]), fmt(p_["max"])] for i, p_ in enumerate(ps)]
+        lines.append(table(["#", "starts (s)", "after", "area", "in-game min", "cutscene min", "hitches",
+                            "in cutscenes", "p95", "p99", "max"], rows))
+        lines.append("")
+
+    hitches = run.kind("hitch")
+    lines.append(f"## Hitches (in-game frames ≥ {run.hitch_ms:g} ms): {len(hitches)}")
+    lines.append("")
+    if hitches:
+        n = len(hitches)
+        gc_n = sum(1 for h in hitches if h.get("gc"))
+        ext_n = sum(1 for h in hitches if h.get("external"))
+        near_load = sum(1 for h in hitches if h.get("since_load_s") is not None and h["since_load_s"] < 15)
+        worst = sorted(hitches, key=lambda h: -h["ms"])[:5]
+        lines.append(f"- With a GC in the same frame: **{gc_n} ({100.0 * gc_n / n:.0f}%)**")
+        lines.append(f"- Within 15 s after a load (likely warm-up: shaders, assets): {near_load} ({100.0 * near_load / n:.0f}%)")
+        lines.append(f"- During another mod's reported work (WrathStatsApi): {ext_n}")
+        lines.append(f"- Median {fmt(median([h['ms'] for h in hitches]))} ms; worst: "
+                     + ", ".join(f"{fmt(h['ms'])} ms @ {fmt(h['t'])} s" for h in worst))
+        lines.append("")
+        by_ctx = defaultdict(list)
+        for h in hitches:
+            fight = "turn-based" if h.get("turn_based") else "combat" if h.get("combat") else "no combat"
+            by_ctx[(h.get("area") or "?", h.get("mode") or "?", fight)].append(h)
+        rows = []
+        for (area, mode, fight), hs in sorted(by_ctx.items(), key=lambda kv: -len(kv[1]))[:10]:
+            rows.append([area, mode, fight, len(hs), fmt(median([h["ms"] for h in hs])),
+                         fmt(max(h["ms"] for h in hs)), sum(1 for h in hs if h.get("gc"))])
+        lines.append(table(["area", "mode", "fight", "hitches", "median ms", "max ms", "with GC"], rows))
+        lines.append("")
+
+    loads = run.kind("load")
+    lines.append(f"## Loads and saves: {len(loads)}")
+    lines.append("")
+    if loads:
+        rows = []
+        for e in loads:
+            what = e.get("reason") or "?"
+            if e.get("save_type"):
+                what += f" ({e['save_type']})"
+            where = e.get("area") or ""
+            if e.get("area_before") and e.get("area_before") != e.get("area"):
+                where = f"{e['area_before']} → {where}"
+            rows.append([fmt(e["t"]), what, where, fmt(e["ms"] / 1000.0, 2), e.get("frames"),
+                         fmt(e.get("max_frame_ms")), e.get("gc"), ",".join(e.get("tags") or [])])
+        lines.append(table(["t (s)", "what", "area", "seconds", "frames", "max frame ms", "GCs", "tags"], rows))
+        lines.append("")
+        by_reason = defaultdict(list)
+        for e in loads:
+            by_reason[e.get("reason") or "?"].append(e["ms"] / 1000.0)
+        lines.append("Median by kind: " + ", ".join(
+            f"{r} {fmt(median(v), 2)} s (n={len(v)})" for r, v in sorted(by_reason.items())))
+        lines.append("")
+
+    mem = memory(run)
+    if mem:
+        lines.append(f"## Memory (MB, {mem['scope']}: first → last, max)")
+        lines.append("")
+        for label in ("resident", "mono heap", "mono used", "unity reserved"):
+            if label in mem:
+                a, b, m = mem[label]
+                lines.append(f"- {label}: {fmt(a, 0)} → {fmt(b, 0)} (max {fmt(m, 0)})")
+        lines.append(f"- GC collections per minute: {fmt(mem['gc_per_min'], 2)}")
+        lines.append("")
+
+    markers = run.kind("marker")
+    if markers:
+        lines.append(f"## Markers: {len(markers)}")
+        lines.append("")
+        lines += [f"- {fmt(m['t'])} s: {m.get('area')} / {m.get('mode')}" for m in markers]
+        lines.append("")
+
+    notes = [e.get("text", "") for e in run.kind("note")]
+    drops = [t for t in notes if "dropped" in t and not t.endswith("frames=0 seconds=0 events=0")]
+    if drops:
+        lines.append("**Warning:** records were dropped: " + "; ".join(drops))
+        lines.append("")
+    if not any(t.startswith("session end") for t in notes):
+        lines.append("_No session-end note: the game probably crashed or is still running._")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def key_metrics(run):
+    m = {}
+    for label, pred in GROUPS:
+        st = frame_stats(run, pred, label)
+        if st:
+            for k in ("fps", "p50", "p95", "p99", "p999", "max", "over50", "hitches_per_min"):
+                m[f"{label}: {k}"] = st[k]
+    for i, p_ in enumerate(passes(run)):
+        m[f"pass {i + 1}: hitches"] = p_["hitches"]
+        m[f"pass {i + 1}: p99"] = p_["p99"]
+    hitches = run.kind("hitch")
+    m["hitches"] = len(hitches)
+    m["hitches with GC %"] = 100.0 * sum(1 for h in hitches if h.get("gc")) / len(hitches) if hitches else float("nan")
+    by_reason = defaultdict(list)
+    for e in run.kind("load"):
+        by_reason[e.get("reason") or "?"].append(e["ms"] / 1000.0)
+    for r, v in sorted(by_reason.items()):
+        m[f"load {r}: median s"] = median(v)
+    mem = memory(run)
+    if mem:
+        if "resident" in mem:
+            m["resident max MB"] = mem["resident"][2]
+        m["GC per min"] = mem["gc_per_min"]
+    return m
+
+
+def compare(a, b):
+    ma, mb_ = key_metrics(a), key_metrics(b)
+    keys = list(ma) + [k for k in mb_ if k not in ma]
+    rows = []
+    for k in keys:
+        va, vb = ma.get(k), mb_.get(k)
+        delta = "–"
+        if isinstance(va, (int, float)) and isinstance(vb, (int, float)) and va and not math.isnan(va) and not math.isnan(vb):
+            delta = f"{100.0 * (vb - va) / va:+.1f}%"
+        rows.append([k, fmt(va, 2) if va is not None else "–", fmt(vb, 2) if vb is not None else "–", delta])
+
+    def label(r):
+        p = r.session.get("platform", {})
+        return f"{r.name()} ({'Rosetta' if p.get('rosetta') else 'native'})"
+
+    return "\n".join([
+        f"# WrathStats comparison", "",
+        f"- A: {label(a)}", f"- B: {label(b)}", "",
+        "Lower is better for frame times, hitches and load times; higher is better for fps.", "",
+        table(["metric", "A", "B", "B vs A"], rows), ""])
+
+
+def newest_run(root):
+    if not os.path.isdir(root):
+        raise SystemExit(f"no WrathStats folder at {root}")
+    runs = sorted(d for d in os.listdir(root) if os.path.isfile(os.path.join(root, d, "session.json")))
+    if not runs:
+        raise SystemExit(f"no sessions in {root}")
+    return os.path.join(root, runs[-1])
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("run", nargs="?", help="session folder (default: newest)")
+    ap.add_argument("--compare", nargs=2, metavar=("RUN_A", "RUN_B"))
+    ap.add_argument("-o", "--out", help="write markdown here instead of stdout")
+    args = ap.parse_args()
+
+    if args.compare:
+        text = compare(Run(args.compare[0]), Run(args.compare[1]))
+    else:
+        text = summarize(Run(args.run or newest_run(DEFAULT_ROOT)))
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"wrote {args.out}")
+    else:
+        print(text)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

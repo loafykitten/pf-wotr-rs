@@ -1,0 +1,18 @@
+<Project>
+  <!-- Shared settings for the oracle's UMM mods. Game DLLs are referenced from the oracle's build
+       copy (never the Steam install) and are not copied to output. Override the build with
+       -p:WrathBuild=<path to builds/<name>>. -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <DebugType>portable</DebugType>
+    <WrathBuild Condition="'$(WrathBuild)' == ''">$(MSBuildThisFileDirectory)../../builds/arm64-oracle</WrathBuild>
+    <WrathManaged>$(WrathBuild)/Wrath.app/Contents/Resources/Data/Managed</WrathManaged>
+    <ModInstallDir>$(WrathBuild)/Mods/$(MSBuildProjectName)</ModInstallDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

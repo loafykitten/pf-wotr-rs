@@ -1,0 +1,358 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using UnityEngine;
+
+namespace WrathOracle;
+
+// Fixture windows: record a fixture, or replay it from its own recorded trace.
+//
+// Recording: Time.captureDeltaTime is fixed (Driver.FixedDelta, 1/60 s by default), so every
+// frame advances Unity time (and therefore TimeController's raw delta, animation and
+// physics) by the same amount whatever the real frame rate; the generator is seeded with
+// Driver.Seed; the trace starts. The window normally spans a reload of the save, so the
+// fixture starts from the save's state.
+// Replaying: the same plan steps run again with the same fixed delta, but the generator is
+// seeded differently and every hooked draw returns the recorded value (Rng tape, strict).
+// The replay's trace must equal the recording's, apart from fields that are expected to
+// differ (frame numbers, generator states, gaps, "forced"/"match"); tools/oracle-trace-diff
+// compares them.
+internal static class Fixture
+{
+    public static string Name, Mode, PathNow;
+    private static string _saveFile; // the window's source save, for both its start and end dumps
+    private static readonly Dictionary<string, int> Replays = new Dictionary<string, int>();
+    public static readonly List<string> Results = new List<string>();
+    public static readonly List<Dictionary<string, object>> HealthRecords = new List<Dictionary<string, object>>();
+
+    public static string Dir(Plan plan, string name) => Path.Combine(plan.Out, "fixtures", name);
+
+    public static void Begin(Plan plan, string name, bool replay, string perturb, string saveFile, List<string> stepsAhead)
+    {
+        if (Trace.Active) End();
+        var dir = Dir(plan, name);
+        Directory.CreateDirectory(dir);
+        Name = name;
+        Mode = replay ? "replay" : "record";
+        _saveFile = saveFile;
+        var record = Path.Combine(dir, "record.trace.jsonl.gz");
+        if (replay)
+        {
+            Replays.TryGetValue(name, out var k);
+            Replays[name] = ++k;
+            var tag = string.IsNullOrEmpty(perturb) ? $"replay-{k}" : $"replay-{k}-perturbed";
+            PathNow = Path.Combine(dir, tag + ".trace.jsonl.gz");
+        }
+        else PathNow = record;
+        var prePath = PrePathSync.Stop(); // before the window's own path sync (held pre-window paths go back first)
+        Rng.ResetWindow();
+        Hooks.ResetWindow();
+        // Turn-based windows (the plan has a "tbm:" step ahead) get deterministic clocks, boundary
+        // gates and input checks (Sched, WallClock); other windows are unchanged.
+        Sched.BeginWindow(stepsAhead.Any(x => x.StartsWith("tbm:", StringComparison.Ordinal)));
+        Observe.ResetWindow();
+        GroupObs.ResetWindow();
+        CommandObs.ResetWindow();
+        PathSync.ResetWindow();
+        TurnBased.ResetWindow();
+        if (replay)
+        {
+            if (!File.Exists(record)) throw new FileNotFoundException("no recording to replay", record);
+            Rng.LoadTape(record, perturb);
+        }
+        PhysicsPhase.Unpinned = null;
+        PhysicsPhase.WindowOpen(replay && Sched.Window);
+        WallClock.BeginWindow(); // after the tape: a replay reads the recording's clocks from its header
+        InputPin.Begin("fixture " + name); // normally on since the fixture's "prepare"
+        if (Fidelity.Installed && !InputPin.ReloadedUnderPin)
+            Health.Failed("input pin", new Exception($"fixture {name} opened without a reload under the input pin (\"prepare\" then \"reload\" before the window)"));
+        InputPin.WindowOpen();
+        var camera = InputPin.CameraState();
+        OracleTime.FixtureMode = true;
+        Time.captureDeltaTime = Driver.FixedDelta;
+        // Record: the generator continues as it is (the "prepare" step seeded it before the
+        // reload). Replay: reseeded, so code that draws without a hook sees another stream.
+        if (replay) UnityEngine.Random.InitState(Driver.Seed ^ 0x5bd1e995);
+        try { StateDump.Run(dir, "start-" + Path.GetFileName(PathNow).Replace(".trace.jsonl.gz", ""), saveFile); }
+        catch (Exception e) { Health.Failed("fixture start state", e); }
+        Trace.Begin(PathNow, name, Mode, j =>
+        {
+            j.Prop("fixed_delta", Driver.FixedDelta);
+            j.Prop("seed", replay ? Driver.Seed ^ 0x5bd1e995 : Driver.Seed);
+            j.Prop("random_state_at_begin", RandomState.Text());
+            j.Prop("save_file", saveFile != null ? Path.GetFileName(saveFile) : null);
+            j.Prop("save_sha256", saveFile != null ? Json.Sha256File(saveFile) : null);
+            j.Prop("oracle_version", Main.Mod.Info.Version);
+            j.Prop("game_version", Kingmaker.GameVersion.GetVersion());
+            j.Prop("assembly_csharp_sha256", Fidelity.AssemblySha);
+            j.Prop("tape", replay ? record : null);
+            j.Prop("tape_draws", Rng.TapeLength);
+            j.Prop("turn_based_window", Sched.Window);
+            // The observation families installed: a replay requires each one's records.
+            j.Arr("observers"); foreach (var o in Fidelity.Observers) j.W.WriteValue(o); j.EndArr();
+            j.Prop("input_pin", InputPin.Describe());
+            j.Arr("camera"); if (camera != null) foreach (var v in camera) j.W.WriteValue(v); j.EndArr();
+            // The physics clock at window open: whether colliders sync to queries without a step, and the
+            // phase of the fixed-step clock against the frame clock (which frames run a step).
+            j.Prop("physics_auto_sync", Physics.autoSyncTransforms);
+            j.Prop("physics_auto_simulation", Physics.autoSimulation);
+            j.Prop("fixed_delta_time", (double)Time.fixedDeltaTime);
+            j.Prop("fixed_phase0", PhysicsPhase.Phase);
+            j.Prop("frames_anchor_to_begin", PhysicsPhase.FramesSinceAnchor);
+            j.Prop("fixed_phase_pin", PhysicsPhase.SteerNote);
+            j.Prop("frame0", Time.frameCount);
+            if (Sched.Window)
+            {
+                // What a replay must reproduce of this recording's native clocks (WallClock).
+                j.Prop("time0", WallClock.Time0);
+                j.Prop("unscaled0", WallClock.Unscaled0);
+                if (WallClock.NavTimer0.HasValue) j.Prop("nav_timer0", (double)WallClock.NavTimer0.Value);
+            }
+            j.Prop("perturbation", Rng.PerturbNote);
+            j.Arr("steps"); foreach (var s in stepsAhead) j.W.WriteValue(s); j.EndArr();
+            j.Key("faults"); Fidelity.WriteFaults(j);
+            j.Key("install"); Fidelity.WriteInstall(j);
+            j.Key("rng_sites"); Rng.WriteSites(j, compact: true);
+        });
+        Rng.Checkpoint(); // the gap baseline: the window starts here
+        Main.Note($"fixture {Mode} {name} -> {PathNow}");
+        PrePathSync.Flush(Time.frameCount);
+        if (prePath != null && Sched.Replay) Sched.Invalidate(prePath);
+        if (PhysicsPhase.Unpinned != null && Sched.Replay) Sched.Invalidate(PhysicsPhase.Unpinned);
+        // The camera is the player's input too (frustum: which extra units sleep); a turn-based replay must start
+        // with the recording's.
+        if (Sched.Replay)
+        {
+            var rec = Sched.RecCamera;
+            if (rec == null || camera == null || rec.Length != camera.Length)
+                Sched.Invalidate("camera at the window's start: the recording has none (re-record)");
+            else
+                for (var i = 0; i < rec.Length; i++)
+                    if (Math.Abs(rec[i] - camera[i]) > 1e-3)
+                    {
+                        Sched.Invalidate($"camera at the window's start differs: recording [{string.Join(", ", rec)}], replay [{string.Join(", ", camera)}]");
+                        break;
+                    }
+        }
+    }
+
+    // Unconditional cleanup: no fixture timing, tape or trace survives a plan's end or abort.
+    public static void Cleanup()
+    {
+        try { if (Trace.Active) End(); }
+        catch (Exception e) { Health.Failed("fixture cleanup", e); }
+        finally
+        {
+            Rng.UnloadTape();
+            PhysicsPhase.Stop();
+            PrePathSync.Stop();
+            PathSync.EndWindow();
+            Sched.EndWindow();
+            WallClock.Restore();
+            InputPin.End();
+            OracleTime.FixtureMode = false;
+            Time.captureDeltaTime = 0f;
+            TurnBased.RestoreSetting();
+            IdTrace.Stop();
+        }
+    }
+
+    public static string End()
+    {
+        if (!Trace.Active) return null;
+        Rng.Checkpoint(); // unrecorded steps since the last hooked draw count too
+        var tapeLen = Rng.TapeLength;
+        var tapePos = Rng.TapeLength - Rng.TapeLeftover;
+        try { StateDump.Run(Path.GetDirectoryName(PathNow), "end-" + Path.GetFileName(PathNow).Replace(".trace.jsonl.gz", ""), _saveFile); }
+        catch (Exception e) { Health.Failed("fixture end state", e); }
+        var replay = Rng.ReplayActive;
+        Sched.CheckComplete();
+        PathSync.EndWindow(); // held paths go back to the game
+        var inputReads = InputPin.Reads;
+        var pointerPicks = InputPin.Picks;
+        var focusHeld = InputPin.FocusHeld;
+        var guiUsed = InputPin.GuiEventsUsed;
+        WallClock.EndWindow(); // while the window's clock is still the one the game sees
+        var invalid = Sched.Invalid;
+        var gates = Sched.GatesSeen;
+        var inputsChecked = Sched.InputsChecked;
+        Trace.End(j =>
+        {
+            j.Prop("tick", Trace.Tick);
+            j.Prop("rules", Rules.RulesSeen);
+            j.Prop("handlers", Rules.HandlersSeen);
+            j.Prop("draws", Rng.TotalDraws);
+            j.Prop("dialog_transitions", Hooks.DialogTransitions);
+            j.Prop("input_neutral_reads", inputReads);
+            j.Prop("pointer_picks", pointerPicks);
+            j.Prop("focus_changes_held", focusHeld);
+            j.Prop("imgui_input_events_used", guiUsed);
+            if (Sched.Window)
+            {
+                j.Prop("gates", gates);
+                j.Prop("inputs_checked", inputsChecked);
+                j.Prop("max_tick_offset", Sched.MaxOffset);
+                j.Prop("tick_offset_changes", Sched.OffsetChanges);
+                j.Prop("virtual_clock_reads", WallClock.VirtualReads);
+                j.Prop("virtual_frame_reads", WallClock.FrameReads);
+                j.Prop("paths_tracked", PathSync.Tracked);
+                j.Prop("path_waits", PathSync.Waited);
+                j.Prop("path_wait_timeouts", PathSync.Timeouts);
+            }
+            if (replay)
+            {
+                j.Prop("tape_draws", tapeLen);
+                j.Prop("tape_leftover", Rng.TapeLeftover);
+                j.Prop("replay_out_of_order", Rng.ReplayOutOfOrder);
+                j.Prop("time_forced", OracleTime.Forced);
+                j.Prop("time_tape_exhausted", OracleTime.Exhausted);
+                j.Prop("replay_invalid", invalid);
+                j.Arr("leftover_by_site");
+                foreach (var kv in Rng.TapeLeftoverBySite()) { j.W.WriteStartArray(); j.W.WriteValue(kv.Key); j.W.WriteValue(kv.Value); j.W.WriteEndArray(); }
+                j.EndArr();
+            }
+            j.Arr("site_draws");
+            foreach (var s in Rng.Sites.Where(s => s.Draws > 0))
+            {
+                j.W.WriteStartArray(); j.W.WriteValue(s.Id); j.W.WriteValue(s.Draws); j.W.WriteEndArray();
+            }
+            foreach (var s in Rng.GlobalSiteList())
+            {
+                j.W.WriteStartArray(); j.W.WriteValue(s.Key); j.W.WriteValue(s.Draws); j.W.WriteEndArray();
+            }
+            j.EndArr();
+        });
+        Rng.UnloadTape();
+        Sched.EndWindow();
+        Sched.ClearInvalid();
+        OracleTime.FixtureMode = false;
+        Time.captureDeltaTime = 0f;
+        TurnBased.RestoreSetting(); // every window starts with the player's own turn-based setting
+        var summary = $"{Mode} {Name}: ticks {Trace.Tick}, records {Trace.Written}, failed {Trace.Failed}, dropped {Trace.Dropped}, structural {Trace.StructuralErrors}, rules {Rules.RulesSeen}, draws {Rng.TotalDraws}, unhooked steps {Rng.UnhookedSteps}/{Rng.UnhookedUnknown} unknown" +
+                      (replay ? $", tape {tapePos}/{tapeLen} used, mismatches {Rng.ReplayMismatches}, exhausted {Rng.ReplayExhausted}, out of order {Rng.ReplayOutOfOrder}, gates {gates}, inputs checked {inputsChecked}" + (invalid != null ? ", INVALID: " + invalid : "") : "");
+        Results.Add(summary);
+        HealthRecords.Add(new Dictionary<string, object>
+        {
+            ["name"] = Name, ["mode"] = Mode, ["file"] = PathNow,
+            ["records_failed"] = Trace.Failed, ["records_dropped"] = Trace.Dropped, ["structural_errors"] = Trace.StructuralErrors,
+            ["hook_exceptions_caught"] = Trace.HookFailures, ["rng_unhooked_steps"] = Rng.UnhookedSteps, ["rng_unhooked_unknown"] = Rng.UnhookedUnknown,
+            ["replay_mismatches"] = replay ? Rng.ReplayMismatches : 0, ["replay_tape_exhausted"] = replay ? Rng.ReplayExhausted : 0,
+            ["replay_tape_leftover"] = replay ? tapeLen - tapePos : 0, ["time_tape_exhausted"] = replay ? OracleTime.Exhausted : 0,
+            ["replay_invalid"] = invalid != null ? 1 : 0,
+            ["snapshot_value_failures"] = Interlocked.Read(ref Snap.ValueFailures),
+            ["install_incomplete"] = Fidelity.Installed ? Fidelity.InstallFailures : 1,
+        });
+        Main.Note(summary);
+        Hooks.DialogTransitions = 0;
+        Name = null;
+        // Last: the input pin ends after the trace, the tape and the scheduler are closed, so the focus and
+        // controller changes it held back reach the game outside the window.
+        InputPin.End();
+        return summary;
+    }
+}
+
+// Fidelity instrumentation: installed only when the plan asks for it ("fidelity": true), so
+// performance runs never carry it.
+internal static class Fidelity
+{
+    public static bool Installed;
+    public static string AssemblySha;
+    public static double InstallSeconds;
+    // Failures recorded while installing (a hook that didn't patch, a transpiler that failed,
+    // or Install itself throwing): any of them makes every capture of the run uncertifiable.
+    public static long InstallFailures;
+    public static readonly List<string> Notes = new List<string>();
+
+    public static void Install(Plan plan, HarmonyLib.Harmony h)
+    {
+        var failedBefore = Health.FailedCount;
+        try { InstallInner(plan, h); }
+        finally { InstallFailures = Health.FailedCount - failedBefore + Rng.TranspileFailures; }
+    }
+
+    private static void InstallInner(Plan plan, HarmonyLib.Harmony h)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        AssemblySha = Json.Sha256File(typeof(Kingmaker.Game).Assembly.Location);
+        if (plan.Faults != null)
+        {
+            Rules.FaultThrowAboutAt = plan.Faults.ThrowAboutAt;
+            Rules.FaultDropAboutAt = plan.Faults.DropAboutAt;
+            Rng.DisableSiteContaining = plan.Faults.DisableSite;
+        }
+        Driver.FixedDelta = plan.FixedDelta;
+        Driver.Seed = plan.Seed;
+        Rng.SelfTest();
+        Notes.Add("rng self-test: " + Rng.SelfTestNote);
+        Rng.Scan();
+        Notes.Add("rng scan: " + Rng.ScanNote);
+        Rng.Install(h);
+        Notes.Add($"rng: {Rng.MethodsTranspiled} methods transpiled ({Rng.Sites.Count(s => s.Transpiled)} sites), {Rng.TranspileFailures} failures, {Rng.PatchSeconds:0.00} s");
+        var t0 = sw.Elapsed.TotalSeconds;
+        Rules.Install(h);
+        Notes.Add($"rules: {Rules.TriggersPatched} OnTrigger patched ({Rules.TriggersSkipped} skipped), {Rules.HandlersPatched} handler methods patched, {Rules.HandlersSkippedGeneric} generic handler methods not patchable, {sw.Elapsed.TotalSeconds - t0:0.00} s");
+        Hooks.Install(h);
+        TurnBased.Install(h);
+        WallClock.Install(h);
+        PathSync.Install(h);
+        InputPin.Install(h);
+        Observe.Install(h);
+        GroupObs.Install(h);
+        CooldownObs.Install(h);
+        TurnTickObs.Install(h);
+        CommandObs.Install(h);
+        if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage" });
+        OracleTime.Install(h);
+        InstallSeconds = sw.Elapsed.TotalSeconds;
+        Notes.Add($"install total {InstallSeconds:0.00} s");
+        Installed = true;
+        foreach (var n in Notes) Main.Note(n);
+    }
+
+    // The observation families Install set up (the trace's begin record lists them).
+    internal static readonly List<string> Observers = new List<string>();
+
+    public static void WriteInstall(Json j)
+    {
+        j.Obj();
+        j.Prop("installed", Installed);
+        j.Prop("install_failures", InstallFailures);
+        j.Prop("rng_self_test_ok", Rng.SelfTestOk);
+        j.Prop("rng_sites", Rng.Sites.Count);
+        j.Prop("rng_sites_transpiled", Rng.Sites.Count(s => s.Transpiled));
+        j.Prop("rng_sites_generic", Rng.Sites.Count(s => s.Generic));
+        j.Prop("rules_on_trigger_patched", Rules.TriggersPatched);
+        j.Prop("rules_handlers_patched", Rules.HandlersPatched);
+        j.Prop("rules_handlers_generic_unpatched", Rules.HandlersSkippedGeneric);
+        j.Arr("notes"); foreach (var n in Notes) j.W.WriteValue(n); j.EndArr();
+        j.End();
+    }
+
+    public static void WriteFaults(Json j)
+    {
+        j.Obj();
+        j.Prop("throw_about_at", Rules.FaultThrowAboutAt);
+        j.Prop("drop_about_at", Rules.FaultDropAboutAt);
+        j.Prop("disable_site", Rng.DisableSiteContaining);
+        j.End();
+    }
+
+    public static void WriteSitesFile(string outDir)
+    {
+        using (var j = new Json(Path.Combine(outDir, "rng-sites.json"), indent: true))
+        {
+            j.Obj();
+            j.Prop("schema", "wrath-oracle-rng-sites-v1");
+            j.Key("install"); WriteInstall(j);
+            j.Key("sites"); Rng.WriteSites(j, compact: false);
+            j.Arr("global_sites");
+            foreach (var s in Rng.GlobalSiteList()) j.Obj().Prop("key", s.Key).Prop("draws", s.Draws).End();
+            j.EndArr();
+            j.Arr("handlers_not_patchable"); foreach (var s in Rules.SkippedHandlers) j.W.WriteValue(s); j.EndArr();
+            j.End();
+        }
+    }
+}

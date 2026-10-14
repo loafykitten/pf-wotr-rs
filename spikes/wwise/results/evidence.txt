@@ -1,0 +1,83 @@
+# Supporting evidence for docs/poc0/wwise.md (2026-10-10)
+
+## scripts/decode_settings.py on Data/sharedassets0.assets
+== AudioFilePackagesSettings (path ID 1197, 1556 bytes, consumed exactly: True)
+m_PackageMapping[Preload] = ['Wrath_Main_Default.pck', 'Wrath_Main_Music.pck', 'Wrath_Main_VO_PC.pck', 'Wrath_Main_Creatures.pck', 'Wrath_Main_VO_Companions.pck', 'Wrath_Main_Narrative.pck', 'Wrath_Main_VFX.pck', 'Wrath_Main_Ambs_Prologue.pck', 'Wrath_Main_VO_Dialogues_Prologue.pck', 'Wrath_Main_VO_Dialogues_Other.pck', 'Wrath_Main_VO_Dialogues_PartyBanter.pck']
+m_PackageMapping[MainGame] = ['Wrath_Main_Ambs_CH1.pck', 'Wrath_Main_Ambs_CH2.pck', 'Wrath_Main_Ambs_CH3.pck', 'Wrath_Main_Ambs_CH4.pck', 'Wrath_Main_Ambs_CH5.pck', 'Wrath_Main_Ambs_CH6.pck', 'Wrath_Main_VO_Dialogues_CH1.pck', 'Wrath_Main_VO_Dialogues_CH2.pck', 'Wrath_Main_VO_Dialogues_CH3.pck', 'Wrath_Main_VO_Dialogues_CH4.pck', 'Wrath_Main_VO_Dialogues_CH5.pck', 'Wrath_Main_VO_Dialogues_CH6.pck']
+m_PackageMapping[DLC1] = ['Wrath_DLC1_VO_Dialogues.pck', 'Wrath_DLC1_Other.pck']
+m_PackageMapping[DLC2] = ['Wrath_DLC2_VO_Dialogues.pck', 'Wrath_DLC2_Other.pck']
+m_PackageMapping[DLC3] = ['Wrath_DLC3_VO_Dialogues.pck', 'Wrath_DLC3_Other.pck']
+m_PackageMapping[DLC4] = ['Wrath_DLC4_VO_Dialogues.pck', 'Wrath_DLC4_Other.pck']
+m_PackageMapping[DLC5] = ['Wrath_DLC5_VO_Dialogues.pck', 'Wrath_DLC5_Other.pck']
+m_PackageMapping[DLC6] = ['Wrath_DLC6_VO_Dialogues.pck', 'Wrath_DLC6_Other.pck']
+m_BankMapping[Preload] = ['Main', 'VFX', 'Interface', 'Music', 'Tech', 'Dialogs_ENG', 'Dialogs_Prologue_ENG', 'Dialogs_PartyBanter_ENG']
+m_BankMapping[MainGame] = ['Dialogs_CH1_ENG', 'Dialogs_CH2_ENG', 'Dialogs_CH3_ENG', 'Dialogs_CH4_ENG', 'Dialogs_CH5_ENG', 'Dialogs_CH6_ENG']
+m_BankMapping[DLC1] = ['Dialogs_DLC1_ENG']
+m_BankMapping[DLC2] = ['Dialogs_DLC2_ENG']
+m_BankMapping[DLC3] = ['Dialogs_DLC3_ENG']
+m_BankMapping[DLC4] = ['Dialogs_DLC4_ENG']
+m_BankMapping[DLC5] = ['Dialogs_DLC5_ENG']
+m_BankMapping[DLC6] = ['Dialogs_DLC6_ENG']
+== Mac (path ID 1200, 2564 bytes, consumed exactly: True)
+IgnorePropertyNameList = []
+GlobalPropertyNameList.count = 46
+UserSettings.m_BasePath = 'Audio\\GeneratedSoundBanks'
+UserSettings.m_StartupLanguage = 'English(US)'
+UserSettings.m_EngineLogging = True
+UserSettings.m_MaximumNumberOfPositioningPaths = 255
+UserSettings.m_CommandQueueSize = 262144
+UserSettings.m_SamplesPerFrame = 1024
+UserSettings.Main.m_AudioDeviceShareset = ''
+UserSettings.Main.m_DeviceID = 0
+UserSettings.Main.m_PanningRule = 0
+UserSettings.Main.ChannelConfigType = 0
+UserSettings.Main.ChannelMask = 0
+UserSettings.Main.NumberOfChannels = 0
+UserSettings.m_StreamingLookAheadRatio = 1.0
+UserSettings.m_SampleRate = 48000
+UserSettings.m_NumberOfRefillsInVoice = 4
+UserSettings.SA.m_MaxSoundPropagationDepth = 8
+UserSettings.SA.m_DiffractionFlags = -1
+UserSettings.SA.m_MovementThreshold = 1.0
+UserSettings.SA.m_NumberOfPrimaryRays = 100
+UserSettings.SA.m_MaxReflectionOrder = 1
+UserSettings.SA.m_MaxPathLength = 10000.0
+UserSettings.SA.m_EnableDiffractionOnReflections = True
+UserSettings.SA.m_EnableDirectPathDiffraction = True
+UserSettings.SA.m_EnableTransmission = True
+AdvancedSettings.m_IOMemorySize = 2097152
+AdvancedSettings.m_TargetAutoStreamBufferLengthMs = 380.0
+AdvancedSettings.m_UseStreamCache = False
+AdvancedSettings.m_MaximumPinnedBytesInCache = 4294967295
+AdvancedSettings.m_EnableGameSyncPreparation = False
+AdvancedSettings.m_ContinuousPlaybackLookAhead = 1
+AdvancedSettings.m_MonitorQueuePoolSize = 65536
+AdvancedSettings.m_MaximumHardwareTimeoutMs = 1000
+AdvancedSettings.m_DebugOutOfRangeCheckEnabled = False
+AdvancedSettings.m_DebugOutOfRangeLimit = 16.0
+AdvancedSettings.SA.m_DiffractionShadowAttenuationFactor = 1.0
+AdvancedSettings.SA.m_DiffractionShadowDegrees = 30.0
+AdvancedSettings.m_RenderDuringFocusLoss = False
+AdvancedSettings.m_SoundBankPersistentDataPath = ''
+AdvancedSettings.m_UseAsyncOpen = False
+CommsSettings.m_PoolSize = 262144
+CommsSettings.m_DiscoveryBroadcastPort = 24024
+CommsSettings.m_CommandPort = 0
+CommsSettings.m_NotificationPort = 0
+CommsSettings.m_InitializeSystemComms = False
+CommsSettings.m_NetworkName = '\x00'
+CommsSettings.m_commSystem = 0
+
+## lsof -nP -a -i -p <spike pid> during a run with InitCommunication
+COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+wwise-spi 24058 user    3u  IPv4 0x20486e77ff23947e      0t0  UDP *:24024
+wwise-spi 24058 user    4u  IPv4 0x113c9f9df79e33b9      0t0  TCP *:62243 (LISTEN)
+wwise-spi 24058 user    5u  IPv4 0x402a27d124dc3c4d      0t0  TCP *:62244 (LISTEN)
+
+## scripts/scan_markers.py on the prologue VO and party-banter packages
+Wrath_Main_VO_Dialogues_Prologue:
+scanned 233 streamed files; with cue markers: 0
+Wrath_Main_VO_Dialogues_PartyBanter:
+scanned 1257 streamed files; with cue markers: 8
+('Wrath_Main_VO_Dialogues_PartyBanter.pck', 27926140, 1)
+('Wrath_Main_VO_Dialogues_PartyBanter.pck', 135873202, 1)

@@ -1,0 +1,37 @@
+# scene run results/scene/immediate-l2-150
+config: Args { count: 150, parts: 1, present: Immediate, latency: 2, seconds: 20.0, warmup: 2.0, gate: true, windowed: false, variants: true, shadows: true, out: "results/scene/immediate-l2-150" }
+layer: maximumDrawableCount=3 displaySyncEnabled=false
+instances: 150 skinned scene instances (150 characters x 1 parts)
+load: 0.776 s to first visible frame (gate=true)
+pipelines: 62 at load, 62 at end (62 ok, 0 pending, 0 err); timed: created 58 in 229.7 ms of process_queue (3.96 ms/pipeline); untimed (built elsewhere, e.g. upscaling's block_on): 4
+pipelines created after first visible frame: 0 (in 0 frames, max 0.0 ms)
+drawables acquired while recording: 4017; presented handlers: 4017; shown: 4015; dropped (presentedTime=0): 2
+
+## intervals (ms)
+displayed (presentedTime)  n=4014 mean=4.982 p01=2.341 p50=4.843 p95=7.092 p99=8.117 p99.9=15.804 max=18.062 sd=1.365
+app frame (First schedule) n=4016 mean=4.980 p01=4.127 p50=4.864 p95=5.873 p99=6.883 p99.9=16.049 max=17.478 sd=0.778
+acquire->displayed         n=4015 mean=7.829 p01=6.474 p50=7.671 p95=9.375 p99=10.418 p99.9=15.461 max=17.561 sd=0.905
+GPU frame (timestamps)     n=4018 mean=2.430 p01=1.836 p50=2.268 p95=3.293 p99=3.804 p99.9=4.237 max=4.611 sd=0.454
+GPU frame (MTLCommandBuffer) n=4018 mean=3.767 p01=3.075 p50=3.645 p95=4.717 p99=5.191 p99.9=5.632 max=6.124 sd=0.473
+displayed: >5.0ms 1838 | >8.33ms 35 | >16.7ms 1 | >33ms 0 | >50ms 0
+app frame: >5.0ms 1511 | >8.33ms 21 | >16.7ms 1 | >33ms 0 | >50ms 0
+displayed rate: 200.7 Hz (from mean interval)
+
+## Bevy RenderDiagnosticsPlugin (mean over its history window)
+spans: 10 (0 elapsed_gpu)
+render/auxiliary_views/elapsed_cpu: 0.4907
+render/bin_unpacking/elapsed_cpu: 0.0012
+render/clustering/elapsed_cpu: 0.0085
+render/early_mesh_preprocessing/elapsed_cpu: 0.0011
+render/main_opaque_pass_3d/elapsed_cpu: 0.0097
+render/main_transparent_pass_3d/elapsed_cpu: 0.0099
+render/per_view_shadow_pass/elapsed_cpu: 0.0084
+render/ui/elapsed_cpu: 0.0032
+render/uniform_allocation/elapsed_cpu: 0.0017
+render/upscaling/elapsed_cpu: 0.0017
+
+summary columns: n,mean,min,p01,p50,p95,p99,p999,max,stddev
+displayed,4014,4.9824,1.3566,2.3412,4.8433,7.0920,8.1168,15.8035,18.0619,1.3650
+app_frame,4016,4.9800,3.8130,4.1266,4.8641,5.8725,6.8834,16.0491,17.4780,0.7785
+gpu_ts,4018,2.4302,1.6710,1.8360,2.2679,3.2930,3.8038,4.2372,4.6113,0.4539
+gpu_cb,4018,3.7673,2.9537,3.0751,3.6455,4.7166,5.1906,5.6323,6.1243,0.4734

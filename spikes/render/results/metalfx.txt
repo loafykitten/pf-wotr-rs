@@ -1,0 +1,14 @@
+# MetalFX via wgpu raw handles (Apple M2 Max, wgpu 30.0.1, objc2-metal-fx 0.3.2)
+support: spatial=true temporal=true frame_interpolator=true
+output 2560x1440, RGBA16Float, 32 frames each; GPU time = MTLCommandBuffer GPUEnd-GPUStart (first frame excluded)
+quality checks: mean absolute difference (MAD) against references, over every 7th pixel
+spatial 2.0x 1280x720: GPU n=31 mean=0.522 p01=0.477 p50=0.487 p95=0.609 p99=1.198 p99.9=1.198 max=1.198 sd=0.129 | MAD vs truth 0.0267 (bilinear 0.0119, flat grey 0.1853) PASS
+spatial 1.5x 1707x960: GPU n=31 mean=0.459 p01=0.398 p50=0.451 p95=0.547 p99=0.565 p99.9=0.565 max=0.565 sd=0.052 | MAD vs truth 0.0265 (bilinear 0.0067, flat grey 0.1859) PASS
+spatial 1.33x 1920x1080: GPU n=31 mean=0.489 p01=0.405 p50=0.508 p95=0.575 p99=0.586 p99.9=0.586 max=0.586 sd=0.053 | MAD vs truth 0.0255 (bilinear 0.0053, flat grey 0.1857) PASS
+temporal 1.5x 1707x960 (static scene, jittered input): GPU n=31 mean=2.393 p01=1.544 p50=2.385 p95=2.681 p99=2.768 p99.9=2.768 max=2.768 sd=0.223 | MAD vs truth after 32 frames 0.0068 (one frame bilinear 0.0066, flat grey 0.1774) PASS
+frame interpolation 2560x1440 (motion sign -1, UV units, fov 45): GPU n=31 mean=5.539 p01=5.234 p50=5.415 p95=6.644 p99=6.669 p99.9=6.669 max=6.669 sd=0.353 | MAD vs shift 0 / 8 / 16 px: 0.0844 / 0.0432 / 0.0013 FAIL
+frame interpolation 2560x1440 (motion sign +1, UV units, fov 45): GPU n=31 mean=5.450 p01=5.232 p50=5.412 p95=5.716 p99=6.229 p99.9=6.229 max=6.229 sd=0.203 | MAD vs shift 0 / 8 / 16 px: 0.0842 / 0.0429 / 0.0014 FAIL
+frame interpolation 2560x1440 (motion sign -1, pixel units, fov 45): GPU n=31 mean=5.453 p01=5.237 p50=5.405 p95=5.758 p99=6.128 p99.9=6.128 max=6.128 sd=0.198 | MAD vs shift 0 / 8 / 16 px: 0.0844 / 0.0432 / 0.0013 FAIL
+frame interpolation 2560x1440 (motion sign +1, pixel units, fov 45): GPU n=31 mean=5.444 p01=5.236 p50=5.399 p95=5.699 p99=5.775 p99.9=5.775 max=5.775 sd=0.145 | MAD vs shift 0 / 8 / 16 px: 0.0842 / 0.0429 / 0.0014 FAIL
+frame interpolation 2560x1440 (motion sign -1, UV units, fov 0.785): GPU n=31 mean=5.483 p01=5.239 p50=5.406 p95=6.107 p99=6.384 p99.9=6.384 max=6.384 sd=0.258 | MAD vs shift 0 / 8 / 16 px: 0.0844 / 0.0432 / 0.0013 FAIL
+frame interpolation 2560x1440 (motion sign -1, pixel units, fov 0.785): GPU n=31 mean=5.441 p01=5.226 p50=5.414 p95=5.668 p99=5.711 p99.9=5.711 max=5.711 sd=0.147 | MAD vs shift 0 / 8 / 16 px: 0.0844 / 0.0432 / 0.0013 FAIL

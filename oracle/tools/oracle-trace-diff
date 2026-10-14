@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""Compare two WrathOracle traces (wrath-oracle-trace-v1, .jsonl.gz) record by record.
+
+usage: oracle/tools/oracle-trace-diff A.trace.jsonl.gz B.trace.jsonl.gz [--json OUT] [--context N]
+                               [--allow-unhooked N] [--ignore-health] [--t0]
+       oracle/tools/oracle-trace-diff --check A.trace.jsonl.gz [--allow-unhooked N]
+
+--check validates one capture: complete (has its end record), no failed/dropped records, no
+structural errors (in the recorder's count or found again here: every rule has rule, about,
+trig, trig_end, did, rule_end in that order; every handler h has its h_end), no hook
+exceptions, no unhooked RNG steps (unless allowed), no replay mismatches, exhausted or leftover
+tape, self-test passed. A comparison also requires both captures to be valid (unless
+--ignore-health).
+
+Two traces of the same fixture (a recording and its replay) must have the same records in
+the same order. Fields that legitimately differ between a recording and a replay are
+ignored: seq (records are aligned by position), frame numbers, generator states and gaps
+("st", "gap", "steps", "rng_gap", "random_state"), the replay markers ("forced", "match"),
+thread ids, and unscaled (wall-clock) deltas. Draws from presentation-only sites ("c":"pres":
+rendering, particles, sound, UI) are left out of the alignment (their number depends on how
+many frames were rendered, e.g. during a load) and only counted. The begin/end records are compared only for
+their health. Exit status: 0 if the traces are equal or T0-equal (see "certification view" below), 1 if
+not, 2 usage or unreadable input.
+"""
+import gzip
+import json
+import re
+
+# Entity ids the game creates during a run are fresh System.Guid values (not from the
+# RNG), so two runs give them different names. They are renamed in order of first
+# appearance ($new1, $new2, ...) before comparing; save-stable ids (short hex) are kept.
+NEWID = re.compile(r'"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"')
+
+
+def renamer(keep=frozenset()):
+    """Renames fresh ids (quoted dashed GUIDs) in order of first appearance; ids in `keep`
+    (those present in both inputs: from the save, so stable) are left alone."""
+    names = {}
+
+    def sub(text):
+        return NEWID.sub(lambda m: m.group(0) if m.group(1) in keep else '"' + names.setdefault(m.group(1), f"$new{len(names) + 1}") + '"', text)
+    return sub
+
+
+def guids(text):
+    return set(NEWID.findall(text))
+
+
+SAVES = "~/Library/Application Support/Owlcat Games/Pathfinder Wrath Of The Righteous/Saved Games"
+
+
+def save_ids(save_file):
+    """Dashed GUID ids that appear in the save the capture was made from (read only): these are
+    stable across runs and are never renamed."""
+    import os
+    import zipfile
+    if not save_file:
+        return None
+    path = os.path.join(os.path.expanduser(SAVES), os.path.basename(save_file))
+    if not os.path.isfile(path):
+        return None
+    ids = set()
+    with zipfile.ZipFile(path) as z:
+        for n in z.namelist():
+            if n.endswith(".json"):
+                ids |= set(re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", z.read(n).decode("utf-8", "replace")))
+    return ids
+import sys
+
+IGNORE = {"seq", "frame", "st", "gap", "steps", "rng_gap", "random_state", "forced", "match",
+          "thread", "wall_delta"}
+SKIP_KINDS = {"begin", "end", "obs"}
+# Frame numbers inside nested snapshots (a projectile's launch frame is the absolute Unity
+# frame, genuinely timing): dropped at any depth.
+DEEP_IGNORE = {"m_LaunchFrame"}
+# Projectile snapshots (inside the attack rules' fields) keep every field in strict comparisons.
+# Under --t0, the fields that follow from the launcher's animated skeleton are T1 (Ember,
+# 2026-10-11): where the projectile is launched from (CorePosition, m_LaunchPosition), how far
+# along its flight it is when the hit is processed (Progress, PassedTime, PassedDistance: a launch a
+# few centimetres off reaches the target a frame sooner or later; the hit's tick is held to the tick
+# tolerance like other T1 timing), and a miss destination's point
+# (MissTarget.m_Point; Projectile.CalculateMissTarget aims from LaunchPosition). The pose depends
+# on idle animations that started before the window (random and not pinned), so it differs by
+# millimetres to centimetres between runs; the attack's outcome is decided before launch, and the
+# Rust port can't reproduce bone poses either. They are reported (largest deviation per field,
+# "t1_projectile_geometry"), not compared; the rest of the snapshot, MissTarget's other members
+# included, is compared exactly.
+PROJECTILE_MARK = {"CorePosition", "m_LaunchPosition", "PassedTime"}
+# The most a T0 record's tick may move between a recording and its replay: the replay scheduler bounds
+# the total gate drift at 4 ticks (Sched.MaxDrift, max_tick_offset); measured shifts are 0 or 1.
+T0_TICK_TOL = 4
+PROJECTILE_T1 = {"CorePosition", "m_LaunchPosition", "Progress", "PassedTime", "PassedDistance"}
+GEOMETRY_DEV = {}
+
+
+def _note_dev(field, a, b):
+    if isinstance(a, list) and isinstance(b, list):
+        for x, y in zip(a, b):
+            _note_dev(field, x, y)
+    elif isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+        GEOMETRY_DEV[field] = max(GEOMETRY_DEV.get(field, 0.0), abs(a - b))
+    elif a != b:
+        GEOMETRY_DEV[field] = float("inf")
+
+
+def tol_equal(a, b):
+    """Equality leaving PROJECTILE_T1 out of projectile dicts (--t0 only), noting their deviation."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a) != set(b):
+            return False
+        proj = PROJECTILE_MARK <= set(a)
+        ok = True
+        for k in a:
+            if proj and k in PROJECTILE_T1:
+                _note_dev(k, a[k], b[k])
+            elif proj and k == "MissTarget" and isinstance(a[k], dict) and isinstance(b[k], dict):
+                if set(a[k]) != set(b[k]):
+                    ok = False
+                for f in a[k]:
+                    if f == "m_Point":
+                        _note_dev("MissTarget.m_Point", a[k][f], b[k].get(f))
+                    elif a[k][f] != b[k].get(f):
+                        ok = False
+            elif not tol_equal(a[k], b[k]):
+                ok = False
+        return ok
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all([tol_equal(x, y) for x, y in zip(a, b)])
+    return a == b
+
+
+def same_t0(x, y, t0):
+    """Equal records; under --t0 (t0) projectile geometry is left out (PROJECTILE_T1)."""
+    return x == y or (t0 and tol_equal(json.loads(x), json.loads(y)))
+
+
+def raw(path):
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        return f.read()
+
+
+def load(path, keep=frozenset()):
+    recs = []
+    ren = renamer(keep)
+    for n, line in enumerate(raw(path).splitlines()):
+        if True:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                recs.append(json.loads(ren(line)))
+            except json.JSONDecodeError as e:
+                raise SystemExit(f"{path}: line {n + 1}: {e}")
+    return recs
+
+
+# Absolute game times (TimeSpan ticks): with the tick-tolerant comparison they shift with
+# the events, so they're compared relative to the game time of the tick they were recorded
+# in. That keeps durations (a buff that lasts 60 s longer still differs); values that are
+# already durations (TickTime, TimeToNextRound, ...) are compared as they are.
+ABS_GAME_TIME_KEYS = {"end_time", "game_time", "DeathTime", "next_tick_time", "start_time", "tick_time",
+                      "AttachTime", "m_EndTime", "NextTickTime"}
+# Real time is wall-clock-coupled; "t" is the tick number itself.
+DROP_KEYS = {"t", "real_time"}
+NO_END = (2**63 - 1, -(2**63))  # TimeSpan.MaxValue/MinValue: permanent, not a time
+
+
+def scrub_times(x, now):
+    if isinstance(x, dict):
+        out = {}
+        for k, v in x.items():
+            if k in DROP_KEYS:
+                continue
+            if k in ABS_GAME_TIME_KEYS and isinstance(v, int) and not isinstance(v, bool) and v not in NO_END and now is not None:
+                v = ("rel", v - now)
+            else:
+                v = scrub_times(v, now)
+            out[k] = v
+        return out
+    if isinstance(x, list):
+        return [scrub_times(v, now) for v in x]
+    return x
+
+
+# Sim draws outside rules that may legitimately differ between a recording and its replay
+# (T1: timing-coupled consumers whose number or tick depends on wall-clock-coupled systems,
+# docs/poc1/oracle.md "Replays"). Audited one by one; every other sim site must replay the
+# same values per site even with --t0. Matched against the site key's "type|method" part.
+AUDITED_T1_SITES = (
+    "Kingmaker.AreaLogic.Cutscenes.Commands.CommandDelay|OnRun(",
+    "Kingmaker.AreaLogic.Cutscenes.Commands.CommandUnitPlayCutsceneAnimation|OnRun(",
+    "Kingmaker.Controllers.Units.UnitAnimationController|Activate(",
+    "Kingmaker.Controllers.Units.UnitRoamingController|RollNextPoint(",
+    "Kingmaker.View.Roaming.RoamingWaypointData|SelectIdleTime(",
+    "Kingmaker.UnitLogic.Commands.Base.UnitCommand|TickApproaching(",
+    "Kingmaker.View.UnitMovementAgent|SlowDown(",
+    "Kingmaker.Visual.Animation.",
+)
+
+
+def audited_t1(key):
+    parts = str(key).split("|")
+    tm = "|".join(parts[1:3]) if len(parts) >= 3 else str(key)
+    return any(tm.startswith(a) for a in AUDITED_T1_SITES)
+
+
+def _deep(x):
+    if isinstance(x, dict):
+        return {k: _deep(v) for k, v in x.items() if k not in DEEP_IGNORE}
+    if isinstance(x, list):
+        return [_deep(v) for v in x]
+    return x
+
+
+def norm(r):
+    return _deep({k: v for k, v in r.items() if k not in IGNORE})
+
+
+def health(recs):
+    end = next((r for r in reversed(recs) if r.get("k") == "end"), None)
+    return (end or {}).get("health"), end is not None
+
+
+HEALTH_ZERO = ("records_failed", "records_dropped", "structural_errors", "hook_exceptions_caught",
+               "rng_unhooked_unknown", "replay_mismatches", "replay_tape_exhausted", "snapshot_value_failures")
+HEALTH_KEYS = ("records_written", "records_failed", "records_dropped", "structural_errors", "hook_exceptions_caught",
+               "rng_unhooked_steps", "rng_unhooked_unknown")
+
+
+def validity(recs, allow_unhooked=0, tape_counters=True):
+    """Problems that make a trace invalid as a capture (empty list = valid). With
+    tape_counters=False the replay-tape counters are left to the comparison, which can tell
+    T0 sites from T1 sites."""
+    probs = []
+    h, complete = health(recs)
+    if not complete or h is None:
+        return ["no end record (incomplete trace)"]
+    if not recs or recs[0].get("k") != "begin":
+        probs.append("no begin record")
+    missing = [k for k in HEALTH_KEYS if k not in h]
+    if missing:
+        probs.append(f"health lacks {missing}")
+    for k in HEALTH_ZERO:
+        if not tape_counters and k in ("replay_mismatches", "replay_tape_exhausted"):
+            continue
+        if h.get(k):
+            probs.append(f"{k}={h.get(k)}")
+    if (h.get("rng_unhooked_steps") or 0) > allow_unhooked:
+        probs.append(f"rng_unhooked_steps={h.get('rng_unhooked_steps')} (allowed {allow_unhooked})")
+    end = next((r for r in reversed(recs) if r.get("k") == "end"), {})
+    for k in ("time_tape_exhausted", "tape_leftover", "replay_invalid"):
+        if k == "tape_leftover" and not tape_counters:
+            continue
+        if end.get(k):
+            probs.append(f"{k}={end.get(k)}")
+    begin = next((r for r in recs if r.get("k") == "begin"), {})
+    inst = begin.get("install") or {}
+    if not inst.get("installed"):
+        probs.append("fidelity instrumentation not installed")
+    if inst.get("install_failures"):
+        probs.append(f"install_failures={inst.get('install_failures')}")
+    if not inst.get("rng_self_test_ok"):
+        probs.append("rng self-test failed at install")
+    errs = structure(recs)
+    if errs:
+        probs.append(f"{len(errs)} structure errors in the file")
+    return probs
+
+
+def nesting(recs):
+    """Rules and handlers form one execution stack: a rule's parent is the innermost open rule
+    and its depth the number of open rules; a handler belongs to the innermost open rule; each
+    rule_end/h_end closes the innermost open frame. Frames an exception unwound (h_exc, or a
+    rule with trig_exc/h_exc) may be skipped when an outer frame closes."""
+    errs = []
+    stack = []  # ("R", id) / ("H", id, rule)
+    unwound = set()
+
+    def rules_open():
+        return [f for f in stack if f[0] == "R"]
+
+    def close(kind, fid, what):
+        if stack and stack[-1][0] == kind and stack[-1][1] == fid:
+            stack.pop()
+            return
+        idx = next((i for i in range(len(stack) - 1, -1, -1) if stack[i][0] == kind and stack[i][1] == fid), None)
+        if idx is None:
+            errs.append(f"{what}: closes a frame that isn't open")
+            return
+        inner = stack[idx + 1:]
+        if all(f[1] in unwound or (f[0] == "R" and f[1] in unwound) for f in inner) and inner:
+            del stack[idx:]
+            return
+        errs.append(f"{what}: crosses open frames {[f[:2] for f in inner][:4]}")
+        del stack[idx:]
+
+    for r in recs:
+        k = r.get("k")
+        if k == "rule":
+            ro = rules_open()
+            want_parent = ro[-1][1] if ro else 0
+            if (r.get("parent") or 0) != want_parent:
+                errs.append(f"rule {r.get('id')}: parent {r.get('parent')}, innermost open rule {want_parent}")
+            if r.get("depth") is not None and r.get("depth") != len(ro):
+                errs.append(f"rule {r.get('id')}: depth {r.get('depth')}, {len(ro)} rules open")
+            stack.append(("R", r.get("id")))
+        elif k == "rule_end":
+            close("R", r.get("id"), f"rule_end {r.get('id')}")
+        elif k == "h":
+            ro = rules_open()
+            if r.get("rule") and (not ro or ro[-1][1] != r.get("rule")):
+                errs.append(f"handler {r.get('id')}: for rule {r.get('rule')}, innermost open rule {ro[-1][1] if ro else 0}")
+            stack.append(("H", r.get("id"), r.get("rule")))
+        elif k == "h_end":
+            close("H", r.get("id"), f"h_end {r.get('id')}")
+        elif k == "h_exc":
+            unwound.add(r.get("id"))
+            if r.get("rule"):
+                unwound.add(r.get("rule"))
+            close("H", r.get("id"), f"h_exc {r.get('id')}")
+        elif k == "trig_exc":
+            unwound.add(r.get("id"))
+        if len(errs) >= 50:
+            errs.append("(more nesting errors not listed)")
+            break
+    return errs
+
+
+def structure(recs):
+    """Rule records must nest and be complete; seq must have no gaps."""
+    errs = nesting(recs)
+    for i, r in enumerate(recs):
+        if r.get("seq") != i:
+            errs.append(f"seq gap at record {i}: seq {r.get('seq')}")
+            break
+    seen = {}
+    excused = set()
+    order = {"rule": 0, "about": 1, "trig": 2, "trig_end": 3, "did": 4, "rule_end": 5}
+    last = {}
+    open_h = {}
+    handler_ids = set()
+    for r in recs:
+        k = r.get("k")
+        if k == "rule":
+            if r["id"] in seen:
+                errs.append(f"rule {r['id']}: duplicate id")
+            seen[r["id"]] = {"rule"}
+            last[r["id"]] = 0
+        elif k in order:
+            if r.get("id") not in seen:
+                errs.append(f"{k} for unknown rule {r.get('id')}")
+                continue
+            if k in seen[r["id"]]:
+                errs.append(f"rule {r['id']}: duplicate {k}")
+            seen[r["id"]].add(k)
+            if order[k] < last.get(r["id"], 0):
+                errs.append(f"rule {r['id']}: {k} out of order")
+            last[r["id"]] = order[k]
+        elif k == "trig_exc":
+            excused.add(r.get("id"))
+        elif k == "h":
+            if r["id"] in handler_ids:
+                errs.append(f"handler {r['id']}: duplicate id")
+            handler_ids.add(r["id"])
+            if r.get("rule") and r.get("rule") not in seen:
+                errs.append(f"handler {r['id']} for unknown rule {r.get('rule')}")
+            open_h[r["id"]] = r.get("rule")
+        elif k == "h_end":
+            if r.get("id") not in open_h:
+                errs.append(f"handler {r.get('id')}: h_end without h")
+            elif open_h.pop(r.get("id")) != r.get("rule"):
+                errs.append(f"handler {r.get('id')}: h_end names another rule")
+        elif k == "h_exc":
+            open_h.pop(r.get("id"), None)
+            excused.add(r.get("rule"))
+    for hid, rid in open_h.items():
+        errs.append(f"handler {hid} (rule {rid}) never ended")
+    for rid, parts in seen.items():
+        missing = set(order) - parts
+        if missing and rid not in excused:
+            errs.append(f"rule {rid} missing {','.join(sorted(missing))}")
+    return errs
+
+
+def main(argv):
+    allow_unhooked = 0
+    if "--allow-unhooked" in argv:
+        i = argv.index("--allow-unhooked")
+        allow_unhooked = int(argv[i + 1])
+        argv = argv[:i] + argv[i + 2:]
+    ignore_health = "--ignore-health" in argv
+    t0_mode = "--t0" in argv
+    argv = [x for x in argv if x not in ("--ignore-health", "--t0")]
+    if len(argv) >= 2 and argv[0] == "--check":
+        recs = load(argv[1])
+        h, complete = health(recs)
+        errs = structure(recs)
+        probs = validity(recs, allow_unhooked)
+        kinds = {}
+        for r in recs:
+            kinds[r.get("k")] = kinds.get(r.get("k"), 0) + 1
+        out = {"valid": not probs, "problems": probs, "records": len(recs), "complete": complete, "health": h,
+               "structure_errors": errs[:50], "structure_error_count": len(errs), "kinds": kinds}
+        print(json.dumps(out, indent=1))
+        return 1 if probs else 0
+    if len(argv) < 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    a_path, b_path = argv[0], argv[1]
+    out_path = None
+    ctx = 3
+    rest = argv[2:]
+    while rest:
+        if rest[0] == "--json":
+            out_path, rest = rest[1], rest[2:]
+        elif rest[0] == "--context":
+            ctx, rest = int(rest[1]), rest[2:]
+        else:
+            print(f"unknown option {rest[0]}", file=sys.stderr)
+            return 2
+    ra, rb = raw(a_path), raw(b_path)
+    m = re.search(r'"save_file":"([^"]*)"', ra)
+    stable = save_ids(m.group(1) if m else None)
+    if stable is None:
+        keep = frozenset(guids(ra) & guids(rb))
+        id_policy = "save not found: ids present in both traces kept, others renamed (weaker)"
+    else:
+        keep = frozenset(stable)
+        id_policy = f"ids from the save kept ({len(stable)}), ids created during the run renamed"
+    a, b = load(a_path, keep), load(b_path, keep)
+    va, vb = validity(a, allow_unhooked), validity(b, allow_unhooked, tape_counters=False)
+    # Replay tape problems (fallback draws, leftovers, mismatches) are T0 problems only at
+    # sites that drew inside a rule in the recording; elsewhere they are T1 (timing-coupled
+    # consumers drawing once more or less) and reported, not failed.
+    def site_key(r):
+        return str(r.get("key") or r.get("site"))
+    t0_sites = {site_key(r) for r in a if r.get("k") == "draw" and r.get("rule")}
+    keys = {}
+    for r in a + b:
+        if r.get("k") == "begin":
+            for e in r.get("rng_sites") or []:
+                keys[str(e[0])] = e[1]
+    tape_t0, tape_t1 = [], []
+    for r in b:
+        if r.get("k") == "draw" and r.get("fallback"):
+            (tape_t0 if r.get("rule") or site_key(r) in t0_sites else tape_t1).append(f"fallback at {site_key(r)} t={r.get('t')}")
+        elif r.get("k") == "draw" and r.get("match") is False:
+            (tape_t0 if r.get("rule") or site_key(r) in t0_sites else tape_t1).append(f"mismatch at {site_key(r)} t={r.get('t')}")
+    end_b = next((r for r in reversed(b) if r.get("k") == "end"), {})
+    inv = {v: k for k, v in keys.items()}
+    for key, n in end_b.get("leftover_by_site") or []:
+        sid = inv.get(key, key)
+        (tape_t0 if sid in t0_sites or key in t0_sites else tape_t1).append(f"{n} left over at {sid}")
+    if tape_t0:
+        vb = vb + [f"replay tape problems at T0 sites: {tape_t0[:10]}"]
+    def keep(r):
+        return r.get("k") not in SKIP_KINDS and not (r.get("k") == "draw" and r.get("c") == "pres")
+    ab = [r for r in a if keep(r)]
+    bb = [r for r in b if keep(r)]
+    first = None
+    diffs_by_kind = {}
+    ndiff = 0
+    for i in range(min(len(ab), len(bb))):
+        x, y = norm(ab[i]), norm(bb[i])
+        if x != y:
+            ndiff += 1
+            diffs_by_kind[x.get("k")] = diffs_by_kind.get(x.get("k"), 0) + 1
+            if first is None:
+                first = i
+    equal = first is None and len(ab) == len(bb)
+    # Positional comparison cascades after one extra or missing record; an alignment
+    # (difflib over the normalised records) says what actually differs.
+    import difflib
+    sa = [json.dumps(norm(r), sort_keys=True) for r in ab]
+    sb = [json.dumps(norm(r), sort_keys=True) for r in bb]
+    ops = []
+    if not equal:
+        sm = difflib.SequenceMatcher(None, sa, sb, autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag != "equal":
+                ops.append({"op": tag, "a": [i1, i2], "b": [j1, j2],
+                            "a_kinds": sorted({ab[i].get("k") for i in range(i1, i2)}),
+                            "b_kinds": sorted({bb[j].get("k") for j in range(j1, j2)}),
+                            "a_first": ab[i1] if i1 < i2 else None, "b_first": bb[j1] if j1 < j2 else None})
+    result = {
+        "a": a_path, "b": b_path, "equal": equal,
+        "records": [len(ab), len(bb)], "differing_records": ndiff, "differing_by_kind": diffs_by_kind,
+        "health": [health(a)[0], health(b)[0]],
+        "structure_errors": [len(structure(a)), len(structure(b))],
+        "valid": [not va, not vb], "problems": [va, vb], "id_policy": id_policy,
+        "replay_tape_t1_issues": tape_t1,
+        "presentation_draws": [sum(1 for r in a if r.get("c") == "pres"), sum(1 for r in b if r.get("c") == "pres")],
+    }
+    result["aligned_differences"] = len(ops)
+    result["aligned"] = ops[:200]
+    if first is None and len(ab) != len(bb):
+        first = min(len(ab), len(bb))
+    if first is not None:
+        lo = max(0, first - ctx)
+        result["first_difference"] = first
+        result["context_a"] = ab[lo:first + ctx]
+        result["context_b"] = bb[lo:first + ctx]
+        if first < len(ab) and first < len(bb):
+            x, y = norm(ab[first]), norm(bb[first])
+            result["fields"] = {k: [x.get(k), y.get(k)] for k in sorted(set(x) | set(y)) if x.get(k) != y.get(k)}
+    # The certification view. T0 stream: every record except presentation draws and draws
+    # made outside any rule (with "at" positions and other T1 values left out); it must be
+    # identical in order. Draws outside rules (cutscene delays, movement jitter, AI
+    # scheduling, animation, roaming) are T1 consumers: per site, the sequence of (member,
+    # arguments, value) must be identical; the tick at which each happens may shift, and the
+    # largest shift is reported.
+    def t0(rs, ticks=True):
+        out = []
+        now = None  # game time of the latest tick
+        for r in rs:
+            if r.get("k") == "draw" and (r.get("c") == "pres" or not r.get("rule")):
+                continue
+            if r.get("k") == "time" and isinstance(r.get("game_time"), int):
+                now = r["game_time"]
+            if not ticks and r.get("k") in ("tick", "time", "controllers"):
+                continue
+            x = norm(r)
+            x.pop("at", None)
+            if not ticks:
+                x = scrub_times(x, now)
+            out.append(json.dumps(x, sort_keys=True))
+        return out
+
+    def t0_ticks(rs):
+        # The tick of each record t0() keeps (same filter, in order).
+        return [r.get("t") for r in rs if r.get("k") not in ("tick", "time", "controllers")
+                and not (r.get("k") == "draw" and (r.get("c") == "pres" or not r.get("rule")))]
+
+    def per_site(rs):
+        d = {}
+        for r in rs:
+            if r.get("k") == "draw" and r.get("c") != "pres" and not r.get("rule"):
+                key = r.get("key") or r.get("site")
+                d.setdefault(str(key), []).append((json.dumps([r.get("m"), r.get("a"), r.get("v")]), r.get("t")))
+        return d
+
+    ta, tb = t0(ab), t0(bb)
+    t0_equal = len(ta) == len(tb) and all(same_t0(x, y, t0_mode) for x, y in zip(ta, tb))
+    # T1 tolerance (PLAN, fidelity contract): the same T0 records in the same order, at
+    # possibly different ticks (tick/time records, the "t" field and absolute-time values
+    # left out).
+    na, nb = t0(ab, ticks=False), t0(bb, ticks=False)
+    t0_order_equal = len(na) == len(nb) and all(same_t0(x, y, t0_mode) for x, y in zip(na, nb))
+    t0o_first = next((i for i in range(min(len(na), len(nb))) if not same_t0(na[i], nb[i], t0_mode)), None if len(na) == len(nb) else min(len(na), len(nb)))
+    result["t0_order_equal"] = t0_order_equal
+    # How far the T0 records' ticks moved (aligned by order): the T1 tolerance bounds it under --t0, so a
+    # record whose own fields are T1 (a projectile's flight) can't move without limit.
+    t0_shift = None
+    if t0_order_equal:
+        sa, sb = t0_ticks(ab), t0_ticks(bb)
+        if len(sa) == len(sb):
+            t0_shift = max((abs(x - y) for x, y in zip(sa, sb) if isinstance(x, int) and isinstance(y, int)), default=0)
+    result["t0_max_tick_shift"] = t0_shift
+    if t0o_first is not None:
+        result["t0_order_first_difference"] = [json.loads(na[t0o_first]) if t0o_first < len(na) else None,
+                                               json.loads(nb[t0o_first]) if t0o_first < len(nb) else None]
+    t0_first = next((i for i in range(min(len(ta), len(tb))) if not same_t0(ta[i], tb[i], t0_mode)), None if len(ta) == len(tb) else min(len(ta), len(tb)))
+    pa, pb = per_site(ab), per_site(bb)
+    site_diffs = []
+    max_shift = 0
+    for key in sorted(set(pa) | set(pb)):
+        x, y = pa.get(key, []), pb.get(key, [])
+        if [v for v, _ in x] != [v for v, _ in y]:
+            skey = keys.get(key, key)
+            site_diffs.append({"site": key, "key": skey, "audited_t1": audited_t1(skey), "a": len(x), "b": len(y)})
+        else:
+            for (_, t1), (_, t2) in zip(x, y):
+                max_shift = max(max_shift, abs((t1 or 0) - (t2 or 0)))
+    result["t0_equal"] = t0_equal
+    result["t0_records"] = [len(ta), len(tb)]
+    if t0_first is not None:
+        result["t0_first_difference"] = [json.loads(ta[t0_first]) if t0_first < len(ta) else None,
+                                         json.loads(tb[t0_first]) if t0_first < len(tb) else None]
+    result["t1_sites_equal"] = not site_diffs
+    result["t1_site_differences"] = site_diffs
+    unaudited = [d for d in site_diffs if not d["audited_t1"]]
+    result["t1_unaudited_site_differences"] = unaudited
+    result["t1_max_tick_shift"] = max_shift
+    result["t1_projectile_geometry"] = {k: round(v, 4) for k, v in sorted(GEOMETRY_DEV.items())}
+    summary = {k: result[k] for k in ("valid", "problems", "replay_tape_t1_issues", "equal", "t0_equal", "t0_order_equal", "t0_records", "t1_sites_equal", "t1_max_tick_shift", "t0_max_tick_shift", "t1_projectile_geometry", "records", "aligned_differences", "structure_errors", "presentation_draws")}
+    if t0_first is not None:
+        summary["t0_first_difference"] = result["t0_first_difference"]
+    if site_diffs:
+        summary["t1_site_differences"] = site_diffs[:10]
+        summary["t1_unaudited_site_differences"] = unaudited[:10]
+    summary["aligned_first"] = [{k: o[k] for k in ("op", "a", "b", "a_kinds", "b_kinds")} for o in ops[:10]]
+    if first is not None:
+        summary["first_difference"] = first
+        summary["fields"] = result.get("fields")
+    if out_path:
+        with open(out_path, "w") as f:
+            f.write(json.dumps(result, indent=1))
+    print(json.dumps(summary, indent=1))
+    # Default: strict equality, or T0 order-equal with identical per-site T1 sequences.
+    # --t0: the certification level of docs/poc1/oracle.md: T0 records equal in order and value
+    # (ticks may shift by up to T0_TICK_TOL; absolute times compared relative to their tick), and
+    # only audited T1 sites may differ per site.
+    ok = equal or (t0_order_equal and (t0_shift or 0) <= T0_TICK_TOL
+                   and (not site_diffs or (t0_mode and not unaudited)))
+    if not ignore_health and (va or vb):
+        ok = False
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Expand a fixture spec into a WrathOracle plan for oracle/tools/oracle-run.sh (PRESET plan).
+
+usage: oracle/tools/oracle-fixtures/make-plan SPEC.json > PLAN.json
+
+SPEC: {"plan": {...extra plan keys...},
+       "fixtures": [{"name": "...", "steps": [...], "replays": 1, "perturb": ["N:+D", ...]}]}
+Each fixture becomes: prepare, reload, seed:S, wait:60, fixture:NAME, STEPS, end (prepare
+fixes the frame delta and seeds the generator before the reload; the generator is seeded again
+right after the load, whose frame count varies, so the 60 settle ticks draw the same stream;
+the window starts after them); then `replays` replays (the same with replay:NAME); then one perturbed replay per
+"perturb" entry (replay:NAME:N:+D). The run starts with load and settles 30 frames; it ends with sites
+and quit.
+"""
+import json
+import sys
+
+spec = json.load(open(sys.argv[1]))
+steps = ["load", "wait:30"]
+for f in spec["fixtures"]:
+    seed = spec.get("plan", {}).get("seed", 20261011)
+    pre = ["prepare", "reload", f"seed:{seed}", "wait:60"]
+    body = f["steps"] + ["end"]
+    steps += pre + [f"fixture:{f['name']}"] + body
+    for _ in range(f.get("replays", 1)):
+        steps += pre + [f"replay:{f['name']}"] + body
+    for p in f.get("perturb", []):
+        steps += pre + [f"replay:{f['name']}:{p}"] + body
+steps += spec.get("after", [])
+steps += ["sites", "quit"]
+plan = dict(spec.get("plan", {}))
+plan["fidelity"] = True
+plan["steps"] = steps
+json.dump(plan, sys.stdout, indent=1)

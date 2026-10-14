@@ -1,0 +1,15 @@
+Scene runs, 2026-10-10.
+
+- Directories without the "quiet-" prefix were recorded under heavy contention (other agents
+  compiling, OBS, webcam assistant; load average 5-14). Their CPU frame and pacing numbers are
+  provisional.
+- In those runs "GPU frame (timestamps)" and "GPU frame (MTLCommandBuffer)" came from the first
+  frame bracket, whose end marker was an independent compute pass that Metal could run before
+  the frame's last render pass (Astra review finding 1). They under-measure and are not used.
+  Later runs end the bracket with a render pass on the swapchain texture; that span includes
+  waiting for the compositor to release the drawable, so it is a timeline span, not GPU cost.
+  GPU cost per pass comes from Metal System Trace (quiet-trace-*/gpu_passes.*).
+- Their "displayed vsync multiples" line (where present) inferred the period from p01; later
+  runs use --refresh-hz (240) and only for vsync'd modes.
+- conditions.txt (quiet-* runs) records load average and whether the original game was running
+  before and after each run.

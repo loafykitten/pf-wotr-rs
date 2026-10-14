@@ -1,0 +1,12 @@
+# owlcat passthrough (Apple M2 Max, headless wgpu 30)
+pair: blob153.metal + blob869.metal
+vs: 4 bindings, 4 vertex inputs; fs: 10 bindings, 6 colour outputs
+create: vs module 0.35 ms, fs module 0.18 ms, render pipeline 48.02 ms
+constant-buffer members written by name: 24
+GPU time of the G-buffer pass (render-pass timestamp_writes, 512x512, 1 sphere, 6 MRT): n=20 mean=0.285 p01=0.027 p50=0.102 p95=0.627 p99=1.958 p99.9=1.958 max=1.958 sd=0.424
+checks at 81 interior pixels:
+  normals: worst dot(decoded RT1, analytic) = 0.99997
+  BC1 albedo (RT0): 64/64 exact texel colour at the analytic UV (17 near cell edges skipped)
+  metallic, smoothness, emission, baked GI, shadowmask, translucency: expected values (bytes within 1, floats within 0.002)
+verdict: normals PASS | BC1 albedo PASS | other targets PASS
+PNGs: ~/Developer/Wrath-Rust/spikes/render/../../cache/poc0-render/out (gitignored cache)
