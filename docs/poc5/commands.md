@@ -818,3 +818,16 @@ record before its `cmd` note, a death's batch together and before `SetLifeState`
 clear. Round 4: no impatience record accepted without the observer, a death's batch at its notification (by compared
 mutations). Rounds 5 and 6: the whole record family without the observer, in spans and out; a bother unit's record in
 the handler that queued it. Round 7 found nothing (residual gaps: the paths no capture exercises, above).
+## A third fight: `poc5-tb-96` (2026-10-14, seventeenth session) [M]
+
+`poc5-tb-96` (idle, Manual_18, current WrathOracle with every observer) records one fight, **`tb-hold`**
+(`oracle/tools/oracle-fixtures/poc5-tb3.spec.json`): the party moves as in `tb-focus`, then focuses 51DD, 523B, 51FC
+in that order (the reverse of `tb-focus`), and the archer 5198 ends each of its turns without acting. The record and
+both replays are clean (no unhooked draw), and **all three runs are valid** in the POC-5 suite with every slice
+computed and every assertion `-95`'s runs pass (`driven_replay_equals_the_recordings` takes each capture's fights from
+`FIGHTS`). With `-95`'s `tb-nearest` and `tb-focus` that is three recorded fights with different choices, each
+T0-identical with an end state equal to the oracle's on every run: POC-5's pass as worded, given the inputs listed in
+PLAN (movement agent and pathing, group memory and visibility, animation, the Unity clock, the UI's requests).
+
+Not exercised by this fight either: an impatience hard target (`hard` and `ipt` stay empty in every `imp_s`), so the
+switch and setup draws and `SetupPriorityTarget` are still untested by a capture.

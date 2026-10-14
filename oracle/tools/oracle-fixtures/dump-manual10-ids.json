@@ -1,0 +1,6 @@
+{
+  "fidelity": true,
+  "save": "Manual_10_Defender_s_Heart",
+  "area": "any",
+  "steps": ["idtrace:on", "load", "settle:2", "idtrace:write:load", "state:manual10-after-load", "quit"]
+}
