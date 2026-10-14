@@ -7,7 +7,7 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-14, seventeenth session): start here
+## Where things stand (2026-10-14, end of the seventeenth session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
@@ -17,6 +17,22 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   meets POC-5's pass as worded, given the inputs that remain recorded (movement agent and pathing, group memory and
   visibility, animation, the Unity clock, the UI's requests). No impatience hard target in it either, nor in the fourth,
   `poc5-tb-97/tb-solo` (one party member fights; the AI archer ends it in round 2), also valid on every run.
+- **POC-4 rounds 6 to 8 (seventeenth session, `docs/poc4/dialogue.md`): Horgus T0-equal.** WrathOracle now records,
+  outside turn-based windows, the units `UnitActivatableAbilitiesController` iterates (`aa_awake`), each cutscene
+  `CommandAction` run (`cs_action`), random gate draws with their producer (`gate_track`, flagged inside a player's
+  `Start`) and roaming's draw producers; the begin record declares `cutscene_progress` and `aa_awake`. The dialogue
+  runner takes these as recorded inputs (awake states where the sim can't tell, a cutscene's T0 steps when the game ran
+  them, accepted random gates' draws at their place) and applies dialogue inputs at their recorded ticks. On
+  `poc4-horgus-6` every run's T0 stream is equal and the end state 1.0000; still invalid on `OnIsInGameChanged`'s group
+  membership and two roaming draws, and a gap found in review applies to every dialogue fixture: `CommandLockControls`'
+  buff tick/postpone and the runner's missing `UnitBuffsController` (plan in round 8's notes). Seven Sol rounds also
+  closed older cutscene-classification holes (`OnStopped`, in-fade starts, `RunAway`, revival by unit-controlling
+  commands, `TranslocateUnit`'s `MarkNoExtra`, now ported). `scripts/scene-cache.sh` works again (lower-case area name);
+  the scene cache is schema v2 (roaming waypoints): rebuild both areas' caches.
+- **Hydration (seventeenth session):** mythic class levels in `AddClassLevels`, `AddMythicEnemyHitPointsBonus`,
+  `AddFeatureOnAlignment`, `HasArmorFeatureUnlock`: Manual_10's one-sided facts 72 -> 35 (Mephisto, Galfrey match).
+  `manual10-ids-1` (WrathOracle `IdTrace`) names every id the load allocates: the rest of Manual_10's id offset is the
+  facts still missing (working notes).
 - **POC-5 round 14, slice G (sixteenth session, `docs/poc5/commands.md`): the impatience controller computed.** On
   `poc5-tb-95` (both fights, record and two replays) every run is valid with `UnitImpatienceController` the sim's
   (`combat/impatience.rs`, `combat/replay/impatience.rs`, `csharp/hashset.rs`): its tick (a phase before the AI's) and
