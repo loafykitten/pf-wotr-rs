@@ -19,6 +19,7 @@ pub mod counts;
 pub mod engage;
 pub mod fire;
 pub mod groups;
+pub mod impatience;
 pub mod initiative;
 pub mod inspect;
 pub mod life;
@@ -63,6 +64,8 @@ pub struct UnitCombat {
     pub eng: engage::UnitEngage,
     /// `LastTarget`, `ManualTarget`.
     pub tgt: targets::UnitTargets,
+    /// `CombatAiData`'s impatience state.
+    pub imp: impatience::UnitImpatience,
 }
 
 /// A timer (UniRx `Observable.Timer`) that removes a buff when it fires
@@ -147,6 +150,8 @@ pub struct CombatWorld {
     pub engage: engage::Engage,
     /// Units' `LastTarget` and `ManualTarget`, when modelled ([`targets::Targets::on`]).
     pub targets: targets::Targets,
+    /// The impatience controller, when modelled ([`impatience::Impatience::on`]).
+    pub impatience: impatience::Impatience,
     /// `Game.Instance.IsPaused` (the pause mode), for the commands' lifecycle.
     pub commands_paused: bool,
 }

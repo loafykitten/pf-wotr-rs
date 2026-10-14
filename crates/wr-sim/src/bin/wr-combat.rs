@@ -278,6 +278,10 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.eng_provokes
     );
     println!("targets: writes {} (each checked), reads checked {}", out.tgt_checked, out.tgt_reads);
+    println!(
+        "impatience: entries {}, states checked {}, handlers matched {}, draws {}",
+        out.imp_entries, out.imp_states, out.imp_handlers, out.imp_draws
+    );
     println!("kinds [oracle, sim]: {:?}", out.diff.kinds);
     println!(
         "turn order (sort events, overrides/sequences taken from the recording): {:?}",

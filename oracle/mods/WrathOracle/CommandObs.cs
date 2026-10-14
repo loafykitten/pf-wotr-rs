@@ -310,6 +310,7 @@ internal static partial class CommandObs
             Sched.Obs("uc_snap");
             if (EngOn) EngInit();
             if (TgtOn) TgtInit();
+            if (ImpOn) ImpInit();
         }
         catch (Exception e) { Trace.HookFailed("observe uc_snap", e); }
     }
@@ -347,7 +348,7 @@ internal static partial class CommandObs
     private static readonly HashSet<IntPtr> TransparentGeneric = new HashSet<IntPtr>();
 
     // The entries on the stack (the innermost last), and whether each one's lifecycle is recorded.
-    private struct Entry { public bool Rec, Ext, Ai, Eng; }
+    private struct Entry { public bool Rec, Ext, Ai, Eng, Imp; }
     private static readonly List<Entry> Entries = new List<Entry>();
 
     private static bool InRecordedEntry => Entries.Count > 0 && Entries[Entries.Count - 1].Rec;
@@ -416,7 +417,7 @@ internal static partial class CommandObs
 
     // ---- entries ----
 
-    private static void Push(bool rec, bool ext, bool ai = false, bool eng = false) => Entries.Add(new Entry { Rec = rec, Ext = ext, Ai = ai, Eng = eng });
+    private static void Push(bool rec, bool ext, bool ai = false, bool eng = false, bool imp = false) => Entries.Add(new Entry { Rec = rec, Ext = ext, Ai = ai, Eng = eng, Imp = imp });
 
     // The innermost entry, removed: whether its start record was written.
     private static bool Pop()
@@ -429,10 +430,10 @@ internal static partial class CommandObs
 
     // An entry starts: nested when base lifecycle code of an outer entry calls it (then it is that
     // entry's code, recorded as that one is), else its own. Returns whether it is recorded, and pushes it.
-    private static bool Enter(MethodBase m, out bool nested, bool ai = false, bool eng = false)
+    private static bool Enter(MethodBase m, out bool nested, bool ai = false, bool eng = false, bool imp = false)
     {
         nested = false;
-        if (!On) { Push(false, false, ai, eng); return false; }
+        if (!On) { Push(false, false, ai, eng, imp); return false; }
         bool rec;
         try
         {
@@ -440,7 +441,7 @@ internal static partial class CommandObs
             rec = !nested || InRecordedEntry;
         }
         catch (Exception e) { Trace.HookFailed("observe entry", e); rec = false; }
-        Push(rec, rec, ai, eng);
+        Push(rec, rec, ai, eng, imp);
         return rec;
     }
 
@@ -1674,5 +1675,8 @@ internal static partial class CommandObs
 
         // LastTarget and ManualTarget (observer "targets", CommandObsTarget.cs).
         InstallTargets(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+
+        // The impatience controller (observer "impatience", CommandObsImpatience.cs).
+        InstallImpatience(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
     }
 }

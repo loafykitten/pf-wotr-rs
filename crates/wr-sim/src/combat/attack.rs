@@ -1354,6 +1354,8 @@ pub struct AttackLink {
     pub sneak_used: std::rc::Rc<std::cell::Cell<bool>>,
     pub precise_strike: i32,
     pub weapon_attack: bool,
+    /// `RuleDealDamage.AttackRoll`: its attack roll's sequence number (`RuleBase.seq`).
+    pub roll_seq: Option<u64>,
 }
 
 /// `RulePrepareDamage`.
@@ -1832,6 +1834,8 @@ pub struct RuleAttackWithWeapon {
     pub attack_hit: Option<bool>,
     pub attack_result: i32,
     pub damage_result: Option<i32>,
+    /// `AttackRoll`: its sequence number, once rolled.
+    pub attack_roll_seq: Option<u64>,
 }
 
 impl RuleAttackWithWeapon {
@@ -1938,6 +1942,7 @@ impl RuleAttackWithWeapon {
             attack_hit: None,
             attack_result: 0,
             damage_result: None,
+            attack_roll_seq: None,
         }
     }
 }
@@ -2000,7 +2005,9 @@ impl RuleEvent for RuleAttackWithWeapon {
             sneak_used: std::rc::Rc::default(),
             precise_strike: roll.precise_strike,
             weapon_attack: true,
+            roll_seq: Some(roll.base.seq),
         };
+        self.attack_roll_seq = Some(roll.base.seq);
         if self.skip_animation {
             w.coverage.unsupported("RuleAttackWithWeapon: SkipAnimation");
             return;

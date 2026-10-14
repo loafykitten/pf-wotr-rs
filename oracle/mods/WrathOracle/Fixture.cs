@@ -304,7 +304,7 @@ internal static class Fidelity
         CooldownObs.Install(h);
         TurnTickObs.Install(h);
         CommandObs.Install(h);
-        if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets" });
+        if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets", "impatience" });
         OracleTime.Install(h);
         InstallSeconds = sw.Elapsed.TotalSeconds;
         Notes.Add($"install total {InstallSeconds:0.00} s");

@@ -11,6 +11,15 @@ is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-5 round 14, slice G (sixteenth session, `docs/poc5/commands.md`): the impatience controller computed.** On
+  `poc5-tb-95` (both fights, record and two replays) every run is valid with `UnitImpatienceController` the sim's
+  (`combat/impatience.rs`, `combat/replay/impatience.rs`, `csharp/hashset.rs`): its tick (a phase before the AI's) and
+  `UpdatePriorityTarget` (also `TurnController.Prepare`'s, before its `ForceTick`), each unit's hard, disliked and bother
+  units (.NET `HashSet`s), attacks without effect and counts, the handlers (command starts, damage, offensive actions,
+  deaths) queued and applied in order as their records come, leaving combat's clear; the AI's `ipt`/`disliked` reads are
+  checks. WrathOracle's observer `impatience` (`CommandObsImpatience.cs`). gpt-6.1-sol's reviews converged after seven rounds;
+  57 damage cases. No hard target, priority target or draw happens in these fights (a fight where an enemy keeps missing one
+  target would exercise them).
 - **POC-5 round 13, slice F (sixteenth session, `docs/poc5/commands.md`): units' targets computed.** On `poc5-tb-92`
   (both fights, record and two replays) every run is valid with `UnitCombatState.LastTarget` and `ManualTarget` the
   sim's (`combat/targets.rs`, `combat/replay/targets.rs`): `UnitCommands.UpdateCombatTarget` in `Run` and the merge (its
@@ -146,9 +155,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - **POC-6:** realtime spot and point shadows (pack format v2: rerun `wr-import pack`), FLIP mean 0.1246.
 
 **Next, in order:**
-1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): the impatience controller next
-   (`UnitImpatienceController`: the AI's `ipt` and `disliked` reads, its rule and command-start handlers, two
-   `Random.Range` draws; `docs/poc5/commands.md` has no design for it yet). A fixture whose enemies start out of reach would
+1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): what the AI and the commands still
+   read as inputs (group memory and visibility, the movement agent and pathing, animation, the Unity clock) mostly wait
+   for their own ports (memory, nav); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
    exercise the AI's movement simulation (`ScorePath`). The movement agent waits for the nav port. The UI's requests
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks; POC-5's pass needs three recorded
@@ -189,8 +198,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - Driven replay of one run: `target/debug/wr-combat replay fixtures/captures/oracle/<capture>/fixtures/<fight> --run
   record` (its `commands:` line counts what the commands model computed); `WR_DEBUG_COMMANDS=1` prints each command
   desync and state difference, `WR_DEBUG_UNSUPPORTED=1` each report under its frame. The POC-5 suite:
-  `cargo nextest run -p wr-sim --test poc5 --run-ignored only` (about three minutes). The current capture is `poc5-tb-92`
-  (the targets computed; the summary's `targets:` line); `-85` and `-91` replay as slice E, `-82` as slice D, `-80` and `-81` as slice C, `-77` as slice B, `-74` as slice A. The superseded ones
+  `cargo nextest run -p wr-sim --test poc5 --run-ignored only` (about three minutes). The current captures are `poc5-tb-95`
+  (the impatience controller computed; the summary's `impatience:` line) and `-92` (slice F, the targets); `-85` and
+  `-91` replay as slice E, `-82` as slice D, `-80` and `-81` as slice C, `-77` as slice B, `-74` as slice A. The superseded ones
   (`poc5-tb-69` to `-73`, `-75`, `-76`, `-78`, `-79`, `-83`, `-84`, `-86` to `-90`) were deleted on 2026-10-14. Fights vary by capture: disengages (and so
   attacks of opportunity) were in 3 of 18 fights recorded this session; record again for one.
 - A recording that "hangs at startup" may be the main menu's gamepad/keyboard prompt waiting for a click (2026-10-14):

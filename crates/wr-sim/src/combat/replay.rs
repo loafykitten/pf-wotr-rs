@@ -142,6 +142,12 @@ pub struct Outcome {
     /// Units' targets (`targets` observer): the sim's writes checked, the reads checked.
     pub tgt_checked: usize,
     pub tgt_reads: usize,
+    /// The impatience controller (`impatience` observer): its entries run, the handlers' records
+    /// matched, the states checked in its entries, its draws.
+    pub imp_entries: usize,
+    pub imp_handlers: usize,
+    pub imp_states: usize,
+    pub imp_draws: usize,
 }
 
 /// Who triggered a root rule, from its recorded call site (`origin`: the game's methods,
@@ -421,6 +427,8 @@ pub enum Phase {
     Prepare,
     /// `UnitCombatCooldownsController`: cooldowns run down.
     Cooldowns,
+    /// `UnitImpatienceController`.
+    Impatience,
     /// `AiBrainController` (outside the turn controller's own ticks).
     Ai,
     /// `UnitCombatEngagementController`: attacks of opportunity are run.
@@ -485,7 +493,7 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         Phase::Inspect => m == DEFAULT || m == DIALOG || m == CUTSCENE,
         Phase::TurnPrefix | Phase::Turn | Phase::TurnChoose => m == DEFAULT || m == CUTSCENE,
         Phase::Buffs => m == DEFAULT || m == DIALOG,
-        Phase::Follow | Phase::Ai | Phase::Engagement => m == DEFAULT,
+        Phase::Follow | Phase::Impatience | Phase::Ai | Phase::Engagement => m == DEFAULT,
         Phase::Roaming | Phase::Prone => m == DEFAULT || m == DIALOG || m == CUTSCENE,
     })
 }
@@ -862,6 +870,18 @@ struct Driver<'t> {
     /// The driver's click waiting for its `Run`; the active `Run`s' recorded chains.
     tgt_click: Option<targets::TgtClick>,
     tgt_runs: Vec<String>,
+    /// The impatience controller is the sim's (the `impatience` observer): the `imp_init`s seen
+    /// and whether their block closed, the frame of its last tick, the `UpdatePriorityTarget`
+    /// entries from `TurnController.Prepare` not yet matched, its draws' numeric sites.
+    imp: bool,
+    imp_init_n: usize,
+    imp_init_closed: bool,
+    imp_tick_frame: Option<i64>,
+    imp_prepared: Vec<EntityIdx>,
+    imp_prepare_tail: Option<String>,
+    /// `Prepare`'s rider once its cooldowns' `Clear` came (its `UpdatePriorityTarget` may follow).
+    imp_prepare_ready: Option<EntityIdx>,
+    imp_sites: Vec<i64>,
     /// The frame of the last `AiBrainController.Tick` entry; the turn controller's `ForceTick`
     /// entries since its last tick start (its forced AI tick) and since its last `Prepare`; the
     /// active `ForceTick`'s call site.
@@ -1094,6 +1114,14 @@ impl<'t> Driver<'t> {
             tgt_leave_by: std::collections::HashMap::new(),
             tgt_click: None,
             tgt_runs: Vec::new(),
+            imp: false,
+            imp_init_n: 0,
+            imp_init_closed: false,
+            imp_tick_frame: None,
+            imp_prepared: Vec::new(),
+            imp_prepare_tail: None,
+            imp_prepare_ready: None,
+            imp_sites: Vec::new(),
             ai_tick_frame: None,
             ai_forced: 0,
             ai_prepared: 0,
@@ -1229,6 +1257,23 @@ impl<'t> Driver<'t> {
         // Units' targets are the sim's with the `targets` observer.
         w.combat.targets.on = w.combat.engage.on && declared.contains(&"targets");
         d.tgt = w.combat.targets.on;
+        // The impatience controller is the sim's with the `impatience` observer.
+        w.combat.impatience.on = w.combat.targets.on && declared.contains(&"impatience");
+        d.imp = w.combat.impatience.on;
+        d.imp_sites = trace
+            .sites
+            .iter()
+            .filter(|(_, v)| {
+                v.0 == crate::combat::impatience::SWITCH_DRAW.0
+                    || v.0 == crate::combat::impatience::SETUP_DRAW.0
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        if declared.contains(&"impatience") && !w.combat.impatience.on {
+            w.coverage.unsupported(
+                "driven replay: the recording declares its impatience observer without the targets records",
+            );
+        }
         if declared.contains(&"targets")
             && (!w.combat.targets.on || !declared.contains(&"cooldowns"))
         {
@@ -1272,6 +1317,7 @@ impl<'t> Driver<'t> {
         self.cd_frame_end(w);
         self.uc_frame_end(w);
         self.tgt_frame_end(w);
+        self.imp_frame_end(w);
         self.uc_finish(w);
         let outgoing = self.frame.mode;
         let rest = self.frame.finish();
@@ -2132,7 +2178,13 @@ impl Driver<'_> {
                 if sim_prone != prone {
                     w.coverage.unsupported("driven replay: TurnController.Prepare: the rider's prone state differs from the recording's");
                 }
-                // `Prepare` ticks the AI (`ForceTick`) before its end.
+                // `Prepare` updates the rider's priority target (`UnitImpatienceController`), then
+                // ticks the AI (`ForceTick`), before its end.
+                if self.imp && std::mem::take(&mut self.imp_prepared) != [u] {
+                    w.coverage.unsupported(
+                        "driven replay: TurnController.Prepare without exactly one UpdatePriorityTarget of its rider",
+                    );
+                }
                 if self.ai && std::mem::take(&mut self.ai_prepared) != 1 {
                     w.coverage.unsupported(
                         "driven replay: TurnController.Prepare without exactly one AI entry (ForceTick)",
@@ -2604,6 +2656,8 @@ impl Driver<'_> {
                     );
                 }
                 self.turn_prepared = true;
+                // (`Prepare`'s `UpdatePriorityTarget` comes after its interrupts and this clear.)
+                self.imp_prepare_ready = Some(u);
                 self.cd_before(w, u, &r["b"], "TurnController.Prepare");
                 super::cooldowns::prepare_clear(w, u);
                 // `Prepare` goes on (after its acting commands' `SpendAction`): the rider's
@@ -2658,6 +2712,7 @@ impl Driver<'_> {
                 self.cd_frame_end(w);
                 self.uc_frame_end(w);
                 self.tgt_frame_end(w);
+                self.imp_frame_end(w);
                 let outgoing = self.frame.mode;
                 let rest = self.frame.start(m);
                 self.draining = outgoing;
@@ -2708,6 +2763,7 @@ impl Driver<'_> {
                             || e.starts_with("ai_")
                             || e.starts_with("eng_")
                             || e.starts_with("tgt_")
+                            || e.starts_with("imp_")
                     }) =>
             {
                 return self.uc_record(w, i);
@@ -2764,6 +2820,12 @@ impl Driver<'_> {
                 }
             }
             Some("cmd") => {
+                // (`UnitCommand.Start` raised the impatience controller's handler before
+                // WrathOracle's `cmd` note of it.)
+                if let Err(d) = self.imp_due(w) {
+                    w.coverage.unsupported(format!("driven replay: commands: {}", d.0));
+                    w.combat.impatience.queue.clear();
+                }
                 let (Some(u), Some(class)) = (unit_id(&r["unit"]), r["class"].as_str()) else {
                     return i + 1;
                 };
@@ -2813,6 +2875,19 @@ impl Driver<'_> {
                 let _ = w.rng.range_float(crate::rng::sites::AI_NEXT_COMMAND_TIME, 0.0, 0.1);
                 if !self.uc_skipping {
                     w.coverage.unsupported("driven replay: an AI draw the sim's AI didn't make");
+                }
+            }
+            Some("draw") if !self.imp && self.imp_family(r) => {
+                w.coverage.unsupported(
+                    "driven replay: an impatience record without the impatience observer",
+                );
+            }
+            Some("draw") if self.imp_draw_record(r) => {
+                self.imp_skip_draw(w, r);
+                if !self.uc_skipping {
+                    w.coverage.unsupported(
+                        "driven replay: an impatience draw the sim's controller didn't make",
+                    );
                 }
             }
             _ => {}
@@ -3388,6 +3463,13 @@ impl Driver<'_> {
     }
 
     fn root(&mut self, w: &mut World, i: usize) -> usize {
+        let next = self.root_inner(w, i);
+        // The impatience handlers' records inside it, after the sim fired it (or didn't).
+        self.imp_span(w, i, next - 1);
+        next
+    }
+
+    fn root_inner(&mut self, w: &mut World, i: usize) -> usize {
         let trace = self.trace;
         let recs = &trace.records;
         let r = &recs[i];
@@ -4135,6 +4217,7 @@ fn pos_pair(at: &J) -> Option<([f32; 3], [f32; 3])> {
 mod ai;
 mod commands;
 mod engage;
+mod impatience;
 mod targets;
 
 #[cfg(test)]

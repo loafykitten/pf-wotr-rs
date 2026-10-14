@@ -587,6 +587,9 @@ pub fn rulebook_did_trigger(w: &mut World, rule: &mut dyn RuleEvent) {
     // (The engagement controller's handlers, when it's modelled: a global subscriber whose only
     // effect is its provoke queue, so its place among the global subscribers doesn't show.)
     crate::combat::engage::rule_did_trigger(w, rule);
+    // (The impatience controller's and `OffensiveActionsController`'s, when modelled: they queue
+    // their effects, applied in order as their records come.)
+    crate::combat::impatience::rule_did_trigger(w, rule);
     manager(w, rule, Mgr::Global, RuleStep::DidTrigger);
     if let Some(t) = rule.target() {
         manager(w, rule, Mgr::Target(t), RuleStep::DidTrigger);

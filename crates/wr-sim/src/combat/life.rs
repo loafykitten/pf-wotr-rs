@@ -318,7 +318,8 @@ fn set_life_state(w: &mut World, u: EntityIdx, new: i32) {
 /// through the bus): the turn controller removes the unit from the turn order; the summon pools
 /// drop it unless their blueprint keeps dead units; `Player.Stalker` is cleared for its blueprint;
 /// the inspection controller queues it. `UnitGroupsController`'s handler is empty;
-/// `UnitImpatienceController` (the AI's bother list) and `GameHistoryLog` aren't modelled.
+/// `UnitImpatienceController` (the AI's bother lists: queued when modelled) and `GameHistoryLog`
+/// isn't modelled.
 fn death_listeners(w: &mut World, u: EntityIdx) {
     remove_tb_unit(w, u);
     for pool in w.scene.summon_pools.iter().map(|(g, _)| *g).collect::<Vec<_>>() {
@@ -331,9 +332,12 @@ fn death_listeners(w: &mut World, u: EntityIdx) {
         w.player.stalker = None;
     }
     super::inspect::queue(w, u);
-    w.coverage.stub(
-        "UnitImpatienceController.HandleUnitDeath: the AI's bother lists (the AI isn't ported)",
-    );
+    if w.combat.impatience.on {
+        super::impatience::unit_death(w, u);
+    } else {
+        w.coverage
+            .stub("UnitImpatienceController.HandleUnitDeath: the AI's bother lists (not modelled)");
+    }
 }
 
 /// `UnitEntityData.LeaveCombat`. `UnitCombatState.LeaveCombat` (for a unit in combat): out of
@@ -371,8 +375,8 @@ pub(crate) fn leave_combat(w: &mut World, u: EntityIdx) {
 }
 
 /// `UnitCombatState.Clear()` for what the sim keeps: the cooldowns, `Initiative` and `Prepared`
-/// (`InitiativeRandom` stays), the engagement and the targets when they're modelled
-/// (`engage::clear`, `targets::clear`). The AI's combat data isn't modelled.
+/// (`InitiativeRandom` stays), the engagement, the targets and the impatience state when they're
+/// modelled (`engage::clear`, `targets::clear`, `impatience::clear`).
 fn combat_state_clear(w: &mut World, u: EntityIdx) {
     let before = w.unit(u).map(|x| x.combat.cooldown).unwrap_or_default();
     if let Some(q) = &mut w.combat.cooldown_clears {
@@ -385,6 +389,7 @@ fn combat_state_clear(w: &mut World, u: EntityIdx) {
     }
     super::engage::clear(w, u);
     super::targets::clear(w, u);
+    super::impatience::clear(w, u);
 }
 
 /// `if (SettingsRoot.Difficulty.RemoveAnnoyingBuffsAfterCombat) Buffs.RemoveAnnoyingBuffs()`:

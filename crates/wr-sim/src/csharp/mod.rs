@@ -10,6 +10,7 @@
 pub mod arith;
 pub mod decimal;
 pub mod dict;
+pub mod hashset;
 pub mod sort;
 pub mod string_hash;
 pub mod timespan;

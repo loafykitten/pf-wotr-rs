@@ -75,8 +75,9 @@ fn boundary(r: &J) -> bool {
             "uc_v" | "uc_fx" | "uc_tc" | "uc_tick" | "uc_tick_end" | "uc_ctl" | "uc_ctl_end"
             | "uc_snap" | "uc_run_end" | "uc_queue_end" | "uc_x_end" | "uc_exc" | "ua_atk"
             | "uc_call" | "uc_ai" | "uc_ai_end" | "ai_sc" | "ai_best" | "ai_sel" | "uc_eng"
-            | "uc_eng_end" | "eng_tu" | "eng_e" | "eng_aoo",
+            | "uc_eng_end" | "eng_tu" | "eng_e" | "eng_aoo" | "uc_imp" | "uc_imp_end",
         ) => true,
+        Some("imp_s") => matches!(r["at"].as_str(), Some("upd" | "setup")),
         Some("uc_end" | "uc_rc") => r["ctx"] != "other",
         Some("uc_run" | "uc_queue") => r["nested"] != false,
         Some("cd_spend") => from_controller(r),
@@ -161,6 +162,7 @@ pub(super) fn phase_of(origin: &str) -> Option<Phase> {
         "UnitMoveController" => Phase::Move,
         "UnitCombatJoinController" => Phase::Join,
         "UnitCombatPrepareController" => Phase::Prepare,
+        "UnitImpatienceController" => Phase::Impatience,
         "AiBrainController" => Phase::Ai,
         "UnitCombatEngagementController" => Phase::Engagement,
         "UnitCommandController" => Phase::Commands,
@@ -244,6 +246,9 @@ impl Driver<'_> {
             }
             "tgt_init" => self.tgt_init(w, i),
             "tgt_w" => self.tgt_w(w, i),
+            "imp_init" => self.imp_init(w, i),
+            "uc_imp" if r["nested"] == false => return self.imp_entry(w, i),
+            "imp_s" | "imp_other" => self.imp_record(w, i),
             // A provoke outside an attack rule the sim fires: its handler's context isn't validated
             // (the rule handlers' provokes are taken inside their rule's span).
             "eng_prov" => w.coverage.unsupported(
@@ -303,6 +308,18 @@ impl Driver<'_> {
                 self.i += 1;
                 continue;
             }
+            if self.imp_draw_record(r) {
+                self.imp_skip_draw(w, r);
+                self.i += 1;
+                continue;
+            }
+            if r["k"] == "obs"
+                && r["ev"] == "imp_s"
+                && matches!(r["at"].as_str(), Some("upd" | "setup"))
+            {
+                self.i += 1;
+                continue;
+            }
             if r["k"] == "obs"
                 && r["ev"].as_str().is_some_and(|e| {
                     (e.starts_with("uc_")
@@ -341,6 +358,12 @@ impl Driver<'_> {
                 return Err(Desync(format!("{what}: the recording ends")));
             };
             if want(r) {
+                // (An impatience handler's record comes before the next lifecycle record.)
+                let own =
+                    r["k"] == "obs" && r["ev"].as_str().is_some_and(|e| e.starts_with("imp_"));
+                if !own {
+                    self.imp_due(w)?;
+                }
                 // Each record is of the frame it's made in.
                 if r["t"].as_i64() != Some(self.tick) {
                     let d = describe(r);
@@ -349,7 +372,11 @@ impl Driver<'_> {
                 self.i += 1;
                 return Ok(self.i - 1);
             }
-            if boundary(r) || self.approach_draw_record(r) || self.ai_draw_record(r) {
+            if boundary(r)
+                || self.approach_draw_record(r)
+                || self.ai_draw_record(r)
+                || self.imp_draw_record(r)
+            {
                 return Err(Desync(format!("{what}: the recording has {}", describe(r))));
             }
             let i = self.i;
@@ -374,6 +401,7 @@ impl Driver<'_> {
             boundary(r)
                 || self.approach_draw_record(r)
                 || self.ai_draw_record(r)
+                || self.imp_draw_record(r)
                 || (r["k"] == "obs"
                     && r["ev"].as_str().is_some_and(|e| {
                         (e.starts_with("uc_")
@@ -795,6 +823,9 @@ impl Driver<'_> {
         let origin = r["origin"].as_str().unwrap_or("");
         let outer = std::mem::replace(&mut self.uc_origin, origin.to_owned());
         self.tgt_runs.clear();
+        if obs(r, "uc_x").is_some() {
+            self.imp_death_window(w, r);
+        }
         let click = self.tgt_entry(w, i);
         let running_before = r["u"].as_str().and_then(|u| w.combat.commands.is_running(u));
         match phase_of(origin) {
@@ -1975,6 +2006,13 @@ impl Inputs for Driver<'_> {
         for p in w.combat.pending_resolves.iter_mut().skip(before) {
             p.source_id = rid;
         }
+        // (`AllAttacks[i].Rule.AttackRoll`, for the impatience controller's damage handler.)
+        if let Some(seq) = rule.attack_roll_seq
+            && w.combat.impatience.on
+        {
+            w.combat.impatience.rolls.entry(c).or_default().push(seq);
+        }
+        self.imp_span(w, at, end);
         match rule.attack_hit {
             Some(hit) => Ok(hit),
             None => Err(Desync(format!("command {c}'s attack rule made no roll"))),
@@ -2191,7 +2229,7 @@ fn base_fields() -> serde_json::Map<String, J> {
 /// innermost rule, of a kind the replay reads, with every field typed; diffs of the rule's own
 /// fields, each value of its field's kind. No lifecycle record, other observation or exception.
 fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
-    let SpanCx { tick, w, replay, sites, limb, rules, root_reason, achievements } = *cx;
+    let SpanCx { tick, w, replay, sites, limb, rules, root_reason, achievements, impatience } = *cx;
     struct Frame {
         id: i64,
         class: String,
@@ -2544,6 +2582,41 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
             // The engagement controller's provoke (`OnEventDidTrigger` of an attack roll or an attack
             // with a weapon), in its handler: the initiator's, checked against the sim's queue at
             // the next engagement tick.
+            Some("obs") if x["ev"] == "imp_s" => {
+                // Written in a did handler of this very rule: the impatience controller's for a
+                // `RuleDealDamage` (its bother unit, then its end), `OffensiveActionsController`'s
+                // for a `RuleAttackRoll` (the target's bother unit). Matched with the sim's
+                // operations after the sim fires the rule (`imp_span`).
+                let handler = handler_classes.last().map(String::as_str);
+                // Its units: the bother unit is the rule's target, bothered by its initiator; the
+                // damage handler's end is the initiator's, with the rule's id.
+                let units_ok = match x["at"].as_str() {
+                    Some("bother") => {
+                        x.get("u") == top.target.get("$unit")
+                            && x.get("b") == top.initiator.get("$unit")
+                    }
+                    Some("dmg") => {
+                        x.get("u") == top.initiator.get("$unit") && x["rule"].as_i64() == Some(rule)
+                    }
+                    _ => false,
+                };
+                impatience
+                    && units_ok
+                    && own_handler
+                    && stage == 3
+                    && matches!(
+                        (handler, x["at"].as_str(), short_class(&top.class)),
+                        (
+                            Some("Kingmaker.Controllers.UnitImpatienceController"),
+                            Some("bother" | "dmg"),
+                            "RuleDealDamage",
+                        ) | (
+                            Some("Kingmaker.Controllers.OffensiveActionsController"),
+                            Some("bother"),
+                            "RuleAttackRoll",
+                        )
+                    )
+            }
             Some("obs") if x["ev"] == "eng_prov" => {
                 // Called by the handler of this very rule (its subscribers list's type argument).
                 let list = format!(
@@ -2743,6 +2816,8 @@ struct SpanCx<'a> {
     root_reason: &'a J,
     /// Each achievement handler's multiplicity, as the run's first rule it handles showed it.
     achievements: &'a std::cell::RefCell<HashMap<String, usize>>,
+    /// The impatience controller is observed (its handlers' records may be in a span).
+    impatience: bool,
 }
 
 /// The `RulebookTargetEvent`s among the rules seen inside attacks.
@@ -3806,6 +3881,7 @@ impl Driver<'_> {
                     rules: &self.rule_ids,
                     root_reason: &root_reason,
                     achievements: &self.achievements,
+                    impatience: self.imp,
                 },
             );
         if !ok {
@@ -4217,7 +4293,8 @@ mod tests {
                 limb: None,
                 rules: &rules,
                 root_reason: &root_reason,
-                achievements: &ach
+                achievements: &ach,
+                impatience: false
             }
         ));
         // The root's reason is the one `AssignSource` gave.
@@ -4234,7 +4311,8 @@ mod tests {
                     limb: None,
                     rules: &rules,
                     root_reason: &other,
-                    achievements: &ach
+                    achievements: &ach,
+                    impatience: false
                 }
             ),
             "another reason for the root"
@@ -4252,7 +4330,8 @@ mod tests {
                     limb: None,
                     rules: &only_two,
                     root_reason: &root_reason,
-                    achievements: &ach
+                    achievements: &ach,
+                    impatience: false
                 }
             ),
             "a reason's unallocated rule"
@@ -4271,6 +4350,7 @@ mod tests {
                     rules: &rules,
                     root_reason: &root_reason,
                     achievements: &ach,
+                    impatience: false,
                 },
             )
         };

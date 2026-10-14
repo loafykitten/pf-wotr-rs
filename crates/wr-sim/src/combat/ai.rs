@@ -1145,12 +1145,32 @@ fn calculate_targets_score<I: AiInputs>(
         }
         // `IsAffectedByImpatience`: an attack is.
         if !w.combat.ai.ctx.is_player_faction && !not_priority {
-            if stable_bool(w, inp, "disliked", &t.id)? {
+            let disliked = stable_bool(w, inp, "disliked", &t.id)?;
+            // (The impatience controller's, when modelled: a check.)
+            if w.combat.impatience.on {
+                let me = ctx_unit(w)?;
+                if super::impatience::disliked(w, me, t.unit)? != disliked {
+                    return desync(format!(
+                        "{me_id}'s DislikedTargets.Contains({}): the sim's differs",
+                        t.id
+                    ));
+                }
+            }
+            if disliked {
                 let c = ctx(w);
                 c.cur = mul(c.cur, Decimal::lit(1, 2))?;
             }
             let ipt = inp.ai_unit(w, "ipt", None)?;
             stable(w, "ipt", &me_id, Stable::Unit(ipt.clone()))?;
+            if w.combat.impatience.on {
+                let me = ctx_unit(w)?;
+                let sim = super::impatience::priority(w, me)?.map(|p| uid(w, p));
+                if sim != ipt {
+                    return desync(format!(
+                        "{me_id}'s ImpatiencePriorityTarget: the sim's {sim:?}, the recording's {ipt:?}"
+                    ));
+                }
+            }
             if let Some(p) = ipt {
                 // The second read of `ImpatiencePriorityTarget`.
                 let again = inp.ai_unit(w, "ipt", None)?;

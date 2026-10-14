@@ -13,12 +13,12 @@ survey and notes on other rewrites.
   - POC-4 (`docs/poc4/dialogue.md`, round 5): 15 of 21 dialogue runs are valid end to end
     (the 12 Seelah runs and the 3 dialog-checks runs); Horgus stays invalid until its
     background cutscene's track selection is ported. Manual_13 loads clean; Manual_19 1.0000.
-  - POC-5 (`docs/poc5/combat.md`, `docs/poc5/commands.md` round 13 slice F): every run of `poc5-tb-92` valid
-    with cooldowns, turns, the commands' lifecycle, `UnitAttack`, the approach, the AI, the engagement controller and
-    units' `LastTarget`/`ManualTarget` computed (`combat/commands/*.rs`, `combat/ai.rs`, `combat/engage.rs`,
-    `combat/targets.rs`, `combat/replay/{commands,ai,engage,targets}.rs`; oracle `CommandObs.cs`, `CommandObsAi.cs`,
-    `CommandObsEngage.cs`, `CommandObsTarget.cs`, observers `commands`, `attacks`, `approach`, `ai`, `engage`,
-    `targets`). Next: the impatience controller; the movement agent waits for the nav port.
+  - POC-5 (`docs/poc5/combat.md`, `docs/poc5/commands.md` round 14 slice G): every run of `poc5-tb-95` valid
+    with cooldowns, turns, the commands' lifecycle, `UnitAttack`, the approach, the AI, the engagement controller,
+    units' `LastTarget`/`ManualTarget` and the impatience controller computed (`combat/commands/*.rs`, `combat/ai.rs`,
+    `combat/engage.rs`, `combat/targets.rs`, `combat/impatience.rs`, `combat/replay/*.rs`; oracle `CommandObs*.cs`,
+    observers `commands`, `attacks`, `approach`, `ai`, `engage`, `targets`, `impatience`). Next: see PLAN's list; the
+    movement agent waits for the nav port.
   - Oracle (`docs/poc5/tb-replay.md`): turn-based replays are tick-exact, under load too (`poc5-tb-51`..`-53`,
     player input neutral at the source, physics phase pinned); `cert-20` certifies from this repo's layout.
   - POC-6 render round 3 (`docs/poc6/render-round3.md`): realtime shadows; FLIP 0.1246. Next: light probes.

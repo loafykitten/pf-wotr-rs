@@ -138,7 +138,19 @@ impl Driver<'_> {
                 Some("TurnBased.Controllers.TurnController.Tick") if self.tt_open => {
                     self.ai_forced += 1;
                 }
-                Some("TurnBased.Controllers.TurnController.Prepare") => self.ai_prepared += 1,
+                Some("TurnBased.Controllers.TurnController.Prepare") => {
+                    self.ai_prepared += 1;
+                    // (After `Prepare`'s `UpdatePriorityTarget`, from the same chain.)
+                    let tail = origin.strip_prefix("Kingmaker.AI.AiBrainController.ForceTick < ");
+                    if self.imp
+                        && (self.imp_prepared.is_empty()
+                            || self.imp_prepare_tail.take().as_deref() != tail)
+                    {
+                        w.coverage.unsupported(
+                            "driven replay: TurnController.Prepare's ForceTick before its UpdatePriorityTarget, or from another chain",
+                        );
+                    }
+                }
                 Some("TurnBased.Controllers.TurnController.Tick") => w.coverage.unsupported(
                     "driven replay: a forced AI tick outside the turn controller's tick",
                 ),

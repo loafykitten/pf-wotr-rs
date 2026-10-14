@@ -1,4 +1,4 @@
-# POC-5 commands: survey and plan (round 8: slice A done 2026-10-13, eleventh session; round 9: slice B done, twelfth session; slice C done, thirteenth session; slice D done, fourteenth session; slice E done, fifteenth session; slice F done, sixteenth session)
+# POC-5 commands: survey and plan (round 8: slice A done 2026-10-13, eleventh session; round 9: slice B done, twelfth session; slice C done, thirteenth session; slice D done, fourteenth session; slice E done, fifteenth session; slices F and G done, sixteenth session)
 
 Round 7 left the units' commands as the main recorded input of the turn controller: whether a rider's commands are
 empty or running, the turn's running commands (`HasRunningCommands`), and when a command acts (`SpendAction`'s call from
@@ -88,7 +88,8 @@ others). Most runs never start: they're replaced or interrupted (the AI re-decid
   `Engage`/`Disengage`, attacks of opportunity and their count).
 - **F (done 2026-10-14: "Slice F: result" below): units' targets** (`LastTarget`, `ManualTarget`:
   `UnitCommands.UpdateCombatTarget` and the other writers).
-- **G (next): the impatience controller** (`UnitImpatienceController`: what the AI reads as `ipt` and `disliked`).
+- **G (done 2026-10-14: "Slice G: result" below): the impatience controller** (`UnitImpatienceController`: what
+  the AI reads as `ipt` and `disliked`).
 
 Before slice A's first review, walk the fail-closed checklist (every field, frame id, finite values, declared
 observers, completeness at each boundary; hooks never call side-effecting game methods).
@@ -736,7 +737,7 @@ click's frame, turn count and `at`. Rounds 9 and 10: the reset's own writer, flo
 11 found nothing (residual gaps: the paths no capture exercises, above). Left as is: the other slices' leaves are
 still pulled with records processed on the way (a reordered presentation draw between them isn't reported).
 
-## Slice G: design draft (2026-10-14, sixteenth session; not started)
+## Slice G: design (2026-10-14, sixteenth session)
 
 The AI reads the impatience controller's state as inputs: `ipt` (`CombatAiData.ImpatiencePriorityTarget`) and
 `disliked` (`DislikedTargets.Contains`). Slice G ports `UnitImpatienceController` so both become checks [C]:
@@ -767,3 +768,53 @@ The AI reads the impatience controller's state as inputs: `ipt` (`CombatAiData.I
   and of `UpdatePriorityTarget`/`SetupPriorityTarget`'s results; the initial state at the window's first tick.
 - **Fixture**: the current fights may not reach a hard target (the threshold of misses); a fight where an enemy keeps
   missing one target would exercise the switch draw. Check what `-92` exercises before recording more.
+
+## Slice G: result (2026-10-14, sixteenth session) [M]
+
+On **`poc5-tb-95`** (idle, Manual_18; `tb-nearest` and `tb-focus`, record and two replays) **every run is valid with
+the impatience controller computed** (`combat/impatience.rs`, `combat/replay/impatience.rs`; WrathOracle
+`CommandObsImpatience.cs`, observer `impatience`): `tb-focus` runs 2,631 entries (the controller's ticks, their
+`UpdatePriorityTarget`s and `TurnController.Prepare`'s), checks 13,968 states after `UpdatePriorityTarget` and matches
+50 handler records (command starts, bother units from `OffensiveActionsController`'s offensive actions and from
+damage, the damage handler's attacks without effect, deaths). The AI's `ipt` and `disliked` reads are checks. Units'
+sets are .NET `HashSet`s (`csharp/hashset.rs`: the reference source's, whose `Remove` of the last entry resets the
+set, as the recorded slot counts show); a damage rule carries its attack roll's sequence number
+(`AttackLink.roll_seq`), and each `UnitAttack` its rolls, which the damage handler matches.
+
+How it's checked: the controller's entries (`uc_imp`: the tick from `GameMode.Tick`, placed in a new phase before the
+AI's; `UpdatePriorityTarget` from `Prepare`, exactly one of its rider before its `ForceTick`) pull their leaves
+(`ipic`, `ivis`, `idist`, `iotw`, `ilvl`), nested entries, draws and states strictly as the next record (nothing else
+is recorded in the controller's code). The handlers run inside other code, so each queues its operation; the replay
+applies the queue in order as the handlers' `imp_s` records come (`TryAddBotherUnit`'s visibility read is its
+record's), inside a rule's span after the sim fires the rule (`span_ok` binds each record to its handler, rule and
+units). A command start's record must come before the next lifecycle record. Leaving combat's `CombatAiData.Clear` and
+a death's removals go through the queue too. The awake units of a tick are checked against the sim's as far as it
+knows them. `imp_init` is one block right after `tgt_init`'s. The tick's call chain is exactly `GameMode.Tick`'s;
+`Prepare`'s `UpdatePriorityTarget` has its `ForceTick`'s. Inside any rule's span (a command's attack or a projectile's
+resolve) each record must be of its frame and inside the did handler of its rule, bound to the rule's units (and the
+damage handler's to its id). A draw is the tape's, its recorded value checked; one outside the controller is reported.
+A destruction's handler records are reported (the replay doesn't model destruction). A rule handler's record
+outside its rule's span, a fired rule's handler record missing from it, and the controller's own records (entries,
+leaves, draws) inside a rule are reported. A tick's awake units follow the state's units' order. A command start's record comes before WrathOracle's `cmd` note
+of the start; a death's records are one batch where its notification is (after as many compared mutations as the sim
+made before it: `GiveExperience`'s come first), done before the unit's `SetLifeState` goes on; `Prepare`'s
+`UpdatePriorityTarget` comes after its interrupts and its cooldowns' clear.
+
+A bother unit's record must be in the handler that queued it (the damage handler's or an offensive action's). Any
+record of the impatience observer's family (observations, entries, leaves, draws) in a recording without the observer
+is reported, in a rule's span or outside (the targets test has those cases on `-92`). `missing_or_wrong_impatience_records_are_reported` damages `-95/tb-focus` 57 ways; each is reported. The regression
+(`out-slice-g`) is identical to `out-slice-f`; the older captures replay as before.
+
+Not exercised by a capture: a hard target and its switch draw (three consecutive attacks without effect on one
+target), `SetupPriorityTarget` (so `ivis`, `idist` and the setup draw), an impatience level other than normal,
+abilities, heals and summons (reported), mounts (reported).
+
+
+**Reviews:** gpt-6.1-sol (high, Fast mode), seven rounds, every finding confirmed against the code and fixed. Round
+1: records in projectile resolves validated, a stray draw reported, draws' values checked against the tape, the entries'
+whole chains, a destruction reported. Round 2: a rule handler's record only inside its rule's span (and a fired rule's
+all there), the controller's own records never inside a rule, the awake units' order. Round 3: a command start's
+record before its `cmd` note, a death's batch together and before `SetLifeState` goes on, `Prepare`'s update after its
+clear. Round 4: no impatience record accepted without the observer, a death's batch at its notification (by compared
+mutations). Rounds 5 and 6: the whole record family without the observer, in spans and out; a bother unit's record in
+the handler that queued it. Round 7 found nothing (residual gaps: the paths no capture exercises, above).

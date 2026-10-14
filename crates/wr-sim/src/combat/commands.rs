@@ -968,7 +968,10 @@ fn start<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<()> {
         return interrupt(w, inp, c, true);
     }
     cmd_mut(w, c)?.s.started = true;
-    class_code(w, inp, "OnStart", c, None).map(|_| ())
+    class_code(w, inp, "OnStart", c, None)?;
+    // `IUnitCommandStartHandler.HandleUnitCommandDidStart`: the impatience controller's.
+    super::impatience::command_started(w, c);
+    Ok(())
 }
 
 /// `Target?.Unit`: the target unit, when it resolves.

@@ -25,7 +25,8 @@ const SAVE: &str = "Manual_18_WR_FirstBattle";
 /// of opportunity's class code are the sim's. `poc5-tb-82` also has the `ai` observer: the AI is
 /// the sim's. `poc5-tb-85` also has the `engage` observer: the engagement controller is the sim's.
 /// `poc5-tb-92` also has the `targets` observer: units' `LastTarget` and `ManualTarget` are the sim's.
-const CAPTURES: [&str; 15] = [
+/// `poc5-tb-95` also has the `impatience` observer: the impatience controller is the sim's.
+const CAPTURES: [&str; 16] = [
     "poc5-tb-51",
     "poc5-tb-52",
     "poc5-tb-53",
@@ -41,10 +42,11 @@ const CAPTURES: [&str; 15] = [
     "poc5-tb-85",
     "poc5-tb-91",
     "poc5-tb-92",
+    "poc5-tb-95",
 ];
 
 /// The captures whose root rules carry their call sites.
-const WITH_ORIGINS: [&str; 11] = [
+const WITH_ORIGINS: [&str; 12] = [
     "poc5-tb-60",
     "poc5-tb-63",
     "poc5-tb-68",
@@ -56,10 +58,11 @@ const WITH_ORIGINS: [&str; 11] = [
     "poc5-tb-85",
     "poc5-tb-91",
     "poc5-tb-92",
+    "poc5-tb-95",
 ];
 
 /// The captures with WrathOracle's cooldown records (`cd_*`).
-const WITH_COOLDOWNS: [&str; 10] = [
+const WITH_COOLDOWNS: [&str; 11] = [
     "poc5-tb-63",
     "poc5-tb-68",
     "poc5-tb-74",
@@ -70,10 +73,11 @@ const WITH_COOLDOWNS: [&str; 10] = [
     "poc5-tb-85",
     "poc5-tb-91",
     "poc5-tb-92",
+    "poc5-tb-95",
 ];
 
 /// The captures with WrathOracle's turn controller tick records (`tt*`).
-const WITH_TURN_TICKS: [&str; 9] = [
+const WITH_TURN_TICKS: [&str; 10] = [
     "poc5-tb-68",
     "poc5-tb-74",
     "poc5-tb-77",
@@ -83,10 +87,11 @@ const WITH_TURN_TICKS: [&str; 9] = [
     "poc5-tb-85",
     "poc5-tb-91",
     "poc5-tb-92",
+    "poc5-tb-95",
 ];
 
 /// The captures with WrathOracle's command records (`uc_*`).
-const WITH_COMMANDS: [&str; 8] = [
+const WITH_COMMANDS: [&str; 9] = [
     "poc5-tb-74",
     "poc5-tb-77",
     "poc5-tb-80",
@@ -95,10 +100,11 @@ const WITH_COMMANDS: [&str; 8] = [
     "poc5-tb-85",
     "poc5-tb-91",
     "poc5-tb-92",
+    "poc5-tb-95",
 ];
 
 /// The captures with WrathOracle's `attacks` observer (`ua_atk`, `UnitAttack`'s leaves).
-const WITH_ATTACKS: [&str; 7] = [
+const WITH_ATTACKS: [&str; 8] = [
     "poc5-tb-77",
     "poc5-tb-80",
     "poc5-tb-81",
@@ -106,21 +112,32 @@ const WITH_ATTACKS: [&str; 7] = [
     "poc5-tb-85",
     "poc5-tb-91",
     "poc5-tb-92",
+    "poc5-tb-95",
 ];
 
 /// The captures with WrathOracle's `approach` observer (`uc_call`, the approach's taps).
-const WITH_APPROACH: [&str; 6] =
-    ["poc5-tb-80", "poc5-tb-81", "poc5-tb-82", "poc5-tb-85", "poc5-tb-91", "poc5-tb-92"];
+const WITH_APPROACH: [&str; 7] = [
+    "poc5-tb-80",
+    "poc5-tb-81",
+    "poc5-tb-82",
+    "poc5-tb-85",
+    "poc5-tb-91",
+    "poc5-tb-92",
+    "poc5-tb-95",
+];
 
 /// The captures with WrathOracle's `ai` observer (`uc_ai`, the AI's taps and checks).
-const WITH_AI: [&str; 4] = ["poc5-tb-82", "poc5-tb-85", "poc5-tb-91", "poc5-tb-92"];
+const WITH_AI: [&str; 5] = ["poc5-tb-82", "poc5-tb-85", "poc5-tb-91", "poc5-tb-92", "poc5-tb-95"];
 
 /// The captures with WrathOracle's `engage` observer (`uc_eng`, the engagement's taps and checks).
-const WITH_ENGAGE: [&str; 3] = ["poc5-tb-85", "poc5-tb-91", "poc5-tb-92"];
+const WITH_ENGAGE: [&str; 4] = ["poc5-tb-85", "poc5-tb-91", "poc5-tb-92", "poc5-tb-95"];
 
 /// The captures with WrathOracle's `targets` observer (`tgt_init`, `tgt_w`, `UpdateCombatTarget`'s
 /// leaves).
-const WITH_TARGETS: [&str; 1] = ["poc5-tb-92"];
+const WITH_TARGETS: [&str; 2] = ["poc5-tb-92", "poc5-tb-95"];
+
+/// The captures with WrathOracle's `impatience` observer (`imp_init`, `uc_imp`, `imp_s`, its leaves).
+const WITH_IMPATIENCE: [&str; 1] = ["poc5-tb-95"];
 
 /// The capture the approach records are damaged in.
 const APPROACH: &str = "poc5-tb-80";
@@ -452,6 +469,19 @@ fn driven_replay_equals_the_recordings() {
                     assert!(out.tgt_reads >= 20, "{name} {run}: {}", out.tgt_reads);
                 } else {
                     assert_eq!(out.tgt_checked + out.tgt_reads, 0, "{name} {run}");
+                }
+                if WITH_IMPATIENCE.contains(&capture) {
+                    // The impatience controller is the sim's: every tick and `UpdatePriorityTarget`
+                    // run, each state after it checked, every handler's record matched.
+                    assert!(out.imp_entries > 1_000, "{name} {run}: {}", out.imp_entries);
+                    assert!(out.imp_states > out.imp_entries, "{name} {run}: {}", out.imp_states);
+                    assert!(out.imp_handlers >= 5, "{name} {run}: {}", out.imp_handlers);
+                } else {
+                    assert_eq!(
+                        out.imp_entries + out.imp_states + out.imp_handlers,
+                        0,
+                        "{name} {run}"
+                    );
                 }
                 if WITH_COOLDOWNS.contains(&capture) {
                     // The cooldowns are the sim's at every prefix and around every recorded
@@ -4713,11 +4743,26 @@ fn missing_or_wrong_target_records_are_reported() {
         renumber(recs);
     }
     const STOP: &str = "Kingmaker.Controllers.Combat.UnitCombatState.set_LastTarget < Kingmaker.EntitySystem.Entities.UnitEntityData.Stop < X.Y";
+    // A record put inside the first initiative roll's span (a root the replay drives: its frame,
+    // renumbered).
+    fn insert_in_root(recs: &mut Vec<V>, mut r: V) {
+        let root = recs
+            .iter()
+            .position(|x| {
+                x["k"] == "rule"
+                    && x["parent"] == 0
+                    && x["class"].as_str().is_some_and(|c| c.ends_with("RuleInitiativeRoll"))
+            })
+            .expect("an initiative roll");
+        r["t"] = recs[root]["t"].clone();
+        recs.insert(root + 1, r);
+        renumber(recs);
+    }
     const C: &str = "driven replay: commands:";
     const DIFF: &str = "driven replay: the sim's target write";
     const UNMADE: &str = "driven replay: a target write the sim didn't make";
     const UNREAD: &str = "driven replay: a tgt_w record it can't read";
-    let cases: [(&str, Change); 85] = [
+    let cases: [(&str, Change); 90] = [
         // The initial state.
         ("driven replay: a tgt_init record it can't read", |recs| {
             let at = first_init(recs);
@@ -5307,6 +5352,47 @@ fn missing_or_wrong_target_records_are_reported() {
             let i = pos(recs, |r| r["k"] == "input" && r["step"] == "tbattack");
             recs[i]["at"]["path_points"] = json!(2_147_483_648_i64);
         }),
+        // An impatience record without its observer (slice G, review round 4): inside a rule's
+        // handler too.
+        (C, |recs| {
+            let h = pos(recs, |r| {
+                r["k"] == "h"
+                    && r["class"] == "Kingmaker.Controllers.OffensiveActionsController"
+                    && r["phase"] == "did"
+            });
+            let mut r = recs.iter().find(|x| ev(x, "tgt_init")).unwrap().clone();
+            let o = r.as_object_mut().unwrap();
+            o.clear();
+            o.insert("k".into(), json!("obs"));
+            o.insert("ev".into(), json!("imp_s"));
+            o.insert("at".into(), json!("bother"));
+            o.insert("t".into(), recs[h]["t"].clone());
+            recs.insert(h + 1, r);
+            renumber(recs);
+        }),
+        // The impatience observer's other records without it, inside a root rule.
+        ("driven replay: an impatience record without the impatience observer", |recs| {
+            insert_in_root(
+                recs,
+                json!({"k": "obs", "ev": "uc_imp_end", "fn": "Tick", "exc": false}),
+            );
+        }),
+        ("driven replay: an impatience record without the impatience observer", |recs| {
+            insert_in_root(recs, json!({"k": "obs", "ev": "uc_v", "f": "ipic", "v": true}));
+        }),
+        ("driven replay: an impatience record without the impatience observer", |recs| {
+            insert_in_root(
+                recs,
+                json!({"k": "draw", "c": "sim", "key": "Assembly-CSharp|Kingmaker.Controllers.UnitImpatienceController|UpdatePriorityTarget(UnitEntityData)|#0@121|Range(int,int)", "m": "Range_ii", "a": [0, 100], "v": 5, "rule": 0, "h": 0}),
+            );
+        }),
+        ("driven replay: an impatience record without the impatience observer", |recs| {
+            // An impatience draw outside any rule.
+            let at = pos(recs, |r| r["k"] == "tick" && r["t"].as_i64() > Some(300));
+            let d = json!({"k": "draw", "c": "sim", "t": recs[at]["t"], "key": "Assembly-CSharp|Kingmaker.Controllers.UnitImpatienceController|UpdatePriorityTarget(UnitEntityData)|#0@121|Range(int,int)", "m": "Range_ii", "a": [0, 100], "v": 5, "rule": 0, "h": 0});
+            recs.insert(at + 1, d);
+            renumber(recs);
+        }),
         // The observer without the engagement's.
         ("driven replay: the recording declares its targets observer without", |recs| {
             let at = pos(recs, |r| r["k"] == "begin");
@@ -5319,6 +5405,504 @@ fn missing_or_wrong_target_records_are_reported() {
                 "approach",
                 "ai",
                 "targets"
+            ]);
+        }),
+    ];
+    let mut missed = Vec::new();
+    for (i, (want, change)) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+        change(&mut changed.records);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
+            missed.push(format!(
+                "case {i}: {want}: {:?}",
+                w.coverage.unsupported.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// The fight the impatience records are damaged in: the controller's ticks, `Prepare`'s
+/// `UpdatePriorityTarget`s, command starts, bother units (offensive actions and damage), deaths.
+const IMPATIENCE: (&str, &str) = ("poc5-tb-95", "tb-focus");
+
+/// Every way of losing, changing or adding an impatience record (slice G) is reported.
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18 and the poc5-tb-95 capture"]
+fn missing_or_wrong_impatience_records_are_reported() {
+    use serde_json::Value as V;
+    let Some(dir) = fixture_in(IMPATIENCE.0, IMPATIENCE.1) else {
+        eprintln!("{IMPATIENCE:?} not present: skipped");
+        return;
+    };
+    type Change = fn(&mut Vec<V>);
+    fn ev(r: &V, e: &str) -> bool {
+        r["k"] == "obs" && r["ev"] == e
+    }
+    fn leaf(r: &V, f: &str) -> bool {
+        ev(r, "uc_v") && r["f"] == f
+    }
+    fn pos(recs: &[V], f: impl Fn(&V) -> bool) -> usize {
+        recs.iter().position(f).expect("a record to change")
+    }
+    fn renumber(recs: &mut [V]) {
+        for (n, r) in recs.iter_mut().enumerate() {
+            r["seq"] = json!(n);
+        }
+    }
+    fn state(recs: &[V], at: &str) -> usize {
+        pos(recs, |r| ev(r, "imp_s") && r["at"] == at && r["t"].as_i64() > Some(300))
+    }
+    // A tick's entry (after the window's first frames).
+    fn tick(recs: &[V]) -> usize {
+        pos(recs, |r| ev(r, "uc_imp") && r["fn"] == "Tick" && r["t"].as_i64() > Some(300))
+    }
+    fn prepare_upd(recs: &[V]) -> usize {
+        pos(recs, |r| ev(r, "uc_imp") && r["nested"] == false && r["fn"] == "UpdatePriorityTarget")
+    }
+    // The records of the entry at `at`, through its end.
+    fn entry_end(recs: &[V], at: usize) -> usize {
+        let f = recs[at]["fn"].clone();
+        at + recs[at..].iter().position(|r| ev(r, "uc_imp_end") && r["fn"] == f).unwrap()
+    }
+    fn first_init(recs: &[V]) -> usize {
+        pos(recs, |r| ev(r, "imp_init"))
+    }
+    // A draw moved right before record `at` (of `at`'s frame).
+    fn draw_before(recs: &mut Vec<V>, at: usize) {
+        let d = recs[at..].iter().position(|r| r["k"] == "draw").unwrap() + at;
+        let mut r = recs.remove(d);
+        r["t"] = recs[at]["t"].clone();
+        recs.insert(at, r);
+        renumber(recs);
+    }
+    // An `imp_s` `at` inside a projectile's resolve (a root `RuleAttackWithWeaponResolve`'s span).
+    fn in_resolve(recs: &[V], at: &str) -> usize {
+        let mut root = None;
+        for (i, r) in recs.iter().enumerate() {
+            if r["k"] == "rule" && r["parent"] == 0 {
+                root = r["class"].as_str().map(str::to_owned);
+            }
+            if ev(r, "imp_s")
+                && r["at"] == at
+                && root.as_deref().is_some_and(|c| c.ends_with("RuleAttackWithWeaponResolve"))
+            {
+                return i;
+            }
+        }
+        panic!("no {at} in a projectile's resolve")
+    }
+    const C: &str = "driven replay: commands:";
+    const IMP: &str = "driven replay: impatience:";
+    let cases: [(&str, Change); 57] = [
+        // The initial state.
+        ("driven replay: an imp_init record it can't read", |recs| {
+            let at = first_init(recs);
+            recs[at]["extra"] = json!(1);
+        }),
+        ("driven replay: an imp_init record it can't read", |recs| {
+            let at = first_init(recs);
+            recs[at]["u"] = json!("no-such-unit");
+        }),
+        ("driven replay: an imp_init record out of its block", |recs| {
+            let at = first_init(recs);
+            recs.swap(at, at + 1);
+        }),
+        ("driven replay: the initial impatience (imp_init) doesn't cover", |recs| {
+            let at = first_init(recs);
+            let end = at + recs[at..].iter().position(|r| !ev(r, "imp_init")).unwrap();
+            recs.remove(end - 1);
+        }),
+        ("driven replay: impatience state at the window's start", |recs| {
+            let at = first_init(recs);
+            let other = recs[at + 1]["u"].clone();
+            recs[at]["bother"] = json!([other]);
+            recs[at]["bother_slots"] = json!(1);
+        }),
+        ("driven replay: impatience state at the window's start", |recs| {
+            let at = first_init(recs);
+            recs[at]["hard_slots"] = json!(1);
+        }),
+        // The entries.
+        ("driven replay: a uc_imp record it can't read", |recs| {
+            let at = tick(recs);
+            recs[at]["extra"] = json!(1);
+        }),
+        (
+            "driven replay: the impatience controller called from a source the replay can't place",
+            |recs| {
+                let at = tick(recs);
+                let o =
+                    recs[at]["origin"].as_str().unwrap().replace("GameModes.GameMode.Tick", "X.Y");
+                recs[at]["origin"] = json!(o);
+            },
+        ),
+        ("driven replay: the impatience controller's awake units aren't the sim's", |recs| {
+            let at = tick(recs);
+            recs[at]["awake"].as_array_mut().unwrap().pop();
+        }),
+        ("driven replay: the impatience controller's awake units aren't the sim's", |recs| {
+            let at = tick(recs);
+            let a = recs[at]["awake"][0].clone();
+            recs[at]["awake"].as_array_mut().unwrap().push(a);
+        }),
+        ("driven replay: a frame without the impatience controller's tick", |recs| {
+            let at = tick(recs);
+            let end = entry_end(recs, at);
+            recs.drain(at..=end);
+        }),
+        (C, |recs| {
+            let at = tick(recs);
+            let end = entry_end(recs, at);
+            recs[end]["exc"] = json!(true);
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "uc_imp") && r["nested"] == true && r["t"].as_i64() > Some(300)
+            });
+            let other = recs.iter().find(|r| ev(r, "imp_init") && r["u"] != recs[at]["u"]).unwrap()
+                ["u"]
+                .clone();
+            recs[at]["u"] = other;
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "uc_imp") && r["nested"] == true && r["t"].as_i64() > Some(300)
+            });
+            recs[at]["origin"] =
+                json!("Kingmaker.Controllers.UnitImpatienceController.UpdatePriorityTarget < X.Y");
+        }),
+        // The states after `UpdatePriorityTarget`.
+        (C, |recs| {
+            let at = state(recs, "upd");
+            recs[at]["cnt"] = json!(1);
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "imp_s")
+                    && r["at"] == "upd"
+                    && r["cawe"].as_array().is_some_and(|a| !a.is_empty())
+            });
+            recs[at]["cawe"] = json!([]);
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "imp_s")
+                    && r["at"] == "upd"
+                    && r["bother"].as_array().is_some_and(|a| a.len() >= 2)
+            });
+            recs[at]["bother"].as_array_mut().unwrap().reverse();
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "imp_s")
+                    && r["at"] == "upd"
+                    && r["bother"].as_array().is_some_and(|a| !a.is_empty())
+            });
+            recs[at]["bother_slots"] = json!(9);
+        }),
+        (C, |recs| {
+            let at = state(recs, "upd");
+            let u = recs[at]["u"].clone();
+            recs[at]["ipt"] = u;
+        }),
+        (C, |recs| {
+            let at = state(recs, "upd");
+            let u = recs[at]["u"].clone();
+            recs[at]["lost"] = u;
+        }),
+        (C, |recs| {
+            let at = state(recs, "upd");
+            recs[at]["extra"] = json!(1);
+        }),
+        // The leaves and draws.
+        (C, |recs| {
+            let at = pos(recs, |r| leaf(r, "ipic") && r["t"].as_i64() > Some(300));
+            recs[at]["v"] = json!(!recs[at]["v"].as_bool().unwrap());
+        }),
+        (C, |recs| {
+            // (Flipped: a projectile on the way, or none.)
+            let at = pos(recs, |r| leaf(r, "iotw"));
+            let on = recs[at]["v"].as_array().unwrap().iter().any(|b| b == true);
+            recs[at]["v"] = if on { json!([]) } else { json!([true]) };
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| leaf(r, "iotw"));
+            recs.remove(at);
+        }),
+        (C, |recs| {
+            let at = state(recs, "upd");
+            draw_before(recs, at);
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| leaf(r, "ipic") && r["t"].as_i64() > Some(300));
+            draw_before(recs, at);
+        }),
+        // `TurnController.Prepare`'s `UpdatePriorityTarget`.
+        (
+            "driven replay: TurnController.Prepare without exactly one UpdatePriorityTarget",
+            |recs| {
+                let at = prepare_upd(recs);
+                let end = entry_end(recs, at);
+                recs.drain(at..=end);
+            },
+        ),
+        (C, |recs| {
+            let at = prepare_upd(recs);
+            let other = recs.iter().find(|r| ev(r, "imp_init") && r["u"] != recs[at]["u"]).unwrap()
+                ["u"]
+                .clone();
+            recs[at]["u"] = other;
+        }),
+        // The handlers.
+        (IMP, |recs| {
+            let at = state(recs, "start");
+            recs[at]["c"] = json!(99_999);
+        }),
+        (C, |recs| {
+            let at = state(recs, "start");
+            recs.remove(at);
+        }),
+        (IMP, |recs| {
+            let at = state(recs, "start");
+            let r = recs[at].clone();
+            recs.insert(at + 1, r);
+        }),
+        (IMP, |recs| {
+            let at = state(recs, "start");
+            recs[at]["cnt"] = json!(4);
+        }),
+        (IMP, |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "bother" && r["added"] == true);
+            recs[at]["vis"] = json!(false);
+        }),
+        (IMP, |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "bother");
+            recs[at]["vis"] = json!(null);
+        }),
+        (IMP, |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "bother");
+            recs[at]["added"] = json!(!recs[at]["added"].as_bool().unwrap());
+        }),
+        (C, |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "dmg");
+            recs[at]["rule"] = json!(1);
+        }),
+        (IMP, |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "death");
+            let other = recs.iter().find(|r| ev(r, "imp_init") && r["u"] != recs[at]["u"]).unwrap()
+                ["u"]
+                .clone();
+            recs[at]["u"] = other;
+        }),
+        ("driven replay: impatience: a death's records not together", |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "death");
+            let end = at
+                + recs[at..].iter().position(|r| !(ev(r, "imp_s") && r["at"] == "death")).unwrap();
+            recs.remove(end - 1);
+        }),
+        ("driven replay: impatience: a heal or a summon", |recs| {
+            let at = state(recs, "start");
+            let mut r = recs[at].clone();
+            r = json!({"seq": r["seq"], "k": "obs", "t": r["t"], "ev": "imp_other", "fn": "UnitImpatienceController.OnEventDidTrigger(RuleHealDamage)"});
+            recs.insert(at + 1, r);
+        }),
+        // Review round 1: records in a projectile's span checked; a stray draw; the whole chains.
+        ("driven replay: impatience: a record out of its rule's handler", |recs| {
+            let at = in_resolve(recs, "dmg");
+            recs[at]["rule"] = json!(1);
+        }),
+        (C, |recs| {
+            let at = in_resolve(recs, "dmg");
+            recs[at]["t"] = json!(-999);
+        }),
+        ("driven replay: impatience: a record out of its rule's handler", |recs| {
+            let at = in_resolve(recs, "dmg");
+            let r = recs.remove(at);
+            let to = at + recs[at..].iter().position(|x| x["k"] == "h_end").unwrap() + 1;
+            let to = to + recs[to..].iter().position(|x| x["k"] == "h_end").unwrap() + 1;
+            recs.insert(to, r);
+            renumber(recs);
+        }),
+        ("driven replay: an impatience draw the sim's controller didn't make", |recs| {
+            let at = tick(recs);
+            let end = entry_end(recs, at);
+            let mut d = recs.iter().find(|r| r["k"] == "draw" && r["c"] == "sim").unwrap().clone();
+            let o = d.as_object_mut().unwrap();
+            o.remove("site");
+            o.insert("key".into(), json!("Assembly-CSharp|Kingmaker.Controllers.UnitImpatienceController|UpdatePriorityTarget(UnitEntityData)|#0@121|Range(int,int)"));
+            o.insert("t".into(), recs[end]["t"].clone());
+            recs.insert(end + 1, d);
+            renumber(recs);
+        }),
+        (
+            "driven replay: the impatience controller called from a source the replay can't place",
+            |recs| {
+                let at = tick(recs);
+                let o =
+                    recs[at]["origin"].as_str().unwrap().replace("Kingmaker.Runner.Update", "X.Y");
+                recs[at]["origin"] = json!(o);
+            },
+        ),
+        (
+            "driven replay: TurnController.Prepare's ForceTick before its UpdatePriorityTarget, or from another chain",
+            |recs| {
+                let at = prepare_upd(recs);
+                let o =
+                    recs[at]["origin"].as_str().unwrap().replace("Kingmaker.Runner.Update", "X.Y");
+                recs[at]["origin"] = json!(o);
+            },
+        ),
+        // Review round 2: a rule handler's record only inside its rule's span; the controller's
+        // own records never inside a rule; the awake units in their order.
+        ("driven replay: impatience: a rule handler's record outside its rule's span", |recs| {
+            let at = in_resolve(recs, "dmg");
+            let r = recs.remove(at);
+            let to = at
+                + recs[at..]
+                    .iter()
+                    .position(|x| {
+                        x["k"] == "rule_end"
+                            && x["id"]
+                                == recs
+                                    .iter()
+                                    .rev()
+                                    .skip(recs.len() - at)
+                                    .find(|y| y["k"] == "rule" && y["parent"] == 0)
+                                    .unwrap()["id"]
+                    })
+                    .unwrap()
+                + 1;
+            recs.insert(to, r);
+            renumber(recs);
+        }),
+        ("driven replay: impatience: the controller's record inside a rule", |recs| {
+            let at = in_resolve(recs, "dmg");
+            let mut r = recs.iter().find(|x| leaf(x, "ipic")).unwrap().clone();
+            r["t"] = recs[at]["t"].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        ("driven replay: impatience: the controller's record inside a rule", |recs| {
+            let at = in_resolve(recs, "dmg");
+            let mut r = recs.iter().find(|x| ev(x, "uc_imp_end")).unwrap().clone();
+            r["t"] = recs[at]["t"].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        ("driven replay: impatience: the controller's draw inside a rule", |recs| {
+            let at = in_resolve(recs, "dmg");
+            let mut d = recs.iter().find(|r| r["k"] == "draw" && r["c"] == "sim").unwrap().clone();
+            let o = d.as_object_mut().unwrap();
+            o.remove("site");
+            o.insert("key".into(), json!("Assembly-CSharp|Kingmaker.Controllers.UnitImpatienceController|UpdatePriorityTarget(UnitEntityData)|#0@121|Range(int,int)"));
+            o.insert("t".into(), recs[at]["t"].clone());
+            recs.insert(at, d);
+            renumber(recs);
+        }),
+        ("driven replay: the impatience controller's awake units aren't the sim's", |recs| {
+            let at = tick(recs);
+            recs[at]["awake"].as_array_mut().unwrap().swap(0, 1);
+        }),
+        // Review round 3: a start's record before the command's `cmd` note; a death's batch
+        // together and before its `SetLifeState` goes on; `Prepare`'s update after its clear.
+        ("driven replay: commands: an impatience handler's record is missing", |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "start");
+            let next = at + 1 + recs[at + 1..].iter().position(|r| r["k"] == "cmd").unwrap();
+            let r = recs.remove(at);
+            recs.insert(next, r);
+            renumber(recs);
+        }),
+        ("driven replay: impatience: a death's records after its SetLifeState went on", |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "death");
+            let end = at
+                + recs[at..].iter().position(|r| !(ev(r, "imp_s") && r["at"] == "death")).unwrap();
+            let batch: Vec<V> = recs.drain(at..end).collect();
+            let x = at + recs[at..].iter().position(|r| ev(r, "uc_x_end")).unwrap() + 1;
+            for (k, r) in batch.into_iter().enumerate() {
+                recs.insert(x + k, r);
+            }
+            renumber(recs);
+        }),
+        ("driven replay: impatience: a death's records not together", |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "death");
+            let end = at
+                + recs[at..].iter().position(|r| !(ev(r, "imp_s") && r["at"] == "death")).unwrap();
+            let last = recs.remove(end - 1);
+            let x = end - 1 + recs[end - 1..].iter().position(|r| ev(r, "uc_x_end")).unwrap() + 1;
+            recs.insert(x, last);
+            renumber(recs);
+        }),
+        (
+            "driven replay: UpdatePriorityTarget before its TurnController.Prepare's interrupts and cooldowns' clear",
+            |recs| {
+                let at = prepare_upd(recs);
+                let end = entry_end(recs, at);
+                let block: Vec<V> = recs.drain(at..=end).collect();
+                let c = recs[..at].iter().rposition(|r| ev(r, "cd_clear")).unwrap();
+                for (k, r) in block.into_iter().enumerate() {
+                    recs.insert(c + k, r);
+                }
+                renumber(recs);
+            },
+        ),
+        // Review round 4: a death's records where its notification is (after `GiveExperience`).
+        ("driven replay: impatience: a death's records away from its notification", |recs| {
+            let at = pos(recs, |r| ev(r, "imp_s") && r["at"] == "death");
+            let end = at
+                + recs[at..].iter().position(|r| !(ev(r, "imp_s") && r["at"] == "death")).unwrap();
+            let batch: Vec<V> = recs.drain(at..end).collect();
+            let m = recs[..at].iter().rposition(|r| r["k"] == "mut").unwrap();
+            for (k, r) in batch.into_iter().enumerate() {
+                recs.insert(m + k, r);
+            }
+            renumber(recs);
+        }),
+        // Review round 6: a bother record in the handler that made it.
+        (IMP, |recs| {
+            // The first offensive action's bother unit, moved into the next damage handler's.
+            let in_handler = |recs: &[V], i: usize, class: &str| {
+                recs[..i]
+                    .iter()
+                    .rposition(|x| x["k"] == "h")
+                    .is_some_and(|h| recs[h]["class"] == class)
+            };
+            let off = (0..recs.len())
+                .find(|&i| {
+                    ev(&recs[i], "imp_s")
+                        && recs[i]["at"] == "bother"
+                        && in_handler(recs, i, "Kingmaker.Controllers.OffensiveActionsController")
+                })
+                .unwrap();
+            let dmg = (off + 1..recs.len())
+                .find(|&i| {
+                    ev(&recs[i], "imp_s")
+                        && recs[i]["at"] == "bother"
+                        && in_handler(recs, i, "Kingmaker.Controllers.UnitImpatienceController")
+                        && recs[i]["u"] == recs[off]["u"]
+                        && recs[i]["b"] == recs[off]["b"]
+                })
+                .unwrap();
+            let mut r = recs.remove(off);
+            r["t"] = recs[dmg - 1]["t"].clone();
+            recs.insert(dmg - 1, r);
+            renumber(recs);
+        }),
+        // The observer without the targets'.
+        ("driven replay: the recording declares its impatience observer without", |recs| {
+            let at = pos(recs, |r| r["k"] == "begin");
+            recs[at]["observers"] = json!([
+                "groups",
+                "cooldowns",
+                "turn_ticks",
+                "commands",
+                "attacks",
+                "approach",
+                "ai",
+                "engage",
+                "impatience"
             ]);
         }),
     ];

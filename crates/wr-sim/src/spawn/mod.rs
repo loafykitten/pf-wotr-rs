@@ -322,6 +322,13 @@ pub(crate) fn construct(
     {
         x.combat.tgt = crate::combat::targets::UnitTargets { known: true, ..Default::default() };
     }
+    // (`new CombatAiData()`: no impatience state.)
+    if w.combat.impatience.on
+        && let Some(x) = w.unit_mut(e)
+    {
+        x.combat.imp =
+            crate::combat::impatience::UnitImpatience { known: true, ..Default::default() };
+    }
     // `new CharacterStats(descriptor)`: every stat's initial value goes through its
     // `BaseValue` setter (AC 10, attacks of opportunity 1), in `CollectAllStats` order.
     let types: Vec<StatType> = w.stats(e).all.iter().map(|s| s.ty).collect();
