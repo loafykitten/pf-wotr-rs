@@ -179,9 +179,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   record` (its `commands:` line counts what the commands model computed); `WR_DEBUG_COMMANDS=1` prints each command
   desync and state difference, `WR_DEBUG_UNSUPPORTED=1` each report under its frame. The POC-5 suite:
   `cargo nextest run -p wr-sim --test poc5 --run-ignored only` (about three minutes). The current captures are `poc5-tb-85`
-  and `-91` (the engagement computed; the summary's `engagement:` line); `-82` replays as slice D, `-80` and `-81` as slice C, `-77` as slice B, `-74` as slice A; `poc5-tb-69` to `-73`, `-75`, `-76`,
-  `-78` and `-79` are superseded (earlier versions of `CommandObs.cs`) and can be deleted, as can `-83`, `-84` and `-86` to
-  `-90` (slice E's recordings: older `eng_init`, or no attack of opportunity). Fights vary by capture: disengages (and so
+  and `-91` (the engagement computed; the summary's `engagement:` line); `-82` replays as slice D, `-80` and `-81` as slice C, `-77` as slice B, `-74` as slice A. The superseded ones
+  (`poc5-tb-69` to `-73`, `-75`, `-76`, `-78`, `-79`, `-83`, `-84`, `-86` to `-90`) were deleted on 2026-10-14. Fights vary by capture: disengages (and so
   attacks of opportunity) were in 3 of 18 fights recorded this session; record again for one.
 - A recording that "hangs at startup" may be the main menu's gamepad/keyboard prompt waiting for a click (2026-10-14):
   ask Ember whether it's showing before suspecting the hooks.

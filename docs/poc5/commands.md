@@ -624,7 +624,7 @@ engagement. The turn's `ImmuneAttackOfOpportunityOnDisengage` is the sim's (a ne
 `poc5-tb-83` and `-84` (before `eu_slots`; `-83` with `CheckMobility` unhooked) were valid in all six runs each with
 1–2 attacks of opportunity computed a fight, and are superseded. `-86` to `-90` replay valid but for `-86/tb-focus`,
 whose initiative order has a full tie (`CombatController.SortUnits`' identity-hash fallback: the turn order port's,
-reported); disengages are rare (none in `-85` to `-90`), so the damage cases use `-91`, whose `tb-focus` has one. `-83`, `-84` and `-86` to `-90` can be deleted.
+reported); disengages are rare (none in `-85` to `-90`), so the damage cases use `-91`, whose `tb-focus` has one. `-83`, `-84` and `-86` to `-90` were deleted (2026-10-14).
 
 `missing_or_wrong_engage_records_are_reported` damages `-91/tb-focus` 71 ways (64 cases, and 7 on its
 provoke) (entries, checks, every leaf, the nested run and its callers, the count write and its caller, the
