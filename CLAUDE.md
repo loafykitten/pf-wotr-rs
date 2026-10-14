@@ -49,7 +49,7 @@ survey and notes on other rewrites.
   fast-forwarding to Claude. Don't push unless asked.
 - **Never commit game data, extracted assets, decompiled code or oracle captures.** Keep
   them under the gitignored paths and check `git status` before every commit. The remote
-  (`loafykitten/pf-wotr-rs`) is going public (Ember, 2026-10-14) with a fresh history (the old one is on the
+  (`loafykitten/pf-wotr-rs`) is public (since 2026-10-14) with a fresh history (the old one is on the
   local, never-pushed branch `archive/private-history`): keep tracked files free of machine-specific paths
   (scripts find the repo from their own location) and of personal details.
 - **Model routing:** Claude implements (here, or through **Sonnet** subagents; Ember,
