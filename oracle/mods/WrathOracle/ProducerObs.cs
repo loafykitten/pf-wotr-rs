@@ -19,6 +19,8 @@ namespace WrathOracle;
 //   roam_point  RoamingWaypointData.SelectNextPoint/SelectPrevPoint/SelectCutscene: the point and
 //               its idle cutscenes
 //   roam_roll   UnitRoamingController.RollNextPoint: the unit and its roaming settings' idle cutscenes
+// And when a cutscene's CommandAction runs (cs_action: the command and its player's cutscene), whose
+// timing the sim can't compute (delays, animations): a replay runs a cutscene's T0 actions then.
 // Fields only (the references' GUIDs, not their blueprints); nothing here draws or changes state.
 internal static class ProducerObs
 {
@@ -32,13 +34,23 @@ internal static class ProducerObs
         Patch(h, typeof(RoamingWaypointData), nameof(RoamingWaypointData.SelectPrevPoint), nameof(PointPrevPrefix));
         Patch(h, typeof(RoamingWaypointData), nameof(RoamingWaypointData.SelectCutscene), nameof(PointCutscenePrefix));
         Patch(h, typeof(UnitRoamingController), "RollNextPoint", nameof(RollPrefix));
+        Patch(h, typeof(CommandAction), "OnRun", nameof(ActionPrefix), new[] { typeof(CutscenePlayerData), typeof(bool) });
+        try
+        {
+            var start = AccessTools.Method(typeof(CutscenePlayerData), nameof(CutscenePlayerData.Start)) ?? throw new MissingMethodException("CutscenePlayerData.Start");
+            h.Patch(start, prefix: new HarmonyMethod(typeof(ProducerObs), nameof(StartPrefix)), finalizer: new HarmonyMethod(typeof(ProducerObs), nameof(StartFinalizer)));
+        }
+        catch (Exception e)
+        {
+            Health.Failed("patch CutscenePlayerData.Start", e);
+        }
     }
 
-    private static void Patch(Harmony h, Type t, string method, string prefix)
+    private static void Patch(Harmony h, Type t, string method, string prefix, Type[] args = null)
     {
         try
         {
-            var m = AccessTools.Method(t, method) ?? throw new MissingMethodException(t.FullName, method);
+            var m = AccessTools.Method(t, method, args) ?? throw new MissingMethodException(t.FullName, method);
             h.Patch(m, prefix: new HarmonyMethod(typeof(ProducerObs), prefix));
         }
         catch (Exception e)
@@ -55,6 +67,21 @@ internal static class ProducerObs
         j.EndArr();
     }
 
+    // The player whose Start is running: its root gate activates inside it (gate_track "start").
+    private static CutscenePlayerData _starting;
+
+    public static void StartPrefix(CutscenePlayerData __instance, out CutscenePlayerData __state)
+    {
+        __state = _starting;
+        _starting = __instance;
+    }
+
+    public static Exception StartFinalizer(Exception __exception, CutscenePlayerData __state)
+    {
+        _starting = __state;
+        return __exception;
+    }
+
     public static void GatePrefix(CutscenePlayerGateData __instance)
     {
         if (!Trace.Active || !Trace.OnMainThread) return;
@@ -63,12 +90,14 @@ internal static class ProducerObs
             var gate = __instance.Gate;
             var cutscene = __instance.Player?.Cutscene;
             var started = __instance.StartedTracks?.Count ?? -1;
+            var start = _starting != null && __instance.Player == _starting;
             Trace.Emit("obs", j =>
             {
                 j.Prop("ev", "gate_track");
                 j.Prop("gate", gate == null ? null : gate.AssetGuid.ToString());
                 j.Prop("cutscene", cutscene == null ? null : cutscene.AssetGuid.ToString());
                 j.Prop("started", started);
+                j.Prop("start", start);
             });
         }
         catch (Exception e) { Trace.HookFailed("gate_track", e); }
@@ -95,6 +124,24 @@ internal static class ProducerObs
     public static void PointNextPrefix(RoamingWaypointData __instance) => Point(__instance, "SelectNextPoint");
     public static void PointPrevPrefix(RoamingWaypointData __instance) => Point(__instance, "SelectPrevPoint");
     public static void PointCutscenePrefix(RoamingWaypointData __instance) => Point(__instance, "SelectCutscene");
+
+    public static void ActionPrefix(CommandAction __instance, CutscenePlayerData player, bool skipping)
+    {
+        if (!Trace.Active || !Trace.OnMainThread) return;
+        try
+        {
+            var command = __instance.AssetGuid.ToString();
+            var cutscene = player?.Cutscene;
+            Trace.Emit("obs", j =>
+            {
+                j.Prop("ev", "cs_action");
+                j.Prop("command", command);
+                j.Prop("cutscene", cutscene == null ? null : cutscene.AssetGuid.ToString());
+                j.Prop("skipping", skipping);
+            });
+        }
+        catch (Exception e) { Trace.HookFailed("cs_action", e); }
+    }
 
     public static void RollPrefix(UnitPartRoaming roaming)
     {

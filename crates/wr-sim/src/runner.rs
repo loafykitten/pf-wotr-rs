@@ -236,6 +236,8 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
     let dialog_or_cutscene = matches!(w.player.mode, "Dialog" | "Cutscene");
     // (The sim's ticks count from 1, the oracle's from 0.)
     let t = w.events.tick - 1;
+    // 2a. CutsceneController (registered before the units' controllers): the recorded progress.
+    crate::elements::cutscene::recorded_tick(w, t);
     crate::spawn::recorded_awake_for_tick(w, t);
     crate::spawn::activatable_abilities_tick(w, dialog_or_cutscene);
     if let Some(r) = w.recorded_awake.as_mut() {
@@ -249,8 +251,11 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
     if w.player.mode == "Dialog" {
         crate::dialog::tick(w);
     }
-    // 4b. CutsceneController: the T0 actions of the cutscenes started so far.
-    crate::elements::cutscene::run_pending(w);
+    // 4b. CutsceneController, without a recording of its progress: the T0 actions of the
+    // cutscenes started so far, in order (their timing is T1).
+    if w.recorded_cs.is_none() {
+        crate::elements::cutscene::run_pending(w);
+    }
     // 5. EtudeSystemController.
     crate::narrative::etudes::controller_tick(w);
     // 6. EntityCreationController, EntityDestructionController (registered after the
@@ -295,7 +300,32 @@ fn wait_until(w: &mut World, cond: fn(&World) -> bool, max: u32) -> bool {
     cond(w)
 }
 
+/// Before a `dialog:` or `answer:` input, with a recording: the recording's next such input
+/// must be the same step, and the sim ticks until the tick it was applied in (an input is
+/// applied after its tick's controllers; the sim's ticks count from 1, the recording's from 0).
+/// One the sim reaches later than the recording, or a different one, is reported.
+fn align_input(w: &mut World, step: &str) {
+    let Some(next) = w.recorded_inputs.as_mut().map(std::collections::VecDeque::pop_front) else {
+        return;
+    };
+    let Some((t, recorded)) = next else {
+        w.coverage.unsupported("dialogue replay: an input the recording doesn't have");
+        return;
+    };
+    if recorded != step {
+        w.coverage.unsupported("dialogue replay: an input unlike the recording's");
+        return;
+    }
+    while w.events.tick < t + 1 {
+        tick(w, None);
+    }
+    if w.events.tick > t + 1 {
+        w.coverage.unsupported("dialogue replay: an input later than the recording's");
+    }
+}
+
 fn answer(w: &mut World, a: Guid, n: usize, out: &mut RunOutcome) {
+    align_input(w, &format!("answer:{n}"));
     let of = w.dialog.answers.len();
     w.events
         .push("input", json!({ "step": format!("answer:{n}"), "answer": a.to_string(), "of": of }));
@@ -364,6 +394,7 @@ fn run_step(
             if parts.next().is_some() {
                 bail!("dialog with a unit isn't supported by the runner");
             }
+            align_input(w, &format!("dialog:{arg}"));
             w.events.push("input", json!({ "step": format!("dialog:{arg}") }));
             // `StartDialogWithoutTarget(dialog, null, Main_)`.
             let mc = w.main_character;
@@ -1043,6 +1074,13 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
         .iter()
         .filter_map(|s| s.as_str().map(str::to_owned))
         .collect();
+    // The recording, before the load: whether it has the cutscenes' progress decides how the
+    // load treats random gates.
+    let records = match o.oracle {
+        Some(dir) => read_trace(&dir.join(format!("{}.trace.jsonl.gz", o.run)))?,
+        None => Vec::new(),
+    };
+    let recorded_cutscenes = crate::elements::cutscene::RecordedCutscene::present(&records);
     let path = wr_save::report::find_save(&save)?;
     let s = crate::hydrate::Save::read(&path)?;
     let content = Rc::new(crate::content::Content::open_default()?);
@@ -1053,23 +1091,40 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
         &s,
         &crate::hydrate::Options {
             ability_params_empty: o.ability_params_empty,
+            recorded_cutscenes,
             ..crate::hydrate::Options::default()
         },
     )?;
     let first_runtime_id = w.player.max_unique_id;
     let runtime_ids = RuntimeIds::of(&w);
     let load_unsupported = w.coverage.unsupported.clone();
-    let mut records = Vec::new();
     let mut narrative_start = None;
     let mut start_diff = None;
     if let Some(dir) = o.oracle {
-        records = read_trace(&dir.join(format!("{}.trace.jsonl.gz", o.run)))?;
         if o.oracle_inputs {
             steps = steps_with_oracle_answers(&steps, &records)?;
         }
         w.rng = Box::new(crate::rng::Tape::new(tape_from_trace(&records)));
         // The recording's awake states (newer recordings have them): inputs where the sim
         // can't establish a unit's.
+        // The recording's dialogue inputs, at their ticks (with the cutscenes' recorded progress,
+        // whose records interleave with the dialogue's by tick).
+        if recorded_cutscenes {
+            w.recorded_inputs = Some(
+                records
+                    .iter()
+                    .filter(|r| r["k"] == "input")
+                    .filter_map(|r| Some((r["t"].as_i64()?, r["step"].as_str()?.to_owned())))
+                    .filter(|(_, s)| s.starts_with("dialog:") || s.starts_with("answer:"))
+                    .collect(),
+            );
+            match crate::elements::cutscene::RecordedCutscene::of(&records) {
+                Ok(r) => w.recorded_cs = Some(Box::new(r)),
+                Err(e) => w
+                    .coverage
+                    .unsupported(format!("dialogue replay: a malformed cutscene record ({e})")),
+            }
+        }
         match crate::spawn::RecordedAwake::of(&records, runtime_ids.saved.clone()) {
             Ok(r) => w.recorded_awake = r.map(Box::new),
             Err(e) => {
@@ -1096,6 +1151,12 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
     w.rng = Box::new(crate::rng::Counted { inner, n: w.events.draws.clone() });
     let t0 = std::time::Instant::now();
     let outcome = run(&mut w, &steps);
+    // Recorded inputs the run didn't reach, and recorded cutscene progress past its last tick.
+    if w.recorded_inputs.as_ref().is_some_and(|q| !q.is_empty()) {
+        w.coverage.unsupported("dialogue replay: a recorded input the run didn't reach");
+    }
+    let last = w.events.tick - 1;
+    crate::elements::cutscene::recorded_finish(&mut w, last);
     let run_ms = t0.elapsed().as_secs_f64() * 1e3;
     w.finish_run();
     let narrative_end = crate::narrative::dump::dump(&mut w, "end");

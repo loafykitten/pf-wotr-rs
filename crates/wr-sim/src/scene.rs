@@ -467,6 +467,13 @@ pub struct SceneState {
     pub in_cutscene_step: bool,
     /// Started cutscenes' T0 actions, run by the cutscene controller's next tick.
     pub cutscene_pending: Vec<crate::elements::cutscene::Pending>,
+    /// The run takes cutscene progress from a recording (set before the load).
+    pub recorded_cutscenes: bool,
+    /// Random gates accepted for recorded draws: (the player's cutscene, the gate).
+    pub random_gates_t1: std::collections::HashSet<(Guid, Guid)>,
+    /// Cutscenes the sim classified (started, restored, or in their closures): a recorded
+    /// command of another one is reported.
+    pub classified_cutscenes: std::collections::HashSet<Guid>,
     /// Unit prefabs' `IsInGameBySettings` by asset GUID (`cache/sim/unit-prefabs.json`,
     /// [`crate::scene_spawn::load_unit_prefabs`]); `None` when the table wasn't built.
     pub unit_prefabs: Option<Rc<HashMap<String, Option<bool>>>>,
@@ -597,6 +604,7 @@ pub fn cutscene_post_load(w: &mut World, e: EntityIdx) {
         for t in &cls.t1_actions {
             w.coverage.stub(format!("cutscene action {t} (T1: positions, cutscene control)"));
         }
+        crate::elements::cutscene::settle_random_gates(w, &cls);
         for u in &cls.unsupported {
             w.coverage.unsupported(format!("cutscene: {u}"));
         }

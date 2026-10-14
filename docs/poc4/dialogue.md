@@ -473,12 +473,60 @@ cutscene's start in the sim: cutscene timing is T1 and the sim runs a cutscene's
 commands' timing from the recording (a `CommandAction.OnRun` observation), and the gate's draws as recorded inputs
 tied to their producer.
 
+## Round 8: the cutscenes' progress as recorded inputs (2026-10-14, seventeenth session) [M]
+
+A cutscene's timing (delays, animations) is T1, so the sim ran a cutscene's T0 actions in order at its start; with
+recorded awake states that showed (62DE hidden at tick 187 in the game, at tick 40 in the sim). And a random-track
+gate's draw (`CutscenePlayerGateData.SelectTrackToStart`) can't be made without knowing when the gate activates. Both
+are now taken from the recording:
+
+- **WrathOracle** (`ProducerObs.cs`) writes `cs_action` at each `CommandAction.OnRun` (the command, the player's
+  cutscene) besides `gate_track`; the begin record declares `cutscene_progress` (and `aa_awake`) when the patches
+  installed, the sim's marker for these inputs.
+- **Classification** (`elements/cutscene.rs`): a random gate in a closure without T0 actions is listed
+  (`Classified::random_gates`, with the cutscene whose player activates it) and settled by the run: reported unless the
+  run takes cutscene progress from a recording (decided before the load), then accepted. Found in review and closed
+  (most older than this round, they also applied to accepted non-random cutscenes): `CommandMoveUnit` with `RunAway`
+  (the unit leaves the game) is reported; a `StopCutscene` classifies the stopped cutscene's `OnStopped`; a command
+  that controls a unit (mark, move, look-at, animation) is reported while any unit is unconscious or dead but not
+  finally (marking revives it in Cutscene mode); `TranslocateUnit` is a T0 action (`MarkNoExtra`, now ported, also
+  for etudes) unless it can only move a spawner's non-extra unit; a command that starts a cutscene and runs T0 actions,
+  and a random-track start from `OnStopped` or in-fade actions (no recorded place), are reported; a T0 step carries its
+  command invocation.
+- **Replay** (`RecordedCutscene`, `recorded_tick`): each oracle tick's events, in order, at the cutscene controller's
+  place (after the clock, before the units' controllers): an accepted gate's draw (`Random.Range(0, tracks with
+  commands)`, the new modelled site `GATE_SELECT_TRACK`, its started count checked), a `FirstTrack` gate's selection (no
+  draw), a `CommandAction`'s pending T0 steps (that invocation's, in order). WrathOracle flags a draw made inside a
+  player's `Start`: it waits for the sim's start of that cutscene (`PlayCutscene`, or a recorded presentation command
+  that starts it), which covers the start's whole synchronous chain; later activations are the controller's. A
+  recorded command without pending steps must be presentation (classified recursively). A step out of order, an event
+  not taken by the end of its tick's inputs, one after the run's last tick: reported.
+- **Dialogue inputs at their ticks** (`align_input`): with these records, each `dialog:`/`answer:` input is applied at
+  the recording's tick (WrathOracle's driver applies a step's first input a frame after the previous step ended);
+  a different, late or unreached input is reported.
+
+On `poc4-horgus-6` (Manual_19): **every run's T0 stream is equal, gate draws included (191 to 197 records), the end
+state 1.0000, and the only report left is `OnIsInGameChanged`'s group membership**; the comparison still fails on the
+two roaming draws (`SelectNextPoint`'s `WeightedRandom`, `SelectPrevPoint`). Seelah and `dialog-checks` (no such
+records) are unchanged and valid. A recorded command of a cutscene the sim never classified is reported.
+
+**Known gaps found in review, not closed yet:** `CommandLockControls` (accepted as presentation in every fixture's
+cutscenes, these included) ticks every unit's buffs at its start and postpones them at its stop
+(`UnitBuffsController.TickAll`/`PostponeAll`): with timed buffs, deadlines shift by the time since each collection's
+last tick, a cutscene's duration in Cutscene mode. And the dialogue runner doesn't run `UnitBuffsController` at all
+(the combat replay does: `combat::life::buffs_tick`). Reporting the lock with timed buffs around invalidates every
+dialogue fixture (all have such cutscenes and buffs), so it waits for the model: record the lock's start and stop
+(WrathOracle), track each collection's last tick time (`m_PreviousTime`), run the controller in Default and Dialog
+modes, and replay `TickAll`/`PostponeAll` at the recorded places; then re-record the Seelah and `dialog-checks`
+captures. Next after that: the roaming draws as recorded inputs tied to their producers (`roam_point`, `roam_roll`),
+and the groups model in dialogue runs.
+
 ## Recordings (local, gitignored)
 
 | Capture | Fixtures | Runs |
 |---|---|---|
 | `fixtures/captures/oracle/poc4-seelah-1` (Manual_13) | `seelah-a` (Athletics, then `1cfe1ed0…`), `seelah-b` (question `7ce19f7c…`, Knowledge World), `seelah-c` (Diplomacy) | record, replay-1, perturbed replays (a: +8 on d20 #7; b: +8/+14 on #13, +8 on #7; c: +8/+14 on #7) |
-| `fixtures/captures/oracle/poc4-horgus-4` (Manual_19) | as `poc4-horgus-1`, with `aa_awake` and the draw producers | record, replay-1, perturbed (as below) |
+| `fixtures/captures/oracle/poc4-horgus-6` (Manual_19) | as `poc4-horgus-1`, with `aa_awake`, `cs_action` and the draw producers | record, replay-1, perturbed (as below) |
 | `fixtures/captures/oracle/poc4-horgus-1` (Manual_19) | `horgus-check` (`905c535d…`, check `3ab56408…`, `d641426b…`, `7a580452…`), `horgus-alt` (`5422edfb…`, `db14014b…`, `905c535d…`, `e497fc46…`, `7a580452…`) | record, replay-1, perturbed (+7/+13 on d20 #3) |
 
 Specs: `oracle/tools/oracle-fixtures/poc4-seelah.spec.json`, `poc4-horgus.spec.json`

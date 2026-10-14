@@ -270,6 +270,21 @@ fn quat_yaw_degrees(q: [f32; 4]) -> f32 {
 }
 
 /// `HideUnit.RunAction()`.
+/// `TranslocateUnit.RunAction()`: with a position (a locator or an evaluator) the unit stops
+/// being an extra (`MarkNoExtra`, saved; it changes the unit's sleeping), then stops and moves
+/// there (positions and movement are T1).
+pub fn translocate_unit(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
+    let u = get_unit(w, owner, a.obj("Unit"))?;
+    if a.obj("translocatePosition").is_none() && a.obj("translocatePositionEvaluator").is_none() {
+        return Ok(());
+    }
+    if let Some(x) = w.unit_mut(u) {
+        x.is_extra = false;
+    }
+    w.coverage.stub("TranslocateUnit: stop, interrupt the move, the new position (T1)");
+    Ok(())
+}
+
 pub fn hide_unit(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
     // Run from a cutscene's `CommandAction` (the closing cutscene of the Horgus meeting) the
     // action is checked against the oracle. Run by an etude trigger at load it is not yet: on

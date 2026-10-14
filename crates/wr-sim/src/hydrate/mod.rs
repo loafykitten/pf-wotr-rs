@@ -999,6 +999,9 @@ pub struct Options {
     /// The process's `AbilityParams.Empty` when the load began (the oracle's
     /// `abilityParamsEmpty`); `None`: unknown (see [`crate::world::EmptyAbilityParams`]).
     pub ability_params_empty: Option<(i32, i32)>,
+    /// The run will take cutscene progress from a recording (random gates are accepted for
+    /// recorded draws instead of reported: `elements::cutscene`).
+    pub recorded_cutscenes: bool,
 }
 
 /// `AbilityParams.Empty`'s starting value from a command-line argument: an object
@@ -1141,6 +1144,7 @@ pub fn hydrate(
     let partyix = DocIndex::new(party);
 
     let mut w = World::new(content.clone(), registry);
+    w.scene.recorded_cutscenes = opts.recorded_cutscenes;
     if let Some((cl, rb)) = opts.ability_params_empty {
         w.empty_params = crate::world::EmptyAbilityParams::supplied(cl, rb);
     }

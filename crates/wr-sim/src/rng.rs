@@ -81,8 +81,14 @@ pub mod sites {
         "Assembly-CSharp|Kingmaker.AI.AiBrainController|SelectAction(UnitEntityData,DecisionContext,AIDebugScope)|#0@417|Range(float,float)",
     );
 
+    /// `CutscenePlayerGateData.SelectTrackToStart` of a `RandomTrack` gate: `Random.Range(0,
+    /// tracks)` (made only from a recording's cutscene progress: `elements::cutscene`).
+    pub const GATE_SELECT_TRACK: CallSite = CallSite(
+        "Assembly-CSharp|Kingmaker.AreaLogic.Cutscenes.CutscenePlayerGateData|SelectTrackToStart()|#0@164|Range(int,int)",
+    );
+
     /// Every site the sim draws from, for filtering an oracle tape to the T0 stream.
-    pub const ALL: [CallSite; 9] = [
+    pub const ALL: [CallSite; 10] = [
         DICE_D,
         AC_SELECT_MISS_REASON,
         RULE_SKILL_CHECK,
@@ -92,6 +98,7 @@ pub mod sites {
         MISS_TARGET_DEVIATION,
         MISS_TARGET_SIDE,
         DROP_LOOT_ROTATION,
+        GATE_SELECT_TRACK,
     ];
 }
 

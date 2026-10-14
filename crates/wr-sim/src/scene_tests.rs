@@ -419,10 +419,23 @@ fn cutscene_paths_that_depend_on_state_or_timing_are_reported() {
     insert(&w, 0xE2, "Kingmaker.AreaLogic.Cutscenes.CommandAction", &[("EntryCondition", cond)]);
     let c = gate(&w, 0xE3, "Cutscene", vec![track(&[Guid(0xE2)], None)], &[]);
     assert!(classify(c).iter().any(|u| u.contains("EntryCondition")));
-    // A random-track gate with nothing T0 in it.
+    // A random-track gate with nothing T0 in it: listed, settled by the run (below).
     let c =
         gate(&w, 0xE4, "Cutscene", vec![track(&[], None)], &[("m_ActivationMode", Node::Enum(2))]);
-    assert!(classify(c).iter().any(|u| u.contains("RandomTrack")));
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(cls.unsupported.is_empty() && cls.random_gates == [(c, c)], "{cls:?}");
+    // With a T0 action: reported, not listed.
+    let c = gate(
+        &w,
+        0xEF,
+        "Cutscene",
+        vec![track(&[spawn], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(
+        cls.unsupported.iter().any(|u| u.contains("RandomTrack")) && cls.random_gates.is_empty()
+    );
     // T0 before a continuous command on the same track.
     insert(&w, 0xE5, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandLockControls", &[]);
     let c = gate(&w, 0xE6, "Cutscene", vec![track(&[spawn, Guid(0xE5)], None)], &[]);
@@ -1147,4 +1160,307 @@ fn stop_and_in_fade_actions_are_classified() {
         "{:?}",
         classify(c)
     );
+}
+
+/// A random gate without T0 actions is reported unless the run takes cutscene progress from a
+/// recording; then its recorded draws are made at their place, and a command's T0 steps run
+/// when the recording runs it: in order (one run out of order is reported), a draw for a gate
+/// the sim didn't accept is reported.
+#[test]
+fn recorded_cutscene_progress_draws_and_runs_steps() {
+    use crate::elements::cutscene::{CutsceneEvent, RecordedCutscene};
+    let (mut w, _) = world();
+    let c = gate(
+        &w,
+        0xC1,
+        "Cutscene",
+        vec![track(&[], None), track(&[], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    let cls = crate::elements::cutscene::classify(&w, c);
+    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    assert!(
+        w.coverage.unsupported.keys().any(|k| k.contains("RandomTrack")),
+        "no recording: reported"
+    );
+    let (mut w, _) = world();
+    // (Content is shared per world: rebuild the blueprints in this one.)
+    insert(&w, 0xC2, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandLockControls", &[]);
+    let c = gate(
+        &w,
+        0xC1,
+        "Cutscene",
+        vec![track(&[Guid(0xC2)], None), track(&[], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    w.scene.recorded_cutscenes = true;
+    let cls = crate::elements::cutscene::classify(&w, c);
+    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    // A random gate the sim didn't accept (nothing classified it).
+    gate(
+        &w,
+        0xDD,
+        "Gate",
+        vec![track(&[Guid(0xC2)], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(
+        3,
+        vec![
+            CutsceneEvent::Gate { cutscene: c, gate: c, started: 2, start: true },
+            CutsceneEvent::Gate {
+                cutscene: Guid(0xDD),
+                gate: Guid(0xDD),
+                started: 1,
+                start: false,
+            },
+        ],
+    );
+    w.recorded_cs = Some(Box::new(rec));
+    w.rng = Box::new(crate::rng::PlayRng::new(1));
+    crate::elements::cutscene::recorded_tick(&mut w, 3);
+    // The root gate's draw waits for the cutscene's start.
+    assert!(w.rng.log().is_empty());
+    crate::elements::cutscene::recorded_start(&mut w, c);
+    // One track has commands: `Range(0, 1)`.
+    let draws = w.rng.log();
+    assert_eq!(draws.len(), 1);
+    assert_eq!(draws[0].site, crate::rng::sites::GATE_SELECT_TRACK.0);
+    // The gate the sim didn't accept waits; nothing takes it this tick: reported at its end.
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    crate::elements::cutscene::recorded_tick_end(&mut w);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("didn't reach")));
+}
+
+/// A cutscene started in the tick takes its root gate's recorded draw at its start; a recorded
+/// command with T0 actions the sim has no pending step for is reported.
+#[test]
+fn a_started_cutscene_takes_its_root_draw_and_t0_commands_need_steps() {
+    use crate::elements::cutscene::{CutsceneEvent, RecordedCutscene};
+    let (mut w, _) = world();
+    insert(&w, 0xE2, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandLockControls", &[]);
+    let c = gate(
+        &w,
+        0xE1,
+        "Cutscene",
+        vec![track(&[Guid(0xE2)], None), track(&[Guid(0xE2)], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    let hide = command_action(&w, 0xE3, vec![action("HideUnit")]);
+    w.scene.recorded_cutscenes = true;
+    w.scene.classified_cutscenes.insert(Guid(0xEE));
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(
+        4,
+        vec![
+            CutsceneEvent::Gate { cutscene: c, gate: c, started: 2, start: true },
+            CutsceneEvent::Action { cutscene: Guid(0xEE), command: hide },
+        ],
+    );
+    w.recorded_cs = Some(Box::new(rec));
+    w.rng = Box::new(crate::rng::PlayRng::new(1));
+    // The controller's place: the gate isn't accepted yet, so nothing is taken.
+    crate::elements::cutscene::recorded_tick(&mut w, 4);
+    assert!(w.rng.log().is_empty());
+    // `PlayCutscene` (classified and settled) takes the draw, then the queue goes on: the
+    // `HideUnit` command has no pending step.
+    let cls = crate::elements::cutscene::classify(&w, c);
+    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    crate::elements::cutscene::recorded_start(&mut w, c);
+    assert_eq!(w.rng.log().len(), 1);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("no pending step")));
+    crate::elements::cutscene::recorded_tick_end(&mut w);
+    assert!(!w.coverage.unsupported.keys().any(|k| k.contains("didn't reach")));
+}
+
+/// A cutscene's pending T0 steps run in order: a recorded run of a later command while an
+/// earlier one is pending is reported, and nothing runs.
+#[test]
+fn a_recorded_command_out_of_order_is_reported() {
+    use crate::elements::cutscene::{CutsceneEvent, Pending, RecordedCutscene, T0Step};
+    let (mut w, _) = world();
+    let a = command_action(&w, 0xD1, vec![action("Spawn")]);
+    let b = command_action(&w, 0xD2, vec![action("Spawn")]);
+    let bp = |g: Guid| w.content.get(g).expect("command");
+    w.scene.cutscene_pending.push(Pending {
+        cutscene: Guid(0xD0),
+        steps: vec![
+            T0Step { command: bp(a), action: 0, invocation: 1 },
+            T0Step { command: bp(b), action: 0, invocation: 2 },
+        ],
+    });
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(1, vec![CutsceneEvent::Action { cutscene: Guid(0xD0), command: b }]);
+    w.recorded_cs = Some(Box::new(rec));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("out of order")));
+    assert_eq!(w.scene.cutscene_pending[0].steps.len(), 2, "nothing ran");
+}
+
+/// A recorded command without a pending step runs nothing in the sim: fine for one whose every
+/// action is presentation, reported for any other (a flag, a missing blueprint). A command that
+/// starts a cutscene and runs a T0 action is reported by the classification.
+#[test]
+fn unmatched_recorded_commands_must_be_presentation() {
+    use crate::elements::cutscene::{CutsceneEvent, RecordedCutscene};
+    let (mut w, _) = world();
+    let sound = command_action(&w, 0xF1, vec![action("Play3DSound")]);
+    let flag = command_action(&w, 0xF2, vec![action("UnlockFlag")]);
+    w.scene.classified_cutscenes.insert(Guid(0xF0));
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(1, vec![CutsceneEvent::Action { cutscene: Guid(0xF0), command: sound }]);
+    rec.ticks.insert(2, vec![CutsceneEvent::Action { cutscene: Guid(0xF0), command: flag }]);
+    w.recorded_cs = Some(Box::new(rec));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    crate::elements::cutscene::recorded_tick(&mut w, 2);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("no pending step")));
+    let (w, _) = world();
+    let inner = gate(&w, 0xF3, "Cutscene", vec![track(&[], None)], &[]);
+    let play = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Actions.PlayCutscene",
+        &[("m_Cutscene", Node::BpRef(inner))],
+    )));
+    let mixed = command_action(&w, 0xF4, vec![play, action("Spawn")]);
+    let c = gate(&w, 0xF5, "Cutscene", vec![track(&[mixed], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(cls.unsupported.iter().any(|u| u.contains("starts a cutscene and runs T0")), "{cls:?}");
+}
+
+/// A root gate reactivated later (not inside a start) is the controller's: its draw is taken at
+/// the controller's place. A presentation command that starts a cutscene with a random root
+/// starts it for that draw.
+#[test]
+fn reactivations_and_starts_by_recorded_commands_take_their_draws() {
+    use crate::elements::cutscene::{CutsceneEvent, RecordedCutscene};
+    let (mut w, _) = world();
+    insert(&w, 0xA2, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandLockControls", &[]);
+    let c = gate(
+        &w,
+        0xA1,
+        "Cutscene",
+        vec![track(&[Guid(0xA2)], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    let play = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Actions.PlayCutscene",
+        &[("m_Cutscene", Node::BpRef(c))],
+    )));
+    let starter = command_action(&w, 0xA3, vec![play]);
+    w.scene.recorded_cutscenes = true;
+    w.scene.classified_cutscenes.insert(Guid(0xA0));
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(
+        1,
+        vec![
+            // Another cutscene's presentation command starts `c`: its root draw follows.
+            CutsceneEvent::Action { cutscene: Guid(0xA0), command: starter },
+            CutsceneEvent::Gate { cutscene: c, gate: c, started: 1, start: true },
+        ],
+    );
+    rec.ticks
+        .insert(2, vec![CutsceneEvent::Gate { cutscene: c, gate: c, started: 1, start: false }]);
+    w.recorded_cs = Some(Box::new(rec));
+    w.rng = Box::new(crate::rng::PlayRng::new(1));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    assert_eq!(w.rng.log().len(), 1, "{:?}", w.coverage.unsupported);
+    crate::elements::cutscene::recorded_tick(&mut w, 2);
+    assert_eq!(w.rng.log().len(), 2, "the reactivation's draw");
+    crate::elements::cutscene::recorded_tick_end(&mut w);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// One start can activate several gates (a skipped track signalling its end gate): the start
+/// covers every start draw of its tick. Marking a unit controlled is reported while a unit is
+/// unconscious (the mark revives it in Cutscene mode).
+#[test]
+fn a_start_covers_its_chain_and_marking_can_revive() {
+    use crate::elements::cutscene::{CutsceneEvent, RecordedCutscene};
+    let (mut w, u) = world();
+    insert(&w, 0xB2, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandLockControls", &[]);
+    let c = gate(
+        &w,
+        0xB1,
+        "Cutscene",
+        vec![track(&[Guid(0xB2)], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    w.scene.recorded_cutscenes = true;
+    let cls = crate::elements::cutscene::classify(&w, c);
+    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    w.scene.random_gates_t1.insert((c, Guid(0xB3)));
+    gate(
+        &w,
+        0xB3,
+        "Gate",
+        vec![track(&[Guid(0xB2)], None)],
+        &[("m_ActivationMode", Node::Enum(2))],
+    );
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(
+        1,
+        vec![
+            CutsceneEvent::Gate { cutscene: c, gate: c, started: 1, start: true },
+            CutsceneEvent::Gate { cutscene: c, gate: Guid(0xB3), started: 1, start: true },
+        ],
+    );
+    w.recorded_cs = Some(Box::new(rec));
+    w.rng = Box::new(crate::rng::PlayRng::new(1));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    crate::elements::cutscene::recorded_start(&mut w, c);
+    assert_eq!(w.rng.log().len(), 2);
+    crate::elements::cutscene::recorded_tick_end(&mut w);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    // An unconscious unit: a mark command isn't presentation.
+    insert(&w, 0xB4, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandMarkUnitControlled", &[]);
+    let marked = gate(&w, 0xB5, "Cutscene", vec![track(&[Guid(0xB4)], None)], &[]);
+    assert!(crate::elements::cutscene::classify(&w, marked).unsupported.is_empty());
+    w.unit_mut(u).expect("unit").life_state = 1;
+    let cls = crate::elements::cutscene::classify(&w, marked);
+    assert!(cls.unsupported.iter().any(|x| x.contains("revival")), "{cls:?}");
+}
+
+/// `TranslocateUnit` is presentation without a position to go to, and a T0 step otherwise
+/// unless its unit is a spawner's non-extra unit (`MarkNoExtra` its only T0 effect).
+#[test]
+fn translocations_are_t0_unless_they_change_nothing_but_a_position() {
+    let (w, _) = world();
+    let bare = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Actions.TranslocateUnit",
+        &[],
+    )));
+    let moving = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Actions.TranslocateUnit",
+        &[(
+            "translocatePositionEvaluator",
+            Node::Object(Box::new(obj(
+                "Kingmaker.Designers.EventConditionActionSystem.Evaluators.MapObjectPosition",
+                &[],
+            ))),
+        )],
+    )));
+    let a = command_action(&w, 0x91, vec![bare]);
+    let b = command_action(&w, 0x92, vec![moving]);
+    let ca = gate(&w, 0x93, "Cutscene", vec![track(&[a], None)], &[]);
+    let cb = gate(&w, 0x94, "Cutscene", vec![track(&[b], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, ca);
+    assert!(cls.t0_steps.is_empty() && cls.unsupported.is_empty(), "{cls:?}");
+    let cls = crate::elements::cutscene::classify(&w, cb);
+    assert_eq!(cls.t0_steps.len(), 1, "{cls:?}");
+}
+
+/// A recorded command of a cutscene the sim never classified (never started or restored) is
+/// reported: its sibling commands weren't checked.
+#[test]
+fn commands_of_unclassified_cutscenes_are_reported() {
+    use crate::elements::cutscene::{CutsceneEvent, RecordedCutscene};
+    let (mut w, _) = world();
+    let sound = command_action(&w, 0x81, vec![action("Play3DSound")]);
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(1, vec![CutsceneEvent::Action { cutscene: Guid(0x80), command: sound }]);
+    w.recorded_cs = Some(Box::new(rec));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("didn't classify")));
 }

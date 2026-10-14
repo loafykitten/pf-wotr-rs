@@ -29,6 +29,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "AttachBuff",
     "Spawn",
     "HideUnit",
+    "TranslocateUnit",
 ];
 
 /// `GameAction.RunAction()`.
@@ -211,6 +212,7 @@ pub fn run(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
         // `Spawn.cs`, `HideUnit.cs`.
         "Spawn" => crate::scene_spawn::spawn_action(w, owner, a),
         "HideUnit" => crate::scene_spawn::hide_unit(w, owner, a),
+        "TranslocateUnit" => crate::scene_spawn::translocate_unit(w, owner, a),
         // `Recruit.cs`.
         "Recruit" => crate::dialog::recruit::run(w, owner, a),
         // `PlayCutscene.cs` / `StopCutscene.cs`: cutscenes are T1 (see `cutscene`).

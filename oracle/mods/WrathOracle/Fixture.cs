@@ -305,9 +305,15 @@ internal static class Fidelity
         CooldownObs.Install(h);
         TurnTickObs.Install(h);
         CommandObs.Install(h);
-        ProducerObs.Install(h);
-        AwakeObs.Install(h);
         if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets", "impatience" });
+        // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
+        // units outside turn-based windows (aa_awake): declared when their patches installed.
+        var failed = Health.FailedCount;
+        ProducerObs.Install(h);
+        if (Health.FailedCount == failed) Observers.Add("cutscene_progress");
+        failed = Health.FailedCount;
+        AwakeObs.Install(h);
+        if (Health.FailedCount == failed) Observers.Add("aa_awake");
         OracleTime.Install(h);
         InstallSeconds = sw.Elapsed.TotalSeconds;
         Notes.Add($"install total {InstallSeconds:0.00} s");

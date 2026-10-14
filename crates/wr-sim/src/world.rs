@@ -390,6 +390,10 @@ pub struct World {
     /// Awake states taken from a recording (a dialogue fixture's `awake_set`/`awake`), when the
     /// run has one: [`crate::spawn::RecordedAwake`].
     pub recorded_awake: Option<Box<crate::spawn::RecordedAwake>>,
+    /// Cutscene progress taken from a recording: [`crate::elements::cutscene::RecordedCutscene`].
+    pub recorded_cs: Option<Box<crate::elements::cutscene::RecordedCutscene>>,
+    /// A recording's dialogue inputs (oracle tick, step), applied at their ticks.
+    pub recorded_inputs: Option<std::collections::VecDeque<(i64, String)>>,
     pub bus: EventBus,
     pub rulebook: crate::rulebook::Rulebook,
     pub rng: Box<dyn Rng>,
@@ -522,6 +526,8 @@ impl World {
             by_id: HashMap::new(),
             coverage: Coverage::default(),
             recorded_awake: None,
+            recorded_cs: None,
+            recorded_inputs: None,
             bus: EventBus::default(),
             rulebook: crate::rulebook::Rulebook::default(),
             rng: Box::new(PlayRng::new(0)),
