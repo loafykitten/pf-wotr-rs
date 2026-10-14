@@ -25,7 +25,7 @@ use crate::elements::{self, Ctx};
 use crate::world::{EntityIdx, World};
 
 /// Cache file schema tag.
-pub const SCHEMA: &str = "wr-sim-scene-v1";
+pub const SCHEMA: &str = "wr-sim-scene-v2";
 
 /// One shape of a zone (`IScriptZoneShape`), with the world-to-local transform of its
 /// `Transform` (the importer's `localToWorldMatrix`, inverted at import).
@@ -82,7 +82,8 @@ pub struct ViewInfo {
     pub active_in_hierarchy: bool,
     /// `IsInGameBySettings` (`m_IsInGame`).
     pub is_in_game: bool,
-    /// The view's gameplay components (map objects, zones and unit spawners).
+    /// The view's gameplay components (map objects, zones, unit spawners and roaming
+    /// waypoints).
     #[serde(default)]
     pub components: Vec<CompInfo>,
     /// World position and rotation (quaternion x, y, z, w) of the view's object.
@@ -248,6 +249,7 @@ impl SceneCache {
                 let components = if class.ends_with(".MapObjectView")
                     || class.ends_with("SriptZones.ScriptZone")
                     || class.ends_with(".UnitSpawner")
+                    || class.ends_with(".RoamingWaypointView")
                 {
                     comps_of
                         .get(&uid)

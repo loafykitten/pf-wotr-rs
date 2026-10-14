@@ -71,6 +71,9 @@ impl Loader<'_> {
             race: o.guid("m_Race"),
             faction: o.guid("m_Faction"),
             roaming: o.obj("m_Roaming").is_some(),
+            roaming_idle_cutscene: o
+                .obj("m_Roaming")
+                .is_some_and(|r| r.obj("IdleCutscene").is_some()),
             vendor_table: o.guid("m_VendorTable"),
             has_prefab_id: o.str("m_PrefabId").is_some_and(|s| !s.is_empty()),
             prefab_id: o.str("m_PrefabId").filter(|s| !s.is_empty()).map(str::to_owned),

@@ -171,8 +171,11 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
    choices are recorded and valid: `-95`'s two and `-96`).
-2. Horgus: the background cutscene's gate-track selection (`CutscenePlayerGateData.SelectTrackToStart`)
-   and the spawned unit's awake state; then each save's load tail (`coverage.json`).
+2. Horgus (`docs/poc4/dialogue.md`, round 6): its two unmodelled draws (a random-track gate, the roaming waypoint
+   choices) need WrathOracle to record each draw's producer so the comparison can tie it to the sim's classification
+   (a per-run method exemption was withdrawn in review); then the awake states (record them in dialogue fixtures and
+   take them as inputs) and `OnIsInGameChanged`'s group membership (run the groups model in dialogue runs); then each
+   save's load tail (`coverage.json`).
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
    features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them). They also offset every
    later fact id: `manual10-ids-1/ids-load.json` names each allocation the sim misses (working notes).
@@ -235,8 +238,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   attacks of opportunity) were in 3 of 18 fights recorded this session; record again for one.
 - A recording that "hangs at startup" may be the main menu's gamepad/keyboard prompt waiting for a click (2026-10-14):
   ask Ember whether it's showing before suspecting the hooks.
-- Scene caches for POC-4: `scripts/scene-cache.sh <area> <guid>` (it failed from the main checkout on
-  2026-10-12, with "no scene bundles"; the caches were copied from the agent's build; investigate).
+- Scene caches for POC-4: `scripts/scene-cache.sh <area> <guid>` (schema v2 since 2026-10-14, with roaming waypoints;
+  rebuild both areas' caches after pulling).
 - The oracle regression: `scripts/regress.sh <label> <bindir>` then `scripts/regress-diff.sh <new> <base>`
   (outputs in `cache/regress/`; the last baseline is `cache/regress/out-mythic2` (release build: the mythic levels and
   three components, only Manual_10 changed; before it `out-awake-start`, the fact pairing's `out-fact-pairing`,

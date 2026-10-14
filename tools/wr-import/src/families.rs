@@ -51,6 +51,8 @@ const EXACT: &[(&str, Family)] = &[
     ("Kingmaker.Blueprints.Area.FactHolder", fam("fact_holder", Gameplay)),
     ("Kingmaker.View.PerceptionCheckComponent", fam("perception", Gameplay)),
     ("Kingmaker.View.Roaming.SpawnerRoamingSettings", fam("spawner_setting", Gameplay)),
+    // A roaming route's points: the next and previous ones, idle times and idle cutscenes.
+    ("Kingmaker.View.Roaming.RoamingWaypointView", fam("roaming_waypoint", Gameplay)),
     ("Kingmaker.UnitLogic.Interaction.SpawnerInteractionBark", fam("spawner_setting", Gameplay)),
     ("Kingmaker.UnitLogic.Interaction.SpawnerInteractionDialog", fam("spawner_setting", Gameplay)),
     ("Kingmaker.View.MapObjects.KingdomLootComponent", fam("interaction", Gameplay)),

@@ -420,6 +420,35 @@ Next: (1) run the background cutscene players (`SelectTrackToStart`), roaming (`
 (the awake state) so Horgus is valid; (2) HideUnit outside cutscene steps (etude triggers) once the etude conditions
 are ported; (3) record Camelia's meeting; (4) `crates/wr-text`.
 
+## Round 6: the Horgus runs' draws (2026-10-14, seventeenth session) [M]
+
+Tried and withdrawn after review: exempting the Horgus runs' two unmodelled draws per run (`SelectTrackToStart` of a
+random-track gate whose cutscene has no T0 action, and the roaming waypoint choices when no idle cutscene of the
+area has one). gpt-6.1-sol showed why the per-run exemption can't be sound with today's records: a draw's site key
+names only the method, not the cutscene player or unit that made it, so exempting the method for one audited gate
+also exempts gates the sim never classified; `UnitRoamingController.RollNextPoint` picks an idle cutscene through a
+global helper draw besides its audited position and time draws; and a saved roaming next point can carry its own
+idle cutscene. **What's needed:** WrathOracle records, for each such draw, its producer (the cutscene and gate, the
+roaming unit and point), and the comparison checks each draw against the sim's classification of that producer.
+
+Kept from the round:
+- **Cutscene classification holes closed** (found in review, older than this round): a cutscene's `OnStopped`
+  actions (run when it finishes or stops) weren't classified at all, and a fade's in-fade `PlayCutscene` didn't
+  classify the cutscene it starts. Both now go through the same check as `CommandAction`'s actions; a T0 action there
+  is reported (test `stop_and_in_fade_actions_are_classified`).
+- A `RandomTrack` gate stays reported wherever it is (a second review round): without an oracle comparison nothing
+  else would invalidate a run whose shared RNG it draws from, so the report is what keeps a standalone run fail-closed.
+- A placeholder restored with a roaming idle cutscene playing is reported.
+- The scene cache (schema v2) carries `RoamingWaypointView`'s fields (the importer now treats the type as gameplay):
+  data for the roaming audit above. Neathholm's 22 waypoints and both roaming spawner settings have no idle cutscene.
+- `scripts/scene-cache.sh` failed with "no scene bundles": the dependency list names bundles in lower case; it now
+  passes the lower-case area name (regenerated caches identical but for the new fields).
+
+The Horgus runs stay invalid on the two draws above, the awake states (180 reports a run; the spawned unit's toggle,
+3 stream records) and `OnIsInGameChanged`'s group membership. Next: the producer records and the awake states
+(WrathOracle's `awake_set`/`awake` observation runs only in turn-based windows; record it in dialogue fixtures, with
+a spawned unit's blueprint, and take it as an input), then the groups model in dialogue runs.
+
 ## Recordings (local, gitignored)
 
 | Capture | Fixtures | Runs |

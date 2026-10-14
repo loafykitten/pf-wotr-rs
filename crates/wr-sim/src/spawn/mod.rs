@@ -56,6 +56,8 @@ pub struct PlaceholderData {
     /// A saved `m_Roaming` (`UnitPartRoaming`): `BecomeUnit` gives the unit the part and
     /// `RestoreFrom` copies it.
     pub roaming: bool,
+    /// The saved roaming state's `IdleCutscene` (a cutscene player mid-way) is set.
+    pub roaming_idle_cutscene: bool,
     /// `m_VendorTable` (`UnitPartVendor.SharedInventory`).
     pub vendor_table: Option<Guid>,
     /// `m_PrefabId` is set (`UnitSpawningData.PrefabGuid`): `EntityCreator.SpawnUnit` then
@@ -213,6 +215,9 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
             w.entity_mut(e).parts.push(crate::world::Part { clr: "UnitPartRoaming" });
         }
         w.coverage.stub("UnitPartRoaming.RestoreFrom (roaming movement along waypoints: T1)");
+        if p.roaming_idle_cutscene {
+            w.coverage.unsupported("UnitPartRoaming.RestoreFrom: an idle cutscene playing");
+        }
     }
     // `unit.Ensure<UnitPartVendor>().SetSharedInventory(m_VendorTable)`: the part points at
     // the shared table (nothing is generated; the table's stock is the player's).

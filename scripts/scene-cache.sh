@@ -15,8 +15,9 @@ guid=${2:?area guid}
 R=$(cd "$(dirname "$0")/.." && pwd)
 export WR_CACHE=${WR_CACHE:-$R/cache}
 cd "$R"
-cargo run --release -q -p wr-import -- import --area "$name" --no-census
 lower=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
+# The dependency list names the bundles in lower case (`prologue_neathholm_*.scenes`).
+cargo run --release -q -p wr-import -- import --area "$lower" --no-census
 [ -f "$WR_CACHE/sim/unit-prefabs.json" ] || cargo run --release -q -p wr-import -- unit-prefabs
 cargo run --release -q -p wr-sim --bin wr-sim -- scene-import \
   "$WR_CACHE/import/$lower/inventory.json" --area "$guid"

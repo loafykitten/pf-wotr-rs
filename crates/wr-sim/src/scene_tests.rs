@@ -1096,3 +1096,55 @@ fn a_spawned_unit_is_not_assumed_awake() {
     assert_eq!(awake_state(&mut w, spawned, &[spawned]), Awake::No, "out of the game");
     assert!(w.coverage.valid());
 }
+
+/// Actions outside the tracks' command order are classified too: a cutscene's `OnStopped`
+/// (run when it finishes or stops) and a fade's in-fade actions. Presentation passes; a T0
+/// action is reported, and so is a cutscene they start that has one.
+#[test]
+fn stop_and_in_fade_actions_are_classified() {
+    let (w, _) = world();
+    let list = |actions: Vec<Node>| {
+        Node::Object(Box::new(obj(
+            "Kingmaker.ElementsSystem.ActionList",
+            &[("Actions", Node::Seq(actions))],
+        )))
+    };
+    let classify = |g: Guid| crate::elements::cutscene::classify(&w, g).unsupported;
+    // `OnStopped` with a sound: accepted; with a `Spawn`: reported.
+    let c = gate(
+        &w,
+        0xB1,
+        "Cutscene",
+        vec![track(&[], None)],
+        &[("OnStopped", list(vec![action("Play3DSound")]))],
+    );
+    assert!(classify(c).is_empty(), "{:?}", classify(c));
+    let c = gate(
+        &w,
+        0xB2,
+        "Cutscene",
+        vec![track(&[], None)],
+        &[("OnStopped", list(vec![action("Spawn")]))],
+    );
+    assert!(classify(c).iter().any(|u| u.contains("Cutscene.OnStopped action Spawn")));
+    // An in-fade `PlayCutscene` of a cutscene with a T0 action: reported through the nested
+    // classification.
+    let spawn = command_action(&w, 0xB3, vec![action("Spawn")]);
+    let inner = gate(&w, 0xB4, "Cutscene", vec![track(&[spawn], None)], &[]);
+    let play = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Actions.PlayCutscene",
+        &[("m_Cutscene", Node::BpRef(inner))],
+    )));
+    insert(
+        &w,
+        0xB5,
+        "Kingmaker.AreaLogic.Cutscenes.Commands.CutsceneCommandFadeout",
+        &[("m_InFadeActions", list(vec![play]))],
+    );
+    let c = gate(&w, 0xB6, "Cutscene", vec![track(&[Guid(0xB5)], None)], &[]);
+    assert!(
+        classify(c).iter().any(|u| u.contains("started by a cutscene has T0")),
+        "{:?}",
+        classify(c)
+    );
+}

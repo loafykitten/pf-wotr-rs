@@ -18,8 +18,11 @@
 //!   track (a gate's activation force-stops it), only `AllTracks` and `And` gates, no gate
 //!   reactivation or command signals, no `CommandRequireUnits`, and every gate with T0 tracks
 //!   reached. Anything else is reported.
+//! - A cutscene's `OnStopped` actions and a fade's in-fade actions are accepted when they are
+//!   presentation (a cutscene they start is classified in turn); anything else is reported.
 //! - Always reported: a command with an `EntryCondition` (`StartNextCommand` checks it and
-//!   applies `OnFail`), a `RandomTrack` gate (`SelectTrackToStart` draws from the global RNG),
+//!   applies `OnFail`), a `RandomTrack` gate (`SelectTrackToStart` draws from the global RNG:
+//!   the sim doesn't make that draw, so a run that would is never valid on its own),
 //!   `CommandStartDialog` (the dialogue blocks its track and isn't started by the sim), a
 //!   cutscene started by a cutscene with T0 actions of its own, and a `CommandDismountSpan`
 //!   while any unit has a rider part.
@@ -294,6 +297,10 @@ fn walk_gate(w: &World, g: Guid, out: &mut Classified, walk: &mut Walk) {
     }
     if ty == "Cutscene" {
         out.cutscenes.push(g);
+        // `Cutscene.OnStopped` runs when the player finishes or stops
+        // (`CutscenePlayerData.Tick`/`Stop`).
+        let stopped = b.view().obj("OnStopped").map(|l| l.objs("Actions")).unwrap_or_default();
+        side_actions(w, stopped, "Cutscene.OnStopped", out, walk);
     }
     walk.gates.push(g);
     let v = b.view();
@@ -387,14 +394,7 @@ fn command(
         // `CutsceneCommandFadeout.m_InFadeActions` run at half the fade's lifetime.
         if *t1 == "CutsceneCommandFadeout" {
             let actions = v.obj("m_InFadeActions").map(|l| l.objs("Actions")).unwrap_or_default();
-            for a in actions {
-                let at = View(a).type_name();
-                if T1_ACTIONS.contains(&at) {
-                    out.t1_actions.push(at);
-                } else {
-                    out.unsupported.push(format!("CutsceneCommandFadeout in-fade action {at}"));
-                }
-            }
+            side_actions(w, actions, "CutsceneCommandFadeout in-fade", out, walk);
         }
         // `CommandDismountSpan` dismounts riders (`UnitPartRider`) and remounts them at its
         // end; with no rider anywhere it does nothing.
@@ -433,33 +433,57 @@ fn command(
                 } else {
                     out.unsupported.push(format!("CommandAction action {at}"));
                 }
-                // A cutscene this one starts plays on its own player: its T1 content is
-                // classified here; T0 content of its own isn't ordered with this one's.
-                if at == "PlayCutscene"
-                    && let Some(c) = av.guid("m_Cutscene")
-                    && !walk.seen.contains(&c)
-                    && !walk.playing.contains(&c)
-                {
-                    walk.seen.push(c);
-                    let mut nested = classify_in(w, c, walk.playing.clone());
-                    if !nested.t0_steps.is_empty() || !nested.dialogs.is_empty() {
-                        push_unique(
-                            &mut out.unsupported,
-                            "a cutscene started by a cutscene has T0 actions".into(),
-                        );
-                    }
-                    out.t1_commands.append(&mut nested.t1_commands);
-                    out.t1_actions.append(&mut nested.t1_actions);
-                    out.cutscenes.append(&mut nested.cutscenes);
-                    for u in nested.unsupported {
-                        push_unique(&mut out.unsupported, u);
-                    }
-                }
+                nested_play(w, av, out, walk);
             }
         }
         _ => out.unsupported.push(format!("cutscene command {ty}")),
     }
     false
+}
+
+/// A `PlayCutscene` action: the cutscene it starts plays on its own player. Its T1 content is
+/// classified here; T0 content of its own isn't ordered with this one's (reported).
+fn nested_play(w: &World, av: View<'_>, out: &mut Classified, walk: &mut Walk) {
+    if av.type_name() != "PlayCutscene" {
+        return;
+    }
+    let Some(c) = av.guid("m_Cutscene") else { return };
+    if walk.seen.contains(&c) || walk.playing.contains(&c) {
+        return;
+    }
+    walk.seen.push(c);
+    let mut nested = classify_in(w, c, walk.playing.clone());
+    if !nested.t0_steps.is_empty() || !nested.dialogs.is_empty() {
+        push_unique(&mut out.unsupported, "a cutscene started by a cutscene has T0 actions".into());
+    }
+    out.t1_commands.append(&mut nested.t1_commands);
+    out.t1_actions.append(&mut nested.t1_actions);
+    out.cutscenes.append(&mut nested.cutscenes);
+    for u in nested.unsupported {
+        push_unique(&mut out.unsupported, u);
+    }
+}
+
+/// An action list that runs outside the tracks' command order (a fade's in-fade actions, a
+/// cutscene's `OnStopped`): presentation actions are accepted (a cutscene one starts is
+/// classified in turn); anything else is reported, its timing being outside the T0 order.
+fn side_actions(
+    w: &World,
+    actions: Vec<&wr_content::node::Object>,
+    what: &str,
+    out: &mut Classified,
+    walk: &mut Walk,
+) {
+    for a in actions {
+        let av = View(a);
+        let at = av.type_name();
+        if T1_ACTIONS.contains(&at) {
+            out.t1_actions.push(at);
+            nested_play(w, av, out, walk);
+        } else {
+            push_unique(&mut out.unsupported, format!("{what} action {at}"));
+        }
+    }
 }
 
 /// A cutscene's T0 actions waiting for the cutscene controller's next tick.
