@@ -175,6 +175,14 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
+- **Sixteenth session's loose ends (2026-10-14):** a third fight is ready to record:
+  `scripts/oracle-record.sh poc5-tb-96 Manual_18 oracle/tools/oracle-fixtures/poc5-tb3.plan.json --deadline 3600
+  --allow-unhooked 5` (`poc5-tb3.spec.json`: `tb-hold`, focus in the reverse order, the archer 5198 ending its turns:
+  different choices, maybe a hard target for the impatience draws); it wasn't recorded because the screen had locked.
+  Replay it with the POC-5 suite's lists (add it like `-95`) and see what it exercises. Captures `poc5-tb-93` and `-94`
+  are superseded by `-95` (made while the impatience hooks changed): delete with Ember's say-so. Manual_10's 72
+  remaining one-sided facts are behind reported components (mythic class levels in `AddClassLevels`, pets and mounts,
+  `AddFeatureOnAlignment`).
 - **booklab, the second Mac (set up 2026-10-12; details in `docs/booklab.md`):** `ssh booklab`, an Apple M1 (8-core
   GPU, 16 GB), dedicated to this project, kept awake and plugged in. It runs the game (without Steam:
   `WR_NO_STEAM=1`) for **correctness work in parallel with this Mac**: oracle recordings, and POC-6's render work

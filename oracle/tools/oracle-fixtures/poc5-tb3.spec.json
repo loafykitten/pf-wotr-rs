@@ -1,0 +1,20 @@
+{
+ "plan": {
+  "fixedDelta": 0.016666668,
+  "seed": 20261011
+ },
+ "fixtures": [
+  {
+   "name": "tb-hold",
+   "steps": [
+    "tbm:on",
+    "wait:5",
+    "move:57,34.5,155.5",
+    "tbwaitcombat:3600",
+    "tbfight:default=focus/51DD/523B/51FC,5198=end:30000",
+    "wait:60"
+   ],
+   "replays": 2
+  }
+ ]
+}
