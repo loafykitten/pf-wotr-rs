@@ -247,7 +247,9 @@ by `{"$failed": "..."}`; `value_failures` counts single values written as `$fail
 
 ## Comparing
 
-- Units by `id`; stats by `type`; facts by `id` (and separately check the order); modifiers
+- Units by `id`; stats by `type`; facts by blueprint and occurrence (the n-th fact of a blueprint in list order),
+  with each pair's `id` its own field and the order checked as the blueprints' sequence (a run that allocated one more
+  id earlier shifts every id after it, which pairing by id would turn into comparisons of different facts); modifiers
   as a multiset per stat unless the comparison wants order; resources and spellbooks by
   blueprint; narrative arrays by blueprint.
 - Floats by bits after parsing to their declared width (C# `float` fields are written from

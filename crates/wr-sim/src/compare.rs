@@ -42,6 +42,20 @@ fn by<'a>(v: &'a J, key: &str) -> BTreeMap<String, &'a J> {
     v.as_array().map(|a| a.iter().map(|x| (x[key].to_string(), x)).collect()).unwrap_or_default()
 }
 
+/// Facts by blueprint and occurrence: `<blueprint>#<n>` for the n-th fact of that blueprint in
+/// list order.
+fn by_occurrence(v: &J) -> BTreeMap<String, &J> {
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for x in v.as_array().map(Vec::as_slice).unwrap_or_default() {
+        let bp = x["blueprint"].as_str().map_or_else(|| x["blueprint"].to_string(), str::to_owned);
+        let n = seen.entry(bp.clone()).or_default();
+        out.insert(format!("{bp}#{n}"), x);
+        *n += 1;
+    }
+    out
+}
+
 /// The comparable part of a modifier.
 fn modifier_key(m: &J) -> J {
     serde_json::json!([
@@ -302,38 +316,41 @@ pub fn compare(ours: &J, oracle: &J) -> Report {
                 }
             }
         }
-        let of = by(&o["facts"], "id");
-        let tf = by(&t["facts"], "id");
+        // Facts are paired by blueprint and occurrence (the n-th fact of a blueprint in list
+        // order), so an offset in the run's id allocation doesn't pair different facts; whether
+        // a pair's ids agree is its own field (`fact.id`), the order is the blueprints'.
+        let of = by_occurrence(&o["facts"]);
+        let tf = by_occurrence(&t["facts"]);
         let order = |v: &J| -> J {
             J::from(
                 v.as_array()
-                    .map(|a| a.iter().map(|x| x["id"].clone()).collect::<Vec<_>>())
+                    .map(|a| a.iter().map(|x| x["blueprint"].clone()).collect::<Vec<_>>())
                     .unwrap_or_default(),
             )
         };
         r.check("facts.order", format!("{id}.facts"), &order(&o["facts"]), &order(&t["facts"]));
-        for fid in tf.keys() {
-            if !of.contains_key(fid) {
+        for key in tf.keys() {
+            if !of.contains_key(key) {
                 r.check(
                     "facts.present",
-                    format!("{id}.facts.{fid}"),
+                    format!("{id}.facts.{key}"),
                     &J::Bool(false),
                     &J::Bool(true),
                 );
             }
         }
-        for (fid, f) in &of {
-            let Some(tfa) = tf.get(fid) else {
+        for (key, f) in &of {
+            let Some(tfa) = tf.get(key) else {
                 r.check(
                     "facts.present",
-                    format!("{id}.facts.{fid}"),
+                    format!("{id}.facts.{key}"),
                     &J::Bool(true),
                     &J::Bool(false),
                 );
                 continue;
             };
-            for k in ["blueprint", "rank", "active", "class"] {
-                r.check(&format!("fact.{k}"), format!("{id}.facts.{fid}.{k}"), &f[k], &tfa[k]);
+            for k in ["id", "rank", "active", "class"] {
+                r.check(&format!("fact.{k}"), format!("{id}.facts.{key}.{k}"), &f[k], &tfa[k]);
             }
         }
     }
@@ -350,6 +367,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn facts_pair_by_blueprint_and_occurrence_and_ids_are_their_own_field() {
+        let unit = |facts: J| json!({"units": [{"id": "u", "stats": [], "facts": facts}]});
+        // The oracle's ids run one ahead (another fact made earlier in its run).
+        let ours = unit(json!([
+            {"id": "f1", "blueprint": "a", "rank": 1, "active": true, "class": "Feature"},
+            {"id": "f2", "blueprint": "b", "rank": 1, "active": true, "class": "Buff"},
+            {"id": "f3", "blueprint": "a", "rank": 2, "active": true, "class": "Feature"},
+        ]));
+        let theirs = unit(json!([
+            {"id": "f2", "blueprint": "a", "rank": 1, "active": true, "class": "Feature"},
+            {"id": "f3", "blueprint": "b", "rank": 1, "active": true, "class": "Buff"},
+            {"id": "f4", "blueprint": "a", "rank": 2, "active": true, "class": "Feature"},
+        ]));
+        let r = compare(&ours, &theirs);
+        assert_eq!(r.fields["fact.rank"], (3, 3), "fields compare the paired facts");
+        assert_eq!(r.fields["fact.id"], (0, 3), "every id differs, reported apart");
+        assert_eq!(r.fields["facts.order"], (1, 1));
+        assert!(!r.fields.contains_key("facts.present"));
+    }
 
     /// A dump with one unit whose stat has one modifier from `item`.
     fn dump(item: &str, saved: &[&str]) -> J {
