@@ -390,6 +390,11 @@ internal static class TurnBased
                 var attack = step == "tbattack" || step == "tbattack_impossible" || step == "tbattack_rejected";
                 var cast = step == "tbcast" || step == "tbcast_impossible" || step == "tbcast_rejected";
                 if (!attack && !cast && step != "tbend") break; // an input of some other step: not ours to make
+                if (cast && StrictRefId(rec["unit"]) == null)
+                {
+                    Sched.Invalidate($"recorded {step} at tick {tick} has a malformed caster");
+                    yield break;
+                }
                 // Not there yet: another unit's turn would be a different fight; no turn yet, or a
                 // turn still scrolling or preparing, is the same fight a few ticks later.
                 string why = null;
@@ -412,6 +417,12 @@ internal static class TurnBased
                         yield break;
                     }
                     target = id != null ? FindUnit(id) : null;
+                    if (id != null && target == null)
+                    {
+                        // The recording writes a target it couldn't find as null; a reference is a unit it found.
+                        Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} names target {id}, which doesn't exist");
+                        yield break;
+                    }
                 }
                 else if (why == null && cast)
                 {
