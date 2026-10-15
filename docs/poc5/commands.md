@@ -514,7 +514,8 @@ action, target, scores, five-foot step and path) and `ai_sel` (`SelectAction`'s 
 The AI's `ForcedPath` is then the sim's: `TickApproaching`'s `fpath` leaf is checked against it.
 
 Reported, not modelled: other actions and considerations (casts, custom actions, an auto-use ability, a magus' spell
-before an attack), confusion, a personal enemy, an aggro filter, action cooldowns and combat counts, an action's
+before an attack; cast actions of an ability fact at an enemy, `ThreatedByConsideration` and `DistanceConsideration` were
+ported later by stream P: `docs/poc5/ai-abilities.md`), confusion, a personal enemy, an aggro filter, action cooldowns and combat counts, an action's
 `ActionList`, other target types, `InRangeConsideration.OnlyIfThreated`, more than 16 targets (the list's capacity decides
 the sort). Inputs that stay: the movement and pathing (paths, the simulation, line of sight, positions), the Unity clock,
 the memory, the impatience controller's state, `LastTarget`/`ManualTarget` (their writers aren't ported), the settings.

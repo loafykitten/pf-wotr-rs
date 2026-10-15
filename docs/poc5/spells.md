@@ -13,7 +13,7 @@ names and counts only.
 | `poc5-tb-118/tb-chain` (the same fight, before the reveal was recorded) | Every run T0-equal, end state 1.0000 [M]. Not valid: the fly's reveal isn't recorded, so its `GameLogEventKnowledge` is missing (21 combat log kinds) |
 | The captures to keep valid (`-95`, `-96`, `-109`, `-111` to `-117`) | Still valid on every run [M] |
 | `poc5-tb-122/tb-focus` | Valid on every run [M]; `tb-nearest`'s kinds are an initiative tie (the turn order's identity-hash fallback), not this stream's |
-| `poc5-tb-121/tb-lizard` | Not valid [M]: the lizard's AI scores an ability action (`AiCastSpell`-like, blueprint `14db26a8…`; the sim's AI scores only `AiActionSimple`), and the turn and command kinds that follow; its line-of-sight rays outside the agent's entries. Not this stream's code; the disease-like weapon trigger kind it had is gone |
+| `poc5-tb-121/tb-lizard` | Not valid [M]: the ranged centipede's AI scores an ability action (`BlueprintAiCastSpell`, `14db26a8…`), and the turn and command kinds that follow; its line-of-sight rays outside the agent's entries. Not this stream's code; the disease-like weapon trigger kind it had is gone. Stream P ported the AI's cast actions: only the rays are left (`docs/poc5/ai-abilities.md`) |
 
 ## The giant fly (`tb-chain`) [C]
 
@@ -196,8 +196,8 @@ reported.
 ## Next
 
 1. `ContextActionSavingThrow` and `ContextActionConditionalSaved` (the disease at Core and
-   above); the AI's ability actions (`poc5-tb-121`), with `combat/spells.rs`'s availability and
-   targeting.
+   above). (The AI's ability actions: done by stream P, `docs/poc5/ai-abilities.md`; `Ability`
+   is now also an ability fact's `AbilityData`, whose cast is reported where it begins.)
 2. `UnitUseAbility`'s class code as the sim's (as slice B did for `UnitAttack`): taps for its
    reads (`CanTarget`'s range and line of sight aren't in `CanTarget` itself; the animation's
    precast and act), then `OnAction`'s checks and its spend.
