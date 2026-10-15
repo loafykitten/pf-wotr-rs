@@ -1,9 +1,11 @@
 # POC-5: group memory and visibility (stream F)
 
 Status (2026-10-15): design, and the first part the recordings establish implemented and checked: the memory's
-bookkeeping (`crates/wr-sim/src/combat/memory.rs`), driven by the recorded memory changes, reproduces every memory
-read recorded in `poc5-tb-103` (59,991 `Memory.Enemies` reads, 369 flat-footed `Memory.Contains` reads, 609
-dictionary rows, 42 cached `UnitsList`s, 6 friends' additions on their frame). Not wired into the driven replay (the
+bookkeeping (`crates/wr-sim/src/combat/memory.rs`), driven by the recorded memory changes, reproduces every
+membership read recorded in `poc5-tb-103` (59,991 `Memory.Enemies` reads, 369 flat-footed `Memory.Contains` reads,
+609 dictionary rows, 42 cached `UnitsList`s, 6 friends' additions on their frame). The visibility reads
+(`ContainsVisible`: the impatience controller's `ivis` and `imp_s` `vis`, 16 a record run) aren't checked: `Visible`
+isn't recorded. Not wired into the driven replay (the
 recordings don't carry what the controller's tick reads at each call: "Observer changes requested"). Tags as
 elsewhere: [M] measured, [C] from the decompiled code, [I] inferred.
 
@@ -182,6 +184,7 @@ checks, on all six runs (record and two replays of both fights):
   factions' `AlwaysEnemy` (blueprints), the reader's group from the frame it's read in (`eng_tu`, the AI's unit,
   `uc_tick`);
 - every flat-footed check's `target_remembers_initiator` (369) against `Contains`;
+- not the visibility reads (`ContainsVisible`), since `Visible` isn't recorded;
 - every `mem_add` of a unit absent, every `mem_clear`'s count, and each `Cleanup` removal explained by what the
   recording shows: all 45 are units that left their group a tick before and weren't put back (`group_remove` of a
   member; a unit still in the game would have been put back by the next `UnitGroupsController.Tick`, which runs
@@ -193,9 +196,10 @@ checks, on all six runs (record and two replays of both fights):
 
 All equal, and each run must check every kind above at least once (engagement, AI and `UnitAttack` reads,
 flat-footed reads, rows, cached lists, additions, a friend's frame compared, a removal). `damaged_memory_records_are_caught`
-damages `-103/tb-focus` 12 ways (an addition missing or doubled, an `Enemies` read reordered, a unit forgotten
+damages `-103/tb-focus` 14 ways (an addition missing or doubled, an `Enemies` read reordered, a unit forgotten
 without leaving its group, a flat-footed read flipped, a clear of another size, a row reordered, a friend's hash on
-another frame, and every flat-footed read, time record, AI entry or `Cleanup` removal gone): each is caught. The unit tests port the C#'s branches
+another frame, every flat-footed read, time record but the first, AI entry, `Cleanup` removal or clear gone): each
+is caught. The unit tests port the C#'s branches
 (the free slot reused, caches invalidated by a known unit's `Add` but not by `Cleanup`, the 9 s boundary, `TimeSpan`
 overflow, the null reference, the queue's dedup and peaceful targets, both handlers, the tick's friend frame, a
 long frame, stealth, invisibility, the fake observer group).

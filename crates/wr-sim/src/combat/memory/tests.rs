@@ -111,10 +111,11 @@ fn cleanup_removes_in_order_and_leaves_the_caches_stale() {
     assert_eq!(m.units_list(|_| IN), [1, 2, 3, 4, 5]);
     // Exactly 9 s later: not yet forgotten (strictly older than 9 s).
     let now = at(T0, FORGET_AFTER);
-    let gone = m.cleanup(now, |k| if k == 4 { Resolved::Missing } else { IN }).unwrap();
+    let gone =
+        m.cleanup(now, |k| if k == 4 { Resolved::Missing } else { IN }, &mut Vec::new()).unwrap();
     assert_eq!(gone, [4]);
     let now = TimeSpan(now.0 + 1);
-    let gone = m.cleanup(now, |k| if k == 5 { OUT } else { IN }).unwrap();
+    let gone = m.cleanup(now, |k| if k == 5 { OUT } else { IN }, &mut Vec::new()).unwrap();
     // 1 and 3 expired, 5 left the game: removed in enumeration order.
     assert_eq!(gone, [1, 3, 5]);
     assert_eq!(keys(&m), [2]);
@@ -130,7 +131,7 @@ fn cleanup_removes_in_order_and_leaves_the_caches_stale() {
         1,
         UnitInfo { last_detect_time: TimeSpan::MAX, visible: false },
     )]);
-    assert_eq!(big.cleanup(T0, |_| IN), Err(MemError::Cs(CsError::Overflow)));
+    assert_eq!(big.cleanup(T0, |_| IN, &mut Vec::new()), Err(MemError::Cs(CsError::Overflow)));
 }
 
 #[test]
@@ -610,7 +611,8 @@ fn recorded_memory_changes_reproduce_every_memory_read() {
 }
 
 /// What every run of `poc5-tb-103`'s fights exercises: a run that checks none of one kind fails.
-const COVERAGE: [&str; 9] = [
+const COVERAGE: [&str; 10] = [
+    "cleared",
     "enemies read: engagement",
     "enemies read: AI",
     "enemies read: command",
@@ -696,6 +698,18 @@ fn damaged_memory_records_are_caught() {
         ("no time records", without(|r| r["k"] == "time")),
         ("no AI entries", without(|r| r["k"] == "obs" && r["ev"] == "uc_ai")),
         ("no Cleanup removals", without(|r| r["k"] == "obs" && r["ev"] == "mem_remove")),
+        ("no clears", without(|r| r["k"] == "obs" && r["ev"] == "mem_clear")),
+        (
+            "only the first time record",
+            Box::new(|v| {
+                let first = v.iter().position(|r| r["k"] == "time").unwrap();
+                let mut i = 0;
+                v.retain(|r| {
+                    i += 1;
+                    r["k"] != "time" || i - 1 == first
+                });
+            }),
+        ),
         ("an addition missing", Box::new(move |v| drop(v.remove(first_add)))),
         (
             "an addition twice",
@@ -806,6 +820,8 @@ fn check_trace(r: &mut Rec<'_>, recs: &[Value]) {
         }
         if x["k"] == "tick" {
             r.frame = x["frame"].as_i64().map_or(-1, |f| f + r.frame_shift);
+            // `GameDeltaTime` is this frame's `time` record's, or unknown.
+            r.game_delta = None;
         }
         if x["k"] == "time" {
             r.game_delta = x["game_delta"].as_f64();
@@ -968,7 +984,7 @@ fn check_friend_phase(r: &mut Rec<'_>, g: &str, u: u32, t: i64) {
         }
     }
     let Some(delta) = r.game_delta else {
-        r.fail(t, "a friend's addition before any time record".to_owned());
+        r.fail(t, "a friend's addition on a frame without its time record".to_owned());
         return;
     };
     #[allow(clippy::cast_possible_truncation)]
@@ -1007,13 +1023,11 @@ fn apply_cleanup(r: &mut Rec<'_>, g: &str, gone: &[u32], t: i64) {
     if order.len() != gone.len() {
         r.fail(t, format!("Cleanup of {g} removed {:?}, not all in the model", r.names(gone)));
     }
-    let removed = m.cleanup(TimeSpan::ZERO, |k| {
-        if order.contains(&k) {
-            Resolved::Unit { in_game: false }
-        } else {
-            Resolved::Unit { in_game: true }
-        }
-    });
+    let removed = m.cleanup(
+        TimeSpan::ZERO,
+        |k| Resolved::Unit { in_game: !order.contains(&k) },
+        &mut Vec::new(),
+    );
     if removed.as_deref() != Ok(order.as_slice()) {
         r.fail(t, format!("Cleanup of {g}: {removed:?}"));
     }
@@ -1164,4 +1178,24 @@ fn a_failure_in_the_queue_keeps_every_queued_pair() {
     // The first pair was applied, and the queue (cleared only after the loop) still holds both.
     assert_eq!(keys(&f.mem[&5]), [20, 10]);
     assert_eq!(c.units_for_add, [(41, 20), (42, 10)]);
+}
+
+#[test]
+fn a_cleanup_that_throws_leaves_its_removals_to_the_next_one_of_any_memory() {
+    // Group A: unit 1 gone, then unit 2's detect time overflows.
+    let mut a = GroupMemory::from_entries([
+        (1, UnitInfo { last_detect_time: T0, visible: false }),
+        (2, UnitInfo { last_detect_time: TimeSpan::MAX, visible: false }),
+    ]);
+    let mut pending = Vec::new();
+    let res = |k: u32| if k == 1 { Resolved::Missing } else { IN };
+    assert_eq!(a.cleanup(T0, res, &mut pending), Err(MemError::Cs(CsError::Overflow)));
+    assert_eq!((keys(&a), pending.clone()), (vec![1, 2], vec![1]));
+    // Group B also remembers 1 (in the game for it): its next Cleanup removes it all the same.
+    let mut b = GroupMemory::new();
+    b.add(3, T0);
+    b.add(1, T0);
+    assert_eq!(b.cleanup(T0, |_| IN, &mut pending), Ok(vec![1]));
+    assert!(pending.is_empty());
+    assert_eq!(keys(&b), [3]);
 }

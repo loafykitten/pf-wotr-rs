@@ -170,7 +170,11 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     /// `Cleanup()`: every entry whose unit doesn't resolve, wasn't detected for more than 9 s
     /// (`LastDetectTime + 9 s < GameTime`), or isn't in the game is removed, in enumeration order
     /// (so the last one removed heads the free list). The caches are left as they are. Returns the
-    /// removed keys in that order.
+    /// keys removed from this memory, in that order.
+    ///
+    /// `pending` is `s_UnitsForRemove`, a static list every memory shares: the entries are collected
+    /// into it and it's cleared only after the removals, so an exception part way leaves what was
+    /// collected there, and the next `Cleanup` of any memory removes those keys too (where present).
     ///
     /// # Errors
     ///
@@ -179,8 +183,8 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         &mut self,
         game_time: TimeSpan,
         mut resolve: impl FnMut(K) -> Resolved,
+        pending: &mut Vec<K>,
     ) -> Result<Vec<K>, MemError> {
-        let mut gone = Vec::new();
         for (k, info) in self.units.iter() {
             let remove = match resolve(*k) {
                 Resolved::Missing => true,
@@ -189,11 +193,14 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
                 }
             };
             if remove {
-                gone.push(*k);
+                pending.push(*k);
             }
         }
-        for k in &gone {
-            self.units.remove(k);
+        let mut gone = Vec::new();
+        for k in std::mem::take(pending) {
+            if self.units.remove(&k).is_some() {
+                gone.push(k);
+            }
         }
         Ok(gone)
     }
@@ -289,6 +296,9 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
 #[derive(Debug, Clone, Default)]
 pub struct MemoryController<K> {
     pub units_for_add: Vec<(K, K)>,
+    /// `UnitGroupMemory.s_UnitsForRemove` (static, shared by every memory's `Cleanup`): empty
+    /// unless a `Cleanup` threw part way.
+    pub cleanup_pending: Vec<K>,
 }
 
 /// What `HandleUnitCommandDidAct` reads of the command that acted.
@@ -452,7 +462,7 @@ where
         }
         let lookup =
             |k: K| resolved.iter().find(|(x, _)| *x == k).map_or(Resolved::Missing, |r| r.1);
-        w.memory(g).cleanup(now, lookup)?;
+        w.memory(g).cleanup(now, lookup, &mut ctl.cleanup_pending)?;
     }
     // The queue is cleared after the loop: a failure part way keeps every pair (as the game's
     // exception would).
