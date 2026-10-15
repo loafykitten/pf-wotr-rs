@@ -16,6 +16,22 @@ fn loc(w: &World, v: View<'_>, field: &str) -> Result<String, TextError> {
     crate::text::localized_field(w, v, field)
 }
 
+/// `LocalizedString.IsSet()`: the current pack's text for the string's key (`GetText(key,
+/// reportUnknown: false)`: "" for a missing key) isn't empty; a null string throws.
+fn is_set(w: &World, v: View<'_>, field: &str) -> Result<bool, TextError> {
+    let Some(s) = v.obj(field) else {
+        return Err(TextError::Throws(format!("{field}.IsSet() on null")));
+    };
+    let key = s.str("m_Key").unwrap_or("");
+    let pack = &w
+        .text
+        .as_deref()
+        .ok_or_else(|| TextError::Unsupported("no localization pack loaded".into()))?
+        .pack;
+    let text = pack.find(key).map_err(|e| TextError::Pack(format!("{e:#}")))?;
+    Ok(text.is_some_and(|t| !t.is_empty()))
+}
+
 /// `ItemEntity.Name`: the blueprint's `Name` when identified, else its `NonIdentifiedName`.
 ///
 /// # Errors
@@ -28,10 +44,10 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
     let b = bp(w, g)?;
     let v = b.view();
     if !it.is_identified {
-        // `m_NonIdentifiedNameText.IsSet()`: the pack's text for its key isn't empty.
-        let n = loc(w, v, "m_NonIdentifiedNameText")?;
-        if !n.is_empty() {
-            return Ok(n);
+        // `m_NonIdentifiedNameText.IsSet()`: the pack's raw text for its key (unprocessed, a
+        // missing key unset) isn't empty.
+        if is_set(w, v, "m_NonIdentifiedNameText")? {
+            return loc(w, v, "m_NonIdentifiedNameText");
         }
         // `DefaultNonIdentifiedName`: a weapon's is its type's `DefaultName`.
         if v.is("BlueprintItemWeapon") {

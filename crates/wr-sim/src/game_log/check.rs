@@ -91,83 +91,151 @@ pub fn activate(w: &mut World, begin: &J) {
             Err(e) => unsupported(w, format!("the localization pack: {e:#}")),
         }
     }
+    let mut keys: Vec<&str> =
+        g.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+    keys.sort_unstable();
+    if keys != ["controller", "ctx", "ready", "roots", "scope", "stack", "threads"] {
+        unsupported(w, format!("game_log's fields ({keys:?})"));
+    }
     if g["controller"] != true {
         unsupported(w, "no GameLogController when the window opened");
         return;
     }
     // m_RootRulesTypes.
     let roots: Option<Vec<&str>> =
-        g["roots"].as_array().map(|a| a.iter().filter_map(J::as_str).collect());
+        g["roots"].as_array().and_then(|a| a.iter().map(J::as_str).collect::<Option<Vec<&str>>>());
     let mut ours = root_rules();
     ours.sort_unstable();
     if roots.as_deref() != Some(ours.as_slice()) {
         unsupported(w, format!("the root rule types differ from the game's ({roots:?})"));
     }
-    // m_EventToThreads: each event type's threads, by name, in order.
+    // m_EventToThreads: each event type once, every one the sim dispatches, its threads by name in
+    // order, each ordinal one thread instance.
     let Some(table) = g["threads"].as_array() else {
         unsupported(w, "game_log.threads missing");
         return;
     };
-    let mut keys = 0;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut by_ordinal: HashMap<i64, usize> = HashMap::new();
+    let mut ordinal_of: HashMap<usize, i64> = HashMap::new();
     for t in table {
         let (Some(ev), Some(by)) = (t["event"].as_str(), t["by"].as_array()) else {
             unsupported(w, "a malformed game_log.threads entry");
             continue;
         };
-        let names: Vec<&str> = by.iter().filter_map(|x| x[0].as_str()).collect();
-        let ours: Vec<&str> = parse_type(ev)
-            .map(|ty| threads_of(ty).into_iter().map(|i| THREADS[i].0).collect())
-            .unwrap_or_default();
-        if names != ours || names.len() != by.len() {
-            unsupported(w, format!("{ev}'s threads differ from the game's ({names:?})"));
+        let Some(ty) = parse_type(ev) else {
+            unsupported(w, format!("game_log.threads: an event type {ev}"));
+            continue;
+        };
+        if !seen.insert(ty.key()) {
+            unsupported(w, format!("game_log.threads: {ev} twice"));
         }
-        keys += 1;
+        let ours = threads_of(ty);
+        let rec: Option<Vec<(&str, i64)>> = by
+            .iter()
+            .map(|x| match x.as_array().map(Vec::as_slice) {
+                Some([n, o]) => Some((n.as_str()?, o.as_i64()?)),
+                _ => None,
+            })
+            .collect();
+        let Some(rec) = rec.filter(|r| r.len() == ours.len()) else {
+            unsupported(w, format!("{ev}'s threads differ from the game's ({by:?})"));
+            continue;
+        };
+        for ((name, ord), th) in rec.iter().zip(&ours) {
+            let same_name = *name == THREADS[*th].0;
+            let a = *by_ordinal.entry(*ord).or_insert(*th) == *th;
+            let b = *ordinal_of.entry(*th).or_insert(*ord) == *ord;
+            if !(same_name && a && b) {
+                unsupported(w, format!("{ev}'s threads differ from the game's ({by:?})"));
+                break;
+            }
+        }
     }
-    let our_keys: std::collections::BTreeSet<&str> =
-        THREADS.iter().flat_map(|(_, h)| h.iter().copied()).collect();
-    if keys != our_keys.len() {
+    let our_keys: std::collections::BTreeSet<String> =
+        THREADS.iter().flat_map(|(_, h)| h.iter().map(|k| (*k).to_owned())).collect();
+    if seen != our_keys {
         unsupported(
             w,
-            format!("the game dispatches {keys} event types, the sim {}", our_keys.len()),
+            format!("the game dispatches {} event types, the sim {}", seen.len(), our_keys.len()),
         );
     }
+    w.game_log.thread_ordinals = by_ordinal;
     if g["ready"].as_array().is_none_or(|a| !a.is_empty()) || g["stack"] != 0 {
         unsupported(w, "events queued or open when the window opened");
     }
     if g["scope"] != 0 {
         unsupported(w, "a GameLogContext scope open when the window opened");
     }
-    // The fields `Clear` leaves.
-    let c = &g["ctx"];
-    let int = |k: &str| c[k].as_i64().and_then(|v| i32::try_from(v).ok());
-    match (&c["SourceFact"], int("Rations"), int("RoundNumber"), int("RollChance")) {
-        (f, Some(rations), Some(round), Some(chance)) => {
-            if !f.is_null() {
-                w.game_log.ctx.source_fact =
-                    super::SourceFact::Unknown(format!("from before the window: {f}"));
-            }
-            w.game_log.ctx.rations = rations;
-            w.game_log.ctx.round_number = round;
-            w.game_log.ctx.roll_chance = chance;
-            match &c["Formula"] {
-                J::Null => {}
-                J::String(s) => w.game_log.ctx.formula = Some(s.clone()),
-                _ => unsupported(w, "game_log.ctx.Formula malformed"),
-            }
-        }
-        _ => unsupported(w, "game_log.ctx malformed"),
+    context(w, &g["ctx"]);
+}
+
+/// `GameLogContext`'s fields when the window opens: every one, of its type; the ones `Clear`
+/// leaves taken, the others at their defaults (outside a scope).
+fn context(w: &mut World, c: &J) {
+    // (name, kind: 'i' an int, 's' a string, else an object or null)
+    const FIELDS: [(&str, char); 22] = [
+        ("SourceUnit", 'o'),
+        ("SourceFact", 'o'),
+        ("Target", 'o'),
+        ("Message", 'o'),
+        ("Formula", 's'),
+        ("Text", 's'),
+        ("TextWithTags", 's'),
+        ("Description", 's'),
+        ("Count", 'i'),
+        ("Roll", 'i'),
+        ("D20", 'o'),
+        ("D100", 'o'),
+        ("Modifier", 'i'),
+        ("DC", 'i'),
+        ("ChanceDC", 'i'),
+        ("ConcealmentStatus", 'i'),
+        ("Rations", 'i'),
+        ("AttackNumber", 'i'),
+        ("AttacksCount", 'i'),
+        ("RoundNumber", 'i'),
+        ("Tooltip", 'o'),
+        ("RollChance", 'i'),
+    ];
+    let Some(o) = c.as_object() else {
+        unsupported(w, "game_log.ctx malformed");
+        return;
+    };
+    if o.len() != FIELDS.len() {
+        unsupported(w, format!("game_log.ctx has {} fields", o.len()));
     }
-    // The fields `Clear` resets are at their defaults outside a scope.
-    for (k, v) in c.as_object().into_iter().flatten() {
-        let sticky = matches!(
-            k.as_str(),
-            "SourceFact" | "Formula" | "Rations" | "RoundNumber" | "RollChance"
-        );
-        if !sticky && !(v.is_null() || *v == 0) {
-            unsupported(
+    for (k, kind) in FIELDS {
+        let Some(v) = o.get(k) else {
+            unsupported(w, format!("game_log.ctx.{k} missing"));
+            continue;
+        };
+        let typed = match kind {
+            'i' => v.as_i64().is_some_and(|x| i32::try_from(x).is_ok()),
+            's' => v.is_null() || v.is_string(),
+            _ => v.is_null() || v.is_object(),
+        };
+        if !typed {
+            unsupported(w, format!("game_log.ctx.{k} malformed"));
+            continue;
+        }
+        let int = || v.as_i64().and_then(|x| i32::try_from(x).ok()).unwrap_or(0);
+        match k {
+            "SourceFact" if !v.is_null() => {
+                w.game_log.ctx.source_fact =
+                    super::SourceFact::Unknown(format!("from before the window: {v}"));
+            }
+            "SourceFact" => {}
+            "Formula" => w.game_log.ctx.formula = v.as_str().map(str::to_owned),
+            "Rations" => w.game_log.ctx.rations = int(),
+            "RoundNumber" => w.game_log.ctx.round_number = int(),
+            "RollChance" => w.game_log.ctx.roll_chance = int(),
+            // The fields `Clear` resets are at their defaults outside a scope.
+            _ if !(v.is_null() || *v == 0) => unsupported(
                 w,
                 format!("GameLogContext.{k} set outside a scope when the window opened"),
-            );
+            ),
+            _ => {}
         }
     }
 }
@@ -185,6 +253,10 @@ pub fn input(
     match ty {
         "GameLogEventBark" => {
             let f = &r["f"];
+            if f.as_object().is_none_or(|f| f.len() != 2) {
+                unsupported(w, "a bark's fields malformed");
+                return;
+            }
             let unit = f["Entity"]["$unit"].as_str().and_then(|id| w.by_id.get(id).copied());
             if f["Entity"].get("$unit").is_some() && unit.is_none() {
                 unsupported(w, "a bark's unit is unknown");
@@ -203,6 +275,12 @@ pub fn input(
         }
         "GameLogEventProjectileHit" => {
             let rule = &r["f"]["Projectile"];
+            if r["f"].as_object().is_none_or(|f| f.len() != 1)
+                || !(rule.is_null() || rule["class"] == "RuleAttackRoll")
+            {
+                unsupported(w, "a projectile hit's fields malformed");
+                return;
+            }
             let attack = if rule.is_null() {
                 None
             } else {
@@ -276,6 +354,91 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
     })
 }
 
+/// A record's fields, exactly.
+fn keys_are(r: &J, want: &[&str]) -> bool {
+    r.as_object().is_some_and(|o| o.len() == want.len() && want.iter().all(|k| o.contains_key(*k)))
+}
+
+fn int_or_null(v: &J) -> bool {
+    v.is_null() || v.is_i64()
+}
+
+/// A `clog_q` as `LogObs.QueuedPostfix` writes it.
+fn q_shape(r: &J) -> bool {
+    const BASE: [&str; 9] = ["seq", "k", "t", "ev", "id", "e", "rule", "en", "ov"];
+    let fields = if r["rule"].is_null() {
+        let mut v = BASE.to_vec();
+        v.extend(["f", "origin"]);
+        keys_are(r, &v) && r["f"].is_object() && r["origin"].is_string()
+    } else {
+        keys_are(r, &BASE) && r["rule"].as_i64().is_some_and(|x| x > 0)
+    };
+    fields
+        && r["t"].is_i64()
+        && r["e"].is_string()
+        && r["en"].is_boolean()
+        && (r["ov"].is_null() || r["ov"].is_string())
+}
+
+/// A `clog_tick` as `LogObs.TickPrefix` writes it (before the tick's own scope).
+fn tick_shape(r: &J) -> bool {
+    keys_are(r, &["seq", "k", "t", "ev", "q", "stack", "scope"])
+        && r["t"].is_i64()
+        && r["stack"].as_u64().is_some()
+        && r["scope"] == 0
+        && r["q"].as_array().is_some_and(|q| {
+            q.iter().all(|x| {
+                x.as_array()
+                    .is_some_and(|p| p.len() == 2 && int_or_null(&p[0]) && p[1].is_boolean())
+            })
+        })
+}
+
+/// A `clog_msg` as `LogObs.AddPostfix` writes it: in a thread's handler, inside the tick's scope.
+fn msg_shape(r: &J) -> bool {
+    let keys = [
+        "seq",
+        "k",
+        "t",
+        "ev",
+        "n",
+        "th",
+        "ti",
+        "src",
+        "in_handler",
+        "text",
+        "color",
+        "icon",
+        "tip",
+        "scope",
+        "ctx",
+    ];
+    let tip_ok = match &r["tip"] {
+        J::Null => true,
+        t => {
+            keys_are(t, &["cls", "h", "d"])
+                && t["cls"].is_string()
+                && (t["h"].is_null() || t["h"].is_string())
+                && (t["d"].is_null() || t["d"].is_string())
+        }
+    };
+    keys_are(r, &keys)
+        && r["t"].is_i64()
+        && r["n"].is_i64()
+        && r["th"].is_string()
+        && r["ti"].is_i64()
+        && r["src"].as_i64().is_some_and(|x| x > 0)
+        && r["in_handler"] == true
+        && r["text"].is_string()
+        && r["color"]
+            .as_str()
+            .is_some_and(|c| c.len() == 8 && c.bytes().all(|b| b.is_ascii_hexdigit()))
+        && r["icon"].is_i64()
+        && tip_ok
+        && r["scope"].as_i64().is_some_and(|x| x >= 1)
+        && r["ctx"].is_object()
+}
+
 fn diff(w: &mut World, s: &mut Summary, what: String) {
     s.differences += 1;
     if s.differences <= 20 {
@@ -292,6 +455,49 @@ pub fn compare(
     inputs: std::collections::BTreeMap<String, usize>,
 ) -> Summary {
     let mut s = Summary { inputs, ..Summary::default() };
+    // Every log record well formed, the events numbered from 1 and the messages from 0 in order;
+    // the three kinds in the sim's order.
+    let mut rec_kinds = Vec::new();
+    let (mut next_id, mut next_n) = (1_i64, 0_i64);
+    for r in recs
+        .iter()
+        .filter(|r| r["k"] == "obs" && r["ev"].as_str().is_some_and(|e| e.starts_with("clog_")))
+    {
+        let ok = match r["ev"].as_str() {
+            Some("clog_q") => {
+                rec_kinds.push('q');
+                next_id += 1;
+                q_shape(r) && r["id"].as_i64() == Some(next_id - 1)
+            }
+            Some("clog_tick") => {
+                rec_kinds.push('t');
+                tick_shape(r)
+            }
+            Some("clog_msg") => {
+                rec_kinds.push('m');
+                next_n += 1;
+                msg_shape(r) && r["n"].as_i64() == Some(next_n - 1)
+            }
+            _ => false,
+        };
+        if !ok {
+            diff(w, &mut s, format!("a malformed or unknown log record (seq {})", r["seq"]));
+        }
+    }
+    let sim_kinds: Vec<char> = w
+        .game_log
+        .out
+        .iter()
+        .map(|o| match o {
+            Out::Queued { .. } => 'q',
+            Out::Tick { .. } => 't',
+            Out::Msg(_) => 'm',
+        })
+        .collect();
+    if rec_kinds != sim_kinds {
+        let at = rec_kinds.iter().zip(&sim_kinds).position(|(a, b)| a != b);
+        diff(w, &mut s, format!("the log's records in another order (from record {at:?})"));
+    }
     let obs = |ev: &str| -> Vec<&J> {
         recs.iter().filter(|r| r["k"] == "obs" && r["ev"] == ev).collect()
     };
@@ -342,6 +548,10 @@ pub fn compare(
             bad.push(format!("type {} vs {}", r["e"], ev.ty.name()));
         }
         if let EventType::Rule(class) = ev.ty {
+            // Its rule: the same one (the window's rules numbered alike), of its class and units.
+            if r["rule"].as_i64() != ev.rule_id {
+                bad.push(format!("rule {} vs {:?}", r["rule"], ev.rule_id));
+            }
             match r["rule"].as_i64().and_then(|id| rules.get(&id)) {
                 Some((c, a, b)) => {
                     let ours = (uid(w, ev.units[0]), uid(w, ev.units[1]));
@@ -411,7 +621,6 @@ pub fn compare(
     if rm.len() != sm.len() {
         diff(w, &mut s, format!("{} messages, the sim made {}", rm.len(), sm.len()));
     }
-    let mut ordinal: HashMap<i64, usize> = HashMap::new();
     for (k, (r, m)) in rm.iter().zip(sm.iter()).enumerate() {
         let mut bad = Vec::new();
         if r["t"].as_i64() != Some(m.frame) {
@@ -420,10 +629,9 @@ pub fn compare(
         if r["th"].as_str() != Some(THREADS[m.thread].0) {
             bad.push(format!("thread {} vs {}", r["th"], THREADS[m.thread].0));
         }
-        if let Some(ti) = r["ti"].as_i64()
-            && *ordinal.entry(ti).or_insert(m.thread) != m.thread
-        {
-            bad.push(format!("thread instance {ti}"));
+        // Its thread instance: the begin record's ordinal of this thread.
+        if r["ti"].as_i64().and_then(|ti| w.game_log.thread_ordinals.get(&ti)) != Some(&m.thread) {
+            bad.push(format!("thread instance {}", r["ti"]));
         }
         let src_rec = r["src"].as_i64().and_then(|id| rec_pos.get(&id).copied());
         let src_sim = m.src.and_then(|e| sim_pos.get(&e).copied());

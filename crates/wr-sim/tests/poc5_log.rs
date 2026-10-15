@@ -87,7 +87,7 @@ const C: &str = "driven replay: commands:";
 type Change = fn(&mut Vec<V>);
 
 /// The damaged recordings, each with the report it must make.
-const CASES: [(&str, Change); 30] = [
+const CASES: [(&str, Change); 41] = [
     // Messages.
     (L, |recs| {
         let at = nth(recs, "clog_msg", 3);
@@ -220,6 +220,64 @@ const CASES: [(&str, Change); 30] = [
     (L, |recs| {
         if let Some(o) = recs[0]["observers"].as_array_mut() {
             o.retain(|x| x != "combat_log");
+        }
+    }),
+    // Another rule of the same class and units (an initiative's d20, outside the checked spans).
+    (L, |recs| {
+        let at = first_q(recs, "GameLogRuleEvent<RuleRollD20>");
+        recs[at]["rule"] = json!(recs[at]["rule"].as_i64().unwrap_or(0) + 1);
+    }),
+    // A message before its tick.
+    (L, |recs| {
+        let at = nth(recs, "clog_msg", 0);
+        let tick = (0..at).rev().find(|&i| recs[i]["ev"] == "clog_tick").unwrap_or(at);
+        let r = recs.remove(at);
+        recs.insert(tick, r);
+        renumber(recs);
+    }),
+    // Another thread instance, ordinal, scope, handler; an override of another type; a gate flag;
+    // an unknown log record.
+    (L, |recs| {
+        let at = first_msg(recs, "UnitInitiativeLogThread");
+        let other =
+            recs.iter().find(|r| r["ev"] == "clog_msg" && r["th"] != "UnitInitiativeLogThread");
+        recs[at]["ti"] = other.map_or(json!(-1), |r| r["ti"].clone());
+    }),
+    (L, |recs| {
+        let at = nth(recs, "clog_msg", 2);
+        recs[at]["n"] = json!(7);
+    }),
+    (L, |recs| {
+        let at = nth(recs, "clog_msg", 2);
+        recs[at]["scope"] = json!(0);
+    }),
+    (L, |recs| {
+        let at = nth(recs, "clog_msg", 2);
+        recs[at]["in_handler"] = json!(false);
+    }),
+    (L, |recs| {
+        let at = first_q(recs, "GameLogEventCombatStateChanged");
+        recs[at]["ov"] = json!(5);
+    }),
+    (L, |recs| {
+        let at = nth(recs, "clog_tick", 1);
+        recs[at]["g"] = json!(true);
+    }),
+    (L, |recs| {
+        let at = nth(recs, "clog_tick", 1);
+        let mut r = recs[at].clone();
+        r["ev"] = json!("clog_x");
+        recs.insert(at + 1, r);
+        renumber(recs);
+    }),
+    // A dispatch row replaced by a copy of another; a context field missing.
+    (L, |recs| {
+        let row = recs[0]["game_log"]["threads"][1].clone();
+        recs[0]["game_log"]["threads"][0] = row;
+    }),
+    (L, |recs| {
+        if let Some(c) = recs[0]["game_log"]["ctx"].as_object_mut() {
+            c.remove("Target");
         }
     }),
 ];

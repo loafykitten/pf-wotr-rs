@@ -327,6 +327,9 @@ pub struct Event {
     pub ty: EventType,
     /// The rule's sequence number (`RuleBase.seq`).
     pub rule_seq: Option<u64>,
+    /// The rule's place among the rules triggered since the log was turned on, from 1 (the
+    /// oracle's rule ids are allocated so in a window).
+    pub rule_id: Option<i64>,
     /// The rule's initiator and target (as the observer's rule records name them).
     pub units: [Option<EntityIdx>; 2],
     /// `m_IsEnabled`.
@@ -404,6 +407,10 @@ pub struct GameLog {
     /// Attack rolls' log state by rule sequence number: `AttackLogEntry` (a message made and
     /// kept while `SuspendCombatLog`), `SuspendCombatLog`, `AddedToCombatLog`.
     pub attack_state: HashMap<u64, AttackState>,
+    /// Rules triggered since the log was turned on (every one, events or not).
+    pub rules_seen: i64,
+    /// The recording's thread ordinals (the observer's `ti`), as [`THREADS`] indices.
+    pub thread_ordinals: HashMap<i64, usize>,
     /// The d20 rolls finished inside each open event, in order.
     pub d20s: HashMap<usize, Vec<Roll>>,
     pub out: Vec<Out>,
@@ -442,6 +449,7 @@ pub fn about_to_trigger(w: &mut World, rule: &dyn RuleEvent) {
     if !w.game_log.on {
         return;
     }
+    w.game_log.rules_seen += 1;
     let class = rule.chain().first().copied().unwrap_or("?");
     let root = root_rules().contains(&class);
     if w.game_log.stack.is_empty() && !root {
@@ -450,6 +458,7 @@ pub fn about_to_trigger(w: &mut World, rule: &dyn RuleEvent) {
     let ev = Event {
         ty: EventType::Rule(class),
         rule_seq: Some(rule.base().seq),
+        rule_id: Some(w.game_log.rules_seen),
         units: [Some(rule.initiator()), rule.target()],
         enabled: true,
         override_message: None,
@@ -595,6 +604,7 @@ pub fn add_event(w: &mut World, ty: &'static str, payload: Payload, units: [Opti
     w.game_log.events.push(Event {
         ty: EventType::Other(ty),
         rule_seq: None,
+        rule_id: None,
         units,
         enabled: true,
         override_message: None,
@@ -856,7 +866,7 @@ fn game_log_message_in_scope(w: &mut World, path: &str) -> Result<Option<Msg0>, 
         None => text_of(w, &format!("{path}/Message"))?,
     };
     // The tooltip's text (`TooltipTemplateCombatLogMessage(text, Tooltip)`, after the
-    // concealment's); one the sim can't make is left out of the comparison.
+    // concealment's); one the sim can't make is reported.
     let tooltip = |w: &World| -> Result<String, TextError> {
         let t = text_of(w, &format!("{path}/Tooltip"))?;
         Ok(match (w.game_log.ctx.tooltip, w.game_log.ctx.concealment) {
@@ -872,7 +882,6 @@ fn game_log_message_in_scope(w: &mut World, path: &str) -> Result<Option<Msg0>, 
             header: Some(text.clone()),
             desc: Some(d),
         },
-        Err(TextError::Unsupported(_)) => Tip::NotPorted("TooltipTemplateCombatLogMessage"),
         Err(e) => return Err(e),
     };
     if text.is_empty() {

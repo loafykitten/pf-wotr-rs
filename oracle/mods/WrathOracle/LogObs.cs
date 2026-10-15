@@ -74,7 +74,10 @@ internal static class LogObs
         Handling.Clear();
     }
 
-    private static GameLogController Controller => Kingmaker.Game.Instance?.GameLogController;
+    // Game.Instance's getter creates a Game when there's none: read the static field instead.
+    private static readonly FieldInfo GameInstanceField = AccessTools.Field(typeof(Kingmaker.Game), "s_Instance");
+
+    private static GameLogController Controller => (GameInstanceField?.GetValue(null) as Kingmaker.Game)?.GameLogController;
 
     // ---- names and values ----
 
@@ -412,7 +415,7 @@ internal static class LogObs
     public static void Install(Harmony h)
     {
         var failed = Health.FailedCount;
-        foreach (var f in new[] { ReadyField, StackField, RootsField, ThreadsField, EnabledField, ThreadMessagesField, TooltipField, ScopeFlagField, LocKeyField })
+        foreach (var f in new[] { ReadyField, StackField, RootsField, ThreadsField, EnabledField, ThreadMessagesField, TooltipField, ScopeFlagField, LocKeyField, GameInstanceField })
             if (f == null) Health.Failed("combat log observe: a field is missing", new Exception("combat_log"));
         if (ContextFields.Length < 20) Health.Failed("combat log observe: GameLogContext's fields", new Exception(ContextFields.Length.ToString()));
         var gc = typeof(GameLogController);
