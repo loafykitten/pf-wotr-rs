@@ -741,7 +741,11 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
     let mut pos: HashMap<String, V3> = HashMap::new();
     let mut max_speed: HashMap<String, f32> = HashMap::new();
     let mut fly: HashMap<String, f32> = HashMap::new();
+    // The corpulences read since the movement range (FindPath's argument: one evaluation of
+    // `ActionRangeWithCorpulence`, two reads) and since the path leaf (`IsUnitCloseEnough`'s, the
+    // magnitude test's and the constructor's: six reads before the first step).
     let mut corps: Vec<u32> = Vec::new();
+    let mut corps_since_path: Vec<u32> = Vec::new();
     // FindPath's request: unit, destination, radius, MaxSpeedOverride, corpulences, CurrentSpeedMps.
     let mut find: Option<Find> = None;
     let mut in_find = false;
@@ -765,14 +769,15 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                 fly.insert(u, v);
             }
         } else if let Some(c) = leaf(r, "corp") {
-            corps.push(f(&c["v"]).map_or(u32::MAX, f32::to_bits));
-            if corps.len() > 2 {
-                corps.remove(0);
-            }
+            let v = f(&c["v"]).map_or(u32::MAX, f32::to_bits);
+            corps.push(v);
+            corps_since_path.push(v);
+        } else if leaf(r, "mrange").is_some() || leaf(r, "speed").is_some() {
+            corps.clear();
         } else if is(r, "ag_req") && r["fn"] == "find" {
             let maxover = f(&r["s"]["maxover"]);
-            find = match (v3(&r["p"]), f(&r["r"])) {
-                (Some(p), Some(rad)) => Some((u, p, rad, maxover, corps.clone(), None)),
+            find = match (v3(&r["p"]), f(&r["r"]), corps.len()) {
+                (Some(p), Some(rad), 2) => Some((u, p, rad, maxover, corps.clone(), None)),
                 _ => None,
             };
             in_find = true;
@@ -785,6 +790,7 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
         } else if let Some(p) = leaf(r, "path") {
             // FixPathIfTooShort's path: ScorePath's simulation starts after it.
             let pts: Option<Vec<V3>> = p["v"].as_array().and_then(|a| a.iter().map(v3).collect());
+            corps_since_path.clear();
             scope = match (find.clone(), pts) {
                 (Some((unit, dest, radius, maxover, c, speed)), Some(path)) => Some(Scope {
                     // `MaxSpeedOverride ?? CurrentSpeedMps` [C]; else the unit's last read [I].
@@ -814,10 +820,9 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                 t.failures.push(format!("{at}: a simulation step outside a ScorePath with a path"));
                 continue;
             };
-            let inner: Vec<&Value> = recs[s.from..i]
-                .iter()
-                .filter(|x| is(x, "ag_phys") && x["ctx"] == "sim" && x["u"] == s.unit.as_str())
-                .collect();
+            // Every simulation query in the step's interval (the reader checks whose it is).
+            let inner: Vec<&Value> =
+                recs[s.from..i].iter().filter(|x| is(x, "ag_phys") && x["ctx"] == "sim").collect();
             s.from = i + 1;
             if s.stopped {
                 t.failures.push(format!("{at}: a step after the simulation stopped"));
@@ -831,7 +836,7 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                 // `new MovementSimulator(Unit.Position, CurrentPath, destination,
                 // ActionRangeWithCorpulence, checkLOS: true, 0f)`: the radius FindPath was given
                 // when the corpulences read again are the same [C]; the position [I].
-                if corps.len() != 2 || corps != s.corps {
+                if corps_since_path.len() != 6 || corps_since_path[4..] != s.corps[..] {
                     t.unset.push(format!("{at}: {UNSET}the simulator's ActionRangeWithCorpulence"));
                     s.lost = Some("an unknown start".into());
                     continue;
@@ -845,9 +850,11 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                 s.sim =
                     Some(MovementSimulator::new(p, s.path.clone(), s.dest, s.radius, true, 0.0));
             }
+            // `ScorePath`'s own lookup right after the step: the AI's next leaf.
             let after = recs[i + 1..]
                 .iter()
-                .find_map(|x| leaf(x, "ablk"))
+                .find(|x| is(x, "uc_v"))
+                .and_then(|x| leaf(x, "ablk"))
                 .zip(v3(&m["p"]))
                 .map(|(a, p)| (a["v"].as_i64(), p));
             let older = Older { max_speed: s.max_speed, fly: fly.get(&s.unit).copied(), after };
@@ -912,7 +919,12 @@ fn every_recorded_simulation_step_reruns_bit_for_bit() {
             path.file_name().unwrap_or_default().to_string_lossy()
         );
         runs += 1;
-        if trace.records.iter().any(|r| is(r, "ag_sim")) {
+        // The requested records' format (any of its records: a missing prefix is then reported).
+        if trace
+            .records
+            .iter()
+            .any(|r| is(r, "ag_sim") || is(r, "ag_sim_end") || sim_record(r) && is(r, "ag_v"))
+        {
             check_leaves(&name, &trace.records, &mut t);
         } else {
             check_older(&name, &trace.records, &mut t);
@@ -1025,6 +1037,105 @@ fn the_checker_reads_the_requested_records() {
         d(&mut recs);
         let mut t = Tally::default();
         check_leaves("made", &recs, &mut t);
+        assert!(!t.failures.is_empty(), "damage {i} not reported");
+    }
+}
+
+/// `poc5-tb-103/tb-focus`'s `ScorePath` at t=1754 as the older captures record it (`MaxSpeed`,
+/// `FlyHeight` and the position from earlier records, here made up: 4, 0 and the path's start).
+#[allow(clippy::excessive_precision)] // the recorded values as written
+fn older_score_path() -> Vec<Value> {
+    use serde_json::json;
+    let start = [61.685_562_1_f32, 35.086_124_4, 157.585_739];
+    let wp = [61.750_003_8_f32, 35.203_003, 157.75];
+    let end = [61.750_003_8_f32, 35.107_784_3, 157.75];
+    let uv = |f: &str, extra: Value| {
+        let mut r = json!({"k": "obs", "t": 1754, "ev": "uc_v", "f": f});
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            r[k] = v.clone();
+        }
+        r
+    };
+    let corp = |u: &str, v: &str| uv("corp", json!({"u": u, "v": v}));
+    let me = || corp("51FC", "0.9");
+    let them = || corp("35ff", "0.5");
+    vec![
+        json!({"k": "obs", "t": 1700, "ev": "ag_v", "f": "maxspeed", "u": "51FC", "v": 4.0}),
+        json!({"k": "obs", "t": 1700, "ev": "ag_v", "f": "fly", "u": "51FC", "v": 0.0}),
+        json!({"k": "obs", "t": 1753, "ev": "ag_ctl_end", "u": "51FC", "pos": start}),
+        uv("mrange", json!({"u": "51FC", "v": "9.956802"})),
+        me(),
+        them(),
+        json!({"k": "obs", "t": 1754, "ev": "ag_req", "fn": "find", "u": "51FC",
+            "p": [61.846_942_9_f32, 35.159_595_5, 155.611_313], "r": 2.0096_f32,
+            "s": {"maxover": null}}),
+        json!({"k": "obs", "t": 1754, "ev": "ag_req_end", "u": "51FC", "fn": "find"}),
+        uv("path", json!({"fake": false, "err": false, "st": 2, "v": [start, wp]})),
+        me(),
+        them(),
+        uv("pclose", json!({"r": "2.0096", "v": false})),
+        uv("mag", json!({"v": "2.14132285"})),
+        me(),
+        them(),
+        uv("plen", json!({"v": "0.211648166"})),
+        me(),
+        them(),
+        json!({"k": "obs", "t": 1754, "ev": "ag_phys", "fn": "ray", "ctx": "sim", "u": "51FC",
+            "o": [wp[0], 37.203_003_f32, wp[2]], "d": [0.0, -1.0, 0.0], "max": 100.0,
+            "mask": 2_099_457, "hit": true, "dist": 2.115_902_f32}),
+        json!({"k": "obs", "t": 1754, "ev": "ag_phys", "fn": "disc", "ctx": "sim", "u": "51FC",
+            "o": [wp[0], 35.853_004_5_f32, wp[2]], "r": 0.4_f32, "max": 100.0,
+            "mask": 2_099_457, "hit": true, "dist": 0.745_220_2_f32}),
+        uv(
+            "msim",
+            json!({"max": "9.956802", "v": false, "p": end, "len": "0.176449314",
+            "rmd": false, "wi": 1}),
+        ),
+        uv("ablk", json!({"v": 0})),
+        uv("ablk", json!({"v": 0})),
+        json!({"k": "obs", "t": 1754, "ev": "ai_sc", "fn": "ScorePath"}),
+    ]
+}
+
+#[test]
+fn the_checker_reads_older_captures() {
+    let mut t = Tally::default();
+    check_older("made", &older_score_path(), &mut t);
+    assert_eq!((t.exact, t.inferred, t.unset.len()), (0, 1, 0), "{:?} {:?}", t.failures, t.unset);
+    // Not established: no constructor's corpulences, no earlier speed.
+    for d in [
+        |r: &mut Vec<Value>| {
+            r.drain(16..18);
+        },
+        |r: &mut Vec<Value>| {
+            r.remove(0);
+        },
+    ] {
+        let mut recs = older_score_path();
+        d(&mut recs);
+        let mut t = Tally::default();
+        check_older("made", &recs, &mut t);
+        assert_eq!((t.inferred, t.unset.len(), t.failures.len()), (0, 1, 0));
+    }
+    // Reported: another unit's query, a step after the end, a different position.
+    type Damage = Box<dyn Fn(&mut Vec<Value>)>;
+    let damage: Vec<Damage> = vec![
+        Box::new(|r| {
+            let mut x = r[18].clone();
+            x["u"] = Value::from("5198");
+            r.insert(18, x);
+        }),
+        Box::new(|r| {
+            let x = r[20].clone();
+            r.insert(21, x);
+        }),
+        Box::new(|r| r[20]["p"][1] = Value::from(35.0)),
+    ];
+    for (i, d) in damage.iter().enumerate() {
+        let mut recs = older_score_path();
+        d(&mut recs);
+        let mut t = Tally::default();
+        check_older("made", &recs, &mut t);
         assert!(!t.failures.is_empty(), "damage {i} not reported");
     }
 }

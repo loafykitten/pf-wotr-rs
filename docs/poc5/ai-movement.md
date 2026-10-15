@@ -95,15 +95,18 @@ two replays). Two ways, by capture:
   through its steps), the step's `ag_phys` (`ctx: "sim"`) checked and consumed, the rest from other
   records where they establish it: the destination and radius from the `FindPath` request
   (`ag_req`: `ScorePath` passes the same `destinationPoint` and evaluates the same
-  `ActionRangeWithCorpulence` again, taken only when the corpulences read again are the same) [C];
+  `ActionRangeWithCorpulence` again: taken only when the constructor's two corpulence reads, the
+  last of the six since the path leaf, equal the two FindPath's argument read) [C];
   `MaxSpeed` from `FindPath`'s state (`MaxSpeedOverride`) or its `speedmps` leaf (since
   `poc5-tb-105`) [C], else the unit's last `TickMovement` read [I]; `FlyHeight` the unit's last
   `MoveUnit` read [I]; `Unit.Position` the unit's last `ag_ctl_end`/`ag_ground` position [I]; the
-  step's own `GetNearest` the AI's `ablk` right after it when the step ended where it looked up
-  [C]; line of sight never. A step whose inputs aren't established is counted, not checked (with
+  step's own `GetNearest` the AI's next leaf, its `ablk`, when the step ended where it looked up
+  [C]; every simulation query between two steps read in order, whoever's; line of sight never. A step whose inputs aren't established is counted, not checked (with
   the rest of its `ScorePath`'s steps), unless what it compared before the missing input already
   differs; a step after the simulation stopped, or whose `maxMoveLength` isn't `num5 -
-  LastMoveLength` of the step before, is reported.
+  LastMoveLength` of the step before, is reported. `the_checker_reads_older_captures` (not
+  ignored) checks this path on `poc5-tb-103`'s `ScorePath` written out, two inputs removed (counted,
+  not checked) and three damages (another unit's query, a step after the end, a position).
 
 **Result: the captures hold 21 steps, in `poc5-tb-100/tb-nearest` (3 per run), `-101/tb-focus` (3)
 and `-103/tb-focus` (1); every one is a two-point path whose end lies within one step (the first
