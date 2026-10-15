@@ -39,7 +39,7 @@ survey and notes on other rewrites.
   **The oracle lives in this repo** (`oracle/`, see `oracle/README.md`) and runs on
   `builds/arm64-oracle` (gitignored APFS clone; no ToyBox or BuffIt2TheLimit). Ember wants both
   mods recreated in our version later (PLAN, After the POC, item 4). Implementation subagents run on **Opus 5.5 at high
-  effort** (Ember, 2026-10-15; was Sonnet), at most 5 at once (Ember, 2026-10-15; was 3), and every brief says "don't
+  effort** (Ember, 2026-10-15; was Sonnet), at most 3 at once (Ember, 2026-10-15: briefly 5, back to 3), and every brief says "don't
   spawn sub-agents". Parallel streams work in git worktrees prepared by `scripts/worktree-setup.sh NAME` (linked inputs,
   their own target and cache dirs); only the main session builds and installs WrathOracle and records. Game and GPU share one lock, `builds/.oracle-run.lock`; match
   the game with `pgrep -x 'Pathfinder Wrath Of The Righteous'`, never `-f`.
