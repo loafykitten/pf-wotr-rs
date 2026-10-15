@@ -644,8 +644,9 @@ make the tie reproducible.
   moved). It writes the gate `seedinit` (the state), which a replay must reach at the recorded tick; the replay
   sets the state too, though its draws come from the tape.
 - *Failures* (structural errors, so the record run fails its health check; a replay is also invalidated): the
-  step outside a turn-based window, a second one in a window, one the begin record doesn't declare, a state
-  that doesn't take, a window ending with the step armed and not fired. The end record counts `seedinit_fired`.
+  step outside a turn-based window, a second one in a window, one the begin record doesn't declare, a malformed
+  state, a state that doesn't take, a window ending with a declared step not fired (armed or not). The end record
+  counts `seedinit_fired`. The search also rejects a reference whose batch has another draw inside it.
 - *The search* (`oracle/tools/seedinit-search`). It finds the batch in a reference recording: the draws of the
   window's first `RuleInitiativeRoll` made by `UnitCombatPrepareController`, and of the d20 rules under it or beside
   it with that origin, contiguous at that tick and each one generator step after the previous. Unit k's draws are

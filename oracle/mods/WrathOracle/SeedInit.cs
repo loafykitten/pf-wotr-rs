@@ -18,7 +18,7 @@ namespace WrathOracle;
 // state is set too, though the draws come from the tape.
 // The begin record declares the window's step ("seedinit": its argument, or null).
 // Failures: the step outside a turn-based window, a second seedinit in a window, a step the begin record
-// doesn't declare, or a window that ends with the step armed but not fired, are structural errors (the record run fails its health check), and in a
+// doesn't declare, a malformed state, or a window that ends with a declared step not fired, are structural errors (the record run fails its health check), and in a
 // replay also invalidate it. Field reads only; nothing the game evaluates is called.
 internal static class SeedInit
 {
@@ -52,6 +52,7 @@ internal static class SeedInit
         var w = new uint[4];
         if (p.Length != 4 || !TryHex(p, w) || (w[0] | w[1] | w[2] | w[3]) == 0)
         {
+            if (Trace.Active) Trace.Structural("seedinit: a malformed state (four 32-bit hex words, not all zero)");
             fail("seedinit: expected X:Y:Z:W, four 32-bit hex words, not all zero");
             return false;
         }
@@ -133,12 +134,15 @@ internal static class SeedInit
         return false;
     }
 
-    // The window's end: an armed step that never fired fails the run.
+    // The window's end: a declared step that never fired (armed or not) fails the run.
     public static void CloseWindow()
     {
-        if (_armed == null) return;
-        Trace.Structural("seedinit armed but never fired: no initiative batch followed it in the window");
-        if (Sched.Replay) Sched.Invalidate("seedinit armed but never fired");
+        if (Declared == null && _armed == null) return;
+        if (_fired) return;
+        Trace.Structural(_armed != null
+            ? "seedinit armed but never fired: no initiative batch followed it in the window"
+            : "seedinit declared but never armed");
+        if (Sched.Replay) Sched.Invalidate("seedinit declared but never fired");
         _armed = null;
     }
 }

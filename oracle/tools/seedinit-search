@@ -91,15 +91,14 @@ def batch(recs):
         p = rules.get(r.get("parent"))
         return p is not None and p.get("class") == INIT and p.get("depth") == 0 and PREPARE in (p.get("origin") or "")
 
-    out = []
-    for r in recs:
-        if r.get("k") != "draw" or r.get("t") != t or r["seq"] < first["seq"]:
-            continue
-        if not in_batch(r.get("rule")):
-            if out:
-                break
-            continue
-        out.append((unit_of(rules[r["rule"]]), r))
+    # Every draw of the tick from the first roll on: the batch's must be contiguous among them.
+    tick = [r for r in recs if r.get("k") == "draw" and r.get("t") == t and r["seq"] > first["seq"]]
+    ix = [k for k, r in enumerate(tick) if in_batch(r.get("rule"))]
+    if not ix:
+        sys.exit("no batch draws at the first roll's tick")
+    if ix != list(range(ix[0], ix[-1] + 1)):
+        sys.exit("another draw falls between the batch's draws")
+    out = [(unit_of(rules[tick[k]["rule"]]), tick[k]) for k in ix]
     # Checks: pairs per unit, Range(1, 21), consecutive generator states, the model's values.
     if not out or len(out) % 2:
         sys.exit(f"the batch has {len(out)} draws, not pairs")
