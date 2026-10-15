@@ -2703,7 +2703,10 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 let shape = x.as_object().is_some_and(|o| {
                     let mut k: Vec<&str> = o.keys().map(String::as_str).collect();
                     k.sort_unstable();
-                    k == ["bp", "cb", "ev", "k", "p", "res", "roll", "rule", "seq", "t", "tgt", "trig"]
+                    k == [
+                        "bp", "cb", "ev", "k", "p", "res", "roll", "rule", "seq", "t", "tgt",
+                        "trig",
+                    ]
                 });
                 let roll = x["roll"].as_i64();
                 let roll_ended = roll.is_some()
@@ -2713,7 +2716,9 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                         r["k"] == "rule"
                             && r["id"].as_i64() == roll
                             && r["parent"].as_i64() == Some(rule)
-                            && r["class"].as_str().is_some_and(|c| short_class(c) == "RuleAttackRoll")
+                            && r["class"]
+                                .as_str()
+                                .is_some_and(|c| short_class(c) == "RuleAttackRoll")
                     });
                 shape
                     && !own_handler
