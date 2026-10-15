@@ -32,6 +32,12 @@ fn faction(w: &World, u: EntityIdx) -> Option<Rc<Blueprint>> {
     w.content.get(w.unit(u)?.faction?)
 }
 
+/// `unit.Faction.Peaceful` (`None`: no faction the sim knows).
+#[must_use]
+pub fn faction_peaceful(w: &World, u: EntityIdx) -> Option<bool> {
+    faction(w, u).map(|f| f.view().bool("Peaceful"))
+}
+
 /// `UnitEntityData.GroupId`: the saved `m_GroupId`, else the party group for a player-faction
 /// unit and the unit's own id otherwise (the getter stores it; here it is only computed).
 pub(crate) fn group_id(w: &World, u: EntityIdx) -> Option<String> {

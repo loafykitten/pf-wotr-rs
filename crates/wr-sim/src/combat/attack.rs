@@ -800,7 +800,12 @@ impl RuleEvent for RuleCheckTargetFlatFooted {
             || !self.env.target_can_act_in_combat
             || units::is_helpless(w, t)
             || has_condition(w, t, cond::STUNNED)
-            || !self.env.target_remembers_initiator
+            || !crate::combat::memory::sim::check(
+                w,
+                "flat-footed check's Contains",
+                self.env.target_remembers_initiator,
+                |w| crate::combat::memory::sim::contains(w, t, self.initiator, false),
+            )
             || self.env.concealment_initiator == 2
             || has_condition(w, t, c::LOSE_DEXTERITY_TO_AC)
             || shatter;

@@ -124,6 +124,11 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         self.log.get_or_insert_with(Vec::new);
     }
 
+    /// From now on, nothing is logged (what was logged is dropped).
+    pub fn stop_logging(&mut self) {
+        self.log = None;
+    }
+
     /// The changes logged since the last call.
     pub fn take_changes(&mut self) -> Vec<Change<K>> {
         self.log.as_mut().map(std::mem::take).unwrap_or_default()
@@ -247,10 +252,16 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     /// `UnitsList`: when invalid, rebuilt from the dictionary (the units that resolve and are in the
     /// game, in enumeration order); else the cached list.
     pub fn units_list(&mut self, mut resolve: impl FnMut(K) -> Resolved) -> &[K] {
+        self.units_list_by(|k| resolve(k).in_game())
+    }
+
+    /// `UnitsList`, its fill asking `keep` of each key in enumeration order (`unit != null &&
+    /// unit.IsInGame`).
+    pub fn units_list_by(&mut self, mut keep: impl FnMut(K) -> bool) -> &[K] {
         if !self.units_list_valid {
             self.units_list.clear();
             for k in self.units.keys() {
-                if resolve(k).in_game() {
+                if keep(k) {
                     self.units_list.push(k);
                 }
             }
@@ -266,10 +277,16 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         mut resolve: impl FnMut(K) -> Resolved,
         mut is_enemy: impl FnMut(K) -> bool,
     ) -> &[K] {
+        self.enemies_by(|k| resolve(k).in_game() && is_enemy(k))
+    }
+
+    /// `Enemies`, its fill asking `keep` of each key in enumeration order (`unit != null &&
+    /// unit.IsInGame && Group.IsEnemy(unit)`).
+    pub fn enemies_by(&mut self, mut keep: impl FnMut(K) -> bool) -> &[K] {
         if !self.enemies_valid {
             self.enemies.clear();
             for k in self.units.keys() {
-                if resolve(k).in_game() && is_enemy(k) {
+                if keep(k) {
                     self.enemies.push(k);
                 }
             }
@@ -396,12 +413,18 @@ pub fn cleanup_removes(
 /// `UnitMemoryController`'s own state: `m_UnitsForAdd`, the (observer, target) pairs queued by its
 /// handlers (and by `StartCombat`, random encounters, dungeons) for the next tick. `m_NearUnits` is
 /// cleared before each use, so it isn't state between ticks.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MemoryController<K> {
     pub units_for_add: Vec<(K, K)>,
     /// `UnitGroupMemory.s_UnitsForRemove` (static, shared by every memory's `Cleanup`): empty
     /// unless a `Cleanup` threw part way.
     pub cleanup_pending: Vec<K>,
+}
+
+impl<K> Default for MemoryController<K> {
+    fn default() -> Self {
+        Self { units_for_add: Vec::new(), cleanup_pending: Vec::new() }
+    }
 }
 
 /// What `HandleUnitCommandDidAct` reads of the command that acted.
@@ -676,3 +699,5 @@ mod tests;
 
 #[cfg(test)]
 mod tick_tests;
+
+pub mod sim;

@@ -367,7 +367,12 @@ fn tick_unit<I: EngInputs>(w: &mut World, inp: &mut I, u: EntityIdx) -> R<()> {
             range = n;
         }
     }
-    for e in inp.eng_enemies(w)? {
+    // `unit.Memory.Enemies`: the sim's memory, while it's the sim's.
+    let recorded = inp.eng_enemies(w)?;
+    let enemies = crate::combat::memory::sim::check(w, "engagement's Enemies", recorded, |w| {
+        crate::combat::memory::sim::enemies(w, u).map(|v| crate::combat::memory::sim::ids(w, &v))
+    });
+    for e in enemies {
         let t = unit_of(w, &e)?;
         if !eng(w, u)?.engaged_units.contains_key(&t)
             && super::units::is_conscious(w, t)
@@ -661,7 +666,13 @@ fn aoo_body<I: EngInputs>(
     if hand.is_none() || count(w, u)? <= 0 {
         return Ok(false);
     }
-    if !inp.eng_bool(w, "memc", None, Some(&a))? {
+    // `target.Memory.Contains(Unit)`.
+    let recorded = inp.eng_bool(w, "memc", None, Some(&a))?;
+    let memc =
+        crate::combat::memory::sim::check(w, "attack of opportunity's Contains", recorded, |w| {
+            crate::combat::memory::sim::contains(w, t, u, false)
+        });
+    if !memc {
         return Ok(false);
     }
     if blueprint_has(w, u, "AttackOfOpportunityLimits") {

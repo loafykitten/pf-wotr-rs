@@ -153,6 +153,24 @@ pub struct Outcome {
     pub mem_adds: usize,
     /// Its `AddToMemory` calls in commands' acts, each matched with the sim's.
     pub mem_act_adds: usize,
+    /// Of those calls, the ones whose `queued` the sim's memory queue decided (checked).
+    pub mem_queued_checked: usize,
+    /// The memory computed (`memory` observer, docs/poc5/memory.md H2): the controller's ticks
+    /// run, the sim's own reads in them checked against their leaves, the leaves taken as inputs,
+    /// the memory states checked (initial, between ticks, after each pass, at the tick's end), the
+    /// caches filled by readers the sim doesn't run (checked as fills), the memory's changes
+    /// matched in order.
+    pub mem_ticks: usize,
+    pub mem_reads: usize,
+    pub mem_inputs: usize,
+    pub mem_rows: usize,
+    pub mem_fills: usize,
+    /// Caches filled by readers the sim doesn't run at a moment the recording doesn't establish,
+    /// taken (their keys in order, Enemies' each an enemy).
+    pub mem_fills_taken: usize,
+    pub mem_changes: usize,
+    /// The other models' reads of the memory checked against the recording's, by reader.
+    pub mem_checked: BTreeMap<&'static str, usize>,
     /// The movement agent (`agent` observer): its entries run (`TickUnit`, `FindPath`,
     /// `OnPathComplete`, calls), the commands' calls it ran, the states checked, the units
     /// ticked, the requests checked, its draws, the synchronizations taken, its getters checked
@@ -444,6 +462,9 @@ pub enum Phase {
     Move,
     /// `SleepingUnitsController`: the frame's awake units.
     Sleeping,
+    /// `UnitMemoryController`: each ready group's memory, then the queued additions (placed by
+    /// WrathOracle's `mem_tick`).
+    Memory,
     /// `UnitCombatJoinController`: combat joins (and the party's combat start).
     Join,
     /// `UnitCombatPrepareController`: initiative.
@@ -515,6 +536,7 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         Phase::Sleeping | Phase::Helpless => true,
         Phase::Time | Phase::Commands | Phase::Projectiles | Phase::Fx | Phase::Life => m != PAUSE,
         Phase::Join | Phase::Prepare | Phase::LeavePrefix | Phase::Leave => m == DEFAULT,
+        Phase::Memory => m == DEFAULT,
         Phase::Groups | Phase::Move => m != PAUSE,
         Phase::Cooldowns => m == DEFAULT,
         Phase::Inspect => m == DEFAULT || m == DIALOG || m == CUTSCENE,
@@ -907,6 +929,8 @@ struct Driver<'t> {
     /// settings (the area's nav file).
     ag: bool,
     ags: agent::AgDriver,
+    /// The group memory is the sim's (the `memory` observer).
+    mem: memory::MemDriver,
     imp_init_n: usize,
     imp_init_closed: bool,
     imp_tick_frame: Option<i64>,
@@ -1155,6 +1179,7 @@ impl<'t> Driver<'t> {
             imp: false,
             ag: false,
             ags: agent::AgDriver::default(),
+            mem: memory::MemDriver::default(),
             imp_init_n: 0,
             imp_init_closed: false,
             imp_tick_frame: None,
@@ -1331,6 +1356,29 @@ impl<'t> Driver<'t> {
         w.combat.impatience.memory_adds =
             (w.combat.impatience.on && declared.contains(&"memory")).then(Default::default);
         w.combat.impatience.memory_acts = w.combat.impatience.memory_adds.clone();
+        // The memory itself is the sim's with the `memory` observer (and the turn port's groups):
+        // `mem_init` loads it, `mem_tick` runs the controller, its readers' reads are checks.
+        d.mem.on = w.combat.impatience.memory_adds.is_some() && d.port && w.combat.groups.on;
+        w.combat.memory.on = d.mem.on;
+        w.combat.groups.memory_computed = d.mem.on;
+        if declared.contains(&"memory") && !d.mem.on {
+            w.coverage.unsupported(
+                "driven replay: the recording declares its memory observer without the impatience, command and turn records",
+            );
+        }
+        // A replay's `Time.frameCount` is pinned to the record run's phase (`WallClock`): its
+        // shift from the record run's begin frame, or, replaying a replay on its own trace (whose
+        // begin doesn't give the record run's), from its first memory tick.
+        let begin = |t: &Trace| t.records.iter().find(|r| r["k"] == "begin").cloned();
+        let (tb, ob) = (begin(tape_trace), begin(trace));
+        let frame = |b: &Option<serde_json::Value>| b.as_ref().and_then(|b| b["frame"].as_i64());
+        d.mem.shift = if !std::ptr::eq(tape_trace, trace) {
+            frame(&tb).zip(frame(&ob)).map(|(a, b)| (a - b).rem_euclid(60))
+        } else if ob.as_ref().is_some_and(|b| b["mode"] == "record") {
+            Some(0)
+        } else {
+            None
+        };
         // The movement agent is the sim's with the `agent` observer and its synchronization
         // records (`agent_sync`: the states where real time ends, positions written outside the
         // agent, `PreviousPosition` at the start). An older capture (`agent` alone) replays with
@@ -1433,6 +1481,8 @@ impl<'t> Driver<'t> {
         self.uc_frame_end(w);
         self.tgt_frame_end(w);
         self.imp_frame_end(w);
+        self.mem_frame_end(w);
+        self.out.mem_checked = std::mem::take(&mut w.combat.memory.checked);
         self.uc_finish(w);
         self.ags.ending = true;
         let outgoing = self.frame.mode;
@@ -1617,7 +1667,13 @@ impl Driver<'_> {
                     "driven replay: a unit group's faction caches differ from its members' (a deferred update)",
                 );
             }
-            w.combat.groups.get_mut(gi).memory = Some(g.memory);
+            if w.combat.memory.on {
+                // The sim's memory, as the leave controller reads it: the dictionary's keys and the
+                // cached `UnitsList`.
+                self.mem_leave_row(w, gi, &g.memory);
+            } else {
+                w.combat.groups.get_mut(gi).memory = Some(g.memory);
+            }
         }
     }
 
@@ -1848,6 +1904,8 @@ impl Driver<'_> {
                     super::groups::leave_tick(w, gate);
                 }
                 Phase::Sleeping => {
+                    // (`FogOfWarController` ticks before it: its read of the party's memory.)
+                    self.mem_fog_of_war(w);
                     // The prefix's rows were written for the previous snapshot's units.
                     self.pos.note_prefix(w, self.tick);
                     super::life::update_awake(w);
@@ -2925,6 +2983,7 @@ impl Driver<'_> {
                 self.uc_frame_end(w);
                 self.tgt_frame_end(w);
                 self.imp_frame_end(w);
+                self.mem_frame_end(w);
                 let outgoing = self.frame.mode;
                 let rest = self.frame.start(m);
                 self.draining = outgoing;
@@ -2988,6 +3047,26 @@ impl Driver<'_> {
             Some("obs") if self.ag && r["ev"] == "path_start" => self.ag_path_start(w, r),
             Some("obs") if r["ev"].as_str().is_some_and(|e| e.starts_with("clog_")) => {
                 self.clog_record(w, r);
+            }
+            Some("obs")
+                if self.mem.on
+                    && matches!(
+                        r["ev"].as_str(),
+                        Some(
+                            "mem_init"
+                                | "mem_initq"
+                                | "mem_tick"
+                                | "mem_v"
+                                | "mem_s"
+                                | "mem_tick_end"
+                                | "hash"
+                                | "mem_add"
+                                | "mem_remove"
+                                | "mem_clear"
+                        )
+                    ) =>
+            {
+                return self.mem_record(w, i);
             }
             Some("obs") => self.obs(w, i),
             // The clocks after `TimeController.Tick`.
@@ -4460,6 +4539,7 @@ mod ai;
 mod commands;
 mod engage;
 mod impatience;
+mod memory;
 mod targets;
 
 #[cfg(test)]

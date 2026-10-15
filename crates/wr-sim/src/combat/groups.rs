@@ -48,6 +48,8 @@ pub struct Group {
     pub disposed: bool,
     /// The memory, when the recording establishes it.
     pub memory: Option<Memory>,
+    /// The memory, when it's the sim's ([`Groups::memory_computed`]: `combat::memory::sim`).
+    pub mem: Option<crate::combat::memory::GroupMemory<EntityIdx>>,
 }
 
 impl Group {
@@ -90,6 +92,8 @@ pub struct Groups {
     /// Groups' memory isn't established (a dialogue run: memory follows vision, and nothing
     /// records it there): a group is made with none, so a read of it is reported.
     pub memory_unknown: bool,
+    /// Groups' memory is the sim's (`Group::mem`): a group is made with an empty one.
+    pub memory_computed: bool,
 }
 
 impl Groups {
@@ -111,7 +115,8 @@ impl Groups {
     fn make(&mut self, id: Option<String>) -> GroupIdx {
         // A new group's memory is empty (`new UnitGroupMemory`).
         let memory = (!self.memory_unknown).then(Memory::default);
-        self.arena.push(Group { id, memory, ..Group::default() });
+        let mem = self.memory_computed.then(crate::combat::memory::GroupMemory::new);
+        self.arena.push(Group { id, memory, mem, ..Group::default() });
         GroupIdx(self.arena.len() - 1)
     }
 }
@@ -162,8 +167,16 @@ fn add(w: &mut World, g: GroupIdx, u: EntityIdx) {
     if in_combat {
         grp.in_combat += 1;
     }
-    // `m_Factions.Add`, `UpdateAttackFactionsCache()` (it clears the memory's enemy list, which
-    // the leave controller doesn't read): the factions are computed from the members when read.
+    // `m_Factions.Add`, `UpdateAttackFactionsCache()`: the factions are computed from the members
+    // when read; the cache update clears the memory's enemy list.
+    clear_enemies(w, g);
+}
+
+/// `UnitGroup.UpdateAttackFactionsCache()`'s `Memory.ClearEnemies()` (a memory the sim keeps).
+fn clear_enemies(w: &mut World, g: GroupIdx) {
+    if let Some(m) = w.combat.groups.get_mut(g).mem.as_mut() {
+        m.clear_enemies();
+    }
 }
 
 /// `UnitGroup.Remove(unit)`: the count drops for a unit in combat whether or not it was a member.
@@ -178,6 +191,7 @@ fn remove(w: &mut World, g: GroupIdx, u: EntityIdx) {
     if super::is_in_combat(w, u) {
         guard_dec(w, g);
     }
+    clear_enemies(w, g);
 }
 
 /// `UnitEntityData.UpdateGroup()`.
@@ -256,6 +270,9 @@ pub fn tick(w: &mut World) {
         let grp = groups.get_mut(g);
         grp.units.clear();
         grp.memory = Some(Memory::default());
+        if let Some(m) = grp.mem.as_mut() {
+            m.clear();
+        }
         grp.disposed = true;
         groups.list.retain(|x| *x != g);
     }
@@ -277,13 +294,24 @@ pub fn start_without_memory(w: &mut World) {
 /// `UnitGroupsController.HandleUnitSpawned`: `entityData.Group` (its `UpdateGroup`; the attack
 /// factions are computed from the members when read).
 pub fn spawned(w: &mut World, u: EntityIdx) {
-    group_of(w, u);
+    if let Some(g) = group_of(w, u) {
+        // (`UpdateAttackFactionsCache`: the memory's enemy list cleared.)
+        clear_enemies(w, g);
+    }
 }
 
-/// `UnitGroupsController.HandleUnitDestroyed`: `entityData.Group`, then every group's memory
-/// forgets the unit (`UnitGroupMemory.Remove`, reported where a memory is known).
+/// `UnitGroupsController.HandleUnitDestroyed`: `entityData.Group` (its cache update), then every
+/// group's memory forgets the unit (`UnitGroupMemory.Remove`: the sim's memory, else reported
+/// where a recorded memory holds it).
 pub fn destroyed(w: &mut World, u: EntityIdx) {
-    if group_of(w, u).is_none() {
+    let Some(g) = group_of(w, u) else { return };
+    if w.combat.groups.memory_computed {
+        clear_enemies(w, g);
+        for g in w.combat.groups.list.clone() {
+            if let Some(m) = w.combat.groups.get_mut(g).mem.as_mut() {
+                m.remove(u);
+            }
+        }
         return;
     }
     let id = w.entity(u).unique_id.clone();
@@ -445,11 +473,21 @@ fn should_leave_combat(w: &mut World, g: GroupIdx) -> Option<bool> {
         if !is_enemy(w, g, gu) {
             continue;
         }
-        let Some(mem) = w.combat.groups.get(gu).memory.clone() else {
-            w.coverage.unsupported("UnitCombatLeaveController: a group's memory is not recorded");
-            return None;
+        let remembers = if w.combat.groups.memory_computed {
+            let Some(mem) = w.combat.groups.get(gu).mem.as_ref() else {
+                w.coverage.unsupported("UnitCombatLeaveController: a group without its memory");
+                return None;
+            };
+            members.iter().any(|m| mem.contains(*m))
+        } else {
+            let Some(mem) = w.combat.groups.get(gu).memory.clone() else {
+                w.coverage
+                    .unsupported("UnitCombatLeaveController: a group's memory is not recorded");
+                return None;
+            };
+            members.iter().any(|m| mem.dict.contains(&w.entity(*m).unique_id))
         };
-        if members.iter().any(|m| mem.dict.contains(&w.entity(*m).unique_id)) {
+        if remembers {
             if !tb {
                 w.coverage.unsupported(
                     "UnitCombatLeaveController: ShouldLeaveCombat reads line of sight (HasLOS)",
@@ -460,6 +498,18 @@ fn should_leave_combat(w: &mut World, g: GroupIdx) -> Option<bool> {
         }
     }
     // `ShouldEngageEnemy` over the group's remembered units (`UnitsList`: in the game).
+    if w.combat.groups.memory_computed {
+        // (The getter fills the cache when it's invalid.)
+        let list = crate::combat::memory::sim::with_memory(w, g, |w, m| {
+            m.units_list_by(|k| crate::combat::memory::sim::resolve(w, k).in_game()).to_vec()
+        });
+        let Some(list) = list else {
+            w.coverage.unsupported("UnitCombatLeaveController: a group without its memory");
+            return None;
+        };
+        let ids = list.iter().map(|&u| w.entity(u).unique_id.clone()).collect();
+        return should_engage_any(w, g, ids);
+    }
     let Some(mem) = w.combat.groups.get(g).memory.clone() else {
         w.coverage.unsupported("UnitCombatLeaveController: a group's memory is not recorded");
         return None;
@@ -486,6 +536,20 @@ fn should_leave_combat(w: &mut World, g: GroupIdx) -> Option<bool> {
             }
             l
         }
+    };
+    should_engage_any(w, g, list)
+}
+
+/// `ShouldEngageEnemy` over the remembered units of `UnitsList` (`list`, ids): `false` (stay in
+/// combat) for the first enemy the group should engage.
+fn should_engage_any(w: &mut World, g: GroupIdx, list: Vec<String>) -> Option<bool> {
+    let resolve = |w: &mut World, id: &str| {
+        let e = w.by_id.get(id).copied();
+        if e.is_none() {
+            w.coverage
+                .unsupported("UnitCombatLeaveController: a remembered unit the sim doesn't have");
+        }
+        e
     };
     let player_party = w.combat.groups.get(g).is_player_party();
     for id in list {
