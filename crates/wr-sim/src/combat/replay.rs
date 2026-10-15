@@ -1571,7 +1571,9 @@ impl Driver<'_> {
     /// `ui_guard` (`WaitingForUI` changed): the count after it. The turn and leave controllers'
     /// prefixes are recorded every frame (`turn_tick`, `leave_tick`), so the trace orders the
     /// change: after a prefix the frame has reached, it comes after that controller's tick.
-    fn ui_guard(&mut self, w: &mut World, r: &J) {
+    fn ui_guard(&mut self, w: &mut World, i: usize) {
+        let trace = self.trace;
+        let r = &trace.records[i];
         let Some(count) = r["d"]
             .as_str()
             .and_then(|d| d.split_once("count="))
@@ -1582,7 +1584,23 @@ impl Driver<'_> {
             return;
         };
         let at = self.frame.at;
-        if at == Phase::LeavePrefix {
+        // The UI's own handler of the party's combat state (`HandlePartyCombatStateChanged`: the
+        // combat start window, the initiative tracker's teardown) changes the guard inside that
+        // event, right before `CombatController`'s `HandleCombatStart`/`HandleCombatEnd`: its
+        // phase is the combat change's (after `UnitMoveController`, which saw the old guard).
+        let combat_change = trace.records[i + 1..]
+            .iter()
+            .take_while(|x| x["k"] != "tick")
+            .find(|x| {
+                !(x["k"] == "obs"
+                    && matches!(x["ev"].as_str(), Some("ui_guard" | "delayed_schedule")))
+            })
+            .is_some_and(|x| {
+                x["k"] == "tb" && matches!(x["ev"].as_str(), Some("combat_start" | "combat_end"))
+            });
+        if combat_change {
+            self.place_combat_change(w, "a UI guard change with the party's combat state");
+        } else if at == Phase::LeavePrefix {
             self.place(w, Phase::Leave, "a UI guard change");
         } else if (Phase::TurnPrefix..Phase::TurnChoose).contains(&at) {
             self.place(w, Phase::TurnChoose, "a UI guard change");
@@ -2886,7 +2904,7 @@ impl Driver<'_> {
             }
             Some("obs") if self.ag && r["ev"] == "path_ret" => self.ag_path_ret(w, r),
             Some("obs") if self.ag && r["ev"] == "path_start" => self.ag_path_start(w, r),
-            Some("obs") => self.obs(w, r),
+            Some("obs") => self.obs(w, i),
             // The clocks after `TimeController.Tick`.
             Some("time") => {
                 self.place(w, Phase::Time, "the time record");
@@ -3022,7 +3040,9 @@ impl Driver<'_> {
         i + 1
     }
 
-    fn obs(&mut self, w: &mut World, r: &J) {
+    fn obs(&mut self, w: &mut World, i: usize) {
+        let trace = self.trace;
+        let r = &trace.records[i];
         match r["ev"].as_str() {
             Some("u") => {
                 if let (Some(u), Some(row)) =
@@ -3189,7 +3209,7 @@ impl Driver<'_> {
                 }
             }
             // `WaitingForUI` (the UI's guard), in the order it changed.
-            Some("ui_guard") if self.port => self.ui_guard(w, r),
+            Some("ui_guard") if self.port => self.ui_guard(w, i),
             Some("ui_guard_poll") if self.port && r["g"] == true => {
                 let now = r["d"].as_str().and_then(|d| d.split_once("->")).map(|(_, n)| n);
                 if now.and_then(|n| n.parse::<i32>().ok()) != Some(w.combat.turns.waiting_for_ui) {

@@ -599,3 +599,50 @@ fn missing_or_wrong_agent_records_are_reported() {
     let missed = missed.into_inner().unwrap();
     assert!(missed.is_empty(), "{missed:#?}");
 }
+
+/// The captures with `agent_sync`: every run of every fight valid with the agent driven, its
+/// entries run, its states and getters checked, one synchronization per run. `poc5-tb-114` ends
+/// its fight while the UI guard is up: the guard drops inside the party's combat-state change,
+/// after `UnitMoveController` (which ticks no unit that frame).
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18, the caves' nav file and the poc5-tb-113 and -114 captures"]
+fn driven_agent_replays_are_valid() {
+    let mut runs = Vec::new();
+    for capture in ["poc5-tb-113", "poc5-tb-114"] {
+        for fight in ["tb-nearest", "tb-focus"] {
+            let Some(dir) = fixture_in(capture, fight) else {
+                eprintln!("{capture}/{fight} not present: skipped");
+                continue;
+            };
+            for run in ["record", "replay-1", "replay-2"] {
+                runs.push((format!("{capture}/{fight} {run}"), dir.clone(), run));
+            }
+        }
+    }
+    let failed = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for (name, dir, run) in &runs {
+            let failed = &failed;
+            s.spawn(move || {
+                let (out, w) = replay::run_fixture(SAVE, dir, run).expect("replay");
+                let ok = w.valid()
+                    && out.diff.equal
+                    && out.ag_entries > 10_000
+                    && out.ag_ticks > 5_000
+                    && out.ag_states > 10_000
+                    && out.ag_command_calls > 100
+                    && out.ag_reads > 1_000
+                    && out.ag_syncs == 1;
+                if !ok {
+                    failed.lock().unwrap().push(format!(
+                        "{name}: valid {}, {:?}",
+                        w.valid(),
+                        w.coverage.unsupported.keys().collect::<Vec<_>>()
+                    ));
+                }
+            });
+        }
+    });
+    let failed = failed.into_inner().unwrap();
+    assert!(failed.is_empty(), "{failed:#?}");
+}
