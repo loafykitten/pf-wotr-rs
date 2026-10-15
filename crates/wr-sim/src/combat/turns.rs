@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 
 use super::cooldowns::time_to_next_turn;
-use super::order::{Initiative, TbUnitInfo, order_by, tb_compare};
+use super::order::{Initiative, TbUnitInfo, tb_compare};
 use crate::world::{EntityIdx, World};
 
 /// A turn event the sim made, in the vocabulary of WrathOracle's `tb` records.
@@ -134,6 +134,9 @@ pub struct Turns {
     /// The current turn controller's status and counters, when they are computed (a new one at
     /// each turn start; a cleared turn's is never read again).
     pub ctl: super::turn_tick::TurnCtl,
+    /// The comparers' recorded identity-hash decisions (`None`: the recording has none to give,
+    /// and a fallback is reported).
+    pub ties: Option<super::ties::Ties>,
 }
 
 fn initiative(w: &World, u: EntityIdx) -> Initiative {
@@ -153,13 +156,47 @@ fn sync(w: &mut World) {
     }
 }
 
-/// `CombatController.SortUnits(reason)`: `m_Units.OrderBy(u => u, UnitsOrderComaprer)`.
+/// `CombatController.SortUnits(reason)`: `m_Units.OrderBy(u => u, UnitsOrderComaprer).ToList()`.
+/// The game's `System.Core` sorts a map of indices with `Array.Sort` (the introsort of
+/// [`crate::csharp::sort`], on an array of the count's length) and `EnumerableSorter.CompareAnyKeys`
+/// (the comparer, then the indices), so the comparer sees the game's pairs in the game's order:
+/// its identity-hash fallbacks take the recorded decisions in turn ([`super::ties`]).
 pub fn sort_units(w: &mut World, reason: &str) {
+    use super::order::Cmp;
+    use super::ties::{Tie, TieCmp, decide};
     let infos = w.combat.turns.units.clone();
     let inits: Vec<Initiative> = infos.iter().map(|i| initiative(w, i.unit)).collect();
-    let mut idx: Vec<usize> = (0..infos.len()).collect();
-    let clean = order_by(&mut idx, |a, b| tb_compare(w, &infos[a], inits[a], &infos[b], inits[b]));
-    if !clean {
+    let n = infos.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut fallback = false;
+    let mut decided = 0;
+    crate::csharp::sort::introsort(&mut idx, n, &mut |&x, &y| {
+        let c = match tb_compare(w, &infos[x], inits[x], &infos[y], inits[y]) {
+            Cmp::Less => -1,
+            Cmp::Greater => 1,
+            Cmp::Equal => 0,
+            Cmp::HashFallback => {
+                let tie = decide(w, TieCmp::Turn, decided, infos[x].unit, infos[y].unit);
+                decided += 1;
+                match tie {
+                    Tie::Decided(r) => r,
+                    Tie::Off => {
+                        fallback = true;
+                        0
+                    }
+                    Tie::Missing => 0,
+                }
+            }
+        };
+        // `CompareAnyKeys`: equal keys in index order.
+        if c == 0 {
+            i32::try_from(x).unwrap_or(i32::MAX) - i32::try_from(y).unwrap_or(i32::MAX)
+        } else {
+            c.signum()
+        }
+    });
+    super::ties::end_call(w, TieCmp::Turn);
+    if fallback {
         w.coverage.unsupported(
             "CombatController.SortUnits: the comparer's identity-hash fallback (object identity)",
         );

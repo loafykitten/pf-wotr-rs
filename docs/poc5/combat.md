@@ -3,6 +3,12 @@
 Round 8 (2026-10-13, eleventh session; the units' commands' lifecycle computed, on `poc5-tb-74`) is in
 `docs/poc5/commands.md`.
 
+The initiative comparers' identity-hash tie-break (2026-10-15, stream N) is a recorded input: WrathOracle's
+`init_ties` observer records each decision the comparers make, the sim's sorts (`combat/turns.rs` `sort_units`, now
+`OrderBy`'s own index sort, and `combat/initiative.rs` `prepare_flush`) take them in order (`combat/ties.rs`), and any
+fallback without its record, or record the sim didn't need, is reported. Details in `docs/poc5/tb-replay.md`, "The
+initiative tie-break recorded".
+
 Round 7 (2026-10-12, tenth session) makes the sim compute the turn controller's status, and with it when a turn ends
 (`TurnController.Tick`: `Preparing` → `Acting` → `Ending` → `Ended`). The recorded `turn_end`, an input until round 6,
 is now a check. Tags as below: [M] measured, [C] checked against the C#, [I] inferred.

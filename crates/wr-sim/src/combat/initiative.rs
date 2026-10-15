@@ -109,19 +109,31 @@ pub fn prepare_flush(w: &mut World) {
     let mut list: Vec<EntityIdx> = batch.iter().map(|(u, _)| *u).collect();
     let cap = crate::csharp::sort::grown_capacity(list.len());
     let mut fallback = false;
+    let mut decided = 0;
     crate::csharp::sort::introsort(&mut list, cap, &mut |a, b| {
+        use super::ties::{Tie, TieCmp, decide};
         let ai = w.unit(*a).map(|x| x.combat.initiative).unwrap_or_default();
         let bi = w.unit(*b).map(|x| x.combat.initiative).unwrap_or_default();
         match super::order::prepare_compare(w, *a, ai, *b, bi) {
             super::order::Cmp::Less => -1,
             super::order::Cmp::Greater => 1,
             super::order::Cmp::Equal => 0,
+            // The recorded decision ([`super::ties`]), or reported.
             super::order::Cmp::HashFallback => {
-                fallback = true;
-                0
+                let tie = decide(w, TieCmp::Prepare, decided, *a, *b);
+                decided += 1;
+                match tie {
+                    Tie::Decided(r) => r,
+                    Tie::Off => {
+                        fallback = true;
+                        0
+                    }
+                    Tie::Missing => 0,
+                }
             }
         }
     });
+    super::ties::end_call(w, super::ties::TieCmp::Prepare);
     if fallback {
         w.coverage.unsupported(
             "UnitCombatPrepareController: the comparer's identity-hash fallback (object identity)",
