@@ -83,6 +83,7 @@ internal static class Fixture
         if (replay) UnityEngine.Random.InitState(Driver.Seed ^ 0x5bd1e995);
         try { StateDump.Run(dir, "start-" + Path.GetFileName(PathNow).Replace(".trace.jsonl.gz", ""), saveFile); }
         catch (Exception e) { Health.Failed("fixture start state", e); }
+        SeedInit.ResetWindow(stepsAhead);
         Trace.Begin(PathNow, name, Mode, j =>
         {
             j.Prop("fixed_delta", Driver.FixedDelta);
@@ -96,6 +97,7 @@ internal static class Fixture
             j.Prop("tape", replay ? record : null);
             j.Prop("tape_draws", Rng.TapeLength);
             j.Prop("turn_based_window", Sched.Window);
+            j.Prop("seedinit", SeedInit.Declared);
             // The observation families installed: a replay requires each one's records.
             j.Arr("observers"); foreach (var o in Fidelity.Observers) j.W.WriteValue(o); j.EndArr();
             // The dialogue controller's custom speaker fields, which live as long as the game process.
@@ -183,6 +185,7 @@ internal static class Fixture
     {
         if (!Trace.Active) return null;
         DeathFxPin.Flush(); // records still held go into the trace before it ends
+        SeedInit.CloseWindow();
         Rng.Checkpoint(); // unrecorded steps since the last hooked draw count too
         var tapeLen = Rng.TapeLength;
         var tapePos = Rng.TapeLength - Rng.TapeLeftover;
@@ -233,6 +236,7 @@ internal static class Fixture
                 j.Prop("init_tie_compares_prepare", TieObs.PrepareCompares);
                 j.Prop("init_ties_turn", TieObs.TurnTies);
                 j.Prop("init_ties_prepare", TieObs.PrepareTies);
+                j.Prop("seedinit_fired", SeedInit.Fired);
             }
             if (replay)
             {
@@ -331,6 +335,7 @@ internal static class Fidelity
         TurnBased.Install(h);
         WallClock.Install(h);
         TieObs.Install(h);
+        SeedInit.Install(h);
         PathSync.Install(h);
         ProjPin.Install(h);
         DeathFxPin.Install(h);

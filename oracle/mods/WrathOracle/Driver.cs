@@ -44,6 +44,8 @@ namespace WrathOracle;
 //   tempmod:STAT:DC:B     skill check carrying a temporary +B stat modifier (AddTemporaryModifier)
 //   savebonus:SAVE:DC:B   saving throw with a +B rule bonus (applied through a TemporaryModifiersScope)
 //   seed:N                UnityEngine.Random.InitState(N)
+//   seedinit:X:Y:Z:W      in a turn-based window: Random's state set to X:Y:Z:W (hex) right before the next
+//                         initiative batch (UnitCombatPrepareController.Tick; SeedInit.cs)
 //   run:N                 N frames, resuming the game whenever it pauses itself (auto-pause)
 //   prepare               before a fixture's reload: fixed frame delta, Random.InitState(seed)
 // Every input is recorded in the trace as an "input" record.
@@ -54,6 +56,8 @@ internal static class Driver
     public static int Seed = 20261011;
 
     private static UnitEntityData Main_ => Game.Instance.Player.MainCharacter.Value;
+
+    internal static void RecordInput(string step) => Input(step);
 
     private static void Input(string step, Action<Json> extra = null)
     {
@@ -238,6 +242,8 @@ internal static class Driver
                         }
                     }
                 });
+            case "seedinit":
+                return Do(() => SeedInit.Arm(arg, fail));
             case "seed":
                 return Do(() =>
                 {

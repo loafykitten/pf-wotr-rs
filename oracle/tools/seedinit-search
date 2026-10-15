@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Pick, and afterwards verify, a `seedinit` state that makes two units tie at combat start.
+
+usage: oracle/tools/seedinit-search REF.trace.jsonl.gz UNIT_A UNIT_B [--from N]
+       oracle/tools/seedinit-search --verify NEW.trace.jsonl.gz UNIT_A UNIT_B
+
+The batch: `UnitCombatPrepareController.Tick` rolls initiative for every unit in combat that isn't
+prepared yet, in its `Units` order: per unit a `RuleInitiativeRoll` (whose nested `RuleRollD20` draws
+the initiative d20) and then a root `RuleRollD20` (the tie-break, `InitiativeRandom`). Each d20 is one
+`Random.Range(1, 21)` draw, `1 + next % 20` of Unity's xorshift128 (the model WrathOracle's `Rng`
+self-tests). In the reference recording the batch is found as the draws of the window's first
+`RuleInitiativeRoll` made by `UnitCombatPrepareController` and of the d20 rules under it or beside it
+with that origin, contiguous at that tick, each one generator step after the previous (checked: nothing
+else draws in between). Unit U's draws are batch indices 2k (initiative) and 2k+1 (tie-break), k its
+place in the batch.
+
+Search: the state S, set by `seedinit:S` right before the batch (`SeedInit.cs`), whose outputs 1, 2, ...
+are the batch's draws in order; S is chosen so that UNIT_A's pair equals UNIT_B's (equal initiative d20
+and equal tie-break d20: with equal initiative modifiers and Dexterity both comparers then reach the
+identity-hash fallback). Candidates come from a fixed sequence (`--from` picks its start), so the result
+is reproducible. Prints the plan step and the predicted batch.
+
+Verify: the new recording's `seedinit` gate, its batch starting from that state (first draw's state equal
+to it), the batch's values those the state predicts, UNIT_A's and UNIT_B's pairs equal, the comparers'
+`init_tie` records naming the two units, and the end record's `seedinit_fired` 1 and `init_ties_prepare`
+at least 1. Exit status 0 only if every check passes.
+"""
+import gzip
+import json
+import sys
+
+M = 0xFFFFFFFF
+PREPARE = "Kingmaker.Controllers.Combat.UnitCombatPrepareController"
+INIT = "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll"
+D20 = "Kingmaker.RuleSystem.Rules.RuleRollD20"
+
+
+def step(s):
+    x, y, z, w = s
+    t = (x ^ (x << 11)) & M
+    w2 = (w ^ (w >> 19) ^ t ^ (t >> 8)) & M
+    return (y, z, w, w2), w2
+
+
+def d20s(s, n):
+    out = []
+    for _ in range(n):
+        s, o = step(s)
+        out.append(1 + o % 20)
+    return out
+
+
+def parse_state(text):
+    return tuple(int(h, 16) for h in text.split(":"))
+
+
+def fmt(s):
+    return ":".join(f"{v:08x}" for v in s)
+
+
+def records(path):
+    with gzip.open(path, "rt") as f:
+        for line in f:
+            yield json.loads(line)
+
+
+def unit_of(r):
+    i = r.get("initiator")
+    return i.get("$unit") if isinstance(i, dict) else None
+
+
+def batch(recs):
+    """The prepare controller's first initiative batch: [(unit, draw record)], and its tick."""
+    rules = {}
+    first = None
+    for r in recs:
+        if r.get("k") == "rule":
+            rules[r["id"]] = r
+            if first is None and r.get("class") == INIT and r.get("depth") == 0 and PREPARE in (r.get("origin") or ""):
+                first = r
+    if first is None:
+        sys.exit("no RuleInitiativeRoll by UnitCombatPrepareController in the trace")
+    t = first["t"]
+
+    def in_batch(rule_id):
+        r = rules.get(rule_id)
+        if r is None or r.get("class") != D20:
+            return False
+        if r.get("depth") == 0:
+            return PREPARE in (r.get("origin") or "")
+        p = rules.get(r.get("parent"))
+        return p is not None and p.get("class") == INIT and p.get("depth") == 0 and PREPARE in (p.get("origin") or "")
+
+    out = []
+    for r in recs:
+        if r.get("k") != "draw" or r.get("t") != t or r["seq"] < first["seq"]:
+            continue
+        if not in_batch(r.get("rule")):
+            if out:
+                break
+            continue
+        out.append((unit_of(rules[r["rule"]]), r))
+    # Checks: pairs per unit, Range(1, 21), consecutive generator states, the model's values.
+    if not out or len(out) % 2:
+        sys.exit(f"the batch has {len(out)} draws, not pairs")
+    for k, (u, r) in enumerate(out):
+        if r.get("m") != "Range_ii" or r.get("a") != [1, 21]:
+            sys.exit(f"batch draw {k} isn't Range(1, 21): {r}")
+        st = parse_state(r["st"])
+        if d20s(st, 1)[0] != r["v"]:
+            sys.exit(f"batch draw {k}: the model gives {d20s(st, 1)[0]}, the trace {r['v']}")
+        if k and step(parse_state(out[k - 1][1]["st"]))[0] != st:
+            sys.exit(f"batch draw {k} isn't one generator step after draw {k - 1}")
+        if k % 2 and out[k - 1][0] != u:
+            sys.exit(f"batch draws {k - 1} and {k} are of different units")
+    return t, out
+
+
+def pair_index(out, unit):
+    ix = [k for k in range(0, len(out), 2) if out[k][0] == unit]
+    if len(ix) != 1:
+        sys.exit(f"unit {unit}: {len(ix)} pairs in the batch")
+    return ix[0]
+
+
+def search(path, a, b, start):
+    recs = list(records(path))
+    t, out = batch(recs)
+    ia, ib = pair_index(out, a), pair_index(out, b)
+    n = len(out)
+    print(f"reference batch at tick {t}: {n} draws; {a} at indices {ia},{ia + 1}, {b} at {ib},{ib + 1} (0-based)")
+    print("  units: " + " ".join(f"{u}={out[k][1]['v']},{out[k + 1][1]['v']}" for k, (u, _) in enumerate(out) if k % 2 == 0))
+    # Candidates: a splitmix32-like sequence of states, reproducible from `start`.
+    seed = start & M
+    for _ in range(1_000_000):
+        words = []
+        for _ in range(4):
+            seed = (seed + 0x9E3779B9) & M
+            z = seed
+            z = ((z ^ (z >> 16)) * 0x85EBCA6B) & M
+            z = ((z ^ (z >> 13)) * 0xC2B2AE35) & M
+            words.append(z ^ (z >> 16))
+        s = tuple(words)
+        if not any(s):
+            continue
+        v = d20s(s, n)
+        if v[ia] == v[ib] and v[ia + 1] == v[ib + 1]:
+            print(f"step: seedinit:{fmt(s)}")
+            print("  predicted: " + " ".join(f"{out[k][0]}={v[k]},{v[k + 1]}" for k in range(0, n, 2)))
+            return 0
+    sys.exit("no state found")
+
+
+def verify(path, a, b):
+    recs = list(records(path))
+    fails = []
+    gates = [r for r in recs if r.get("k") == "obs" and r.get("ev") == "seedinit" and r.get("g") is True]
+    end = next((r for r in reversed(recs) if r.get("k") == "end"), {})
+    if len(gates) != 1:
+        sys.exit(f"FAIL: {len(gates)} seedinit gates")
+    s = parse_state(gates[0]["d"])
+    t, out = batch(recs)
+    if gates[0]["t"] != t or gates[0]["seq"] > out[0][1]["seq"]:
+        fails.append(f"the gate (tick {gates[0]['t']}) isn't right before the batch (tick {t})")
+    if parse_state(out[0][1]["st"]) != s:
+        fails.append(f"the batch's first state {out[0][1]['st']} isn't the seedinit state {fmt(s)}")
+    v = d20s(s, len(out))
+    if [r["v"] for _, r in out] != v:
+        fails.append(f"the batch {[r['v'] for _, r in out]} isn't the predicted {v}")
+    ia, ib = pair_index(out, a), pair_index(out, b)
+    pa = (out[ia][1]["v"], out[ia + 1][1]["v"])
+    pb = (out[ib][1]["v"], out[ib + 1][1]["v"])
+    if pa != pb:
+        fails.append(f"{a}'s d20s {pa} differ from {b}'s {pb}")
+    ties = [r for r in recs if r.get("k") == "obs" and r.get("ev") == "init_tie"]
+    named = [r for r in ties if {r.get("a"), r.get("b")} == {a, b}]
+    if not any(r.get("cmp") == "prepare" for r in named):
+        fails.append(f"no prepare init_tie record naming {a} and {b}")
+    if end.get("seedinit_fired") != 1:
+        fails.append(f"end record seedinit_fired {end.get('seedinit_fired')}")
+    if not end.get("init_ties_prepare"):
+        fails.append(f"end record init_ties_prepare {end.get('init_ties_prepare')}")
+    print(f"batch at tick {t}: " + " ".join(f"{out[k][0]}={out[k][1]['v']},{out[k + 1][1]['v']}" for k in range(0, len(out), 2)))
+    print(f"init_tie records: {len(ties)} ({len(named)} naming {a} and {b}); end: fired {end.get('seedinit_fired')}, "
+          f"prepare ties {end.get('init_ties_prepare')}, turn ties {end.get('init_ties_turn')}")
+    for f in fails:
+        print("FAIL: " + f)
+    print("OK" if not fails else f"{len(fails)} failures")
+    return 0 if not fails else 1
+
+
+def main(argv):
+    if len(argv) >= 4 and argv[0] == "--verify":
+        return verify(argv[1], argv[2], argv[3])
+    if len(argv) >= 3:
+        start = int(argv[argv.index("--from") + 1]) if "--from" in argv else 1
+        return search(argv[0], argv[1], argv[2], start)
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

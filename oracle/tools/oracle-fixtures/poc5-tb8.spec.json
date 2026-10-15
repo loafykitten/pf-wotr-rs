@@ -1,0 +1,21 @@
+{
+ "plan": {
+  "fixedDelta": 0.016666668,
+  "seed": 20261011
+ },
+ "fixtures": [
+  {
+   "name": "tb-tie",
+   "steps": [
+    "tbm:on",
+    "seedinit:c01ce21d:7c2fc917:8fee7c64:6aef8300",
+    "wait:5",
+    "attack:cd057d4d28be9fc46949fa1148bece7f",
+    "tbwaitcombat:3600",
+    "tbfight:default=nearest:30000",
+    "wait:60"
+   ],
+   "replays": 2
+  }
+ ]
+}

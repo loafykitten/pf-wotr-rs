@@ -562,6 +562,23 @@ internal static class Rng
     public static int W_get_seed(int site) => URandom.seed;
     public static void W_set_seed(int s, int site) { GapBeforeReseed(); Note(site, "set_seed", s.ToString(CultureInfo.InvariantCulture)); URandom.seed = s; _lastAfter = Now(); }
 
+    // An input (SeedInit): the generator's state set, noted like the game's own reseeds.
+    public static void SetState(S4 s, string what)
+    {
+        GapBeforeReseed();
+        object box = default(URandom.State);
+        var names = new[] { "s0", "s1", "s2", "s3" };
+        var v = new[] { s.X, s.Y, s.Z, s.W };
+        for (var i = 0; i < 4; i++)
+        {
+            var f = typeof(URandom.State).GetField(names[i], BindingFlags.Instance | BindingFlags.NonPublic);
+            f.SetValue(box, f.FieldType == typeof(uint) ? (object)v[i] : unchecked((int)v[i]));
+        }
+        URandom.state = (URandom.State)box;
+        Note(-2, what, Now().ToString());
+        _lastAfter = Now();
+    }
+
     // Unrecorded consumption since the last hooked draw, accounted before game code reseeds or
     // restores the generator (draws whose state is later restored stay invisible to the gap).
     private static void GapBeforeReseed()

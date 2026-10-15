@@ -556,6 +556,115 @@ shift, no long id to bind). `poc5-tb-123` differs only by the dismember rule abo
 
 Pending: the main session's captures of `poc5-tb5` (`tb-chain`) and `poc5-tb` (`tb-nearest`, `tb-focus`).
 
+## The initiative tie-break recorded (2026-10-15, stream N)
+
+[M] `poc5-tb-122/tb-nearest` (record and two replays, tick-exact in the game) was invalid in the driven replay only
+because two centipedes, 51DD and 51FC, tie in everything the initiative comparers read before the hashes:
+`UnitCombatPrepareController`'s sort reached the fallback once and `SortUnits` seven times, and the turn order, the
+choices, the cooldowns, the leave controller's gate and the turn events followed. [C] Both comparers
+(`CombatController.UnitsOrderComaprer`, `UnitCombatPrepareController.UnitEntityOrderComaprer`) end with
+`unit.GetHashCode() >= unit2.GetHashCode() ? -1 : 1`. `UnitEntityData.GetHashCode` is `base.GetHashCode()`, which
+`EntityDataBase` doesn't override, so this is the object's identity hash. Mono derives that hash from the object's
+address the first time it is asked for and then keeps it. Asking for it earlier than the game does could change the
+value the game gets later, so the observer never asks for it. With the hashes the recording's `hash` records give
+(a dev-only check, not committed), all three runs are valid: the tie is the only thing left.
+
+**Recording (`TieObs.cs`, observer `init_ties`).** Both comparers' `GetHashCode` calls are transpiled to
+`TieObs.TieHash`. It makes the same single native call through `WallClock.UnitHash`, so a replay's hash tape applies
+as before; WallClock no longer transpiles the comparers itself. `TieHash` notes the value returned and the unit it
+was called on (`UniqueId`, an auto-property). A prefix on `Compare` resets that state, and a postfix sees whether the
+comparer reached its last branch (both calls made). Then, in a turn-based window, it writes `init_tie`:
+- `cmp`: `turn` or `prepare`;
+- `i`: the decision's index within its sort call (reset by prefixes on `SortUnits` and on
+  `UnitCombatPrepareController.Tick`);
+- `a`, `b`: the units hashed, in call order (the comparer's `unit` and `unit2`);
+- `ha`, `hb`: the values the comparer got;
+- `r`: `Compare`'s result.
+
+`init_tie_bad` (with `why`) is written instead for a `Compare` that made one hash call or more than two, whose result
+isn't the hashes' (`ha >= hb ? -1 : 1`), or that threw. The install checks that it replaced exactly two calls in each
+comparer, and the observer is declared only if every patch installed. Nothing the game evaluates is called. The end
+record counts each comparer's `Compare` calls in the window and the decisions among them (`init_tie_compares_turn`,
+`init_tie_compares_prepare`, `init_ties_turn`, `init_ties_prepare`), so a window without records shows whether the
+comparers ran. gpt-6.1-sol
+(high) reviewed this specifically for side effects and found none.
+
+**The sim (`combat/ties.rs`).**
+- `SortUnits` now sorts as the game's `System.Core` does: `OrderBy(...).ToList()` sorts a map of indices with
+  `Array.Sort` (the ported introsort, on an array of the count's length) and `EnumerableSorter.CompareAnyKeys` (the
+  comparer, then the indices). The comparer therefore sees the game's pairs in the game's order. Before, a stable
+  sort gave the same order for any consistent comparer, but with other comparisons. The prepare sort was already
+  `List.Sort`'s.
+- Each decision is bound to its sort call. A `SortUnits` decision belongs to the recorded `sort` record that follows
+  it in its frame (the call's postfix writes it), and the sim's k-th `sort_units` call takes the k-th recorded sort's
+  decisions: the turn port already matches the sim's sorts with the recorded ones in order. A prepare decision belongs
+  to its frame's prepare sort: `UnitCombatPrepareController.Tick` sorts at most once a frame, and so does the sim's
+  `prepare_flush`, whose batch is the frame's.
+- Where either comparer reaches the fallback, its call's next recorded decision must be this one: the same index
+  within the call, the same two units in the same order. Its `r` decides.
+- Reported:
+  - a fallback without its decision;
+  - a decision its call didn't take (left at the call's end), or whose call or frame the sim never reached;
+  - a `SortUnits` call whose recorded sort is of another tick;
+  - at load: any record it can't read (every field present, typed and in range, `a != b`, `r` the hashes' result);
+  - a record outside its tick's frame (after that tick's `tick` record, before the next);
+  - a `SortUnits` decision without its `sort` record in its frame;
+  - where the end record has its counts: the sim's `Compare` calls or decisions per comparer differing from the
+    game's (an end record with only some of the counts is reported too);
+  - a unit with two hashes;
+  - an index that doesn't follow its call's previous decision;
+  - an `init_tie_bad`;
+  - records without the observer declared;
+  - the observer declared without the turn port.
+- A recording without `init_ties` replays as before: the fallback is reported.
+- The summary line's `SortChecks.hash_decisions` counts the decisions taken.
+
+[M] Development case: `tb-122/tb-nearest`'s three runs, with the decisions the sim needs written in as records
+(`init_tie`, from the recording's `hash` values, each before its call's `sort`), are valid, with 8 decisions each.
+Each of these edits is reported: dropping, adding, flipping or swapping a decision; moving one a tick, to another sort
+call or into the next frame; leaving out the declaration. Unit tests (`combat/ties/tests.rs`) cover the same, the
+three-unit comparison order, the prepare sort and the end record's counts.
+
+[M] `poc5-tb-126` (`poc5-tb`, the first capture with `init_ties`, before the counts): no tie (the plan's initiative rolls
+vary between recordings); all six runs valid. Across 195 recorded fixtures only 51DD and 51FC, the one pair of
+same-blueprint units, can reach the fallback: it takes equal initiative and tie-break d20s. They had equal
+initiative 4 times, so a tie comes about once in 400 fixtures. In `-122` the prepare controller's 12 draws at t=171
+(site 134, two per unit in `Units` order) are consecutive with nothing in between: a seed set at that `Tick` would
+make the tie reproducible.
+
+**A tie on demand: the plan step `seedinit` (`SeedInit.cs`, plan `poc5-tb8`, fixture `tb-tie`).**
+- *The step.* `seedinit:X:Y:Z:W` (four hex words: Unity's xorshift128 state, as the draw records print it in `st`)
+  is a recorded input, like `seed:`. The window's begin record declares it (`seedinit`: the argument, or null, from
+  the plan's steps up to the window's `end`). The step records its input (checked in a replay like any other) and
+  only arms.
+- *Where it fires.* In a prefix on `UnitCombatPrepareController.Tick`, at the first `Tick` after the arming that is
+  about to roll: the controller's own guard (`Player.IsInCombat`, and a unit of `State.Units` in combat with
+  `CombatState.Prepared` false), evaluated with the same field reads. It sets the generator's state there, before
+  the controller's first `RuleInitiativeRoll` (`Rng.SetState`: an `rng_state` note, the unhooked-step baseline
+  moved). It writes the gate `seedinit` (the state), which a replay must reach at the recorded tick; the replay
+  sets the state too, though its draws come from the tape.
+- *Failures* (structural errors, so the record run fails its health check; a replay is also invalidated): the
+  step outside a turn-based window, a second one in a window, one the begin record doesn't declare, a state
+  that doesn't take, a window ending with the step armed and not fired. The end record counts `seedinit_fired`.
+- *The search* (`oracle/tools/seedinit-search`). It finds the batch in a reference recording: the draws of the
+  window's first `RuleInitiativeRoll` made by `UnitCombatPrepareController`, and of the d20 rules under it or beside
+  it with that origin, contiguous at that tick and each one generator step after the previous. Unit k's draws are
+  batch indices 2k (the initiative d20) and 2k+1 (the tie-break). It then picks a state (from a fixed candidate
+  sequence) whose outputs give the two units equal pairs, by `1 + next % 20`, the model `Rng` self-tests and the
+  recorded draws confirm. On `poc5-tb-126`'s and `-122`'s `tb-nearest` the batch is 12 draws, 51DD at indices 6
+  and 7 and 51FC at 8 and 9. `seedinit:c01ce21d:7c2fc917:8fee7c64:6aef8300` predicts 51DD = 7, 2 and 51FC = 7, 2.
+  `--verify` checks a new recording:
+  - the gate is right before the batch, and the batch's first state is the gate's;
+  - the values are the predicted ones, and the two pairs are equal;
+  - a prepare `init_tie` record names both units;
+  - the end record's `seedinit_fired` is 1 and `init_ties_prepare` at least 1.
+- *The plan.* `poc5-tb8` is `poc5-tb`'s `tb-nearest` with the step after `tbm:on`, as `tb-tie` (record and two
+  replays). `poc5-tb.plan.json` is unchanged.
+
+### Results
+
+Pending: the main session's capture of `poc5-tb8` (`tb-tie`).
+
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
 **Everything above describes the earlier mod (`c7117fd` to `ba96d22`), whose recordings do not observe the unmodified game
