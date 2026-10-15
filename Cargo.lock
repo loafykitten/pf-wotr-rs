@@ -4818,6 +4818,7 @@ dependencies = [
  "anyhow",
  "clap",
  "glam 0.34.1",
+ "libc",
  "lz4_flex",
  "lzma-rs",
  "rayon",

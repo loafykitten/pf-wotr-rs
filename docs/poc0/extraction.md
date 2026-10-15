@@ -410,7 +410,7 @@ then within 1e-5), IDs, blueprint GUIDs, shape results and path fields.
 1. **Spawn-time content isn't in the dependency list [M].** Unit prefabs alone add 18
    bundles here; equipment, FX and portraits come from blueprints. The importer must
    walk blueprints to build complete packs, or loads will miss assets.
-2. **Exact pathing is a port of a modified A* [M: searches now exact; smoothing and cuts
+2. **Exact pathing is a port of a modified A* [M: searches and smoothing exact (2026-10-15); cuts
    left, §9].** Heap tie-breaking, backward
    expansion, re-opening, nearest-node rules, clearance and runtime cuts all affect
    which path wins, and turn-based movement is T0/T1. Expect a few weeks of oracle-driven
@@ -440,7 +440,7 @@ Assuming the reader above as the base and Claude/Opus implementing with Astra re
 | Scene gameplay → `wr-sim` types for the 72 gameplay classes (24 for the caves first), with oracle diffs | 3–5 weeks |
 | Meshes, materials (all properties/keywords), textures (BC as-is), lights, probes, lightmaps into packs | 2–3 weeks |
 | Animation data the sim needs (clip durations, events, `AnimationClipEvent` references) | 1–2 weeks |
-| Navigation: the rest after this round (funnel unwrap and raycast smoothing exact, navmesh cuts, combat blocking, dynamic graph updates), oracle-matched | 2–3 weeks |
+| Navigation: the rest after this round (funnel unwrap and raycast smoothing: done 2026-10-15; navmesh cuts, combat blocking, dynamic graph updates), oracle-matched | 2–3 weeks |
 | Classifying the 213 unknown classes and deciding which matter | 1 week |
 | **Total** | **11–17 weeks**, excluding shader ports and VFX Graph |
 
@@ -499,30 +499,36 @@ graph-raycast smoother), with Mono's float semantics (`nav/cs.rs`).
 | `navmesh_raw` (ABPath, mask 1, no modifiers) | 46/46, every field |
 | `grid_raw` | 46/46, every field |
 | `navmesh_agent` (real-time seeker): state, nodes, step costs, end-node G, searched nodes, endpoints | 46/46 |
-| … corner points after StartEnd + Funnel ×2 / after `RemoveExcessPoints` | 26/46 / 27/46 |
-| `tb_clearance_0.5`: search fields | 46/46; corner points 32/46 |
-| `tb_clearance_1.0`: search fields | 46/46; corner points 44/46 |
+| … corner points after StartEnd + Funnel ×2 / after `RemoveExcessPoints` | 46/46 / 46/46 (were 26 / 27) |
+| `tb_clearance_0.5`: search fields | 46/46; corner points 46/46 (were 32) |
+| `tb_clearance_1.0`: search fields | 46/46; corner points 46/46 (were 44) |
 
-So **every search agrees with the game**. What differs is smoothing:
+So **every query agrees with the game, smoothing included**: 3,387 of 3,387 checks on
+`check-1` and on `oracle-3` (`oracle-2`, older, lacks the graph-unchanged guard: its one
+mismatch). Until 2026-10-15 the smoothing differed:
 
-- **Funnel unwrap [M: sensitivity shown; cause I].** `Funnel.Unwrap` rotates portals
-  into a plane with Unity's native `Quaternion.FromToRotation`, which is engine code; our
-  port approximates it (Möller–Hughes matrix, Shoemake conversion in `f32`). Unwrapped
-  coordinates feed exact-sign cross products, so last-bit differences change *which*
-  portal vertex becomes a corner (e.g. `party -> camelia_zone`: the game emits
-  `(100.0, 38.68, 134.6)` twice and `(85.0, 38.45, 145.0)` twice, we emit
-  `(106.6, 39.04, 134.0)` twice and an extra `(82.4, 37.65, 141.6)`). A replay of the
-  captured portals (gpt-6.1-sol, read-only) reproduced our 26/46 and showed that changing
-  only the quaternion construction moves the count to 27 or 19: sensitivity, not a fix.
-  Everything else in the chain was checked against the C# and the oracle's seeker setup
-  (StartEnd → Funnel → Funnel in real time; StartEnd → Funnel → Raycast in turn-based;
-  portal construction and tile-border clipping, `FixFunnel`, Vector2 equality, raycast
-  quality and subdivision, grid linecast traversal).
-- **Turn-based raycast smoothing** differs downstream of the same funnel corners; the
-  native `Matrix4x4.inverse` used by `GridGraph`'s raycasts is a second, unverified
-  substitution.
-- **Next step:** have WrathOracle record `vectorPath` after each modifier and every
-  `FromToRotation` input and output, then match Unity's native routine bit for bit.
+- **Funnel unwrap [M, fixed 2026-10-15].** `Funnel.Unwrap` rotates portals into a plane
+  with Unity's native `Quaternion.FromToRotation`. Unwrapped coordinates feed exact-sign
+  cross products, so its last bits decide *which* portal vertex becomes a corner (e.g.
+  `party -> camelia_zone`: the game emits `(100.0, 38.68, 134.6)` twice and
+  `(85.0, 38.45, 145.0)` twice, the approximation emitted `(106.6, 39.04, 134.0)` twice and
+  an extra `(82.4, 37.65, 141.6)`). The port now follows the arm64 player's machine code
+  (`UnityPlayer.dylib`; the icall table maps `Quaternion::FromToRotation_Injected` to
+  `FromToQuaternionSafe`): the magnitudes are single precision (Mono's `magnitude` is
+  double), `SetFromToRotation` is Möller and Hughes' original code with
+  `h = (1 - e) / |v|²` (not `1 / (1 + e)`), its parallel thresholds compare in double
+  against `±(1 - (double)1e-6f)`, and its 180° case turns about `u × f` with
+  `u = normalize(f × X)` (or `f × Y`), ignoring `to`. `MatrixToQuaternion` was already
+  exact. The turn-based raycast smoothing, downstream of the same corners, became exact
+  with it.
+- **Native math checked against the player itself.** `nav/native_check.rs` (an ignored
+  test: `cargo test --release -p wr-import --lib native_check -- --ignored`) `dlopen`s the
+  oracle build's player and calls its `FromToQuaternionSafe`, `InvertMatrix4x4_Full`
+  (Mesa's `invert_matrix_general`), `Matrix4x4f::SetTRS` and `EulerToQuaternion` (order 4,
+  Z-X-Y) on a million generated inputs each: every result bit-identical with our ports. The
+  grid transform's `Matrix4x4.inverse`, `TRS` and `Quaternion.Euler` (trivial in the caves,
+  not elsewhere) are so verified; Rust's `sin_cos` equals the player's `__sincosf_stret`
+  on every float in [-8, 8].
 
 **Not compared yet:** navmesh cuts (none active in these scenes), combat-time blocking
 (`DynamicBlocked`/`AllyBlocked`, all zero in the dump), A*'s threading, and

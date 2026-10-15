@@ -11,6 +11,8 @@ pub mod cs;
 pub mod funnel;
 pub mod graph;
 pub mod modifiers;
+#[cfg(test)]
+mod native_check;
 pub mod nearest;
 pub mod path;
 pub mod query;

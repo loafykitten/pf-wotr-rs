@@ -7,10 +7,17 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-15, end of the twenty-first session): start here
+## Where things stand (2026-10-15, twenty-second session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **Nav (twenty-second session, `docs/poc0/extraction.md` §9): every path query exact, smoothing included.** The
+  funnel's `Quaternion.FromToRotation` is now a port of the arm64 player's own machine code (found through the icall
+  table in `UnityPlayer.dylib`): single-precision magnitudes, Möller and Hughes' original `h = (1 - e) / |v|²`, double
+  thresholds and Unity's own 180° case. On `check-1` and `oracle-3` 3,387 of 3,387 query checks are exact (real-time
+  corners were 26/46, turn-based 32/46 and 44/46). `nav/native_check.rs` (ignored test) `dlopen`s the player and
+  compares our `FromToRotation`, `Matrix4x4.inverse`, `TRS` and `Quaternion.Euler` with its functions on a million
+  inputs each: bit-identical. gpt-6.1-sol (high): no defects; its one residual (subnormal angles in `Euler`) fixed and tested.
 - **POC-4 round 13 (twenty-first session, `docs/poc4/dialogue.md`): facts' handler interfaces.** No fact had ever
   subscribed to the event bus (the save schema drops handler interfaces, as it did for `EtudesSystem`):
   `rulebook/bus.rs` `FACT_HANDLERS` gives `ActivatableAbility` its ten (and `KingdomMoraleFlag` its one), every
@@ -229,7 +236,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 **Next, in order:**
 1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): what the AI and the commands still
    read as inputs (group memory and visibility, the movement agent and pathing, animation, the Unity clock) mostly wait
-   for their own ports (memory, nav); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
+   for their own ports (memory, nav: the searches and smoothing are exact, next is moving `tools/wr-import/src/nav`
+   into a `crates/wr-nav` the sim can use, then `UnitMovementAgent`); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
    exercise the AI's movement simulation (`ScorePath`). The movement agent waits for the nav port. The UI's requests
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different

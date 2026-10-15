@@ -4,8 +4,8 @@
 //!
 //! The corners come out as portal vertices or endpoints, so they are exact as long as
 //! the same corners are chosen. `Unwrap` uses Unity's native
-//! `Quaternion.FromToRotation`, approximated here with the Möller–Hughes matrix and
-//! Shoemake's conversion in `f32`; a choice that depends on its last bits can differ.
+//! `Quaternion.FromToRotation`, ported from the arm64 player's machine code and checked
+//! against it bit for bit (`native_check`): which corner wins depends on its last bits.
 
 use super::cs::{self, V3, d, r};
 use super::world::{Kind, NodeId, World};
@@ -46,56 +46,68 @@ fn qrot(q: Q, p: V3) -> V3 {
     ]
 }
 
-/// Unity's native `Quaternion.FromToRotation` (approximation, see the module docs).
-fn from_to_rotation(from: V3, to: V3) -> Q {
-    let nf = cs::magnitude(from);
-    let nt = cs::magnitude(to);
+/// `FromToRotation`'s identity threshold on the dot product, a double in the player:
+/// `1.0 - (double)1e-6f`.
+const FROM_TO_PARALLEL: f64 = 1.0 - 1e-6_f32 as f64;
+
+/// The player's `Vector3f` magnitude: single precision throughout, unlike Mono's.
+fn native_magnitude(a: V3) -> f32 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+/// Unity's native `Quaternion.FromToRotation` (`FromToQuaternionSafe`), ported from the
+/// arm64 player's machine code: single-precision operations in this order, none fused.
+pub(crate) fn from_to_rotation(from: V3, to: V3) -> Q {
+    let nf = native_magnitude(from);
+    let nt = native_magnitude(to);
     if nf < 1e-5 || nt < 1e-5 {
         return [0.0, 0.0, 0.0, 1.0];
     }
-    let f = cs::div(from, nf);
-    let t = cs::div(to, nt);
-    let v = [f[1] * t[2] - f[2] * t[1], f[2] * t[0] - f[0] * t[2], f[0] * t[1] - f[1] * t[0]];
+    matrix_to_quaternion(from_to_matrix(cs::div(from, nf), cs::div(to, nt)))
+}
+
+/// The player's `Matrix3x3f::SetFromToRotation` (Möller and Hughes' original code, with
+/// `h = (1 - e) / |v|²`), as `m[row][col]`. Its 180° case turns about `u × f`, where `u`
+/// is `f × X` normalised (`f × Y` when that is too short), and ignores `to`.
+fn from_to_matrix(f: V3, t: V3) -> [[f32; 3]; 3] {
     let e = f[0] * t[0] + f[1] * t[1] + f[2] * t[2];
-    let m: [[f32; 3]; 3] = if e > 1.0 - 1e-6 {
-        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-    } else if e < -1.0 + 1e-6 {
-        // 180° about an axis perpendicular to `from`.
-        let mut x = [0.0f32; 3];
-        let a = f.map(f32::abs);
-        if a[0] < a[1] {
-            if a[0] < a[2] { x[0] = 1.0 } else { x[2] = 1.0 }
-        } else if a[1] < a[2] {
-            x[1] = 1.0;
-        } else {
-            x[2] = 1.0;
-        }
-        let u = [x[0] - f[0], x[1] - f[1], x[2] - f[2]];
-        let vv = [x[0] - t[0], x[1] - t[1], x[2] - t[2]];
-        let c1 = 2.0 / (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
-        let c2 = 2.0 / (vv[0] * vv[0] + vv[1] * vv[1] + vv[2] * vv[2]);
-        let c3 = c1 * c2 * (u[0] * vv[0] + u[1] * vv[1] + u[2] * vv[2]);
-        let mut m = [[0.0f32; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                m[i][j] = -c1 * u[i] * u[j] - c2 * vv[i] * vv[j] + c3 * vv[i] * u[j];
-            }
-            m[i][i] += 1.0;
-        }
-        m
-    } else {
-        let h = 1.0 / (1.0 + e);
-        let hvx = h * v[0];
-        let hvz = h * v[2];
-        let hvxy = hvx * v[1];
-        let hvxz = hvx * v[2];
-        let hvyz = hvz * v[1];
-        [
-            [e + hvx * v[0], hvxy - v[2], hvxz + v[1]],
-            [hvxy + v[2], e + h * v[1] * v[1], hvyz - v[0]],
-            [hvxz - v[1], hvyz + v[0], e + hvz * v[2]],
-        ]
-    };
+    if f64::from(e) > FROM_TO_PARALLEL {
+        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    }
+    if f64::from(e) < -FROM_TO_PARALLEL {
+        let [fx, fy, fz] = f;
+        let (a, b, c) =
+            if (fz * fz + 0.0) + fy * fy < 1e-6 { (-fz, 0.0, fx) } else { (0.0, fz, -fy) };
+        let inv = 1.0 / (c * c + (a * a + b * b)).sqrt();
+        let (a, b, c) = (a * inv, b * inv, c * inv);
+        let vx = fz * b - fy * c;
+        let vy = fx * c - fz * a;
+        let vz = fy * a - fx * b;
+        let m01 = (vx * vy - fx * fy) - a * b;
+        let m02 = (vx * vz - fx * fz) - a * c;
+        let m12 = (vy * vz - fz * fy) - b * c;
+        return [
+            [(vx * vx - fx * fx) - a * a, m01, m02],
+            [m01, (vy * vy - fy * fy) - b * b, m12],
+            [m02, m12, (vz * vz - fz * fz) - c * c],
+        ];
+    }
+    let v = [f[1] * t[2] - f[2] * t[1], f[2] * t[0] - f[0] * t[2], f[0] * t[1] - f[1] * t[0]];
+    let h = (1.0 - e) / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    let hvx = h * v[0];
+    let hvz = h * v[2];
+    let hvxy = hvx * v[1];
+    let hvxz = hvx * v[2];
+    let hvyz = hvz * v[1];
+    [
+        [e + hvx * v[0], hvxy - v[2], hvxz + v[1]],
+        [hvxy + v[2], e + h * v[1] * v[1], hvyz - v[0]],
+        [hvxz - v[1], hvyz + v[0], e + hvz * v[2]],
+    ]
+}
+
+/// The player's `MatrixToQuaternion` (Shoemake), then its normalisation.
+fn matrix_to_quaternion(m: [[f32; 3]; 3]) -> Q {
     let trace = m[0][0] + m[1][1] + m[2][2];
     let mut q = [0.0f32; 4];
     if trace > 0.0 {

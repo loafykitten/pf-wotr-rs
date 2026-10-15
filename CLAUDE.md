@@ -6,7 +6,7 @@ anything**: it's the handoff, with the goal, the fidelity contract, decisions, f
 measured so far, and the proof-of-concept milestones. `docs/research/` holds the code
 survey and notes on other rewrites.
 
-- **Current status (2026-10-15, twenty-first session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
+- **Current status (2026-10-15, twenty-second session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
   certification) passed**. Ember's fixture saves exist: `Manual_18_WR_FirstBattle`,
   `Manual_19_WR_PreHorgus` and `Manual_20_WR_PreCamelia` (read-only copies in `fixtures/saves/`, gitignored).
   Where each workstream stands, with its handoff:
@@ -23,6 +23,9 @@ survey and notes on other rewrites.
   - Oracle (`docs/poc5/tb-replay.md`): turn-based replays are tick-exact, under load too (`poc5-tb-51`..`-53`,
     player input neutral at the source, physics phase pinned); `cert-20` certifies from this repo's layout.
   - POC-6 render round 3 (`docs/poc6/render-round3.md`): realtime shadows; FLIP 0.1246. Next: light probes.
+  - Nav (`docs/poc0/extraction.md` §9, `tools/wr-import/src/nav`): every path query exact, smoothing included (the
+    native math ported from `UnityPlayer.dylib` and checked against it, `nav/native_check.rs`). Next: a `crates/wr-nav`
+    for the sim, then `UnitMovementAgent`.
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in
     parallel (recordings, POC-6 render comparisons, Metal captures of the original), never timing. Setup, sync and

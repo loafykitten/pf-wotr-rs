@@ -212,19 +212,27 @@ pub fn mul_vector(m: &M4, p: V3) -> V3 {
     [0, 1, 2].map(|i| r(d(m[i][0]) * d(p[0]) + d(m[i][1]) * d(p[1]) + d(m[i][2]) * d(p[2])))
 }
 
-/// Unity's native `Quaternion.Euler` (degrees, Z-X-Y order), in float.
+/// Unity's native `Quaternion.Euler` (degrees, Z-X-Y order), in float: the player's
+/// `EulerToQuaternion` multiplies `qy * qx`, then `* qz`, with every zero term of the
+/// general product kept (they only decide the sign of a zero). Rust's `sin_cos` gives the
+/// player's `__sincosf_stret` bit for bit (checked on every float in [-8, 8]).
 #[must_use]
 pub fn quat_euler(deg: V3) -> [f32; 4] {
-    let k = std::f32::consts::PI / 180.0 * 0.5;
-    let (sx, cx) = (deg[0] * k).sin_cos();
-    let (sy, cy) = (deg[1] * k).sin_cos();
-    let (sz, cz) = (deg[2] * k).sin_cos();
-    // q = qy * qx * qz.
+    // The managed side's `euler * Mathf.Deg2Rad`, then the native `* 0.5`.
+    let k = std::f32::consts::PI / 180.0;
+    let (sx, cx) = (deg[0] * k * 0.5).sin_cos();
+    let (sy, cy) = (deg[1] * k * 0.5).sin_cos();
+    let (sz, cz) = (deg[2] * k * 0.5).sin_cos();
+    let z = 0.0f32;
+    let ax = sy * z + (cx * z + sx * cy);
+    let ay = sx * z + (cx * sy + cy * z);
+    let az = ((cx * z + cy * z) + z) - sx * sy;
+    let aw = (cx * cy - sx * z) - sy * z;
     [
-        cy * sx * cz + sy * cx * sz,
-        sy * cx * cz - cy * sx * sz,
-        cy * cx * sz - sy * sx * cz,
-        cy * cx * cz + sy * sx * sz,
+        (sz * ay + (cz * ax + aw * z)) - az * z,
+        (az * z + (cz * ay + aw * z)) - sz * ax,
+        (ax * z + (sz * aw + cz * az)) - ay * z,
+        ((cz * aw - ax * z) - ay * z) - sz * az,
     ]
 }
 
@@ -245,7 +253,9 @@ pub fn trs(t: V3, q: [f32; 4], s: V3) -> M4 {
 }
 
 /// Unity's native general 4×4 inverse (Mesa's `invert_matrix_general`: Gaussian
-/// elimination with partial pivoting), in float. `None` if singular.
+/// elimination with partial pivoting), in float. `None` if singular. As in the player's
+/// code, the first two eliminations skip a zero multiplier only on the right half, and the
+/// third never does (that only decides the sign of a zero).
 #[must_use]
 #[expect(clippy::needless_range_loop, reason = "row operations over two columns of one matrix")]
 pub fn mat_inverse(m: &M4) -> Option<M4> {
@@ -270,7 +280,7 @@ pub fn mat_inverse(m: &M4) -> Option<M4> {
             let f = w[rk][col] / w[p][col];
             for c in col + 1..8 {
                 let s = w[p][c];
-                if s != 0.0 {
+                if c < 4 || col == 2 || s != 0.0 {
                     w[rk][c] -= f * s;
                 }
             }
