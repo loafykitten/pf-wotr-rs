@@ -16,6 +16,6 @@ pub mod string_hash;
 pub mod timespan;
 
 pub use decimal::Decimal;
-pub use dict::CsDict;
+pub use dict::{CsDict, RawSlot};
 pub use sort::{SortReport, introsort};
 pub use timespan::TimeSpan;

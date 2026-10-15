@@ -5,9 +5,11 @@
 //! Pure: generic over the unit key `K` (the sim's `EntityIdx`, or a recording's interned unique
 //! id) and the group key `G`. What the controller reads outside the memory (the ready groups, the
 //! units in vision range, line of sight, stealth, factions, the clocks, a unit's identity hash)
-//! comes through [`MemoryWorld`]; nothing here guesses it. Not wired into the driven replay yet:
-//! the recordings don't carry what the tick reads at each call (docs/poc5/memory.md, "Observer
-//! changes requested"), so the replay keeps taking the memory from WrathOracle's `leave_tick` rows.
+//! comes through [`MemoryWorld`], one method per read, asked in the game's order; nothing here
+//! guesses it. WrathOracle's `memory` observer records each of those reads and the memory after
+//! each step (`tick_tests.rs` reruns every recorded tick against them). Not wired into the driven
+//! replay yet (docs/poc5/memory.md, "H1: result", wiring notes): the replay keeps taking the
+//! memory from WrathOracle's `leave_tick` rows.
 //!
 //! The memory (`m_Units`) is a .NET `Dictionary<string, UnitInfo>` keyed by unique id: its
 //! enumeration order (slots, the LIFO free list) is [`CsDict`]'s. `UnitsList` and `Enemies` are
@@ -19,7 +21,7 @@
 use std::hash::Hash;
 
 use crate::csharp::arith::CsError;
-use crate::csharp::{CsDict, TimeSpan};
+use crate::csharp::{CsDict, RawSlot, TimeSpan};
 
 /// `9f.Seconds()` (`TimeSpan.FromSeconds(9.0)`, whole milliseconds): how long `Cleanup` keeps a unit
 /// that wasn't detected again.
@@ -288,6 +290,50 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     pub fn enemies_cache(&self) -> Option<&[K]> {
         self.enemies_valid.then_some(self.enemies.as_slice())
     }
+
+    /// A memory with this layout (WrathOracle's `mem_init` and `mem_s`); `None` when it isn't a
+    /// dictionary's ([`CsDict::from_slots`]).
+    #[must_use]
+    pub fn from_layout(l: MemoryLayout<K>) -> Option<Self> {
+        Some(Self {
+            units: CsDict::from_slots(l.slots, l.free_list, l.free_count)?,
+            units_list_valid: l.units_list.is_some(),
+            units_list: l.units_list.unwrap_or_default(),
+            enemies_valid: l.enemies.is_some(),
+            enemies: l.enemies.unwrap_or_default(),
+        })
+    }
+
+    /// The memory's layout: the dictionary's slots, its free list (-1 while no slot is free) and
+    /// both caches while valid.
+    #[must_use]
+    pub fn layout(&self) -> MemoryLayout<K> {
+        let (slots, free_list, free_count) = self.units.slots();
+        MemoryLayout {
+            slots: slots
+                .into_iter()
+                .map(|s| match s {
+                    RawSlot::Used(k, v) => RawSlot::Used(k, *v),
+                    RawSlot::Free(next) => RawSlot::Free(next),
+                })
+                .collect(),
+            free_list,
+            free_count,
+            units_list: self.units_list_cache().map(<[K]>::to_vec),
+            enemies: self.enemies_cache().map(<[K]>::to_vec),
+        }
+    }
+}
+
+/// A memory as the runtime holds it: `m_Units`' slots (`entries[0, count)`), `freeList` (-1 while
+/// no slot is free), `freeCount`, and the caches' contents while valid (`None`: invalid).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryLayout<K> {
+    pub slots: Vec<RawSlot<K, UnitInfo>>,
+    pub free_list: i32,
+    pub free_count: usize,
+    pub units_list: Option<Vec<K>>,
+    pub enemies: Option<Vec<K>>,
 }
 
 /// One entry of `Cleanup()`'s walk: its unit doesn't resolve, or wasn't detected for more than 9 s
@@ -400,7 +446,7 @@ impl<K: Copy + Eq> MemoryController<K> {
 }
 
 /// What `UnitMemoryController.Tick` reads and calls outside the memory. Each method is one read
-/// (or call) of the game's code, asked where the game asks it.
+/// (or call) of the game's code, asked where and in the order the game asks it.
 pub trait MemoryWorld<K, G> {
     type Error: From<MemError>;
     /// `LoadedAreaState.Settings.Peaceful`.
@@ -410,10 +456,16 @@ pub trait MemoryWorld<K, G> {
     /// `ExtractNearUnits`: the union of the group's members' `CanBeInVisionRange`, in the `HashSet`'s
     /// enumeration order (each member's set in its own order, first sight kept).
     fn near_units(&mut self, g: G) -> Result<Vec<K>, Self::Error>;
-    /// `nearUnit.Faction.Peaceful || nearUnit.Passive`.
-    fn ignored(&mut self, u: K) -> Result<bool, Self::Error>;
+    /// `nearUnit.Faction.Peaceful`.
+    fn faction_peaceful(&mut self, u: K) -> Result<bool, Self::Error>;
+    /// `(bool)nearUnit.Passive` (read only for a unit whose faction isn't peaceful).
+    fn passive(&mut self, u: K) -> Result<bool, Self::Error>;
     /// `unit.Group` (it runs `UpdateGroup`).
     fn group_of(&mut self, u: K) -> Result<G, Self::Error>;
+    /// `group.IsFake` (`Id == null`).
+    fn is_fake(&mut self, g: G) -> bool;
+    /// `UnitGroupsController.GetGroup(unit.GroupId)` (it can create the group).
+    fn group_by_id(&mut self, u: K) -> Result<G, Self::Error>;
     /// `unit.InStealthFor(group)`.
     fn in_stealth_for(&mut self, u: K, g: G) -> Result<bool, Self::Error>;
     /// `group.IsEnemy(unit)`.
@@ -432,19 +484,27 @@ pub trait MemoryWorld<K, G> {
     /// The loop over the group's members for an invisible target: a member that sees invisibility
     /// and has line of sight to it, or whose blindsense reaches it.
     fn sees_invisible(&mut self, g: G, u: K) -> Result<bool, Self::Error>;
-    /// `TimeController.GameTime`.
+    /// `TimeController.GameTime` (the game reads it at each use; nothing in the tick changes it).
     fn game_time(&mut self) -> Result<TimeSpan, Self::Error>;
     /// The group's memory.
-    fn memory(&mut self, g: G) -> &mut GroupMemory<K>;
-    /// `UnitInfo.Unit` (`UnitReference.Value`), as `Cleanup` reads it.
-    fn resolve(&mut self, u: K) -> Result<Resolved, Self::Error>;
+    fn memory(&mut self, g: G) -> Result<&mut GroupMemory<K>, Self::Error>;
+    /// `UnitInfo.Unit != null` (`UnitReference.Value`), as `Cleanup` reads it.
+    fn resolves(&mut self, u: K) -> Result<bool, Self::Error>;
+    /// `UnitInfo.Unit.IsInGame`, as `Cleanup` reads it.
+    fn in_game(&mut self, u: K) -> Result<bool, Self::Error>;
     /// `unit.IsDisposed`.
     fn disposed(&mut self, u: K) -> Result<bool, Self::Error>;
-    /// The group a queued addition goes to: `observer.Group.IsFake ?
-    /// UnitGroupsController.GetGroup(observer.GroupId) : observer.Group`.
-    fn observer_group(&mut self, u: K) -> Result<G, Self::Error>;
     /// `observer.Wake()` (`AwakeTimer = Max(0, AwakeTimer)`).
     fn wake(&mut self, u: K) -> Result<(), Self::Error>;
+    /// After a ready group's `Cleanup()` (nothing in the game: where a caller checks the group's
+    /// memory), with the keys it removed in removal order.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the caller's check reports.
+    fn cleaned(&mut self, _g: G, _removed: &[K]) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// `UnitMemoryController.Tick()`.
@@ -465,26 +525,17 @@ where
     let now = w.game_time()?;
     for g in w.ready_groups()? {
         for u in w.near_units(g)? {
-            if w.ignored(u)? {
+            if w.faction_peaceful(u)? || w.passive(u)? {
                 continue;
             }
             if w.group_of(u)? == g {
-                w.memory(g).add(u, now).last_detect_time = now;
+                w.memory(g)?.add(u, now).last_detect_time = now;
                 continue;
             }
             update_visibility(w, g, u, now)?;
         }
-        // `Cleanup()`, each entry resolved as the walk reaches it: a failure part way leaves what
-        // was collected in `s_UnitsForRemove`.
-        let keys: Vec<K> = w.memory(g).keys().collect();
-        for k in keys {
-            let resolved = w.resolve(k)?;
-            let info = *w.memory(g).find(k).expect("a key of the walk");
-            if cleanup_removes(&info, resolved, now)? {
-                ctl.cleanup_pending.push(k);
-            }
-        }
-        w.memory(g).cleanup_finish(&mut ctl.cleanup_pending);
+        let removed = cleanup_in_tick(ctl, w, g, now)?;
+        w.cleaned(g, &removed)?;
     }
     // The queue is cleared after the loop: a failure part way keeps every pair (as the game's
     // exception would).
@@ -496,12 +547,50 @@ where
         if w.in_stealth_for(t, og)? {
             continue;
         }
-        let g = w.observer_group(o)?;
-        w.memory(g).add(t, now).last_detect_time = now;
+        // `observer.Group.IsFake ? GetGroup(observer.GroupId) : observer.Group` (`Group` read again
+        // each time).
+        let og = w.group_of(o)?;
+        let g = if w.is_fake(og) { w.group_by_id(o)? } else { w.group_of(o)? };
+        w.memory(g)?.add(t, now).last_detect_time = now;
         w.wake(o)?;
     }
     ctl.units_for_add.clear();
     Ok(())
+}
+
+/// The group's `Cleanup()` as the tick runs it, each entry's reads as the game makes them: its
+/// unit (`value.Unit == null`), its detect time, then its unit again and `IsInGame`. The entries
+/// collected go to `s_UnitsForRemove` (`ctl.cleanup_pending`), so a failure part way leaves them
+/// there. Returns the keys removed, in removal order.
+fn cleanup_in_tick<K, G, W>(
+    ctl: &mut MemoryController<K>,
+    w: &mut W,
+    g: G,
+    now: TimeSpan,
+) -> Result<Vec<K>, W::Error>
+where
+    K: Copy + Eq + Hash,
+    G: Copy + Eq,
+    W: MemoryWorld<K, G>,
+{
+    let keys: Vec<K> = w.memory(g)?.keys().collect();
+    for k in keys {
+        let info = *w.memory(g)?.find(k).expect("a key of the walk");
+        // `value.Unit == null || LastDetectTime + 9 s < GameTime || !value.Unit.IsInGame`, the
+        // reference resolved again for the last test.
+        let gone = !w.resolves(k)?
+            || info.last_detect_time.checked_add(FORGET_AFTER).map_err(MemError::from)? < now
+            || {
+                if !w.resolves(k)? {
+                    return Err(MemError::NullReference.into());
+                }
+                !w.in_game(k)?
+            };
+        if gone {
+            ctl.cleanup_pending.push(k);
+        }
+    }
+    Ok(w.memory(g)?.cleanup_finish(&mut ctl.cleanup_pending))
 }
 
 /// `UpdateVisibility(group, target)` for a near unit of another group.
@@ -512,7 +601,7 @@ where
     W: MemoryWorld<K, G>,
 {
     if w.in_stealth_for(t, g)? {
-        w.memory(g).remove(t);
+        w.memory(g)?.remove(t);
         return Ok(());
     }
     // Friends are looked at on one frame in five, by their identity hash
@@ -526,19 +615,19 @@ where
     }
     if w.group_has_los(g, t)? {
         // Added and visible first; then the invisibility check (a failure there leaves that state).
-        w.memory(g).add(t, now).visible = true;
+        w.memory(g)?.add(t, now).visible = true;
         if w.invisible(t)? {
             let seen = w.sees_invisible(g, t)?;
-            if let Some(info) = w.memory(g).find_mut(t) {
+            if let Some(info) = w.memory(g)?.find_mut(t) {
                 info.visible = seen;
             }
         }
-        if let Some(info) = w.memory(g).find_mut(t).filter(|i| i.visible) {
+        if let Some(info) = w.memory(g)?.find_mut(t).filter(|i| i.visible) {
             info.last_detect_time = now;
         }
         return Ok(());
     }
-    if let Some(info) = w.memory(g).find_mut(t) {
+    if let Some(info) = w.memory(g)?.find_mut(t) {
         info.visible = false;
     }
     Ok(())
@@ -546,3 +635,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tick_tests;
