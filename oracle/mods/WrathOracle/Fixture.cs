@@ -59,6 +59,7 @@ internal static class Fixture
         PathSync.ResetWindow();
         ProjPin.ResetWindow();
         DeathFxPin.ResetWindow();
+        TieObs.ResetWindow();
         Sched.CaptureStartUnits();
         TurnBased.ResetWindow();
         LogObs.ResetWindow();
@@ -228,6 +229,10 @@ internal static class Fixture
                 j.Prop("death_effect_pins", DeathFxPin.Pinned);
                 j.Prop("dismember_effects", DeathFxPin.Inits);
                 j.Prop("root_rules_checked", Sched.RootsChecked);
+                j.Prop("init_tie_compares_turn", TieObs.TurnCompares);
+                j.Prop("init_tie_compares_prepare", TieObs.PrepareCompares);
+                j.Prop("init_ties_turn", TieObs.TurnTies);
+                j.Prop("init_ties_prepare", TieObs.PrepareTies);
             }
             if (replay)
             {

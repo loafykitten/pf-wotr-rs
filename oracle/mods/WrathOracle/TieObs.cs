@@ -27,6 +27,9 @@ namespace WrathOracle;
 // A Compare that made one call, or more than two, or whose result isn't the hashes' (ha >= hb ? -1 :
 // 1), or that threw after a hash call, writes init_tie_bad (why) instead: the recording then gives the
 // sim nothing to follow. Field reads only; nothing the game evaluates is called.
+// The end record counts, per comparer, its Compare calls in the window and the decisions among them
+// (init_tie_compares_turn/_prepare, init_ties_turn/_prepare), so a window without records shows
+// whether the comparers ran at all.
 internal static class TieObs
 {
     internal static bool Installed;
@@ -40,6 +43,10 @@ internal static class TieObs
     private static int _turnIndex, _prepareIndex;
     // GetHashCode calls the transpiler replaced (per patched method).
     private static int _replaced;
+    // In the window: each comparer's Compare calls that returned, and the decisions among them.
+    public static long TurnCompares, PrepareCompares, TurnTies, PrepareTies;
+
+    public static void ResetWindow() => TurnCompares = PrepareCompares = TurnTies = PrepareTies = 0;
 
     public static void Install(Harmony h)
     {
@@ -114,9 +121,18 @@ internal static class TieObs
     {
         var cmp = _cmp;
         _cmp = null;
-        if (cmp == null || _n == 0) return;
+        if (cmp == null) return;
+        var on = Sched.On;
+        if (on)
+        {
+            if (cmp == "turn") TurnCompares++;
+            else PrepareCompares++;
+        }
+        if (_n == 0) return;
         var i = cmp == "turn" ? _turnIndex++ : _prepareIndex++;
-        if (!Sched.On) return;
+        if (!on) return;
+        if (cmp == "turn") TurnTies++;
+        else PrepareTies++;
         try
         {
             string why = null;
