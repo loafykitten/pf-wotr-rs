@@ -91,6 +91,7 @@ internal static partial class CommandObs
         _atkCfg.Clear();
         Uct.Clear();
         ResetAgentWindow();
+        ResetMemWindow();
     }
 
     // ---- fields ----
@@ -313,6 +314,7 @@ internal static partial class CommandObs
             if (TgtOn) TgtInit();
             if (ImpOn) ImpInit();
             if (AgOn) AgInit();
+            if (MemOn) MemInit();
         }
         catch (Exception e) { Trace.HookFailed("observe uc_snap", e); }
     }
@@ -1683,5 +1685,8 @@ internal static partial class CommandObs
 
         // The movement agent (observer "agent", CommandObsAgent.cs).
         InstallAgent(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+
+        // Group memory (observer "memory", CommandObsMemory.cs).
+        InstallMemory(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
     }
 }

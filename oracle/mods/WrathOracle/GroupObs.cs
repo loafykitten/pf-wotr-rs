@@ -18,7 +18,8 @@ namespace WrathOracle;
 //  - group_state (first tick): every group of UnitGroupsController.Groups in order (its units, combat
 //    count, leave timer, the units its memory holds), and each unit's cached m_Group, in State.Units order;
 //  - group_new / group_add / group_remove / group_dispose: changes to the groups and their units;
-//  - mem_remove / mem_clear: memory removals (mem_add is in Observe);
+//  - mem_remove / mem_clear: memory removals (mem_add is in Observe); Cleanup's sorted by id, or in removal order with
+//    the memory observer (CommandObsMemory.cs), which also adds group_remove's caller chain (by);
 //  - turn_tick (CombatController.Tick's prefix, every call): WaitingForUI's count, m_IsUnitsChanged;
 //  - cooldowns (UnitCombatPrepareController.Tick's prefix): units' cooldowns, as changes, then cd_prefix;
 //  - leave_tick (UnitCombatLeaveController.Tick's prefix, every call): the turn-based gate's inputs, and each group's
@@ -240,7 +241,13 @@ internal static class GroupObs
             if (!Sched.On || __instance.IsFake || __instance.Disposed || unit == null) return;
             var ic = unit.IsInCombat;
             var had = GroupUnits(__instance).Any(r => r.UniqueId == unit.UniqueId);
-            Sched.Obs("group_remove", j => { j.Prop("group", __instance.Id); j.Prop("u", unit.UniqueId); j.Prop("had", had); j.Prop("in_combat", ic); });
+            // (With the memory observer, the caller chain: why the unit leaves.)
+            var by = CommandObs.MemOn ? Observe.Callers(4) : null;
+            Sched.Obs("group_remove", j =>
+            {
+                j.Prop("group", __instance.Id); j.Prop("u", unit.UniqueId); j.Prop("had", had); j.Prop("in_combat", ic);
+                if (by != null) j.Prop("by", by);
+            });
         }
         catch (Exception e) { Trace.HookFailed("observe group_remove", e); }
     }
@@ -266,21 +273,48 @@ internal static class GroupObs
         catch (Exception e) { Trace.HookFailed("observe mem_remove", e); }
     }
 
-    public static void MemoryCleanupPrefix(UnitGroupMemory __instance, out List<string> __state)
+    // UnitGroupMemory.s_UnitsForRemove: Cleanup collects into it and removes in its order (it's static: what an
+    // exception left there is removed by the next Cleanup of any memory, first).
+    private static readonly System.Reflection.FieldInfo UnitsForRemove = AccessTools.Field(typeof(UnitGroupMemory), "s_UnitsForRemove");
+
+    public sealed class CleanupState
+    {
+        public List<string> Keys;
+        public List<string> Pending;
+    }
+
+    public static void MemoryCleanupPrefix(UnitGroupMemory __instance, out CleanupState __state)
     {
         __state = null;
-        try { if (Sched.On) __state = MemoryUnits(__instance).Keys.ToList(); }
+        try
+        {
+            if (!Sched.On) return;
+            var pending = CommandObs.MemOn && UnitsForRemove?.GetValue(null) is List<UnitGroupMemory.UnitInfo> l
+                ? l.Select(i => i?.UnitReference.UniqueId).ToList()
+                : new List<string>();
+            __state = new CleanupState { Keys = MemoryUnits(__instance).Keys.ToList(), Pending = pending };
+        }
         catch (Exception e) { Trace.HookFailed("observe mem_remove", e); }
     }
 
-    public static void MemoryCleanupPostfix(UnitGroupMemory __instance, List<string> __state)
+    public static void MemoryCleanupPostfix(UnitGroupMemory __instance, CleanupState __state)
     {
         if (__state == null) return;
         try
         {
             var now = MemoryUnits(__instance);
             var g = MemoryGroupId(__instance);
-            foreach (var id in __state.Where(x => !now.ContainsKey(x)).OrderBy(x => x, StringComparer.Ordinal))
+            IEnumerable<string> gone;
+            if (CommandObs.MemOn)
+            {
+                // In removal order (the memory observer): what was left pending first, then the keys collected, in
+                // the dictionary's order.
+                var seen = new HashSet<string>();
+                gone = __state.Pending.Concat(__state.Keys)
+                    .Where(x => x != null && __state.Keys.Contains(x) && !now.ContainsKey(x) && seen.Add(x)).ToList();
+            }
+            else gone = __state.Keys.Where(x => !now.ContainsKey(x)).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            foreach (var id in gone)
                 Sched.Obs("mem_remove", j => { j.Prop("group", g); j.Prop("u", id); j.Prop("by", "Cleanup"); });
         }
         catch (Exception e) { Trace.HookFailed("observe mem_remove", e); }

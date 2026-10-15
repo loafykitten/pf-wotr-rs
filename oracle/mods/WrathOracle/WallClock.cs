@@ -108,6 +108,9 @@ internal static class WallClock
         return Time.frameCount + _shift;
     }
 
+    // What Frame() returns, without counting a read (the memory observer's record of the frame UpdateVisibility reads).
+    internal static int PeekFrame() => ReplayActive ? Time.frameCount + _shift : Time.frameCount;
+
     // DOTween measures its wall-clock delta as the difference of Time.realtimeSinceStartup between
     // two frames (two reads per Update, the second one stored for the next frame). In a window it is a
     // fixed small base plus the fixed frame deltas, so every run sees the same float sums (at the
@@ -255,6 +258,8 @@ internal static class WallClock
     // UnitEntityData does not override GetHashCode, so that is the object's identity hash. A recording
     // returns the native value and records it (once per unit); a replay returns the recording's value for
     // that unit id (tape loaded at its "prepare"), else the native one. Only these calls are replaced.
+    // With the memory observer a replay records them too (on first use, the value returned, and whether it was the
+    // tape's), so a replay's run carries its own.
     private static readonly HashSet<string> _hashSeen = new HashSet<string>();
 
     public static int UnitHash(object o)
@@ -262,8 +267,21 @@ internal static class WallClock
         var native = o.GetHashCode();
         if (!(o is Kingmaker.EntitySystem.Entities.UnitEntityData u)) return native;
         var tape = Sched.HashTape;
-        if (tape != null && tape.TryGetValue(u.UniqueId, out var h)) return h;
-        if (Sched.On && !Sched.Replay && _hashSeen.Add(u.UniqueId)) Sched.Obs("hash", j => { j.Prop("u", u.UniqueId); j.Prop("h", native); });
+        if (tape != null && tape.TryGetValue(u.UniqueId, out var h))
+        {
+            if (Sched.On && Sched.Replay && CommandObs.MemOn && _hashSeen.Add(u.UniqueId))
+            {
+                var id = u.UniqueId;
+                Sched.Obs("hash", j => { j.Prop("u", id); j.Prop("h", h); j.Prop("tape", true); });
+            }
+            return h;
+        }
+        if (Sched.On && (!Sched.Replay || CommandObs.MemOn) && _hashSeen.Add(u.UniqueId))
+        {
+            var id = u.UniqueId;
+            var replay = Sched.Replay;
+            Sched.Obs("hash", j => { j.Prop("u", id); j.Prop("h", native); if (replay) j.Prop("tape", false); });
+        }
         return native;
     }
 
