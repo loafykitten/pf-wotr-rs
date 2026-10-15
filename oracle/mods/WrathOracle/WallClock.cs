@@ -254,10 +254,11 @@ internal static class WallClock
     }
 
     // UnitMemoryController.UpdateVisibility checks friends' visibility only on frames where Time.frameCount % 5
-    // equals (target.GetHashCode() >>> 2) % 5, and both initiative comparers end with the units' hashes.
-    // UnitEntityData does not override GetHashCode, so that is the object's identity hash. A recording
-    // returns the native value and records it (once per unit); a replay returns the recording's value for
-    // that unit id (tape loaded at its "prepare"), else the native one. Only these calls are replaced.
+    // equals (target.GetHashCode() >>> 2) % 5, and both initiative comparers end with the units' hashes
+    // (their calls reach here through TieObs.TieHash). UnitEntityData's GetHashCode is the base one, the
+    // object's identity hash. A recording returns the native value and records it (once per unit); a replay
+    // returns the recording's value for that unit id (tape loaded at its "prepare"), else the native one.
+    // Only these calls are replaced, and each still makes the game's own native call.
     // With the memory observer a replay records them too (on first use, the value returned, and whether it was the
     // tape's), so a replay's run carries its own.
     private static readonly HashSet<string> _hashSeen = new HashSet<string>();
@@ -534,9 +535,8 @@ internal static class WallClock
         }
         One("Kingmaker.Controllers.Units.UnitMemoryController", "UpdateVisibility", nameof(UnitHashTranspiler));
         One("TurnBased.Controllers.CombatController", "UpdateNavigationGrid", nameof(NavTranspiler));
-        // The last tie-break of the initiative order is the units' identity hashes.
-        One("TurnBased.Controllers.CombatController+UnitsOrderComaprer", "Compare", nameof(UnitHashTranspiler));
-        One("Kingmaker.Controllers.Combat.UnitCombatPrepareController+UnitEntityOrderComaprer", "Compare", nameof(UnitHashTranspiler));
+        // The last tie-break of the initiative order is the units' identity hashes: TieObs transpiles both
+        // comparers' calls to UnitHash (and records their decisions).
         var rig = FindCallers(AccessTools.PropertyGetter(typeof(Time), nameof(Time.time)), (a, managed) => a.GetName().Name == "Assembly-CSharp")
             .Where(m => (m.DeclaringType?.FullName ?? "").StartsWith("Kingmaker.View.CameraRig", StringComparison.Ordinal)).ToList();
         var rigTr = new HarmonyMethod(typeof(WallClock), nameof(RigTimeTranspiler));
