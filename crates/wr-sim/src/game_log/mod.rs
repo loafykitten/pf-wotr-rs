@@ -389,10 +389,12 @@ pub struct Msg {
 /// What the sim's log did, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Out {
-    /// `AddReadyEvent` (an event index).
+    /// `AddReadyEvent` (an event index), with the experience and damage mutations the sim had
+    /// written by then (its place among the gameplay records).
     Queued {
         frame: i64,
         event: usize,
+        muts: usize,
     },
     /// `Tick` with something queued or open: the queue (event index, `IsEnabled`), the open
     /// stack's size.
@@ -538,7 +540,8 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
             weapon_item: r.weapon.item,
             weapon_bp: r.weapon.bp.guid,
             d20: r.d20,
-            d20_roll: first_d20(w, ev, r.d20),
+            // An auto miss rolls no `D20` (null).
+            d20_roll: if r.auto_miss { Roll::Null } else { first_d20(w, ev, r.d20) },
             attack_bonus: r.attack_bonus,
             target_ac: r.target_ac,
             result: r.result,
@@ -641,6 +644,7 @@ fn first_d20(w: &World, ev: usize, result: i32) -> Roll {
 /// `DisableBattleLog`) and no `GameLogDisabled` scope; `GameLogContext.Message` as the
 /// override; queued. The scope it opens clears the context when it is the outermost.
 fn add_ready(w: &mut World, e: usize) {
+    let muts = w.events.records.iter().filter(|r| r.k == "mut" && counted_mut(&r.fields)).count();
     let gl = &mut w.game_log;
     gl.retain();
     // `GameLogDisabled` and the rules' and units' `DisableBattleLog` aren't set where the sim runs
@@ -651,8 +655,15 @@ fn add_ready(w: &mut World, e: usize) {
     }
     gl.events[e].queued = Some(gl.frame);
     gl.ready.push(e);
-    gl.out.push(Out::Queued { frame: gl.frame, event: e });
+    gl.out.push(Out::Queued { frame: gl.frame, event: e, muts });
     gl.release();
+}
+
+/// A mutation whose count places a non-rule event among the gameplay records: experience or
+/// damage (written alike by the sim and the recording).
+#[must_use]
+pub fn counted_mut(fields: &serde_json::Map<String, serde_json::Value>) -> bool {
+    matches!(fields.get("what").and_then(serde_json::Value::as_str), Some("xp" | "damage"))
 }
 
 /// A non-rule event raised through the event bus (its `GameEventsHandler.AddEvent`).
@@ -932,7 +943,9 @@ fn text_of(w: &World, path: &str) -> Result<String, TextError> {
     localized(w, &key)
 }
 
-fn localized(w: &World, key: &str) -> Result<String, TextError> {
+/// A `LocalizedString` with actual key `key`, converted inside the log's scope (`mf` reads its
+/// source unit first).
+pub(crate) fn localized(w: &World, key: &str) -> Result<String, TextError> {
     if key.is_empty() {
         return Ok(String::new());
     }
@@ -1342,7 +1355,7 @@ fn log_unit(w: &World, u: EntityIdx) -> Result<LogUnit, TextError> {
     let bp =
         unit.blueprint.ok_or_else(|| TextError::Unsupported("unit without blueprint".into()))?;
     Ok(LogUnit {
-        name: crate::text::character_name(w, u)?,
+        name: names::character_name(w, u)?,
         color_rgb: crate::text::blueprint_color_html(w, bp)?,
     })
 }

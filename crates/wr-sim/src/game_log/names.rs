@@ -8,12 +8,46 @@ use wr_text::TextError;
 use crate::content::View;
 use crate::world::{EntityIdx, World};
 
+fn bp_of(
+    w: &World,
+    g: wr_content::Guid,
+) -> Result<std::rc::Rc<crate::content::Blueprint>, TextError> {
+    bp(w, g)
+}
+
 fn bp(w: &World, g: wr_content::Guid) -> Result<std::rc::Rc<crate::content::Blueprint>, TextError> {
     w.content.get(g).ok_or_else(|| TextError::Unsupported(format!("blueprint {g} missing")))
 }
 
+/// A `LocalizedString` field as a string, converted in the log's scope (a null field is
+/// `"<null>"`, as the implicit conversion writes it).
 fn loc(w: &World, v: View<'_>, field: &str) -> Result<String, TextError> {
-    crate::text::localized_field(w, v, field)
+    match v.obj(field) {
+        Some(s) => super::localized(w, s.str("m_Key").unwrap_or("")),
+        None => Ok("<null>".to_owned()),
+    }
+}
+
+/// `UnitDescriptor.CharacterName` (`crate::text::character_name`), its localized names converted
+/// in the log's scope.
+///
+/// # Errors
+///
+/// As [`item_name`].
+pub fn character_name(w: &World, u: EntityIdx) -> Result<String, TextError> {
+    let unit = w.unit(u).ok_or_else(|| TextError::Unsupported("not a unit".into()))?;
+    let bp = match unit.replace_blueprint_for_inspection {
+        Some(r) => r,
+        None if !unit.custom_name.is_empty() => return Ok(unit.custom_name.clone()),
+        None => {
+            unit.blueprint.ok_or_else(|| TextError::Unsupported("unit without blueprint".into()))?
+        }
+    };
+    let b = bp_of(w, bp)?;
+    match crate::text::shared_string_key(w, b.view(), "LocalizedName")? {
+        Some(k) => super::localized(w, &k),
+        None => Ok("-unit name not set-".to_owned()),
+    }
 }
 
 /// `LocalizedString.IsSet()`: the current pack's text for the string's key (`GetText(key,

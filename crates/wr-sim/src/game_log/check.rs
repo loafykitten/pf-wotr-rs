@@ -543,6 +543,74 @@ pub fn compare(
             );
         }
     }
+    // A non-rule event: raised where the game raises it (its handler and raiser in its caller
+    // chain) and, for one the sim raises, after as many experience and damage mutations as the
+    // sim had written.
+    let mut rec_muts = Vec::new();
+    let mut n_muts = 0_usize;
+    for r in recs {
+        if r["k"] == "mut" && r.as_object().is_some_and(super::counted_mut) {
+            n_muts += 1;
+        }
+        if r["k"] == "obs" && r["ev"] == "clog_q" && r["rule"].is_null() {
+            let origin = r["origin"].as_str().unwrap_or("");
+            let frames: Vec<&str> = origin.split('<').collect();
+            let raiser = match r["e"].as_str() {
+                Some("GameLogEventPartyGainExperience") => {
+                    Some(("HandlePartyGainExperience", "Player.GainPartyExperience"))
+                }
+                Some("GameLogEventUnitLifeStateChanged") => {
+                    Some(("HandleUnitLifeStateChanged", "UnitLifeController.RaiseLifestateChanged"))
+                }
+                Some("GameLogEventKnowledge") => {
+                    Some(("HandleKnowledgeUpdated", "InspectUnitsManager.TryMakeKnowledgeCheck"))
+                }
+                Some("GameLogEventCombatStateChanged" | "GameLogEventPartyCombatState") => {
+                    Some(("HandlePartyCombatStateChanged", "Player.UpdateIsInCombat"))
+                }
+                Some("GameLogEventAttackOfOpportunity") => {
+                    Some(("HandleAttackOfOpportunity", "UnitCombatState.AttackOfOpportunity"))
+                }
+                Some("GameLogEventProjectileHit") => {
+                    Some(("HandleProjectileHit", "Projectile.OnHit"))
+                }
+                Some("GameLogEventBark") => Some(("HandleOnShowBark", "")),
+                _ => None,
+            };
+            let placed = raiser.is_some_and(|(h, by)| {
+                frames.first() == Some(&"GameLogController.AddReadyEvent")
+                    && frames.get(1) == Some(&"GameEventsHandler.AddEvent")
+                    && frames.get(2) == Some(&format!("EventsHandler.{h}").as_str())
+                    && (by.is_empty() || frames.iter().any(|f| f.contains(by)))
+            });
+            if !placed {
+                diff(w, &mut s, format!("a {} event raised elsewhere ({origin})", r["e"]));
+            }
+            rec_muts.push(Some(n_muts));
+        } else if r["k"] == "obs" && r["ev"] == "clog_q" {
+            rec_muts.push(None);
+        }
+    }
+    let sim_muts: Vec<Option<usize>> = w
+        .game_log
+        .out
+        .iter()
+        .filter_map(|o| match o {
+            Out::Queued { event, muts, .. } => Some(
+                (w.game_log.events[*event].rule_id.is_none()
+                    && super::check::raised_by_sim(&w.game_log.events[*event].ty.name()))
+                .then_some(*muts),
+            ),
+            _ => None,
+        })
+        .collect();
+    for (k, (a, b)) in rec_muts.iter().zip(&sim_muts).enumerate() {
+        if let (Some(a), Some(b)) = (a, b)
+            && a != b
+        {
+            diff(w, &mut s, format!("queued event #{k} after {a} mutations, the sim's after {b}"));
+        }
+    }
     let sim_kinds: Vec<char> = w
         .game_log
         .out
@@ -565,7 +633,7 @@ pub fn compare(
     let sq: Vec<(i64, usize)> = out
         .iter()
         .filter_map(|o| match o {
-            Out::Queued { frame, event } => Some((*frame, *event)),
+            Out::Queued { frame, event, .. } => Some((*frame, *event)),
             _ => None,
         })
         .collect();

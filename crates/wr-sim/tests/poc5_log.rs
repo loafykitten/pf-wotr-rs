@@ -87,7 +87,7 @@ const C: &str = "driven replay: commands:";
 type Change = fn(&mut Vec<V>);
 
 /// The damaged recordings, each with the report it must make.
-const CASES: [(&str, Change); 47] = [
+const CASES: [(&str, Change); 49] = [
     // Messages.
     (L, |recs| {
         let at = nth(recs, "clog_msg", 3);
@@ -304,6 +304,20 @@ const CASES: [(&str, Change); 47] = [
     (L, |recs| {
         let at = first_q(recs, "GameLogEventProjectileHit");
         recs[at]["f"]["Projectile"]["extra"] = json!(1);
+    }),
+    // A party's experience event before the last experience the party gained, and raised by
+    // another caller.
+    (L, |recs| {
+        let at = first_q(recs, "GameLogEventPartyGainExperience");
+        let xp = (0..at).rev().find(|&i| recs[i]["k"] == "mut" && recs[i]["what"] == "xp");
+        let r = recs.remove(at);
+        recs.insert(xp.unwrap_or(at), r);
+        renumber(recs);
+    }),
+    (L, |recs| {
+        let at = first_q(recs, "GameLogEventPartyGainExperience");
+        let o = recs[at]["origin"].as_str().unwrap_or("").replace("GainPartyExperience", "Other");
+        recs[at]["origin"] = json!(o);
     }),
 ];
 
