@@ -76,7 +76,13 @@ pub enum PhysCtx {
     Agent,
     Simulation,
     Span,
+    /// Another caller's (`ctx: "other"`: a critter's move, presentation): the sim doesn't use the
+    /// answer, so one `wr-phys` can't give is taken, not reported; one it gives is checked.
+    Other,
 }
+
+/// A recorded definition of a path: its points, `error`, `CompleteState`.
+type Def = (Vec<V3>, bool, i64);
 
 /// A request the sim's agent made, waiting for its search (`path_fin`).
 #[derive(Debug, Clone)]
@@ -142,6 +148,17 @@ pub struct NavDriver {
     /// and the path each request replaced.
     seeker: HashMap<String, String>,
     replaced: HashMap<String, String>,
+    /// Definitions of a path recorded before the sim registered its request (a worker can finish
+    /// before `ag_req_end`): its kind, and its points with `error` and `CompleteState` when given.
+    early: HashMap<String, Vec<(String, Option<Def>)>>,
+    /// The trace records the movement simulation's steps (`ag_sim`); the last step the sim ran
+    /// (`maxMoveLength`, its result, the simulator after it), not yet read by the AI.
+    has_steps: bool,
+    last_step: Option<(f32, bool, MovementSimulator)>,
+    /// Critters' requests (`path_critter`), and requests started inside spans taken from the
+    /// recording.
+    critters: std::collections::HashSet<String>,
+    taken: std::collections::HashSet<String>,
 }
 
 /// A replay's recording's navigation timer and clock reads (`record.trace.jsonl.gz` beside its
@@ -232,6 +249,8 @@ impl Driver<'_> {
     pub(super) fn nav_start(&mut self, w: &mut World) {
         let trace = self.trace;
         let begin = trace.records.iter().find(|r| r["k"] == "begin");
+        self.ags.nav.has_steps =
+            trace.records.iter().any(|r| r["k"] == "obs" && r["ev"] == "ag_sim");
         // The global query settings `wr-phys` answers with (observer `phys_probe`): back faces
         // not hit (a mesh's would be; the terrain's rays come from above). Triggers fail closed
         // there either way.
@@ -363,7 +382,15 @@ impl Driver<'_> {
 
     /// A path whose request the window started (`path_start`) or carried from real time.
     fn nav_known(&self, key: &str) -> bool {
-        self.ags.started.contains(key) || self.ags.carried.contains(key)
+        self.ags.started.contains(key)
+            || self.ags.carried.contains(key)
+            || self.ags.nav.critters.contains(key)
+    }
+
+    /// A request started inside a span taken from the recording (`path_start` skipped): its
+    /// path is the recording's.
+    pub(super) fn nav_taken_request(&mut self, key: &str) {
+        self.ags.nav.taken.insert(key.to_owned());
     }
 
     /// The grid is the sim's from the window's start and can be used.
@@ -499,6 +526,13 @@ impl Driver<'_> {
                 self.nav_match(w);
             }
             "nav_clock" => self.nav_clock(w, r),
+            // A critter's request (`CritterMoveAgent`: presentation, its path not the sim's).
+            "path_critter" => match r["path"].as_str() {
+                Some(k) if fields(r, &["path", "e"]) => {
+                    self.ags.nav.critters.insert(k.to_owned());
+                }
+                _ => Self::nav_unsupported(w, "a critter's request it can't read"),
+            },
             "path_fin" => self.nav_path_fin(w, r),
             "path_seek" => self.nav_path_seek(w, r),
             "path_mod" => self.nav_path_mod(w, r),
@@ -623,7 +657,14 @@ impl Driver<'_> {
             self.ags.nav.failed.insert(old, ());
         }
         let log_len = w.combat.nav.nav.as_ref().map_or(0, |n| n.log.len());
-        let p = Pending { req: tb_request(q), log_len, defs: Vec::new() };
+        let mut defs = Vec::new();
+        for (kind, def) in self.ags.nav.early.remove(&q.key).unwrap_or_default() {
+            if kind != "ABPathWithClearance" {
+                Self::nav_unsupported(w, format!("{}: a definition of a {kind} path", q.key));
+            }
+            defs.extend(def);
+        }
+        let p = Pending { req: tb_request(q), log_len, defs };
         if self.ags.nav.pending.insert(q.key.clone(), p).is_some()
             || self.ags.nav.computed.contains_key(&q.key)
         {
@@ -663,6 +704,10 @@ impl Driver<'_> {
             // A request of real time (taken) or of code the sim doesn't run.
             if !self.nav_known(&key) {
                 Self::nav_unsupported(w, format!("{key}: a path no request started"));
+            } else if self.ags.nav.critters.contains(&key) {
+                self.ag_input("a critter's path (presentation)");
+            } else if self.ags.nav.taken.contains(&key) {
+                self.ag_input("a path whose request was taken from the recording");
             } else if r["kind"] == "ABPathWithClearance" && w.combat.turn_based && self.ags.synced {
                 Self::nav_unsupported(
                     w,
@@ -885,16 +930,29 @@ impl Driver<'_> {
         w: &mut World,
         key: &str,
         kind: &str,
-        v: &[V3],
-        err: bool,
-        cs: i64,
+        def: Option<(&[V3], bool, i64)>,
     ) -> bool {
+        if !self.ags.nav.paths {
+            return false;
+        }
         // The sim's requests are `ABPathWithClearance`s.
         let ours =
             self.ags.nav.pending.contains_key(key) || self.ags.nav.computed.contains_key(key);
-        if ours && kind != "ABPathWithClearance" {
+        if !ours {
+            // Before its request is registered (or of a request the sim doesn't make): kept for
+            // its registration.
+            self.ags
+                .nav
+                .early
+                .entry(key.to_owned())
+                .or_default()
+                .push((kind.to_owned(), def.map(|(v, e, c)| (v.to_vec(), e, c))));
+            return false;
+        }
+        if kind != "ABPathWithClearance" {
             Self::nav_unsupported(w, format!("{key}: a definition of a {kind} path"));
         }
+        let Some((v, err, cs)) = def else { return true };
         if let Some(p) = self.ags.nav.pending.get_mut(key) {
             p.defs.push((v.to_vec(), err, cs));
             return true;
@@ -1062,7 +1120,11 @@ impl Driver<'_> {
         let got = match got {
             Ok(g) => g,
             Err(e) => {
-                w.coverage.unsupported(format!("driven replay: physics: {e}"));
+                if ctx == PhysCtx::Other {
+                    self.ag_input("physics of code the sim doesn't run (unanswered)");
+                } else {
+                    w.coverage.unsupported(format!("driven replay: physics: {e}"));
+                }
                 self.out.nav.phys_taken += 1;
                 return Ok(recorded);
             }
@@ -1100,7 +1162,7 @@ impl Driver<'_> {
         match ctx {
             PhysCtx::Agent => self.out.nav.phys_tick += 1,
             PhysCtx::Simulation => self.out.nav.phys_sim += 1,
-            PhysCtx::Span => self.out.nav.phys_span += 1,
+            PhysCtx::Span | PhysCtx::Other => self.out.nav.phys_span += 1,
         }
         Ok(got.map(|(h, ..)| h.distance))
     }
@@ -1167,6 +1229,7 @@ impl Driver<'_> {
             return i + 1;
         };
         self.i = i + 1;
+        self.ags.nav.last_step = None;
         let res = (|| {
             let ret = ai_sim::simulate_tick_movement_for_turn_based(
                 w,
@@ -1203,10 +1266,13 @@ impl Driver<'_> {
                     describe(e)
                 )));
             }
-            Ok(())
+            Ok(ret)
         })();
         match res {
-            Ok(()) => self.out.nav.sim_steps += 1,
+            Ok(ret) => {
+                self.out.nav.sim_steps += 1;
+                self.ags.nav.last_step = Some((max, ret, sim.clone()));
+            }
             Err(d) => {
                 w.coverage.unsupported(format!("driven replay: agent: {}", d.0));
                 // The rest of the step's records, up to its end in its frame, are skipped (any
@@ -1273,6 +1339,33 @@ impl Driver<'_> {
             );
             // (Paired from here on as they come.)
         }
+    }
+
+    /// The AI's read of `ScorePath`'s simulation step (`msim`): the step the sim just ran.
+    pub(super) fn nav_ai_msim(&mut self, max: f32, step: &crate::combat::ai::SimStep) -> R<()> {
+        if !self.ag {
+            return Ok(());
+        }
+        let Some((m, ret, sim)) = self.ags.nav.last_step.take() else {
+            if self.ags.nav.has_steps {
+                return Err(Desync("ScorePath's simulation step without the sim's step".into()));
+            }
+            self.ag_input("ScorePath's simulation step (no step recorded)");
+            return Ok(());
+        };
+        let same = m.to_bits() == max.to_bits()
+            && ret == step.ret
+            && bits3(sim.m_position) == bits3(step.position)
+            && sim.last_move_length.to_bits() == step.last_move_length.to_bits()
+            && sim.reached_max_distance == step.reached_max
+            && sim.waypoint_index == step.waypoint;
+        if !same {
+            return Err(Desync(format!(
+                "ScorePath's simulation step: the sim's {ret} with {sim:?} (max {m}), the AI's {step:?} (max {max})"
+            )));
+        }
+        self.out.nav.deliveries += 1;
+        Ok(())
     }
 
     pub(super) fn nav_finish(&mut self, w: &mut World) {

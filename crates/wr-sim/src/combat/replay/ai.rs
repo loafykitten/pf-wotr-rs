@@ -460,7 +460,12 @@ impl AiInputs for Driver<'_> {
                 Some(last_move_length),
                 Some(reached_max),
                 Some(waypoint),
-            ) => Ok(SimStep { ret, position, last_move_length, reached_max, waypoint }),
+            ) => {
+                let step = SimStep { ret, position, last_move_length, reached_max, waypoint };
+                // The step the sim ran (the agent driven).
+                self.nav_ai_msim(max, &step)?;
+                Ok(step)
+            }
             _ => self.uc_reject(
                 at,
                 format!("a movement simulation step of {max}: the recording has another"),

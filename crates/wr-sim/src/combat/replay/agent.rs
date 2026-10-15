@@ -475,6 +475,9 @@ impl Driver<'_> {
         }
         if r["k"] == "obs" && r["ev"] == "path_start" {
             self.ag_count_request(r);
+            if let Some(k) = r["path"].as_str() {
+                self.nav_taken_request(k);
+            }
         }
     }
 
@@ -721,6 +724,10 @@ impl Driver<'_> {
             // the path visualizer): each step the sim's from its recorded simulator
             // (`replay/nav.rs`); in real time its physics the sim's, its reads inputs.
             "ag_sim" => return self.nav_sim_step(w, i),
+            // A query of another caller (a critter's move): the sim's answer checked when it has one.
+            "ag_phys" if r["ctx"] == "other" => {
+                self.nav_phys_alone(w, r, super::nav::PhysCtx::Other);
+            }
             "ag_phys" if r["ctx"] == "sim" && !w.combat.turn_based => {
                 self.nav_phys_alone(w, r, super::nav::PhysCtx::Span);
             }
@@ -749,13 +756,20 @@ impl Driver<'_> {
             return;
         };
         if r["pending"] == true {
+            // (The path's kind is known before its points.)
+            match r["kind"].as_str() {
+                Some(kind) if fields(r, &["path", "kind", "pending"]) => {
+                    self.nav_def(w, k, kind, None);
+                }
+                _ => Self::ag_unsupported(w, "a path definition it can't read"),
+            }
             return;
         }
         let pts: Option<Vec<V3>> = r["v"].as_array().and_then(|v| v.iter().map(v3).collect());
         match (pts, r["err"].as_bool(), r["cs"].as_i64(), r["kind"].as_str(), r["pid"].as_i64()) {
             (Some(p), Some(err), Some(cs), Some(kind), Some(pid)) => {
                 // A path the sim computes: the definition is a check.
-                self.nav_def(w, k, kind, &p, err, cs);
+                self.nav_def(w, k, kind, Some((&p, err, cs)));
                 self.ags.paths.insert(k.to_owned(), p);
                 self.ags.defs.insert(k.to_owned(), (err, cs, kind.to_owned(), pid));
             }

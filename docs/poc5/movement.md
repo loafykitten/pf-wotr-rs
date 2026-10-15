@@ -288,7 +288,9 @@ point and collider (`scene:path (type)`, the importer's shape name, which must n
 sibling path `sib` must have an index per ancestor: the file keeps no sibling indices), bit for bit. Inside `TickMovement`'s `Move` the
 query's arguments are the sim's (`AgentPhysics` answered by the driver); inside a movement simulation step the sim
 runs (below) likewise; inside a span the driven replay takes from the recording (real time: the walk-up, the agent's
-code isn't run there) the arguments are the recording's and only the answer is checked. A query `wr-phys` answers
+code isn't run there) the arguments are the recording's and only the answer is checked; so are another caller's
+(`ctx: "other"`: a critter's move, presentation), except that one `wr-phys` can't answer is taken there, not
+reported (the sim never uses it). A query `wr-phys` answers
 `Unverified` (a box, a mesh or another collider within reach) or `Unsupported` is reported (`driven replay:
 physics: ...`) and the recorded answer taken; none occurs here. With observer `phys_probe` the recorded global query
 settings must be `wr-phys`'s (`ph_settings`: back faces not hit; triggers fail closed in `wr-phys` either way).
@@ -298,8 +300,9 @@ settings must be `wr-phys`'s (`ph_settings`: back faces not hit; triggers fail c
 `FlyHeight` and line of sight are its records (inputs), its physics the sim's, its `GetNearest(p).node.AllyBlocked`
 the sim's grid (with `paths`; before, the record's), and the simulator after it and the result are compared with
 `ag_sim_end`. A simulation record outside a step is reported (in turn-based combat); in real time the steps are
-inputs and their physics checked. The AI still takes `ScorePath`'s step results from its own leaves (the AI isn't
-driven through the step yet: `docs/poc5/ai-movement.md`); these captures' steps cover the shift, the cap at the
+inputs and their physics checked. The AI still reads `ScorePath`'s step results from its own leaves (`msim`; the
+AI isn't driven through the step yet: `docs/poc5/ai-movement.md`), each now required to be the step the sim just ran
+(`maxMoveLength`, the result and the simulator after it); these captures' steps cover the shift, the cap at the
 movement left (`ReachedMaxDistance`), the approach radius entered (`SegmentCircleIntersection`, with line of sight),
 waypoint advances and the path's end.
 
@@ -335,7 +338,8 @@ that replaces its seeker's path still in flight (`StartPathInternal` fails it un
 isn't recorded). Line of sight is
 answered from `path_fin`'s transcript, each call's arguments checked and every answer used (an input:
 `LineOfSightGeometry` isn't ported); a request with `distanceXZ` must give the same path without it. Checked: the
-traced nodes, `error`, `CompleteState`, `searchedNodes`, the end node's grid index, each definition (`ag_pathdef`: the traced nodes before the
+traced nodes, `error`, `CompleteState`, `searchedNodes`, the end node's grid index, each definition (its
+kind too, also of a definition written before the sim registered the request: a worker can finish first) (`ag_pathdef`: the traced nodes before the
 seeker's modifiers ran, the delivered path after), the seeker's decision (`path_seek`: `OnPathComplete(Path)` runs the modifiers and calls back,
 taking the path if it is still the seeker's latest request, from the window's `path_start`s) and modifiers
 (`path_mod`), and
@@ -343,12 +347,14 @@ every delivery: `OnPathComplete` (`ag_done`) **runs on the sim's path** (the rec
 (`ag_findclr`) must be one the seeker makes, and the AI's `ScorePath` read (`uc_v path`) must be the sim's path of the AI's `FindPath`, or,
 when `FixPathIfTooShort` made a fake path, the sim's path must be one it replaces (fewer than two points, or two
 within 0.1 m in x and z; the fake path's points are an input). Every `nav_*`/`path_*` record must be of its frame,
-and a `path_fin`, `path_seek` or `path_mod` of a path no request started is reported. Captures without `paths` (up to `-113`) take the
+and a `path_fin`, `path_seek` or `path_mod` of a path no request started is reported; a critter's request
+(`path_critter`, `critter#n`: `CritterMoveAgent`, presentation) and a request started inside a span taken from the
+recording keep the recording's path. Captures without `paths` (up to `-113`) take the
 recorded paths as before (A2); `paths` declared without the driven agent's chain is reported.
 
 **Still inputs:** when a path is delivered (`PathSync`), line of sight (search and simulation), the units'
 corpulences, `MaxSpeed`/`FlyHeight` in the simulation, the Unity clock the navigation timer reads (a replay's are
-its recording's), `FixPathIfTooShort`'s fake path, `FindPath`'s arguments, the path visualizer's replacement paths (the commands' `FollowPrecomputedPath`
+its recording's), `FixPathIfTooShort`'s fake path, `FindPath`'s arguments, critters' paths and physics, the path visualizer's replacement paths (the commands' `FollowPrecomputedPath`
 of the party: the UI), the `AvoidanceDisabled` counter, a path of real time delivered in turn-based combat.
 
 **Result.** On `poc5-tb-114` to `-117` **every run is valid with the physics, the movement simulation's
@@ -374,11 +380,22 @@ the recording's. `poc5-tb-118` (`tb-chain`, not a target here) computes 4,131 qu
 a difference; its runs are invalid on other ports (`AttackBonusConditional`, `AddInitiatorAttackWithWeaponTrigger`,
 the combat log).
 
+On the main session's newer captures (current oracle build, every observer, the projectile pin and critter paths;
+judged by this stream's kinds only, the runs' other reports being other streams'): `poc5-tb-122/tb-focus` is valid
+on every run (1,719 physics queries, 334 steps, 21 paths, 149 graph events per run); `-123/tb-chain` (4,503 queries,
+920 steps, 45 paths, 297 graph events) has no report of this stream's kinds; `-122/tb-nearest` (24 paths) reports
+graph events that differ only because the sim's turn order differs there (an initiative tie broken by object
+identity, reported by the turn port: its `m_Units` order is the boxes' order); `-121/tb-lizard` (three fights,
+7,994 queries, 1,593 steps, 86 paths, 556 graph events) reports 802 agent and simulation queries near a cave wall
+whose ray may touch its mesh collider (`Unverified`: the BVH34 mesh raycast isn't ported; `phys_probe`'s `ph_probe`
+rays over the meshes would check one), each answer taken from the recording and reported.
+
 The coverage line (`wr-combat replay`): `physics and paths: physics queries computed ... simulation steps ... paths
 computed ... deliveries checked ... graph events matched ...`.
 
-`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 55
-ways (and its first replay once: the timer's refresh removed), each reported: the agent's, a simulation step's and a
+`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 56
+ways (its first replay once: the timer's refresh removed; `poc5-tb-118`'s AI reading a step other than the sim's
+once), each reported: the agent's, a simulation step's and a
 span's query (distance, point, collider and its sibling path, hit); a step's
 end (position, result, length), a grid read, a missing read or end, a stray simulation read, a line-of-sight
 argument; a path's traced nodes, `searchedNodes`, `CompleteState`, its line-of-sight answer flipped, an argument
@@ -388,7 +405,7 @@ modifiers, no callback), a stray `path_seek`, the delivered path, a definition, 
 `FixPathIfTooShort` keeps the path; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
 missing, a refresh repeated, the clock read missing or another, the timer negative, the observer undeclared or declared
 without `agent_sync`, a refresh moved into the next frame, a graph update's id unreadable, a definition of another
-kind of path, a corpulence that changes, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
+kind of path (complete, or pending before the request's registration), a corpulence that changes, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
 and checks the counts.
 
 **Edits outside the agent's and paths' files** (kept small for the other streams): `combat/replay.rs` (the module,

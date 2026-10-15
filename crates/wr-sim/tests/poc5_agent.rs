@@ -691,15 +691,15 @@ type Change = fn(&mut Vec<V>);
 /// Runs each damaged copy of `dir`'s record run; every case must make the run invalid with a new
 /// report containing its text.
 fn damage_cases(dir: &std::path::Path, cases: &[(&str, Change)]) {
-    damage_cases_of(dir, "record", cases);
+    damage_cases_of(dir, "record", cases, true);
 }
 
 /// [`damage_cases`] on one run's trace.
-fn damage_cases_of(dir: &std::path::Path, run: &str, cases: &[(&str, Change)]) {
+fn damage_cases_of(dir: &std::path::Path, run: &str, cases: &[(&str, Change)], valid: bool) {
     let base = {
         let (mut w, trace) = replay::prepare_world(SAVE, dir, run).expect("prepare");
         let _ = replay::run_with_tape(&mut w, &trace, &trace);
-        assert!(w.valid(), "the undamaged run: {:?}", w.coverage.unsupported.keys());
+        assert!(!valid || w.valid(), "the undamaged run: {:?}", w.coverage.unsupported.keys());
         w.coverage.unsupported.keys().cloned().collect::<Vec<_>>()
     };
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
@@ -1056,6 +1056,18 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
                 }
             }
         }),
+        ("a definition of a XPath path", |recs| {
+            // A definition written before its request is registered (the path pending).
+            let s = sync(recs);
+            let at = (s..recs.len())
+                .find(|j| {
+                    ev(&recs[*j], "ag_pathdef")
+                        && recs[*j]["pending"] == true
+                        && recs[*j + 1]["ev"] == "ag_req_end"
+                })
+                .unwrap();
+            recs[at]["kind"] = json!("XPath");
+        }),
         ("a path no request started", |recs| {
             let at = fin_of_done(recs);
             recs[at]["path"] = json!("5198#99");
@@ -1087,5 +1099,14 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
         recs.remove(at);
         renumber(recs);
     })];
-    damage_cases_of(&dir, "replay-1", &replay);
+    damage_cases_of(&dir, "replay-1", &replay, true);
+    // The AI's read of a simulation step the sim ran (`poc5-tb-118`, whose AI walks; its run is
+    // invalid on ports of other streams, so only the new report counts).
+    if let Some(chain) = fixture_in("poc5-tb-118", "tb-chain") {
+        let msim: Vec<(&str, Change)> = vec![("ScorePath's simulation step", |recs| {
+            let at = pos(recs, |r| ev(r, "uc_v") && r["f"] == "msim");
+            recs[at]["len"] = json!(999.0);
+        })];
+        damage_cases_of(&chain, "record", &msim, false);
+    }
 }
