@@ -148,3 +148,13 @@ Also exercised for the first time [M]: the AI's `ScorePath` five-foot-step branc
 `max` 2.286, the five-foot step's range, score 1.1 for a full-round action), a flying unit's simulation steps
 (`ag_sim` of 527A), a crit threat against a flying target (t=4085). Not reached: an AI simulation of more than one step,
 a hard target (`cnt` at most 1).
+
+### `poc5-tb-119/tb-lizard`: the game's replays aren't tick-exact
+
+The record run is clean (12,288 ticks, 749 rules), but both replays are invalidated by the oracle itself, with no
+draw mismatch: path request `?#0` (a requester outside the tracked agents, in the third fight, which starts at t=9352
+with a surprise round) goes elsewhere and at another tick (record: t=10021 to (100.63, 46.11, 97.98); replay-1:
+t=9947 to (102.32, 46.11, 114.11); replay-2: t=10503 to (99.20, 46.10, 98.80)), leaving 227 and 204 tape entries
+unused. So the replays have drifted before that, between the second fight's end (t=6940) and the third fight's start:
+the real-time walk up the ramp across the `Earthquake_3` zone. Not investigated further; until the oracle pins what
+drifts there, `tb-lizard` isn't a fixture the driven replay can use, and `tb-chain` covers its first part.
