@@ -110,13 +110,15 @@ pub fn lerp(a: V3, b: V3, t: f32) -> V3 {
     [0, 1, 2].map(|i| r(d(a[i]) + (d(b[i]) - d(a[i])) * t))
 }
 
-/// `Vector3 ==`: squared distance below `9.9999994E-11f` (evaluated in double).
+/// `Vector3 ==`: squared distance below `9.9999994E-11f` (summed in double, stored as a float).
 #[must_use]
 pub fn approx_eq(a: V3, b: V3) -> bool {
+    // The sum is stored in a `float` local (`num4`) before the comparison; `Vector2 ==` compares
+    // its sum in double.
     let x = d(a[0] - b[0]);
     let y = d(a[1] - b[1]);
     let z = d(a[2] - b[2]);
-    x * x + y * y + z * z < d(9.999_999_4e-11_f32)
+    r(x * x + y * y + z * z) < 9.999_999_4e-11_f32
 }
 
 /// `Vector2 ==` (same rule in two dimensions).
