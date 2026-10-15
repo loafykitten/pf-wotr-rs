@@ -7,7 +7,7 @@
 //! `Quaternion.FromToRotation`, ported from the arm64 player's machine code and checked
 //! against it bit for bit (`native_check`): which corner wins depends on its last bits.
 
-use super::cs::{self, V3, d, r};
+use super::cs::{self, V3, d, quat_mul_vec as qrot, r};
 use super::world::{Kind, NodeId, World};
 
 type Q = [f32; 4];
@@ -21,28 +21,6 @@ fn qmul(a: Q, b: Q) -> Q {
         r(aw * by + ay * bw + az * bx - ax * bz),
         r(aw * bz + az * bw + ax * by - ay * bx),
         r(aw * bw - ax * bx - ay * by - az * bz),
-    ]
-}
-
-/// `Quaternion * Vector3` (managed).
-fn qrot(q: Q, p: V3) -> V3 {
-    let n1 = q[0] * 2.0;
-    let n2 = q[1] * 2.0;
-    let n3 = q[2] * 2.0;
-    let n4 = q[0] * n1;
-    let n5 = q[1] * n2;
-    let n6 = q[2] * n3;
-    let n7 = q[0] * n2;
-    let n8 = q[0] * n3;
-    let n9 = q[1] * n3;
-    let n10 = q[3] * n1;
-    let n11 = q[3] * n2;
-    let n12 = q[3] * n3;
-    let [px, py, pz] = p.map(d);
-    [
-        r((1.0 - (d(n5) + d(n6))) * px + (d(n7) - d(n12)) * py + (d(n8) + d(n11)) * pz),
-        r((d(n7) + d(n12)) * px + (1.0 - (d(n4) + d(n6))) * py + (d(n9) - d(n10)) * pz),
-        r((d(n8) - d(n11)) * px + (d(n9) + d(n10)) * py + (1.0 - (d(n4) + d(n5))) * pz),
     ]
 }
 
@@ -64,7 +42,7 @@ pub(crate) fn from_to_rotation(from: V3, to: V3) -> Q {
 /// The player's `Matrix3x3f::SetFromToRotation` (Möller and Hughes' original code, with
 /// `h = (1 - e) / |v|²`), as `m[row][col]`. Its 180° case turns about `u × f`, where `u`
 /// is `f × X` normalised (`f × Y` when that is too short), and ignores `to`.
-fn from_to_matrix(f: V3, t: V3) -> [[f32; 3]; 3] {
+pub(crate) fn from_to_matrix(f: V3, t: V3) -> [[f32; 3]; 3] {
     let e = f[0] * t[0] + f[1] * t[1] + f[2] * t[2];
     if f64::from(e) > FROM_TO_PARALLEL {
         return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -102,7 +80,7 @@ fn from_to_matrix(f: V3, t: V3) -> [[f32; 3]; 3] {
 }
 
 /// The player's `MatrixToQuaternion` (Shoemake), then its normalisation.
-fn matrix_to_quaternion(m: [[f32; 3]; 3]) -> Q {
+pub(crate) fn matrix_to_quaternion(m: [[f32; 3]; 3]) -> Q {
     let trace = m[0][0] + m[1][1] + m[2][2];
     let mut q = [0.0f32; 4];
     if trace > 0.0 {

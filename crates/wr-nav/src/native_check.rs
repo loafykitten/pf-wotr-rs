@@ -1,7 +1,9 @@
 //! Checks the ports of Unity's native math against the player's own code: the test loads
 //! the oracle build's `UnityPlayer.dylib` and calls `FromToQuaternionSafe`,
-//! `InvertMatrix4x4_Full`, `Matrix4x4f::SetTRS` and `EulerToQuaternion` (pure functions,
-//! found through the icall table) on generated inputs, comparing every result bit for bit.
+//! `InvertMatrix4x4_Full`, `Matrix4x4f::SetTRS`, `EulerToQuaternion` and the icall stubs of
+//! `Vector3.RotateTowards`, `Quaternion.LookRotation` and `Quaternion.Internal_ToEulerRad`
+//! (pure functions, found through the icall table) on generated inputs, comparing every result
+//! bit for bit.
 //! Ignored by default: it needs `builds/arm64-oracle`, and it fails if the player there is
 //! another build (each function's first bytes are checked).
 
@@ -21,6 +23,10 @@ const EULER: (usize, &str) = (0x5bc874, "ed33bb6deb2b016de923026df44f03a9");
 /// `Vector3.RotateTowards_Injected`, the icall stub (its out parameter avoids the indirect
 /// result register the implementation uses).
 const ROTATE_TOWARDS: (usize, &str) = (0x81be34, "ffc300d1f44f01a9fd7b02a9fd830091");
+/// `Quaternion.LookRotation_Injected(ref forward, ref upwards, out ret)`, the icall stub.
+const LOOK_ROTATION: (usize, &str) = (0x81c2d0, "f44fbea9fd7b01a9fd430091f30302aa");
+/// `Quaternion.Internal_ToEulerRad_Injected(ref rotation, out ret)`, the icall stub.
+const TO_EULER: (usize, &str) = (0x81c074, "ff0301d1f44f02a9fd7b03a9fdc30091");
 
 #[repr(C)]
 struct Quat([f32; 4]);
@@ -47,7 +53,16 @@ impl Player {
         let anchor = unsafe { libc::dlsym(h, sym.as_ptr()) } as usize;
         assert_ne!(anchor, 0, "{} not exported", ANCHOR.0);
         let p = Self { base: anchor - ANCHOR.1 };
-        for (off, bytes) in [(ANCHOR.1, ANCHOR.2), FROM_TO, INVERSE, TRS, EULER, ROTATE_TOWARDS] {
+        for (off, bytes) in [
+            (ANCHOR.1, ANCHOR.2),
+            FROM_TO,
+            INVERSE,
+            TRS,
+            EULER,
+            ROTATE_TOWARDS,
+            LOOK_ROTATION,
+            TO_EULER,
+        ] {
             // SAFETY: inside the loaded image's text segment.
             let have = unsafe { std::slice::from_raw_parts((p.base + off) as *const u8, 16) };
             let have: String = have.iter().map(|b| format!("{b:02x}")).collect();
@@ -103,6 +118,59 @@ impl Player {
         fun(&a, &b, max_radians, max_magnitude, &mut out);
         out
     }
+
+    fn look_rotation(&self, forward: V3, up: V3) -> [f32; 4] {
+        // SAFETY: the icall stub's signature: two vector pointers, an out quaternion.
+        let fun: extern "C" fn(*const V3, *const V3, *mut [f32; 4]) =
+            unsafe { std::mem::transmute(self.base + LOOK_ROTATION.0) };
+        let mut out = [0.0f32; 4];
+        fun(&forward, &up, &mut out);
+        out
+    }
+
+    fn to_euler_rad(&self, q: [f32; 4]) -> V3 {
+        // SAFETY: the icall stub's signature: a quaternion pointer, an out vector.
+        let fun: extern "C" fn(*const [f32; 4], *mut V3) =
+            unsafe { std::mem::transmute(self.base + TO_EULER.0) };
+        let mut out = [0.0f32; 3];
+        fun(&q, &mut out);
+        out
+    }
+}
+
+/// Points stdout at `/dev/null` until dropped (the player's log lines go there).
+struct Quiet(libc::c_int);
+
+impl Quiet {
+    fn stdout() -> Self {
+        // SAFETY: plain descriptor calls; the saved descriptor is restored on drop.
+        unsafe {
+            libc::fflush(std::ptr::null_mut());
+            let saved = libc::dup(1);
+            let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+            libc::dup2(null, 1);
+            libc::close(null);
+            Self(saved)
+        }
+    }
+}
+
+impl Drop for Quiet {
+    fn drop(&mut self) {
+        // SAFETY: as above.
+        unsafe {
+            libc::fflush(std::ptr::null_mut());
+            libc::dup2(self.0, 1);
+            libc::close(self.0);
+        }
+    }
+}
+
+/// Does `ToEuler` take its pole branch for `q` (normalised as it normalises it)?
+fn at_pole(q: [f32; 4]) -> bool {
+    let m = (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt();
+    let [x, y, z, w] = if m < 1e-5 { [0.0, 0.0, 0.0, 1.0] } else { q.map(|c| c / m) };
+    (y * z - x * w).abs() >= f32::from_bits(0x3eff_ffde)
 }
 
 fn to_cols(m: &M4) -> [f32; 16] {
@@ -243,7 +311,65 @@ fn native_math_matches_the_player() {
             "RotateTowards({a:?}, {b:?}, {max_radians}, {max_magnitude}) = {want:?}"
         );
     }
+    // LookRotation as UnitMoveController calls it (an XZ direction, up = +Y) and generally:
+    // zero and tiny forwards around the 1e-5 cuts, forwards (anti)parallel to up or nearly so
+    // (the fallback through `SetFromToRotation`), random and zero ups. The player logs each
+    // zero forward to stdout, silenced meanwhile.
+    let mut fallback = 0;
+    let quiet = Quiet::stdout();
+    for i in 0..n {
+        let up = match i % 8 {
+            0 => rng.v3(2.0),
+            1 => [0.0, 0.0, 0.0],
+            _ => [0.0, 1.0, 0.0],
+        };
+        let f = match i % 6 {
+            0 => rng.v3(100.0),
+            1 => [rng.comp(2.0), 0.0, rng.comp(2.0)],
+            2 => rng.v3(2e-5),
+            3 => {
+                let k = rng.comp(10.0);
+                let e = rng.unit() * 1e-3;
+                [up[0] * k + rng.comp(e), up[1] * k + rng.comp(e), up[2] * k + rng.comp(e)]
+            }
+            4 => [rng.comp(1e-5), rng.comp(4.0), rng.comp(1e-5)],
+            _ => [0.0, rng.comp(4.0), 0.0],
+        };
+        let want = p.look_rotation(f, up);
+        let ours = cs::look_rotation(f, up);
+        assert_eq!(bits(ours), bits(want), "LookRotation({f:?}, {up:?}) = {want:?}");
+        if cs::look_rotation_matrix(f, up).is_none() && cs::native_magnitude(f) > 1e-5 {
+            fallback += 1;
+        }
+    }
+    drop(quiet);
+    // Internal_ToEulerRad: rotations LookRotation makes, unit quaternions from Euler angles,
+    // near the poles (x = ±90°, where `y` comes from the product terms and `z` is 0),
+    // unnormalised and tiny quaternions.
+    let mut poles = 0;
+    for i in 0..n {
+        let q = match i % 6 {
+            0 => cs::look_rotation([rng.comp(2.0), 0.0, rng.comp(2.0)], [0.0, 1.0, 0.0]),
+            1 => cs::quat_euler(rng.v3(720.0)),
+            2 | 3 => {
+                let x = if rng.next().is_multiple_of(2) { 90.0 } else { -90.0 };
+                let e = if i % 6 == 2 { rng.comp(1e-2) } else { rng.comp(2.0) };
+                let q = cs::quat_euler([x + e, rng.comp(360.0), rng.comp(360.0)]);
+                let k = rng.unit() * 4.0 + 1e-3;
+                q.map(|c| c * k)
+            }
+            4 => [rng.comp(3.0), rng.comp(3.0), rng.comp(3.0), rng.comp(3.0)],
+            _ => [rng.comp(1e-5), rng.comp(1e-5), rng.comp(1e-5), rng.comp(1e-5)],
+        };
+        let want = p.to_euler_rad(q);
+        assert_eq!(bits(cs::to_euler_rad(q)), bits(want), "ToEulerRad({q:?}) = {want:?}");
+        if at_pole(q) {
+            poles += 1;
+        }
+    }
     eprintln!(
-        "from_to {checked:?}, {n} matrices ({singular} singular), {n} rotations: all bit-identical"
+        "from_to {checked:?}, {n} matrices ({singular} singular), {n} rotations, {n} look \
+         rotations ({fallback} by the fallback), {n} euler conversions ({poles} at a pole): \
+         all bit-identical"
     );
 }
