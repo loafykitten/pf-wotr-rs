@@ -670,7 +670,8 @@ tick 173 gives 51DD = 7,2 and 51FC = 7,2, as predicted. The comparers reached th
 `SortUnits` 7 times (`init_ties_prepare` 1, `init_ties_turn` 7), every record naming 51DD and 51FC. **In the driven
 replay all three runs are valid**, each taking the 8 decisions (`SortChecks.hash_decisions` 8, every sort equal to
 the recorded one). Each run's `Compare` calls equal the end record's counts (48 for `SortUnits`, 11 for the
-prepare sort), which also checks that the sim's sorts compare the game's pairs.
+prepare sort): an aggregate check of the sorts' comparison sequence, whose exact pairs and order are checked only at the
+fallbacks.
 `crates/wr-sim/tests/poc5_ties.rs` asserts this, and damages the recording 11 ways, each reported:
 - a turn or prepare decision dropped, or one added;
 - a result flipped, or the units swapped;
