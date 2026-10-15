@@ -1479,6 +1479,26 @@ impl Driver<'_> {
             );
             return;
         }
+        // A record of this frame, in its controller's phase: `GameLogController`'s tick and its
+        // messages are the frame's last controller's (placed there, the sim's tick runs; a record of
+        // an earlier phase after them is out of place); the party's combat state is raised in
+        // `UnitCombatJoinController` (`Player.UpdateIsInCombat`).
+        if r["t"].as_i64() != Some(self.tick) {
+            w.coverage.unsupported("combat log: a log record of another frame");
+        }
+        match r["ev"].as_str() {
+            Some("clog_tick") => self.place(w, Phase::GameLog, "the combat log's tick"),
+            Some("clog_msg") => self.place(w, Phase::GameLog, "a combat log message"),
+            Some("clog_q")
+                if matches!(
+                    r["e"].as_str(),
+                    Some("GameLogEventCombatStateChanged" | "GameLogEventPartyCombatState")
+                ) =>
+            {
+                self.place(w, Phase::Join, "the party's combat state event");
+            }
+            _ => {}
+        }
         if r["ev"] != "clog_q" {
             return;
         }

@@ -83,11 +83,13 @@ fn renumber(recs: &mut [V]) {
 
 const L: &str = "combat log:";
 const C: &str = "driven replay: commands:";
+/// A record out of its frame's controller order (`Frame::to`).
+const P: &str = "can't be placed";
 
 type Change = fn(&mut Vec<V>);
 
 /// The damaged recordings, each with the report it must make.
-const CASES: [(&str, Change); 51] = [
+const CASES: [(&str, Change); 53] = [
     // Messages.
     (L, |recs| {
         let at = nth(recs, "clog_msg", 3);
@@ -334,6 +336,35 @@ const CASES: [(&str, Change); 51] = [
         let to = tb.unwrap_or(at);
         for (n, r) in pair.into_iter().enumerate() {
             recs.insert(to + n, r);
+        }
+        renumber(recs);
+    }),
+    // A log tick with its messages before the leave controller's record of the frame (the log's
+    // controller is the frame's last); the party's combat state after the cooldowns controller's
+    // prefix (the join controller raises it).
+    (P, |recs| {
+        let at = (0..recs.len())
+            .find(|&i| {
+                recs[i]["ev"] == "clog_tick"
+                    && recs[i.saturating_sub(4)..i].iter().any(|x| x["ev"] == "leave_tick")
+            })
+            .expect("a tick after a leave_tick");
+        let leave = (0..at).rev().find(|&i| recs[i]["ev"] == "leave_tick").unwrap_or(at);
+        let mut moved = vec![recs.remove(at)];
+        while recs[at]["ev"] == "clog_msg" {
+            moved.push(recs.remove(at));
+        }
+        for (n, r) in moved.into_iter().enumerate() {
+            recs.insert(leave + n, r);
+        }
+        renumber(recs);
+    }),
+    (P, |recs| {
+        let at = first_q(recs, "GameLogEventCombatStateChanged");
+        let pair = [recs.remove(at), recs.remove(at)];
+        let cd = at + recs[at..].iter().position(|r| r["ev"] == "cd_prefix").unwrap_or(0);
+        for (n, r) in pair.into_iter().enumerate() {
+            recs.insert(cd + 1 + n, r);
         }
         renumber(recs);
     }),
