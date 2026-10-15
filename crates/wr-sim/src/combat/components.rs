@@ -152,6 +152,13 @@ pub fn register(r: &mut Registry) {
         rule: attack_bonus_conditional,
     }));
     r.register(Box::new(RulePort {
+        name: "DamageBonusConditional",
+        bits: 0,
+        hooks: no_hooks,
+        handlers: &["IInitiatorRulebookHandler<RuleCalculateDamage>"],
+        rule: damage_bonus_conditional,
+    }));
+    r.register(Box::new(RulePort {
         name: "AddInitiatorAttackWithWeaponTrigger",
         bits: 0,
         hooks: no_hooks,
@@ -334,6 +341,54 @@ fn attack_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
             let Some(d) = with_settings(w, c, |v| MD(v.i32("Descriptor"))) else { return };
             evt.bonuses.add_in(w, Bonus::desc(bonus, d).of(c.fact));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// DamageBonusConditional (`Kingmaker.Designers.Mechanics.Buffs/DamageBonusConditional.cs`)
+// ---------------------------------------------------------------------------------------
+
+/// `DamageBonusConditional` (`IInitiatorRulebookHandler<RuleCalculateDamage>`): before the
+/// damage is calculated, its conditions in the fact's context (the data scope's target: the
+/// wielder with `CheckWielder`, else the rule's target) and the bundle (`OnlyWeaponDamage` needs
+/// its `WeaponDamage`: the bundle's weapon isn't kept, so that case is reported) decide
+/// `First?.AddModifierTargetRelated(Bonus.Calculate(Context), Fact, Descriptor)`. Its did handler
+/// is empty.
+fn damage_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent, about: bool) {
+    if !about {
+        return;
+    }
+    let Some(evt) = rule.as_any().downcast_mut::<super::attack::RuleCalculateDamage>() else {
+        return;
+    };
+    let target = evt.target;
+    let Some((bp, i)) = crate::components::settings_of(w, c) else { return };
+    let objs = bp.components_array();
+    let v = crate::content::View(objs[i]);
+    let scope = if v.bool("CheckWielder") { owner_unit(w, c) } else { Some(target) };
+    if w.fact(c.fact).context.is_none() {
+        w.coverage.unsupported("DamageBonusConditional: the fact has no context");
+        return;
+    }
+    let pass = crate::elements::with_ctx(
+        w,
+        crate::elements::Ctx::Mechanics {
+            ctx: crate::elements::MechRef::Fact(c.fact),
+            target: scope,
+        },
+        |w| crate::elements::check_conditions(w, &bp, v.obj("Conditions")),
+    );
+    if !pass {
+        return;
+    }
+    if v.bool("OnlyWeaponDamage") {
+        w.coverage.unsupported("DamageBonusConditional: OnlyWeaponDamage (the bundle's weapon)");
+        return;
+    }
+    let value = context_value(w, c, v.obj("Bonus"));
+    let d = MD(v.i32("Descriptor"));
+    if let Some(first) = evt.bundle.first_mut() {
+        first.add_modifier_target_related(Bonus::desc(value, d).of(c.fact));
     }
 }
 

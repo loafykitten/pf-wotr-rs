@@ -2089,6 +2089,15 @@ impl Inputs for Driver<'_> {
         if let Some(env) = super::env_in(trace, at, end, a, t, w) {
             w.combat.env.push(((a, t), env));
         }
+        // The projectiles the weapon launches (`LaunchProjectiles`: one per blueprint), for the
+        // projectile pin's launch records.
+        let projectiles: Vec<String> = wp
+            .projectile_refs()
+            .into_iter()
+            .flatten()
+            .filter(|g| w.content.get(*g).is_some())
+            .map(|g| g.to_string())
+            .collect();
         let mut rule = crate::combat::attack::RuleAttackWithWeapon::new(a, t, wp, spec.penalty);
         rule.is_first_attack = spec.is_first_attack;
         rule.is_full_attack = spec.is_full_attack;
@@ -2104,6 +2113,33 @@ impl Inputs for Driver<'_> {
         let rid = trace.records[at]["id"].as_i64();
         for p in w.combat.pending_resolves.iter_mut().skip(before) {
             p.source_id = rid;
+        }
+        // With the projectile pin's observer (`proj_arrival`), its launches in the span (placed by
+        // `span_ok`) are the sim's, in order (`LaunchProjectile`: one per blueprint, its resolve
+        // the on-hit trigger, no callback): its blueprint and whether its attack hit
+        // (`AttackResult`).
+        if self.trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
+        }) {
+            let launches: Vec<&J> = trace.records[at..=end]
+                .iter()
+                .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
+                .collect();
+            let made: Vec<bool> =
+                w.combat.pending_resolves.iter().skip(before).map(|p| p.attack_hit).collect();
+            let ok = launches.len() == made.len()
+                && made.len() == projectiles.len()
+                && launches.iter().zip(&made).zip(&projectiles).all(|((l, hit), bp)| {
+                    matches!(l["res"].as_str(), Some("Hit" | "CriticalHit")) == *hit
+                        && l["bp"].as_str() == Some(bp.as_str())
+                        && l["trig"] == "RuleAttackWithWeaponResolve"
+                        && l["cb"] == false
+                });
+            if !ok {
+                w.coverage.unsupported(
+                    "driven replay: commands: an attack's projectiles launched differ from the sim's",
+                );
+            }
         }
         // (`AllAttacks[i].Rule.AttackRoll`, for the impatience controller's damage handler.)
         if let Some(seq) = rule.attack_roll_seq
