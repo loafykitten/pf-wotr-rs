@@ -272,13 +272,12 @@ fn change_unit_size(w: &mut World, c: CompRef, h: Hook) {
     let Some(u) = owner_unit(w, c) else { return };
     match h {
         Hook::Activate => {
-            if !w.entity(u).parts.iter().any(|p| p.clr == "UnitPartSizeModifier") {
-                // A loaded part keeps facts the sim doesn't hydrate.
-                if w.unit(u).is_some_and(|x| x.size_change_facts.is_empty()) {
-                    w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartSizeModifier" });
-                }
-            } else if w.unit(u).is_some_and(|x| x.size_change_facts.is_empty()) {
+            // A loaded part keeps facts the sim doesn't hydrate.
+            if w.unit(u).is_some_and(|x| x.size_part_from_save) {
                 w.coverage.unsupported("UnitPartSizeModifier from a save (not hydrated)");
+            }
+            if !w.entity(u).parts.iter().any(|p| p.clr == "UnitPartSizeModifier") {
+                w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartSizeModifier" });
             }
             if let Some(x) = w.unit_mut(u) {
                 x.size_change_facts.push(c.fact);

@@ -541,10 +541,7 @@ fn ensure_natural_proficiencies(w: &mut World, e: EntityIdx) {
 /// without either). A size part loaded from a save (its facts and `OnPostLoad` aren't hydrated)
 /// is reported.
 pub fn state_size(w: &mut World, e: EntityIdx) -> Option<Size> {
-    let u = w.unit(e)?;
-    if u.size_change_facts.is_empty()
-        && w.entity(e).parts.iter().any(|p| p.clr == "UnitPartSizeModifier")
-    {
+    if w.unit(e)?.size_part_from_save {
         w.coverage.unsupported("UnitPartSizeModifier from a save (not hydrated)");
     }
     let u = w.unit_mut(e)?;

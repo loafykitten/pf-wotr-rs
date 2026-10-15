@@ -245,19 +245,26 @@ impl Ability {
     }
 }
 
-/// `AbilityData.RuntimeActionType` (`ActionType`: `GetDefaultActionType`, the blueprint's for a
-/// spellbook spell without metamagic; no item; no ability modifiers part; no mythic abilities as
-/// move actions), as `commands::ty`.
+/// `AbilityData.ActionType`: `GetDefaultActionType`, the blueprint's for a spellbook spell
+/// without metamagic data and no item (`HasMetamagic(Quicken)` also reads the caster's
+/// `UnitPartSpecialMetamagic`: reported), without a `UnitPartAbilityModifiers` override
+/// (reported), as `commands::ty`.
+fn action_type(w: &World, a: &Ability) -> Result<u8, String> {
+    let bp = a.bp(w).ok_or_else(|| "the spell's blueprint is missing".to_owned())?;
+    if let Some(p) = part(w, a.caster, &["UnitPartSpecialMetamagic", "UnitPartAbilityModifiers"]) {
+        return Err(format!("AbilityData.ActionType: {p}"));
+    }
+    u8::try_from(bp.view().int("ActionType")).map_err(|_| "an action type".to_owned())
+}
+
+/// `AbilityData.RuntimeActionType` (`ActionType`; no Quicken; no mythic abilities as move
+/// actions), as `commands::ty`.
 ///
 /// # Errors
 ///
 /// A branch that reads what isn't modelled.
 pub fn runtime_action_type(w: &World, a: &Ability) -> Result<u8, String> {
-    let bp = a.bp(w).ok_or_else(|| "the spell's blueprint is missing".to_owned())?;
-    if part(w, a.caster, &["UnitPartAbilityModifiers"]).is_some() {
-        return Err("AbilityData.ActionType: UnitPartAbilityModifiers".into());
-    }
-    let ty = u8::try_from(bp.view().int("ActionType")).map_err(|_| "an action type".to_owned())?;
+    let ty = action_type(w, a)?;
     if ty == super::commands::ty::STANDARD
         && crate::components::state::has_mechanics_feature(
             w,
@@ -324,12 +331,8 @@ pub fn is_available_for_cast(w: &mut World, a: &Ability) -> Result<bool, String>
     if has_condition(w, u, cond::STAGGERED) && require_full_round_action(w, a)? {
         return Ok(false);
     }
-    // `ActionType == Standard && HasCondition(CantUseStandardActions)` (`ActionType`: the
-    // blueprint's, no ability modifiers part).
-    if part(w, u, &["UnitPartAbilityModifiers"]).is_some() {
-        return Err("AbilityData.ActionType: UnitPartAbilityModifiers".into());
-    }
-    if bp.view().int("ActionType") == i64::from(super::commands::ty::STANDARD)
+    // `ActionType == Standard && HasCondition(CantUseStandardActions)`.
+    if action_type(w, a)? == super::commands::ty::STANDARD
         && has_condition(w, u, cond::CANT_USE_STANDARD_ACTIONS)
     {
         return Ok(false);
@@ -343,7 +346,11 @@ pub fn is_available_for_cast(w: &mut World, a: &Ability) -> Result<bool, String>
         if has_condition(w, u, cond::SPELLCASTING_FORBIDDEN) {
             return Ok(false);
         }
-        if let Some(p) = part(w, u, &["UnitPartPolymorphed", "UnitPartForbiddenSpellbooks"]) {
+        // `Body.IsPolymorphed` (Natural Spell).
+        if super::inspect::polymorphed(w, u) {
+            return Err("AbilityData.CanBeCastByCaster: a polymorphed caster".into());
+        }
+        if let Some(p) = part(w, u, &["UnitPartForbiddenSpellbooks"]) {
             return Err(format!("AbilityData.CanBeCastByCaster: {p}"));
         }
     }
@@ -664,8 +671,9 @@ impl RuleEvent for RuleCastSpell {
         {
             w.coverage.unsupported(format!("RuleCastSpell's controller handlers: {p}"));
         }
-        let mut before = RuleApplySpell::new(self.ctx, c.ability.caster, Some(self.target), false);
-        trigger_any(w, &mut before, |_| None);
+        let mut before =
+            RuleApplySpell::new(w, self.ctx, c.ability.caster, Some(self.target), false);
+        trigger_any(w, &mut before, RuleApplySpell::result);
         // `Context.IsForced = IsCutscene || Initiator.Blueprint.IsCheater`.
         let cheater = w
             .unit(self.initiator)
@@ -716,12 +724,45 @@ pub struct RuleApplySpell {
     pub target: Option<EntityIdx>,
     /// `Place`: `After`.
     pub after: bool,
+    /// Its inputs as the oracle writes them (`Spell`, `Context`, `SpellTarget`, `Place`): its
+    /// result fields in T0 (it changes none of them), as its target is the oracle's `$impure`.
+    inputs: Option<J>,
 }
 
 impl RuleApplySpell {
     #[must_use]
-    pub fn new(ctx: u32, initiator: EntityIdx, target: Option<EntityIdx>, after: bool) -> Self {
-        Self { base: RuleBase::default(), ctx, initiator, target, after }
+    pub fn new(
+        w: &World,
+        ctx: u32,
+        initiator: EntityIdx,
+        target: Option<EntityIdx>,
+        after: bool,
+    ) -> Self {
+        let inputs = w.combat.spells.context(ctx).map(|c| {
+            let caster = json!({ "$unit": w.entity(c.ability.caster).unique_id });
+            let context = c.mech.associated_blueprint.map(|g| g.to_string());
+            // `TargetWrapper(unit)`: `m_Point` left zero, no orientation.
+            let spell_target = target.map_or(J::Null, |t| {
+                json!({
+                    "UnitRef": { "$unit": w.entity(t).unique_id },
+                    "m_Point": [0.0, 0.0, 0.0],
+                    "m_Orientation": null,
+                    "IsUnit": true,
+                    "IsOrientationSpecified": false,
+                })
+            });
+            json!({
+                "Spell": { "$ability": c.ability.spell.blueprint.to_string(), "caster": caster },
+                "Context": { "$context": context, "caster": caster },
+                "SpellTarget": spell_target,
+                "Place": i32::from(after),
+            })
+        });
+        Self { base: RuleBase::default(), ctx, initiator, target, after, inputs }
+    }
+
+    fn result(&self) -> Option<J> {
+        self.inputs.clone()
     }
 }
 
@@ -877,8 +918,8 @@ fn apply_effect(w: &mut World, i: u32, c: &AbilityCtx, bp: &Rc<Blueprint>, effec
         "OnAbilityEffectApplied",
         None,
     );
-    let mut after = RuleApplySpell::new(i, c.ability.caster, None, true);
-    trigger_any(w, &mut after, |_| None);
+    let mut after = RuleApplySpell::new(w, i, c.ability.caster, None, true);
+    trigger_any(w, &mut after, RuleApplySpell::result);
 }
 
 /// `DoApplyEffect(context, target, effect)`.
@@ -919,8 +960,8 @@ fn do_apply_effect(w: &mut World, i: u32, c: &AbilityCtx, bp: &Rc<Blueprint>, ef
             "OnAbilityEffectAppliedToTarget",
             Some(target),
         );
-        let mut after = RuleApplySpell::new(i, c.ability.caster, Some(target), true);
-        trigger_any(w, &mut after, |_| None);
+        let mut after = RuleApplySpell::new(w, i, c.ability.caster, Some(target), true);
+        trigger_any(w, &mut after, RuleApplySpell::result);
     }
     // A personal spell on its caster is shared with the caster's pets in reach
     // (`SharePersonalSpellsWithPets`): not modelled.

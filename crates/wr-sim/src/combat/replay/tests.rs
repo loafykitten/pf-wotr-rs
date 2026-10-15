@@ -1281,3 +1281,50 @@ fn resuming_a_mode_with_the_buffs_controller_ends_orphaned_toggle_buffs() {
     crate::combat::life::buffs_tick_all(&mut w);
     assert_eq!(w.unit(u).expect("unit").buffs_previous_time, 0);
 }
+
+/// A recorded `InspectUnitsController.HandleEntityRevealed` (WrathOracle's `insp_reveal`) from
+/// `caller`'s tick.
+fn reveal(t: i64, added: bool, caller: &str) -> J {
+    json!({
+        "k": "obs", "t": t, "ev": "insp_reveal", "e": "u", "unit": true, "added": added,
+        "origin": format!(
+            "Kingmaker.Controllers.InspectUnitsController.HandleEntityRevealed < {caller}.Tick \
+             < Kingmaker.GameModes.GameMode.Tick < Kingmaker.Game.Tick < Kingmaker.Runner.Update"
+        ),
+    })
+}
+
+const FOG: &str = "Kingmaker.Controllers.FogOfWar.FogOfWarController";
+
+fn reveal_run(observed: bool, records: Vec<J>) -> World {
+    let (mut w, _) = world_in_area();
+    let observers: Vec<&str> = if observed { vec!["inspect_reveal"] } else { vec![] };
+    let mut recs = vec![
+        json!({"k": "begin", "t": -1, "observers": observers}),
+        tick(0, mode::DEFAULT),
+        time(0, 0, false),
+    ];
+    recs.extend(records);
+    let _ = run(&mut w, &trace(recs));
+    w
+}
+
+/// The sim's `HandleEntityRevealed` queues the revealed unit (a `HashSet`: a second reveal in the
+/// frame adds nothing), and its queuing is checked against the record's.
+#[test]
+fn a_recorded_reveal_queues_the_unit_as_the_game_did() {
+    let w = reveal_run(true, vec![reveal(0, true, FOG), reveal(0, false, FOG)]);
+    assert!(!has_report(&w, "driven replay"), "{:?}", w.coverage.unsupported);
+    let w = reveal_run(true, vec![reveal(0, true, FOG), reveal(0, true, FOG)]);
+    assert!(has_report(&w, "driven replay: a reveal's queuing differs"));
+}
+
+/// A reveal record without its observer declared, or from a caller the replay doesn't place, is
+/// reported.
+#[test]
+fn reveals_the_replay_cant_place_are_reported() {
+    let w = reveal_run(false, vec![reveal(0, true, FOG)]);
+    assert!(has_report(&w, "driven replay: an insp_reveal record without"));
+    let w = reveal_run(true, vec![reveal(0, true, "Kingmaker.Controllers.NotAController")]);
+    assert!(has_report(&w, "driven replay: an entity's reveal from a caller not modelled"));
+}

@@ -708,7 +708,7 @@ impl RuleEvent for RuleCalculateWeaponSizeBonus {
     }
     fn on_trigger(&mut self, w: &mut World) {
         // `IsDefaultUnit` (`Game.DefaultUnit`) never attacks here; polymorph reported.
-        if w.entity(self.initiator).parts.iter().any(|p| p.clr == "UnitPartPolymorphed") {
+        if super::inspect::polymorphed(w, self.initiator) {
             w.coverage.unsupported("RuleCalculateWeaponSizeBonus: polymorphed");
         }
         let player = units::is_player_faction(w, self.initiator);

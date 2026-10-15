@@ -125,8 +125,17 @@ type Change = fn(&mut Vec<V>);
 const PARAMS: &str = "Kingmaker.RuleSystem.Rules.Abilities.RuleCalculateAbilityParams";
 const CAST_RULE: &str = "Kingmaker.RuleSystem.Rules.Abilities.RuleCastSpell";
 const SR: &str = "Kingmaker.RuleSystem.Rules.RuleSpellResistanceCheck";
+const APPLY: &str = "Kingmaker.RuleSystem.Rules.Abilities.RuleApplySpell";
 
-const CASES: [(Want, Change); 12] = [
+/// The `n`th `RuleApplySpell` record (any depth).
+fn apply(recs: &[V], n: usize) -> usize {
+    (0..recs.len())
+        .filter(|&i| recs[i]["k"] == "rule" && recs[i]["class"] == APPLY)
+        .nth(n)
+        .expect("a RuleApplySpell")
+}
+
+const CASES: [(Want, Change); 17] = [
     // The params' snapshot isn't the command's spell.
     (Want::Report("a cast's ability params"), |recs| {
         let at = root(recs, PARAMS);
@@ -155,13 +164,36 @@ const CASES: [(Want, Change); 12] = [
         recs.drain(at..=end);
         renumber(recs);
     }),
-    // A process root from a caller not modelled.
-    (Want::Report("from a caller not modelled"), |recs| {
+    // The resistance check from a caller not modelled.
+    (Want::Report("a RuleSpellResistanceCheck from a caller not modelled"), |recs| {
         let at = root(recs, SR);
         recs[at]["origin"] = json!(
-            "Kingmaker.Controllers.SomethingElse.Tick < Kingmaker.Controllers.AbilityExecutionController.Tick < Kingmaker.GameModes.GameMode.Tick < Kingmaker.Game.Tick < Kingmaker.Runner.Update"
+            "Kingmaker.Controllers.SomethingElse.Tick < Kingmaker.GameModes.GameMode.Tick < Kingmaker.Game.Tick < Kingmaker.Runner.Update"
         );
+    }),
+    // A process root of a class the process doesn't make.
+    (Want::Report("a RuleSavingThrow from a caller not modelled"), |recs| {
+        let at = root(recs, SR);
         recs[at]["class"] = json!("Kingmaker.RuleSystem.Rules.RuleSavingThrow");
+    }),
+    // `RuleApplySpell`'s inputs (its target is `$impure`): the cast's `Before` with another
+    // target, the process's first `After` as a `Before` or without its target, the second
+    // `After` of another spell.
+    (Want::Unequal, |recs| {
+        let at = apply(recs, 0);
+        recs[at]["fields"]["SpellTarget"]["UnitRef"]["$unit"] = json!("5671");
+    }),
+    (Want::Unequal, |recs| {
+        let at = apply(recs, 1);
+        recs[at]["fields"]["Place"] = json!(0);
+    }),
+    (Want::Unequal, |recs| {
+        let at = apply(recs, 1);
+        recs[at]["fields"]["SpellTarget"] = json!(null);
+    }),
+    (Want::Unequal, |recs| {
+        let at = apply(recs, 2);
+        recs[at]["fields"]["Spell"]["$ability"] = json!("00000000000000000000000000000004");
     }),
     // The spell resistance roll's draw, the params' result, the buff: the T0 stream differs.
     (Want::Unequal, |recs| {

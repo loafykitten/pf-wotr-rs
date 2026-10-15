@@ -108,14 +108,22 @@ impl Driver<'_> {
                 return;
             }
         }
-        if r["unit"] != true {
-            return;
-        }
         let u = r["e"]
             .as_str()
             .and_then(|id| w.by_id.get(id).copied())
             .filter(|u| w.unit(*u).is_some());
-        let (Some(u), Some(added)) = (u, r["added"].as_bool()) else {
+        if r["unit"] != true {
+            // Not a unit: nothing is queued (`added` null), and the sim has no unit of its id.
+            if !r["added"].is_null() || u.is_some() {
+                w.coverage.unsupported("driven replay: an insp_reveal record it can't read");
+            }
+            return;
+        }
+        let Some(added) = r["added"].as_bool() else {
+            w.coverage.unsupported("driven replay: a reveal whose queuing wasn't read");
+            return;
+        };
+        let Some(u) = u else {
             w.coverage.unsupported("driven replay: a revealed unit the sim doesn't have");
             return;
         };

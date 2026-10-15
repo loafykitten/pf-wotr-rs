@@ -84,8 +84,11 @@ with one such record put after t=2347's vision records replays valid.
 - `crates/wr-sim/src/combat/spells.rs`: `Ability` (a memorizing spellbook's spell: the slot's
   `SpellShell`), `IsAvailableForCast` (`CanBeCastByCaster`: the cast count from the spellbook's
   slots, the conditions, and every branch that reads what isn't modelled reported: restrictions,
-  caster restrictions, required parameters, material components, mounts, polymorph, forbidden
-  spellbooks, suppressed schools, ability modifiers), `IsAvailable`, `CanTarget` (target
+  caster restrictions, required parameters, material components, mounts, polymorph (a fact with a
+  `Polymorph` component: `Body.IsPolymorphed` isn't modelled; the game has no polymorph part, and
+  `RuleCalculateWeaponSizeBonus`'s check now uses this too), forbidden spellbooks, suppressed
+  schools, ability modifiers, a caster's `UnitPartSpecialMetamagic`, which `HasMetamagic(Quicken)`
+  reads for the action type), `IsAvailable`, `CanTarget` (target
   restrictions: `AbilityTargetHasFact` ported, the others reported; the anchor), `RuntimeActionType`,
   `RequireFullRoundAction`, the execution context (params, ranks = caster level, the spell's
   descriptor and its source ability for the contexts made under it), `RuleCastSpell`,
@@ -102,13 +105,14 @@ with one such record put after t=2347's vision records replays valid.
   `m_SpellSource`); its T0 result includes the computed `IsChanged`.
 - `spellbook.rs`: `GetAvailableForCastSpellCount`, `SpendInternal` (`CanSpend`, `Spend`, with
   linked opposition slots); a spell level limit (`AddSpellLevelLimit`) is reported.
-- `components/stats.rs`: `ChangeUnitSize` and `AddGenericStatBonus`; `CalculatePowerfulChangeBonus`
+- `components/stats.rs`: `ChangeUnitSize` and `AddGenericStatBonus` (a size part from the save, whose facts aren't
+  hydrated, is reported wherever the size is read: `Unit::size_part_from_save`); `CalculatePowerfulChangeBonus`
   now evaluated for contexts made under an ability (it was reported). `spawn::state_size` is
   `UnitState.Size` (`m_Size`, read lazily from `OriginalSize`), its setter runs
   `UpdateSizeModifiers` (which reads it now, not `OriginalSize`), `UnitPartSizeModifier.UpdateSize`;
   `weapon::unit_size` reads it (a size part was reported).
 - `combat/commands.rs`: the lifecycle's ability checks (`IsAvailableForCast`, `CanCast`,
-  `ShouldRestrictCommand`), `UpdateCombatTarget` of a `UnitUseAbility` (`MarkManualTarget`: a
+  `ShouldRestrictCommand`, after which the command type's cooldown is checked as for any other), `UpdateCombatTarget` of a `UnitUseAbility` (`MarkManualTarget`: a
   sticky touch; a held touch or an auto-use ability reported), `UnitUseAbility.OnEnded` (base
   first; its running-list call and end are recorded as class code's, `ctx` other, and checked as
   such: `Inputs::class_running_call`, `class_ended`).
@@ -136,7 +140,10 @@ with one such record put after t=2347's vision records replays valid.
   runs the processes' tick; one in a frame where the sim ticked none is reported); one of those
   classes from elsewhere is reported.
 - `project.rs`: T0 compares `RuleCalculateAbilityParams.Result`, `RuleCastSpell`'s success and
-  failure fields and `RuleSpellResistanceCheck`'s resistance, penetration, roll and immunity.
+  failure fields, `RuleSpellResistanceCheck`'s resistance, penetration, roll and immunity, and
+  `RuleApplySpell`'s inputs (`Spell`, `Context`, `SpellTarget`, `Place`: the oracle writes its
+  target as `$impure`, so they're what tells the cast's `Before` and the process's two `After`
+  rules apart).
 
 ### Inputs that stay recorded
 
@@ -150,10 +157,12 @@ context's `Direction` (positions) isn't kept (no element of this spell reads it)
 
 `crates/wr-sim/tests/poc5_spells.rs` (ignored, real data): every `tb-cast` run valid with the cast
 computed (2 cast roots, 5 process roots), its end state equal; `tb-chain` T0-equal with only the
-combat log's knowledge event left; 12 damaged `tb-cast` recordings (the params' and the cast's
-snapshots, a missing params or cast root, a process root of another caller, the resistance d20, the
-params' DC, the buff's attach, the driver's spell and slot, the cast's end chain), each reported or
-T0-unequal. `facts::tests::an_apply_buff_with_a_context_duration_lasts_its_rounds`.
+combat log's knowledge event left; 17 damaged `tb-cast` recordings (the params' and the cast's
+snapshots, a missing params or cast root, the resistance check from another caller, a process root
+of another class, the resistance d20, the params' DC, the buff's attach, four `RuleApplySpell`
+inputs, the driver's spell and slot, the cast's end chain), each reported or T0-unequal.
+`replay::tests`: a recorded reveal queues the unit as the game did; reveals the replay can't place
+are reported. `facts::tests::an_apply_buff_with_a_context_duration_lasts_its_rounds`.
 
 ## Next
 

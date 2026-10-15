@@ -167,6 +167,9 @@ pub struct Unit {
     pub size_before_death: Option<Size>,
     /// `UnitPartSizeModifier.m_SizeChangeFacts` (the part exists while it holds any).
     pub size_change_facts: Vec<FactIdx>,
+    /// The save had a `UnitPartSizeModifier` (its `m_SizeChangeFacts` and `OnPostLoad` aren't
+    /// hydrated: the unit's size is reported wherever it's read).
+    pub size_part_from_save: bool,
     pub main_fact: Option<FactIdx>,
     pub descriptor_turned_on: bool,
     pub is_main_character: bool,

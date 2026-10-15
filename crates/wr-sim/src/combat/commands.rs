@@ -1109,7 +1109,8 @@ fn has_cooldown_for_command(w: &mut World, c: u32) -> R<bool> {
     let ability = x.is(class::USE_ABILITY).then(|| x.ability.clone());
     let u = executor(w, c)?;
     // In turn-based combat `ShouldRestrictCommand`: a full-round ability (`IsFullRoundAbility`)
-    // of a unit not surprising needs a full-round action.
+    // of a unit not surprising needs a full-round action; with one, the command's type is checked
+    // as any other's.
     if turn_based(w)
         && super::is_in_combat(w, u)
         && !ignore
@@ -1121,8 +1122,8 @@ fn has_cooldown_for_command(w: &mut World, c: u32) -> R<bool> {
             None => Err("its ability isn't established".to_owned()),
         };
         match full {
-            Ok(true) => return Ok(!super::cooldowns::has_full_round_action(w, u)),
-            Ok(false) => {}
+            Ok(true) if !super::cooldowns::has_full_round_action(w, u) => return Ok(true),
+            Ok(_) => {}
             Err(e) => {
                 return unsupported(
                     w,

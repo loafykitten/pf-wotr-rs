@@ -59,7 +59,8 @@ pub fn entity_revealed(w: &mut World, u: EntityIdx) -> Option<bool> {
         w.coverage.unsupported("InspectUnitsController: a polymorphed unit's inspection blueprint");
         return None;
     }
-    let bp = w.unit(u).and_then(|x| x.blueprint);
+    // `BlueprintForInspection`: `ReplaceBlueprintForInspection ?? Blueprint`.
+    let bp = w.unit(u).and_then(|x| x.replace_blueprint_for_inspection.or(x.blueprint));
     if w.player.inspect_infos.iter().any(|x| Some(x.blueprint) == bp) {
         return Some(false);
     }
@@ -68,8 +69,10 @@ pub fn entity_revealed(w: &mut World, u: EntityIdx) -> Option<bool> {
     Some(added)
 }
 
-/// A unit with a `Polymorph` fact (whose activation may set `ReplaceBlueprintForInspection`).
-fn polymorphed(w: &World, u: EntityIdx) -> bool {
+/// A unit with a `Polymorph` fact: the sim doesn't port its activation (`UnitBody.
+/// ApplyPolymorphEffect`, which sets `Body.IsPolymorphed`, and `ReplaceBlueprintForInspection`), so
+/// a reader of those reports it.
+pub(crate) fn polymorphed(w: &World, u: EntityIdx) -> bool {
     w.entity(u).facts.list.iter().any(|f| {
         w.fact(*f).bp.as_ref().is_some_and(|b| {
             b.components_array().iter().any(|o| wr_content::schema::ty(o.ty).short == "Polymorph")
