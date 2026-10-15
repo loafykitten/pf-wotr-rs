@@ -485,11 +485,26 @@ fn on_fact_did_attach(w: &mut World, u: EntityIdx, f: FactIdx) {
     fact_collection_updated(w);
 }
 
+/// `Buff.OnRemove` (`Buff.cs`): the stored modifiers (not modelled: reported) and the stored
+/// facts are removed from the owner (`Owner.RemoveFact(fact)`, each), then the lists cleared.
+/// The removal effect is presentation; `IBuffRemoved` components aren't called here.
+fn buff_on_remove(w: &mut World, u: EntityIdx, f: FactIdx) {
+    let Some(b) = w.fact_mut(f).buff.as_mut() else { return };
+    let stored = std::mem::take(&mut b.stored_facts);
+    let mods = std::mem::take(&mut b.stored_mods);
+    if mods {
+        w.coverage.unsupported("Buff.OnRemove: stored modifiers");
+    }
+    for s in stored {
+        remove(w, u, s);
+    }
+}
+
 /// The processors' `OnFactWillDetach` (`DelegateOnFactWillDetach`, after WrathOracle's
 /// `fact_detach` record): the lost events; abilities' player-faction events; buffs run
-/// `OnRemove` (stored modifiers and facts: nothing stores any here), update the next event
-/// and raise `IUnitBuffHandler.HandleBuffDidRemoved` (activatables whose applied buff it is
-/// stop); then `IFactCollectionUpdatedHandler`.
+/// `OnRemove` (`buff_on_remove`), update the next event and raise
+/// `IUnitBuffHandler.HandleBuffDidRemoved` (activatables whose applied buff it is stop); then
+/// `IFactCollectionUpdatedHandler`.
 fn on_fact_will_detach(w: &mut World, u: EntityIdx, f: FactIdx) {
     let kind = w.fact(f).kind;
     if !has_processor(kind) {
@@ -499,6 +514,7 @@ fn on_fact_will_detach(w: &mut World, u: EntityIdx, f: FactIdx) {
     match kind {
         FactKind::Ability => ability_collection_event(w, u, f, false),
         FactKind::Buff => {
+            buff_on_remove(w, u, f);
             crate::rulebook::bus::raise_global_fact(
                 w,
                 "IUnitBuffHandler",
@@ -723,8 +739,8 @@ fn activatable_on_attack(w: &mut World, a: FactIdx, spend: Spend) {
         return;
     }
     let Some(bp) = ability_bp(w, a) else { return };
-    let available = is_available(w, &bp);
-    if available && has_component(&bp, "IActivatableAbilitySpendResourceLogic") {
+    let available = is_available(w, a);
+    if available && spends_resources(w, a) {
         w.coverage
             .unsupported("ActivatableAbility: IActivatableAbilitySpendResourceLogic on an attack");
     }
@@ -827,9 +843,9 @@ fn on_did_turn_on(w: &mut World, f: FactIdx) {
     if act(w, f).1 {
         return;
     }
-    if has_component(&bp, "IActivatableAbilitySpendResourceLogic")
-        || has_component(&bp, "ActivatableAbilityUnitCommand")
-    {
+    // `IActivatableAbilitySpendResourceLogic.OnAbilityTurnOn`: empty for its one implementer on
+    // toggles (`ActivatableAbilityResourceLogic`); a unit command's logic isn't ported.
+    if has_component(&bp, "ActivatableAbilityUnitCommand") {
         w.coverage.unsupported("ActivatableAbility: resource or unit-command components");
     }
     // `ActivateImmediately`: `ActivationType == Immediately` (0).
@@ -841,23 +857,207 @@ fn on_did_turn_on(w: &mut World, f: FactIdx) {
 }
 
 pub fn has_component(bp: &Blueprint, ty: &str) -> bool {
+    // `IActivatableAbilitySpendResourceLogic` isn't in the content schema's handler lists: its
+    // implementer on toggles is `ActivatableAbilityResourceLogic`.
+    if ty == "IActivatableAbilitySpendResourceLogic"
+        && bp.components_array().iter().any(|o| is_a(o.ty, "ActivatableAbilityResourceLogic"))
+    {
+        return true;
+    }
     bp.components_array().iter().any(|o| {
         is_a(o.ty, ty) || wr_content::schema::ty(o.ty).handlers.iter().any(|h| h.contains(ty))
     })
 }
 
-/// `IsAvailable`: `IsAvailableByRestrictions` (every `ActivatableAbilityRestriction`
-/// component allows it) and resources. Restriction components aren't ported: reported.
-pub fn is_available(w: &mut World, bp: &Blueprint) -> bool {
-    if bp.components_array().iter().any(|o| is_a(o.ty, "ActivatableAbilityRestriction")) {
-        w.coverage.unsupported("ActivatableAbility: restriction components (IsAvailable)");
-    }
-    if bp.view().guid("m_Resource").is_some()
-        || has_component(bp, "ActivatableAbilityResourceLogic")
-    {
-        w.coverage.unsupported("ActivatableAbility: resources (IsAvailable)");
+/// `ActivatableAbility.IsAvailable`: available by resources and by restrictions (and not
+/// `TemporarilyDisabled`, which the sim never sets).
+pub fn is_available(w: &mut World, f: FactIdx) -> bool {
+    is_available_by_resources(w, f) && is_available_by_restrictions(w, f)
+}
+
+/// The fact's blueprint components of a type (`SelectComponentsWithRuntime<T>`: the enabled
+/// ones), in order.
+/// Whether a toggle has resource logic that spends (`IActivatableAbilitySpendResourceLogic` among
+/// its runtimes: `ActivatableAbilityResourceLogic`).
+pub fn spends_resources(w: &mut World, f: FactIdx) -> bool {
+    !components_of(w, f, "ActivatableAbilityResourceLogic").is_empty()
+}
+
+/// Whether a toggle has restriction runtimes (`ActivatableAbilityRestriction`).
+pub fn has_restrictions(w: &mut World, f: FactIdx) -> bool {
+    !components_of(w, f, "ActivatableAbilityRestriction").is_empty()
+}
+
+pub(crate) fn components_of(w: &mut World, f: FactIdx, ty: &str) -> Vec<(Rc<Blueprint>, usize)> {
+    // `EntityFact.SelectComponentsWithRuntime<T>()`: the fact's runtimes whose
+    // `SourceBlueprintComponent` is a `T` (a runtime not yet matched to its component, before
+    // the fact's post-load, has none).
+    (0..w.fact(f).components.len())
+        .filter_map(|comp| w.component(crate::world::CompRef { fact: f, comp }).source.clone())
+        .filter(|(b, i)| is_a(b.components_array()[*i].ty, ty))
+        .collect()
+}
+
+/// `Owner.HasFact(blueprint)`.
+fn owner_has_fact(w: &World, u: EntityIdx, g: wr_content::Guid) -> bool {
+    w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g))
+}
+
+/// `IsAvailableByResources`: every `ActivatableAbilityResourceLogic` allows it.
+pub fn is_available_by_resources(w: &mut World, f: FactIdx) -> bool {
+    let Some(u) = w.fact(f).owner.filter(|o| w.unit(*o).is_some()) else { return true };
+    for (b, i) in components_of(w, f, "ActivatableAbilityResourceLogic") {
+        if !resource_logic_available(w, f, u, crate::content::View(b.components_array()[i])) {
+            return false;
+        }
     }
     true
+}
+
+/// `ActivatableAbilityResourceLogic.IsFreeBecauseOfFact`.
+fn free_because_of_fact(w: &World, u: EntityIdx, v: crate::content::View<'_>) -> bool {
+    if v.bool("m_UseListForFreeBlueprints") {
+        v.guids_with_nulls("m_FreeBlueprints")
+            .into_iter()
+            .flatten()
+            .any(|g| w.content.get(g).is_some() && owner_has_fact(w, u, g))
+    } else {
+        v.guid("m_FreeBlueprint")
+            .filter(|g| w.content.get(*g).is_some())
+            .is_some_and(|g| owner_has_fact(w, u, g))
+    }
+}
+
+/// `ActivatableAbilityResourceLogic.SpendType`: `None`, `Judgment`.
+const SPEND_NONE: i64 = 0;
+const SPEND_JUDGMENT: i64 = 5;
+/// `MechanicsFeatureType.JudgmentSwitch`.
+const JUDGMENT_SWITCH: i64 = 7;
+
+/// `ActivatableAbilityResourceLogic.IsAvailable(runtime)`: free because of a fact; else enough
+/// of the required resource (one unless the spend type is `None`, or `Judgment` with the
+/// owner's `JudgmentSwitch`); else the source item's charges (not modelled: reported).
+fn resource_logic_available(
+    w: &mut World,
+    f: FactIdx,
+    u: EntityIdx,
+    v: crate::content::View<'_>,
+) -> bool {
+    if free_because_of_fact(w, u, v) {
+        return true;
+    }
+    if let Some(r) = v.guid("m_RequiredResource").filter(|g| w.content.get(*g).is_some()) {
+        let spend = v.int("SpendType");
+        let amount = if spend == SPEND_JUDGMENT {
+            i32::from(
+                spend != SPEND_NONE && !crate::combat::weapon::has_feature(w, u, JUDGMENT_SWITCH),
+            )
+        } else {
+            i32::from(spend != SPEND_NONE)
+        };
+        // `Resources.HasEnoughResource(resource, amount)`: no resource is false.
+        return w.unit(u).and_then(|x| x.resources.get(&r)).is_some_and(|x| x.amount >= amount);
+    }
+    if w.fact(f).source_item.is_some() {
+        w.coverage.unsupported("ActivatableAbilityResourceLogic.IsAvailable: source item charges");
+        return true;
+    }
+    false
+}
+
+/// `IsAvailableByRestrictions`: not an `OnlyInCombat` toggle out of combat, every restriction
+/// allows it (those with `IgnoreIfStarted` don't count once started), and no polymorph restricts
+/// it. Restriction types without a port and a toggle whose buff polymorphs are reported.
+pub fn is_available_by_restrictions(w: &mut World, f: FactIdx) -> bool {
+    let Some(bp) = ability_bp(w, f) else { return true };
+    let Some(u) = w.fact(f).owner.filter(|o| w.unit(*o).is_some()) else { return true };
+    if bp.view().bool("OnlyInCombat") && !crate::combat::is_in_combat(w, u) {
+        return false;
+    }
+    let started = act(w, f).1;
+    for (b, i) in components_of(w, f, "ActivatableAbilityRestriction") {
+        let v = crate::content::View(b.components_array()[i]);
+        if started && v.bool("IgnoreIfStarted") {
+            continue;
+        }
+        if !restriction_available(w, u, v) {
+            return false;
+        }
+    }
+    // `IsPolymorphRestricted()`: the toggle's buff polymorphs and another polymorph is active.
+    if bp
+        .view()
+        .guid("m_Buff")
+        .and_then(|g| w.content.get(g))
+        .is_some_and(|b| b.components_array().iter().any(|o| is_a(o.ty, "Polymorph")))
+    {
+        w.coverage.unsupported("ActivatableAbility.IsPolymorphRestricted: a polymorph buff");
+    }
+    true
+}
+
+/// `ActivatableAbilityRestriction.IsAvailable(runtime)` of one restriction.
+fn restriction_available(w: &mut World, u: EntityIdx, v: crate::content::View<'_>) -> bool {
+    match v.type_name() {
+        // `KensaiChosenWeapon.CheckWeaponEquipped(Owner, ChosenWeaponBlueprint)`.
+        "RestrictionKensaiWeapon" => {
+            kensai_weapon_equipped(w, u, v.guid("m_ChosenWeaponBlueprint"))
+        }
+        other => {
+            w.coverage.unsupported(format!("ActivatableAbility restriction {other} (IsAvailable)"));
+            true
+        }
+    }
+}
+
+/// `KensaiChosenWeapon.CheckWeaponEquipped(unit, feature)`: the chosen category
+/// (`GetChosenWeapon`: the unit's first fact of the feature, if it has a `KensaiChosenWeapon`
+/// component, and its param's weapon category) is a hand's or an additional limb's weapon's.
+fn kensai_weapon_equipped(w: &mut World, u: EntityIdx, feature: Option<wr_content::Guid>) -> bool {
+    let fact = feature.and_then(|g| {
+        w.entity(u)
+            .facts
+            .list
+            .iter()
+            .copied()
+            .find(|f| w.fact(*f).kind == FactKind::Feature && w.fact(*f).blueprint == Some(g))
+    });
+    // `fact.GetComponent<KensaiChosenWeapon>()`: a runtime's source component, else the
+    // blueprint's own `ComponentsArray`.
+    let has_component = |w: &mut World, f: FactIdx| {
+        !components_of(w, f, "KensaiChosenWeapon").is_empty()
+            || w.fact(f).bp.as_ref().is_some_and(|b| {
+                // (the fallback skips runtime providers)
+                b.components_array().iter().any(|o| {
+                    is_a(o.ty, "KensaiChosenWeapon")
+                        && !wr_content::schema::ty(o.ty)
+                            .has(wr_content::schema::type_flags::RUNTIME_PROVIDER)
+                })
+            })
+    };
+    let chosen = match fact {
+        Some(f) if has_component(w, f) => crate::feature_param::fact_param(w, f).weapon_category,
+        _ => None,
+    };
+    let Some(chosen) = chosen else { return false };
+    let category = |w: &World, i: Option<EntityIdx>| {
+        i.and_then(|i| crate::combat::weapon::Weapon::of(w, i)).map(|x| x.category())
+    };
+    // `PrimaryHand.HasWeapon && PrimaryHand.Weapon…`, the secondary hand, each limb.
+    let hand = |w: &mut World, primary: bool| {
+        if crate::items::hand_has_weapon(w, u, primary) {
+            crate::items::hand_maybe_weapon(w, u, primary)
+        } else {
+            None
+        }
+    };
+    let primary = hand(w, true);
+    let secondary = hand(w, false);
+    category(w, primary) == Some(chosen)
+        || category(w, secondary) == Some(chosen)
+        || crate::items::limb_slots(w, u)
+            .into_iter()
+            .any(|(has, l)| has && l.is_some() && category(w, l) == Some(chosen))
 }
 
 /// `ActivatableAbility.TryStart()` (`ActivatableAbility.cs:492`).
@@ -866,7 +1066,7 @@ pub fn try_start(w: &mut World, f: FactIdx) {
     let (on, started, buff) = act(w, f);
     // `IsStarted || IsWaitingForTarget || !IsAvailable`.
     let waiting = bp.view().bool("IsTargeted") && on;
-    if started || waiting || !is_available(w, &bp) {
+    if started || waiting || !is_available(w, f) {
         return;
     }
     w.fact_mut(f).ready_to_start = true;
@@ -919,7 +1119,17 @@ pub fn try_start(w: &mut World, f: FactIdx) {
     w.fact_mut(f).was_in_combat = owner.is_some_and(|o| crate::combat::is_in_combat(w, o));
     set_act(w, f, (on, true, buff));
     reapply_buff(w, f);
-    // `IActivatableAbilitySpendResourceLogic.OnStart` (none: checked in `on_did_turn_on`),
+    // `IActivatableAbilitySpendResourceLogic.OnStart`: `ActivatableAbilityResourceLogic` spends
+    // for `TurnOn`, `Start` and the once-per spend types (not ported: reported).
+    // (`SpendResource` returns at once when free because of a fact.)
+    if let Some(u) = owner
+        && components_of(w, f, "ActivatableAbilityResourceLogic").iter().any(|(b, i)| {
+            let v = crate::content::View(b.components_array()[*i]);
+            matches!(v.int("SpendType"), 1 | 2 | 10..=12) && !free_because_of_fact(w, u, v)
+        })
+    {
+        w.coverage.unsupported("ActivatableAbilityResourceLogic.OnStart: spending a resource");
+    }
     // `IActivatableAbilityStartHandler` (UI and action bar).
     w.fact_mut(f).time_to_next_round = 0.0;
     w.fact_mut(f).ready_to_start = false;
@@ -941,8 +1151,10 @@ pub fn stop(w: &mut World, f: FactIdx) {
         remove(w, o, b);
     }
     let Some(bp) = ability_bp(w, f) else { return };
+    // `if (m_IsOn && (ActivateWithUnitCommand || !IsAvailableByRestrictions)) m_IsOn = false`
+    // (`IsStarted` is already false).
     let with_command = bp.view().int("ActivationType") == 1;
-    if on && with_command {
+    if on && (with_command || !is_available_by_restrictions(w, f)) {
         set_act(w, f, (false, false, None));
     }
 }

@@ -54,7 +54,7 @@ fn subscribers(w: &World) -> Vec<Sub> {
 
 fn refers_to(w: &World, s: Sub, e: EntityIdx) -> bool {
     match s {
-        Sub::Entity(x) => x == e,
+        Sub::Entity(x) | Sub::Part(x, _) => x == e,
         Sub::Fact(f) => w.fact(f).owner == Some(e),
         Sub::Component(c) | Sub::Runtime(c) => w.fact(c.fact).owner == Some(e),
         Sub::External(_) => false,

@@ -267,14 +267,21 @@ fn run_fact_context_actions(w: &mut World, c: CompRef, list: &str) {
     if actions.is_empty() {
         return;
     }
-    let owner = w.fact(c.fact).owner;
+    // `(Fact as IFactContextOwner)?.RunActionInContext(list)`: the scope's target is the
+    // context's `MainTarget`, its owner (an enchantment's context is its wielder's; a saved
+    // `m_MainTarget` isn't hydrated).
+    let owner = w
+        .fact(c.fact)
+        .context
+        .as_ref()
+        .and_then(|x| x.owner.clone())
+        .and_then(|id| w.by_id.get(&id).copied());
     let caster = w
         .fact(c.fact)
         .context
         .as_ref()
         .and_then(|x| x.caster.clone())
         .and_then(|id| w.by_id.get(&id).copied());
-    // `(Fact as IFactContextOwner)?.RunActionInContext(list)`: the context's main target.
     in_fact_context(w, c.fact, owner, |w| {
         for a in actions {
             let v = View(a);
@@ -416,6 +423,96 @@ pub fn run_context_action(
                 }
             }
         }
+        "ContextActionApplyBuff" => apply_buff(w, a, target, caster),
         t => w.coverage.unsupported(format!("context action {t}")),
+    }
+}
+
+/// `ContextActionApplyBuff.RunAction` (`Kingmaker.UnitLogic.Mechanics.Actions/
+/// ContextActionApplyBuff.cs`): in the innermost mechanics context, the buff goes on the
+/// context's target (or its caster) through `UnitDescriptor.AddBuff(blueprint, parentContext,
+/// duration)`: the context cloned for the buff (`IgnoreParentContext`: none, so a context of
+/// its own with the target as its caster). `IsFromSpell` is the action's or the blueprint's;
+/// `AsChild` stores the buff in the enclosing `Buff.Data` scope's buff when both have one owner.
+/// Durations other than permanent or `DurationSeconds` (`SameDuration`, `DurationValue`'s
+/// dice and context values), `IsNotDispelable` (not modelled on buffs) are reported.
+fn apply_buff(w: &mut World, a: View<'_>, target: Option<EntityIdx>, caster: Option<EntityIdx>) {
+    let Some((fact, _)) = crate::elements::actions::mechanics_scope(w) else {
+        w.log("error", "Unable to apply buff: no context found");
+        return;
+    };
+    let Some(ctx) = w.fact(fact).context.clone() else {
+        w.log("error", "Unable to apply buff: no context found");
+        return;
+    };
+    // `Target.Unit` / `context.MaybeCaster`: a unit or nothing.
+    let Some(u) =
+        (if a.bool("ToCaster") { caster } else { target }).filter(|u| w.unit(*u).is_some())
+    else {
+        w.log("error", "Can't apply buff: target is null");
+        return;
+    };
+    // `CalculateDuration`.
+    let duration = if a.bool("Permanent") {
+        None
+    } else if a.bool("SameDuration") {
+        w.coverage.unsupported("ContextActionApplyBuff: SameDuration");
+        return;
+    } else if a.bool("UseDurationSeconds") {
+        match crate::csharp::TimeSpan::from_seconds(f64::from(a.f32("DurationSeconds"))) {
+            Ok(d) => Some(d),
+            Err(_) => {
+                w.coverage.unsupported("ContextActionApplyBuff: DurationSeconds out of range");
+                return;
+            }
+        }
+    } else {
+        w.coverage.unsupported("ContextActionApplyBuff: DurationValue (ContextDurationValue)");
+        return;
+    };
+    if a.bool("IsNotDispelable") {
+        w.coverage.unsupported("ContextActionApplyBuff: IsNotDispelable");
+        return;
+    }
+    // `buffTarget.Descriptor.AddBuff(Buff, parentContext, duration)`: a missing blueprint
+    // answers null.
+    let Some(bp) = a.guid("m_Buff").and_then(|g| w.content.get(g)) else { return };
+    let buff_ctx = if a.bool("IgnoreParentContext") {
+        // `AddBuff(blueprint, Unit, duration)`: the target its own caster.
+        crate::unit_facts::context(w, Some(u), Some(u), &bp)
+    } else {
+        // `Buffs.AddBuff(blueprint, parentContext, duration)`: `parentContext.CloneFor`.
+        w.pending_buffs.parent_descriptor = ctx.spell_descriptor;
+        crate::unit_facts::clone_for(w, &ctx, &bp, u)
+    };
+    let Some(buff) = crate::unit_facts::add_buff(w, u, &bp, buff_ctx, duration) else { return };
+    // `buff.IsFromSpell = IsFromSpell || Buff.IsFromSpell`.
+    let from_spell = a.bool("IsFromSpell")
+        || crate::unit_facts::buff_flag(&bp, crate::unit_facts::BUFF_IS_FROM_SPELL);
+    if let Some(b) = w.fact_mut(buff).buff.as_mut() {
+        b.is_from_spell = from_spell;
+    }
+    if !a.bool("AsChild") {
+        return;
+    }
+    // `ContextData<Buff.Data>.Current?.Buff`: the parent stores the child (`StoreFact`, which
+    // logs and skips a fact its owner doesn't have).
+    let parent = w.ctx.iter().rev().find_map(|c| match c {
+        crate::elements::Ctx::BuffData(f) => Some(*f),
+        _ => None,
+    });
+    let Some(p) = parent else { return };
+    let owner = w.fact(p).owner;
+    if owner != w.fact(buff).owner {
+        w.log("error", "Parent and child buff must have one owner");
+        return;
+    }
+    let has = owner.is_some_and(|o| w.entity(o).facts.list.contains(&buff));
+    if !has {
+        w.log("error", "Can't store fact from different owner");
+        return;
+    }
+    if let Some(b) = w.fact_mut(p).buff.as_mut() {
+        b.stored_facts.push(buff);
     }
 }

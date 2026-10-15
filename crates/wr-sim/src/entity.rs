@@ -16,6 +16,7 @@ use crate::world::{EntityIdx, EntityKind, World};
 pub fn pre_post_load(w: &mut World, e: EntityIdx) {
     let id = w.entity(e).unique_id.clone();
     w.by_id.insert(id, e);
+    w.unregistered_items.remove(&e);
     fl::manager_restore_owner_link(w, e);
 }
 
@@ -580,6 +581,10 @@ pub fn dispose(w: &mut World, e: EntityIdx) {
     // if the owner is on, `Dispose`); the save schema's hook table has no dispose hooks, so
     // only the inert parts are known to do nothing there.
     for p in w.entity(e).parts.clone() {
+        if p.clr == crate::components::shifters_fury::PART {
+            crate::components::shifters_fury::part_dispose(w, e);
+            continue;
+        }
         // `UnitPartSpellResistance` overrides nothing (`EntityPart.OnTurnOff`/`OnDispose` are
         // empty for it).
         if !INERT_PARTS.contains(&p.clr) && p.clr != "UnitPartSpellResistance" {

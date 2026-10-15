@@ -27,8 +27,13 @@ pub fn request_plan(w: &mut World, u: EntityIdx) -> Option<EntityIdx> {
     Some(plan)
 }
 
-/// `UnitHelper.CreatePreview(unit, createView: false)`.
+/// `UnitHelper.CreatePreview(unit, createView: false)` (`Copy`: the level-up controller is
+/// stashed for the copy).
 pub fn create_preview(w: &mut World, original: EntityIdx) -> Option<EntityIdx> {
+    super::levelup::with_controller_stashed(w, |w| create_preview_inner(w, original))
+}
+
+fn create_preview_inner(w: &mut World, original: EntityIdx) -> Option<EntityIdx> {
     let bp = w.unit(original).and_then(|u| u.original_blueprint).and_then(|g| w.content.get(g))?;
     // `CopyInternal`: the vacuum unit under `DoNotCreateItems` and `DoNotCreatePlan`.
     let id = w.new_guid();

@@ -3,7 +3,8 @@
 //! `Kingmaker.UnitLogic.FactLogic/AddSkillPointPerCharacterLevel.cs`,
 //! `Kingmaker.Designers.Mechanics.Facts/AddFeatureOnClassLevel.cs`, `AddFeatureIfHasFact.cs`,
 //! `ReplaceCasterLevelOfAbility.cs` (`CalculateClassLevel`), `SavesFixerRecalculate.cs`,
-//! `Kingmaker.Blueprints/PretendUnit.cs`, `Kingmaker.UnitLogic.FactLogic/AddMythicEnemyHitPointsBonus.cs`.
+//! `Kingmaker.Blueprints/PretendUnit.cs`, `Kingmaker.UnitLogic.FactLogic/AddMythicEnemyHitPointsBonus.cs`,
+//! `Kingmaker.Designers.Mechanics.Facts/AddFeatureOnApply.cs` (in `spawn::levelup`).
 
 use serde_json::{Value, json};
 
@@ -39,6 +40,11 @@ pub fn register(r: &mut Registry) {
         "RemoveFeatureOnApply",
         bits(&[Hook::Activate]),
         remove_feature_on_apply,
+    )));
+    r.register(Box::new(Port::new(
+        "AddFeatureOnApply",
+        bits(&[Hook::Activate]),
+        add_feature_on_apply,
     )));
     r.register(Box::new(Port::new(
         "PretendUnit",
@@ -325,4 +331,19 @@ fn remove_feature_on_apply(w: &mut World, c: CompRef, h: Hook) {
     let Some(feature) = with_settings(w, c, |v| v.guid("m_Feature")).flatten() else { return };
     let f = w.entity(u).facts.list.iter().copied().find(|f| w.fact(*f).blueprint == Some(feature));
     remove_fact(w, u, f);
+}
+
+/// `AddFeatureOnApply.OnActivate`: see [`crate::spawn::levelup::add_feature_on_apply_activate`]
+/// (a missing feature adds nothing).
+fn add_feature_on_apply(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    if h != Hook::Activate {
+        return;
+    }
+    let Some(f) =
+        with_settings(w, c, |v| v.guid("m_Feature")).flatten().and_then(|g| w.content.get(g))
+    else {
+        return;
+    };
+    crate::spawn::levelup::add_feature_on_apply_activate(w, u, &f);
 }

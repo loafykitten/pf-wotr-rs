@@ -7,6 +7,7 @@ pub mod books;
 pub mod damage_resistance;
 pub mod difficulty;
 pub mod empty_hand;
+pub mod enchant;
 pub mod equipment;
 pub mod etudes;
 pub mod facts;
@@ -16,6 +17,7 @@ pub mod levelup;
 pub mod logic;
 pub mod mechanics;
 pub mod npc_ports;
+pub mod shifters_fury;
 pub mod state;
 pub mod stats;
 
@@ -46,6 +48,8 @@ pub fn registry() -> Registry {
     empty_hand::register(&mut r);
     npc_ports::register(&mut r);
     aura_loot::register(&mut r);
+    shifters_fury::register(&mut r);
+    enchant::register(&mut r);
     crate::spawn::register(&mut r);
     crate::combat::weapon::register(&mut r);
     crate::combat::components::register(&mut r);

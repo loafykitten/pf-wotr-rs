@@ -615,6 +615,7 @@ pub fn insert_item(
     // `EntityService.Register(item)`.
     let id = w.entity(item).unique_id.clone();
     w.by_id.insert(id, item);
+    w.unregistered_items.remove(&item);
     if let Some(s) = find_slot_mut(w, u, name) {
         s.item = Some(item);
     }
@@ -785,10 +786,12 @@ fn is_stackable(w: &World, item: EntityIdx) -> bool {
     let Some(bp) = it.blueprint.and_then(|g| w.content.get(g)) else { return false };
     let v = bp.view();
     let may = !v.bool("m_IsNotable") || v.bool("m_ForceStackable");
-    // `m_HasExternalEnchantments` is false after a load and nothing here adds an enchantment
-    // with a parent context; `HasOverridenVisual` is `VisualSourceItemBlueprint != null`
+    // `m_HasExternalEnchantments` (false after a load, updated when an effect adds or removes
+    // an enchantment); `HasOverridenVisual` is `VisualSourceItemBlueprint != null`
     // (`ItemEntity.cs:370`).
-    may && it.visual_source.is_none() && it.is_identified
+    may && !w.external_enchantments.contains(&item)
+        && it.visual_source.is_none()
+        && it.is_identified
 }
 
 /// `ItemEntity.CanBeMerged(other)`.
@@ -1415,13 +1418,97 @@ fn add_enchantment(w: &mut World, item: EntityIdx, bp: &Rc<Blueprint>) -> FactId
     f
 }
 
+/// `ItemEntity.AddEnchantment(blueprint, parentContext)` (`ItemEntity.cs:739`): through the
+/// item's `ItemEnchantmentCollection` (none on a shield: `InstantiateEnchantments`), a fact
+/// with the parent context, attached (activated at once when the item has a wielder); then
+/// `UpdateHasExternalEnchantments` and `OnEnchantmentAdded` (armor recalculates its stats).
+pub fn add_enchantment_with_parent(
+    w: &mut World,
+    item: EntityIdx,
+    bp: &Rc<Blueprint>,
+    parent: crate::context::MechanicsContext,
+) -> Option<FactIdx> {
+    if !has_enchantments_collection(w, item) {
+        return None;
+    }
+    // A runtime item's constructor turns its facts on (`EntityDataBase` ctor:
+    // `Facts.TurnOn()`); an item made on without them (`combat::weapon::create_weapon`'s limbs)
+    // would leave the new enchantment off: reported.
+    if w.entity(item).is_turned_on && !w.entity(item).facts.is_turned_on {
+        w.coverage.unsupported(
+            "ItemEntity.AddEnchantment: an item turned on without its facts turned on",
+        );
+    }
+    let f = fl::new_fact(w, FactKind::ItemEnchantment, "ItemEnchantment", bp.clone());
+    w.fact_mut(f).parent_context = true;
+    w.fact_mut(f).enchant_parent = Some(Box::new(parent));
+    let suppress = w.item(item).and_then(|i| i.wielder).is_none();
+    fl::manager_add_attach_with(w, item, f, suppress, |w, _| {
+        bus::raise_global(w, "IFactCollectionUpdatedHandler", None);
+    });
+    update_has_external_enchantments(w, item);
+    if w.entity(item).clr == "ItemEntityArmor" {
+        crate::armor::recalculate_stats(w, item);
+    }
+    Some(f)
+}
+
+/// `ItemEntity.RemoveEnchantment(enchantment)` (`ItemEntity.cs:746`): out of the collection
+/// (disposed), `UpdateHasExternalEnchantments`, `OnEnchantmentRemoved` (armor recalculates).
+pub fn remove_enchantment(w: &mut World, item: EntityIdx, f: FactIdx) {
+    if has_enchantments_collection(w, item) {
+        fl::manager_remove_with(w, item, f, true, |w, _| {
+            bus::raise_global(w, "IFactCollectionUpdatedHandler", None);
+        });
+    }
+    update_has_external_enchantments(w, item);
+    if w.entity(item).clr == "ItemEntityArmor" {
+        crate::armor::recalculate_stats(w, item);
+    }
+}
+
+/// `ItemEntity.EnchantmentsCollection != null`: the collection is made by the constructor (an
+/// item created in this run), `OnPostLoad` (a loaded item, once post-loaded) and `OnDidEquipped`
+/// (`ApplyEnchantments`), never for a shield (`InstantiateEnchantments`).
+#[must_use]
+pub fn has_enchantments_collection(w: &World, item: EntityIdx) -> bool {
+    w.entity(item).clr != "ItemEntityShield"
+        && (w.entity(item).post_load_executed
+            || w.item(item).is_some_and(|i| i.runtime_created)
+            || w.equipped_enchantment_collections.contains(&item))
+}
+
+/// `UpdateHasExternalEnchantments`: whether any enchantment has a parent context.
+fn update_has_external_enchantments(w: &mut World, item: EntityIdx) {
+    let any = w
+        .entity(item)
+        .facts
+        .list
+        .iter()
+        .any(|f| w.fact(*f).kind == FactKind::ItemEnchantment && w.fact(*f).parent_context);
+    if any {
+        w.external_enchantments.insert(item);
+    } else {
+        w.external_enchantments.remove(&item);
+    }
+}
+
 /// `ItemEnchantment.OnActivate`: `m_CurrentContext = CreateContext(this, Owner.Wielder,
-/// ParentContext)` (`new MechanicsContext(null, wielder, blueprint)` and `AddItemSource`).
+/// ParentContext)` (`parentContext.CloneFor(blueprint, wielder)`, or `new MechanicsContext(null,
+/// wielder, blueprint)`; then `AddItemSource`).
 pub fn enchantment_on_activate(w: &mut World, f: FactIdx) {
     let Some(item) = w.fact(f).owner else { return };
     let wielder = w.item(item).and_then(|i| i.wielder);
     let Some(bp) = w.fact(f).bp.clone() else { return };
-    let mut ctx = crate::unit_facts::context(w, None, wielder, &bp);
+    let parent = w.fact(f).enchant_parent.clone();
+    let mut ctx = match (parent, wielder) {
+        (Some(p), Some(u)) => crate::unit_facts::clone_for(w, &p, &bp, u),
+        (Some(_), None) => {
+            w.coverage.unsupported("ItemEnchantment.OnActivate: parent context without a wielder");
+            crate::unit_facts::context(w, None, wielder, &bp)
+        }
+        (None, _) => crate::unit_facts::context(w, None, wielder, &bp),
+    };
     ctx.source_item = Some(w.entity(item).unique_id.clone());
     w.fact_mut(f).context = Some(ctx);
     if bp.view().obj("WeaponFxPrefab").is_some() {
@@ -1475,6 +1562,7 @@ fn base_did_equipped(w: &mut World, e: EntityIdx, wielder: EntityIdx) {
     // `ApplyEnchantments(onInitializeOrEquip: true)`: restores a missing blueprint
     // enchantment (built in, so without recalculation).
     if w.entity(e).clr != "ItemEntityShield" {
+        w.equipped_enchantment_collections.insert(e);
         let present: Vec<Option<Guid>> = w
             .entity(e)
             .facts
@@ -1586,6 +1674,70 @@ fn base_will_unequip(w: &mut World, e: EntityIdx) {
         it.facts_applied_to_wielder = false;
         it.wielder = None;
     }
+}
+
+// ---- slot reads through `MaybeItem` ---------------------------------------------------
+
+/// `ItemSlot.MaybeItem` resolves the slot's item through `EntityService` (`m_ItemRef.Entity`):
+/// a loaded item only once its `PrePostLoad` registered it (a placeholder's saved body during
+/// the new unit's `Initialize` isn't yet), and an item leaving its slot is hidden.
+#[must_use]
+pub fn slot_item_resolves(w: &World, item: EntityIdx) -> bool {
+    // Registered: by its id (`EntityService.Unregister` at disposal drops it), and not a loaded
+    // item still waiting for its `PrePostLoad`.
+    w.by_id.get(&w.entity(item).unique_id) == Some(&item)
+        && !w.entity(item).is_disposed
+        && !w.unregistered_items.contains(&item)
+        && !w.item(item).is_some_and(|i| i.remove_from_slot_in_progress)
+}
+
+/// `HandSlot.HasItem` of the current hands set's primary or secondary hand.
+#[must_use]
+pub fn hand_has_item(w: &World, u: EntityIdx, primary: bool) -> bool {
+    current_hand_item(w, u, primary).is_some_and(|i| slot_item_resolves(w, i))
+}
+
+/// `HandSlot.MaybeWeapon` of the current hands set's hand: [`crate::combat::weapon::hand_weapon`],
+/// except that a slot whose item doesn't resolve (`MaybeItem == null`) gives the empty-hand
+/// weapon.
+pub fn hand_maybe_weapon(w: &mut World, u: EntityIdx, primary: bool) -> Option<EntityIdx> {
+    let set = w.unit(u).map_or(0, |x| x.body.current_hand_set);
+    let hand = if primary { "PrimaryHand" } else { "SecondaryHand" };
+    let raw = find_slot(w, u, &format!("HandsEquipmentSets[{set}].{hand}")).and_then(|s| s.item);
+    if raw.is_some_and(|i| !slot_item_resolves(w, i)) {
+        return w.unit(u).and_then(|x| x.body.empty_hand);
+    }
+    let h = if primary {
+        crate::combat::weapon::Hand::Primary
+    } else {
+        crate::combat::weapon::Hand::Secondary
+    };
+    crate::combat::weapon::hand_weapon(w, u, h)
+}
+
+/// `HandSlot.HasWeapon` (the hand's override): `MaybeWeapon != null`, the empty-hand weapon
+/// included.
+pub fn hand_has_weapon(w: &mut World, u: EntityIdx, primary: bool) -> bool {
+    hand_maybe_weapon(w, u, primary).is_some()
+}
+
+/// `UnitBody.AdditionalLimbs`, each slot's `HasItem` and `MaybeWeapon` (the empty-hand weapon
+/// when the slot has no resolved item or is inactive; else its item if a weapon).
+#[must_use]
+pub fn limb_slots(w: &World, u: EntityIdx) -> Vec<(bool, Option<EntityIdx>)> {
+    let Some(unit) = w.unit(u) else { return Vec::new() };
+    unit.body
+        .limbs
+        .iter()
+        .map(|s| {
+            let item = s.item.filter(|i| slot_item_resolves(w, *i));
+            let weapon = match item {
+                Some(i) if s.active => Weapon::of(w, i).map(|_| i),
+                _ => unit.body.empty_hand,
+            };
+            (item.is_some(), weapon)
+        })
+        .collect()
 }
 
 #[cfg(test)]

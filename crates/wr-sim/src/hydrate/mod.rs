@@ -200,14 +200,32 @@ impl Loader<'_> {
                     .str("SourceAreaEffectId")
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
+                stored_facts: Vec::new(),
+                stored_mods: !o.objs("m_StoredMods").is_empty(),
             });
         }
         let f = self.w.add_fact(fact);
         self.facts.insert(o.id(), f);
+        if clr == "Buff" {
+            // `m_StoredFacts`: references to the owner's facts (nulls skipped: `OnRemove`'s
+            // `RemoveFact(null)` does nothing).
+            let stored: Vec<FactIdx> =
+                o.objs("m_StoredFacts").into_iter().map(|x| self.fact_for(x)).collect();
+            if let Some(b) = self.w.fact_mut(f).buff.as_mut() {
+                b.stored_facts = stored;
+            }
+        }
         // References that can point back at this fact are resolved after registering it.
         if let Some(ctx) = o.obj("m_Context") {
             let c = self.context(ctx);
             self.w.fact_mut(f).context = Some(c);
+        }
+        // `ItemEnchantment.ParentContext` (saved).
+        if clr == "ItemEnchantment"
+            && let Some(pc) = o.obj("ParentContext")
+        {
+            let c = self.context(pc);
+            self.w.fact_mut(f).enchant_parent = Some(Box::new(c));
         }
         if let Some(si) = o.obj("SourceItem") {
             let it = self.item_for(si);
@@ -218,6 +236,8 @@ impl Loader<'_> {
             self.w.fact_mut(f).activatable =
                 Some((o.bool_or("m_IsOn", false), o.bool_or("IsStarted", false), applied));
             self.w.fact_mut(f).ready_to_start = o.bool_or("ReadyToStart", false);
+            let target = o.obj("SelectTargetAbility").map(|a| self.fact_for(a));
+            self.w.fact_mut(f).select_target = target;
             self.w.fact_mut(f).was_in_combat = o.bool_or("m_WasInCombat", false);
             self.w.fact_mut(f).time_to_next_round = match o.get("TimeToNextRound") {
                 Some(wr_save::value::Value::F32(x)) => *x,
@@ -446,6 +466,8 @@ impl Loader<'_> {
             is_disposed: false,
         });
         self.items.insert(o.id(), e);
+        // Registered with `EntityService` by its `PrePostLoad` only.
+        self.w.unregistered_items.insert(e);
         let facts = o.obj("Facts").map(|f| f.objs("m_Facts")).unwrap_or_default();
         let list: Vec<FactIdx> = facts.into_iter().map(|f| self.fact_for(f)).collect();
         let cap = crate::csharp::sort::grown_capacity(list.len());
@@ -781,6 +803,17 @@ impl Loader<'_> {
             ..Unit::default()
         };
         self.w.entity_mut(e).kind = EntityKind::Unit(Box::new(unit));
+        // `ShiftersFuryPart` (its saved `State`).
+        if let Some(p) = o
+            .obj("Parts")
+            .map(|p| p.objs("m_Parts"))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p.ty() == crate::components::shifters_fury::PART)
+            && let Some(x) = self.w.unit_mut(e)
+        {
+            x.shifters_fury = Some(crate::components::shifters_fury::part_from_save(p));
+        }
         if let Some(m) = pet_master {
             self.pending_masters.push((e, m));
         }
@@ -1434,6 +1467,7 @@ pub fn hydrate(
         crate::spawn::after_area_load(&mut w, &area_order, &spawned);
         area_units.extend(spawned.iter().copied());
     }
+    crate::spawn::report_assumed_awake(&mut w);
     w.coverage.context = None;
     report.party_units = party_units.iter().map(|e| w.entity(*e).unique_id.clone()).collect();
     report.area_units = area_units.iter().map(|e| w.entity(*e).unique_id.clone()).collect();

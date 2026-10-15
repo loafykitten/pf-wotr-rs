@@ -70,7 +70,7 @@ struct SelState {
 
 /// `LevelUpState` (the members this path uses).
 #[derive(Debug, Default)]
-struct State {
+pub(crate) struct State {
     next_character_level: i32,
     next_class_level: i32,
     selected_class: Option<Guid>,
@@ -84,6 +84,41 @@ struct State {
     /// (`AddClassLevels.cs:210`; the plan unit's levels don't have it, only `SelectClass`
     /// does, `:287`).
     ignore_prerequisites: bool,
+}
+
+/// `Game.Instance.LevelUpController` as components see it: [`World::level_up`]'s last slot. A
+/// level-up (`AddClassLevels.AddLevel`: `LevelUpControllerStash.Stash()`, then
+/// `LevelUpController.Start`) pushes a live slot, `UnitHelper.Copy` a stashed (null) one.
+#[derive(Debug)]
+pub(crate) enum Slot {
+    /// The controller is null.
+    Stashed,
+    /// A live controller: its state while the level-up has lent it to the world ([`lend`]),
+    /// `None` while the level-up's own code holds it.
+    Live(Option<Box<State>>),
+}
+
+/// Runs `f` with the level-up's state reachable through the world's live slot (calls that can
+/// activate facts: their components read `Game.Instance.LevelUpController.State`), then takes
+/// it back. Without a live slot on top, `f` just runs.
+fn lend<R>(w: &mut World, st: &mut State, f: impl FnOnce(&mut World) -> R) -> R {
+    let Some(Slot::Live(slot)) = w.level_up.last_mut() else { return f(w) };
+    *slot = Some(Box::new(std::mem::take(st)));
+    let r = f(w);
+    if let Some(Slot::Live(slot)) = w.level_up.last_mut()
+        && let Some(s) = slot.take()
+    {
+        *st = *s;
+    }
+    r
+}
+
+/// `UnitHelper.Copy`'s `Game.Instance.LevelUpController = null` for the copy, restored after.
+pub(crate) fn with_controller_stashed<R>(w: &mut World, f: impl FnOnce(&mut World) -> R) -> R {
+    w.level_up.push(Slot::Stashed);
+    let r = f(w);
+    w.level_up.pop();
+    r
 }
 
 impl State {
@@ -396,6 +431,21 @@ fn add_level(
     history: &mut History,
     ignore_prerequisites: bool,
 ) {
+    // `LevelUpControllerStash.Stash()` and `LevelUpController.Start`: the new controller is
+    // `Game.Instance.LevelUpController` until the stash is disposed (`Stop`, the old one back).
+    w.level_up.push(Slot::Live(None));
+    add_level_inner(w, u, cfg, c, history, ignore_prerequisites);
+    w.level_up.pop();
+}
+
+fn add_level_inner(
+    w: &mut World,
+    u: EntityIdx,
+    cfg: &Cfg,
+    c: CompRef,
+    history: &mut History,
+    ignore_prerequisites: bool,
+) {
     let class = cfg.class.clone();
     // `new LevelUpState(unit)` reads `CharacterLevel` and `MythicLevel`, storing the caches.
     crate::unit::setup_levels_if_necessary(w, u);
@@ -477,7 +527,7 @@ fn select_race(w: &mut World, u: EntityIdx, st: &mut State, race: Guid) {
     if r.view().bool("SelectableRaceStat") {
         st.can_select_race_stat = true;
     }
-    set_race(w, u, race);
+    lend(w, st, |w| set_race(w, u, race));
     // `State.Size = OriginalSize`: set at construction (`spawn::initialize`).
     let features = r.view().guids("m_Features");
     add_features_from_progression(w, u, st, &features, race, 0);
@@ -766,13 +816,13 @@ fn select_class(w: &mut World, u: EntityIdx, class: &Rc<Blueprint>, st: &mut Sta
     }
     // `Features.AddFeature(Owner.GetProgression(characterClass)).SetSource(characterClass, 1)`.
     if let Some(prog) = bp(w, class.view().guid("m_Progression"))
-        && let Some(f) = crate::unit_facts::add_fact(w, u, &prog)
+        && let Some(f) = lend(w, st, |w| crate::unit_facts::add_fact(w, u, &prog))
     {
         set_source(w, f, class.guid);
     }
     // `OnGainClassLevel`: HP update, `IOwnerGainLevelHandler`.
     ops::update_value(w, u, StatType::HitPoints);
-    crate::rulebook::bus::raise_unit(w, u, "IOwnerGainLevelHandler");
+    lend(w, st, |w| crate::rulebook::bus::raise_unit(w, u, "IOwnerGainLevelHandler"));
     st.next_class_level = level;
     st.selected_class = Some(class.guid);
     if !mythic && st.next_character_level % 4 == 0 {
@@ -1002,7 +1052,7 @@ fn add_features_from_progression(
         {
             st.add_selection(None, Some(source), f.guid, level);
         }
-        let Some(fact) = crate::unit_facts::add_fact(w, u, &f) else { continue };
+        let Some(fact) = lend(w, st, |w| crate::unit_facts::add_fact(w, u, &f)) else { continue };
         if is_a(f.obj.ty, "BlueprintProgression") {
             update_progression(w, u, st, &f);
         }
@@ -1743,10 +1793,10 @@ fn select_feature(w: &mut World, u: EntityIdx, st: &mut State, idx: usize, item:
             w.coverage.unsupported("SelectFeature.Apply: level-up plan features list");
         }
         // `unit.AddFact<Feature>(feature, null, item.Param)`.
-        feature_fact = match &item.param {
+        feature_fact = lend(w, st, |w| match &item.param {
             Some(p) => crate::unit_facts::add_fact_with_param(w, u, &f, p),
             None => crate::unit_facts::add_fact(w, u, &f),
-        };
+        });
         if let Some(fact) = feature_fact {
             if let Some(s) = sel_state.source {
                 set_source(w, fact, s);
@@ -1988,6 +2038,48 @@ pub fn reapply_features_on_level_up(w: &mut World, u: EntityIdx) {
         crate::unit_facts::reapply_buff(w, a);
     }
     crate::rulebook::bus::raise_unit(w, u, "IUnitReapplyFeaturesOnLevelUpHandler");
+}
+
+/// `AddFeatureOnApply.OnActivate` (`Kingmaker.Designers.Mechanics.Facts/AddFeatureOnApply.cs`):
+/// the feature is added (`Progression.Features.AddFeature`); a progression is then updated on the
+/// live level-up's state (`Game.Instance.LevelUpController?.State`), or on a new
+/// `LevelUpState(Owner, LevelUp)` without one, its exclusive class selected when the owner has
+/// it. A live state its level-up holds at that moment isn't reachable: reported.
+pub fn add_feature_on_apply_activate(w: &mut World, u: EntityIdx, feature: &Rc<Blueprint>) {
+    let Some(f) = crate::unit_facts::add_fact(w, u, feature) else { return };
+    if w.fact(f).kind != FactKind::Feature || !is_a(feature.obj.ty, "BlueprintProgression") {
+        return;
+    }
+    let mut st = match w.level_up.last_mut() {
+        Some(Slot::Live(slot)) => match slot.take() {
+            Some(s) => *s,
+            None => {
+                w.coverage.unsupported(
+                    "AddFeatureOnApply.OnActivate: the level-up's state isn't reachable here",
+                );
+                return;
+            }
+        },
+        // `new LevelUpState(Owner, LevelUp, isPregen: false)`.
+        _ => {
+            crate::unit::setup_levels_if_necessary(w, u);
+            State {
+                next_character_level: crate::unit::character_level(w, u) + 1,
+                ..State::default()
+            }
+        }
+    };
+    let live = matches!(w.level_up.last(), Some(Slot::Live(_)));
+    let exclusive = feature.view().guid("m_ExclusiveProgression");
+    if let Some(e) = exclusive
+        && w.unit(u).is_some_and(|x| x.progression.classes.iter().any(|cd| cd.class == e))
+    {
+        st.selected_class = Some(e);
+    }
+    update_progression(w, u, &mut st, feature);
+    if live && let Some(Slot::Live(slot)) = w.level_up.last_mut() {
+        *slot = Some(Box::new(st));
+    }
 }
 
 #[cfg(test)]

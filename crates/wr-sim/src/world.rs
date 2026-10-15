@@ -167,6 +167,9 @@ pub struct Fact {
     pub buff: Option<BuffTimes>,
     /// `ActivatableAbility` saved state: `m_IsOn`, `IsStarted`, `m_AppliedBuff`.
     pub activatable: Option<(bool, bool, Option<FactIdx>)>,
+    /// `ActivatableAbility.SelectTargetAbility` (saved): a targeted toggle's target-selection
+    /// ability while active.
+    pub select_target: Option<FactIdx>,
     /// `ActivatableAbility.ReadyToStart` (saved).
     pub ready_to_start: bool,
     /// `ActivatableAbility.TimeToNextRound` (saved).
@@ -177,6 +180,8 @@ pub struct Fact {
     pub deactivate_next_round: bool,
     /// `ItemEnchantment.ParentContext != null` (added by an effect, not by the blueprint).
     pub parent_context: bool,
+    /// `ItemEnchantment.ParentContext` (saved, or given by `AddEnchantment`).
+    pub enchant_parent: Option<Box<crate::context::MechanicsContext>>,
     /// `Feature.Param` as saved (`FeatureParam` persisted members), if not empty.
     pub param: Option<serde_json::Value>,
     /// State of narrative fact subclasses (etudes, quests, objectives, tutorials).
@@ -233,6 +238,12 @@ pub struct BuffTimes {
     pub is_from_spell: bool,
     /// `SourceAreaEffectId` (saved), when not empty.
     pub source_area_effect: Option<String>,
+    /// `m_StoredFacts` (saved; `Buff.StoreFact`): the owner's facts `Buff.OnRemove` removes.
+    #[serde(skip)]
+    pub stored_facts: Vec<FactIdx>,
+    /// `m_StoredMods` was saved non-empty: `OnRemove` would remove them (not modelled).
+    #[serde(skip)]
+    pub stored_mods: bool,
 }
 
 impl BuffTimes {
@@ -282,11 +293,13 @@ impl Fact {
             is_suppressed: false,
             buff: None,
             activatable: None,
+            select_target: None,
             ready_to_start: false,
             time_to_next_round: 0.0,
             was_in_combat: false,
             deactivate_next_round: false,
             parent_context: false,
+            enchant_parent: None,
             param: None,
             ext: FactExt::None,
         }
@@ -462,6 +475,20 @@ pub struct World {
     pub saved_spell_ids: std::collections::HashSet<String>,
     /// The loaded area's scene entities (script zones…) and scene cache.
     pub scene: crate::scene::SceneState,
+    /// Items whose `m_HasExternalEnchantments` is set (`ItemEntity.UpdateHasExternalEnchantments`,
+    /// run when an effect adds or removes an enchantment; not saved, so false after a load).
+    pub external_enchantments: std::collections::HashSet<EntityIdx>,
+    /// Items given their `ItemEnchantmentCollection` by `OnDidEquipped` in this run (see
+    /// `items::has_enchantments_collection`).
+    pub equipped_enchantment_collections: std::collections::HashSet<EntityIdx>,
+    /// `Game.Instance.LevelUpController` (its state while lent; see `spawn::levelup::Slot`).
+    pub(crate) level_up: Vec<crate::spawn::levelup::Slot>,
+    /// Loaded items not yet registered with `EntityService` (their `PrePostLoad` hasn't run):
+    /// slot references to them don't resolve (`items::slot_item_resolves`).
+    pub unregistered_items: std::collections::HashSet<EntityIdx>,
+    /// Units the load's start pass took as awake whose toggles acted (see
+    /// `spawn::settle_assumed_awake`), until settled.
+    pub assumed_awake_at_load: Vec<EntityIdx>,
 }
 
 /// `AbilityParams.Empty` (`AbilityParams.cs:7`): a `static readonly` instance with mutable
@@ -573,6 +600,11 @@ impl World {
             spell_cache: std::cell::RefCell::new(HashMap::new()),
             saved_spell_ids: std::collections::HashSet::new(),
             scene: crate::scene::SceneState::default(),
+            external_enchantments: std::collections::HashSet::new(),
+            equipped_enchantment_collections: std::collections::HashSet::new(),
+            level_up: Vec::new(),
+            unregistered_items: std::collections::HashSet::new(),
+            assumed_awake_at_load: Vec::new(),
         }
     }
 
