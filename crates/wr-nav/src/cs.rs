@@ -398,7 +398,10 @@ fn asin_axis(sign: f32, v: f32) -> f32 {
     } else {
         1.0
     };
-    c.asin() * sign
+    let a = c.asin();
+    // `fmul` returns a NaN operand as it is; LLVM would turn `* -1.0` into a negation, which
+    // flips a NaN's sign.
+    if a.is_nan() { a } else { a * sign }
 }
 
 /// Unity's native `Quaternion.Internal_ToEulerRad` (`QuaternionScripting::ToEuler`): the

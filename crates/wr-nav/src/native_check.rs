@@ -367,6 +367,58 @@ fn native_math_matches_the_player() {
             poles += 1;
         }
     }
+    // The thresholds themselves and non-finite inputs: forward lengths a few ulps around 1e-5
+    // (along up and across it), NaN and infinite components; x angles swept across the pole
+    // threshold (89.885°) in 1e-5° steps.
+    let quiet = Quiet::stdout();
+    let cut = 1e-5_f32.to_bits();
+    let odd = [f32::NAN, -f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+    let mut edges = 0;
+    for b in cut - 4..=cut + 4 {
+        let m = f32::from_bits(b);
+        for f in [[m, 0.0, 0.0], [0.0, m, 0.0], [0.0, -m, 0.0], [0.0, 0.0, m], [m, m, 0.0]] {
+            for up in [[0.0, 1.0, 0.0], [m, 1.0, 0.0], [1.0, 0.0, 0.0]] {
+                let want = p.look_rotation(f, up);
+                assert_eq!(
+                    bits(cs::look_rotation(f, up)),
+                    bits(want),
+                    "LookRotation({f:?}, {up:?})"
+                );
+                edges += 1;
+            }
+        }
+    }
+    for x in odd {
+        for f in [[x, 0.0, 1.0], [0.0, x, 0.0], [1.0, 0.0, x]] {
+            for up in [[0.0, 1.0, 0.0], [x, 1.0, 0.0]] {
+                let want = p.look_rotation(f, up);
+                assert_eq!(
+                    bits(cs::look_rotation(f, up)),
+                    bits(want),
+                    "LookRotation({f:?}, {up:?})"
+                );
+                edges += 1;
+            }
+        }
+        for q in [[x, 0.0, 0.0, 1.0], [0.0, x, 0.0, 1.0], [0.5, 0.5, x, 0.5], [0.0, 0.0, 0.0, x]] {
+            let want = p.to_euler_rad(q);
+            assert_eq!(bits(cs::to_euler_rad(q)), bits(want), "ToEulerRad({q:?}) = {want:?}");
+            edges += 1;
+        }
+    }
+    drop(quiet);
+    for k in 0..20_000 {
+        let x = 89.88 + k as f32 * 1e-5;
+        let x = if k % 2 == 0 { x } else { -x };
+        let q = cs::quat_euler([x, rng.comp(360.0), rng.comp(360.0)]);
+        let want = p.to_euler_rad(q);
+        assert_eq!(bits(cs::to_euler_rad(q)), bits(want), "ToEulerRad({q:?}) = {want:?}");
+        if at_pole(q) {
+            poles += 1;
+        }
+        edges += 1;
+    }
+    eprintln!("{edges} threshold and non-finite cases: bit-identical");
     eprintln!(
         "from_to {checked:?}, {n} matrices ({singular} singular), {n} rotations, {n} look \
          rotations ({fallback} by the fallback), {n} euler conversions ({poles} at a pole): \

@@ -56,6 +56,10 @@ inputs each, all bit-identical):
   (xw - yz)(yz + xw) - (xy + zw)(xy - zw))` and `z = 0`. `cs::to_euler_rad`. Rust's `asin`/`atan2` call the same
   `libsystem_m` functions. Inputs: rotations `LookRotation` makes, rotations from Euler angles, near the poles
   (199,344 take the pole branch), unnormalised and tiny quaternions.
+- Edges (20,175 more cases): forward lengths within 4 ulps of 1e-5 along, against and across up; NaN and infinite
+  components in forward, up and the quaternion; x angles swept across the pole threshold in 1e-5° steps. A NaN
+  keeps its sign through the x axis's `* -1` (`fmul`), which Rust's `* -1.0` would turn into a negation: the port
+  returns the NaN as is.
 - `Internal_FromEulerRad_Injected` (stub 0x81c040) is `EulerToQuaternion(euler, 4)`, already ported and checked
   (`cs::quat_euler`). `Quaternion * Vector3` (managed) moved from `funnel.rs` to `cs::quat_mul_vec`.
 
