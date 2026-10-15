@@ -31,9 +31,11 @@ namespace WrathOracle;
 // Chain, Ricochet... poll IsHit, and set the attack roll and range after the launch).
 // Replay: a launch must be the recording's (same key and contents, within the scheduler's tolerance of
 // the recorded tick); its hit is due the recorded number of ticks after this replay's own launch. Before
-// then a hit the native flight makes is taken back (IsHit, and IsHitWall if that tick set it, cleared
-// right after Projectile.Tick, before anything reads them); on the due tick IsHit is set if the flight
-// hasn't got there. A recorded projectile that never hit in its window doesn't hit in the replay's either.
+// then a hit the native flight makes is taken back right after Projectile.Tick, before anything reads it
+// (IsHit; IsHitWall if that tick set it; PassedDistance, which the hit clamps to MaxRange and line and cone
+// deliveries read, back to Tick's own sum); on the due tick IsHit is set if the flight hasn't got there
+// (PassedDistance clamped as Tick does), IsHitWall is the recording's, and the distance flown must be the
+// recording's. A recorded projectile that never hit in its window doesn't hit in the replay's either.
 // Any departure invalidates the replay: a launch the recording didn't make or made differently, a
 // recorded launch that didn't happen, a due hit that didn't happen (the projectile gone or not ticked),
 // OnHit on another tick than the hit, an unpinned projectile hitting inside the window.
