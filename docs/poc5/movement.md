@@ -130,6 +130,21 @@ are caught (`Mathf.Sqrt`'s rounding, a missing `InterruptMovement`, a dropped wa
 recording, which the integration computes: the turn's state and budget (`cd_move`'s delta out), the move command's
 flag, the destination's proxy, and `RepathNeeded` on other agents (its world holds one agent).
 
+**Completions and requests (2026-10-15, later):** `OnPathComplete` (turn-based: `CheckApproachRadius`,
+`UnreachableUnits`, the not-found stop, `SetWaypoint(1)`, `RemoveFromGroup`), `FollowPrecomputedPath`, `ForcePath`
+and `PathTo` (the request's de-duplication by destination and throttling by `TileHandler.LastUpdateFrame`,
+`ResetStuck`, `ConstructTags`, the `ABPathWithClearance`/`LosPathConditionForGrid` request's parameters, the move
+command's warm-up and roaming) are ported, and two more record-level checks rerun them: **60 turn-based completions
+and precomputed or forced paths and 396 `PathTo` calls (33 requests), 0 differ** (`poc5-tb-104`/`-105`), the request
+compared field by field with the recorded one; ticks: **34,074, 0 differ** on `-100` to `-105`. The observer gained
+`PathTo`'s and `FindPath`'s reads (`corp`, `cells`, `fudge`, `speedmps`, `navnode`, `move`), `ag_req.tb`, and
+`ag_done.combat` with the `UnreachableUnits.Add` call (`unreach`) since `-105`. Not yet established by a capture:
+a path ending outside its approach radius (`unreach`, `softcol`/`closest`: none in these fights) and `ForcePath`
+(the fights use only `FollowPrecomputedPath`). The `PathTo` check takes `InitMoveDirection`'s result from the state
+after (orientation is stream B's, `docs/poc5/orientation.md`); the completion check takes `m_RequestedFindPath`
+from the nested completion's state (the AI's `FindPath` callback clears it unobserved; the next capture should
+record the state at a call's start).
+
 ## Steps
 
 1. `agent` observer; record `tb-nearest` and `tb-focus`. **Done** (`poc5-tb-100` to `-103`; `-103` is current).

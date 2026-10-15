@@ -35,6 +35,9 @@ namespace WrathOracle;
 //  - ag_call / ag_call_end: Stop, CompleteMovement, InterruptMovement, SetWaypoint, ForcePath and
 //    FollowPrecomputedPath, with the caller chain (origin) and the state after;
 //  - ag_ctl / ag_ctl_end: UnitMoveController.TickUnit, the unit's position before; its position and orientation after;
+//  - ag_v corp, cells, fudge, speedmps, navnode, move: PathTo's, FindPath's and ConstructTags' reads (corpulence, size in
+//    cells, the command's LOS fudge radius, CurrentSpeedMps, the nearest navmesh node, the move command's delay and roaming);
+//  - ag_v unreach: OnPathComplete's UnreachableUnits.Add (and ag_done's `combat`, the unit's IsInCombat);
 //  - ag_v gmem: ConnectToGroups' first Group read (Memory != null), the evaluation that decides its early return;
 //  - ag_cb / ag_cb_end: the agent's calls into the view (OnMovementInterrupted with the destination,
 //    OnMovementComplete, OnMovementWaypointUpdate with the index);
@@ -445,6 +448,62 @@ internal static partial class CommandObs
         return v;
     }
 
+    // PathTo's and FindPath's reads (and ConstructTags'), each the game's own single evaluation.
+    public static float TapAgCorpulence(UnitEntityView view)
+    {
+        var v = view.Corpulence;
+        AgLeaf("corp", j => j.Prop("v", v));
+        return v;
+    }
+
+    public static int TapAgSizeInCells(UnitEntityView view, Pathfinding.GridGraph grid)
+    {
+        var v = view.GetSizeInCells(grid);
+        AgLeaf("cells", j => j.Prop("v", v));
+        return v;
+    }
+
+    public static float TapAgFudge(UnitCommand c)
+    {
+        var v = c.GetTargetLOSObjectFudgeRadius();
+        AgLeaf("fudge", j => j.Prop("v", v));
+        return v;
+    }
+
+    public static float TapAgSpeedMps(UnitEntityData u)
+    {
+        var v = u.CurrentSpeedMps;
+        AgLeaf("speedmps", j => j.Prop("v", v));
+        return v;
+    }
+
+    public static NNInfo TapAgNavNode(Vector3 pos, GraphNode hint)
+    {
+        var v = ObstacleAnalyzer.GetNearestNode(pos, hint);
+        var has = v.node != null;
+        AgLeaf("navnode", j => { j.Prop("p", pos); j.Prop("v", has); });
+        return v;
+    }
+
+    public static Kingmaker.UnitLogic.Commands.UnitMoveTo TapAgMove(Kingmaker.UnitLogic.Commands.UnitCommands cmds)
+    {
+        var v = cmds.Move;
+        var has = v != null;
+        var delay = has ? v.MovementDelay : 0f;
+        var roaming = has && v.Roaming;
+        AgLeaf("move", j => { j.Prop("v", has); j.Prop("delay", delay); j.Prop("roaming", roaming); });
+        return v;
+    }
+
+    // OnPathComplete's `AIData.UnreachableUnits.Add(destination)` (the call itself, recorded with its unit).
+    public static bool TapAgUnreachable(HashSet<UnitEntityData> set, UnitEntityData unit)
+    {
+        var v = set.Add(unit);
+        var id = unit?.UniqueId;
+        AgLeaf("unreach", j => { j.Prop("v", id); j.Prop("added", v); });
+        return v;
+    }
+
     // UnitMoveController.TickUnit's reads of the unit's state.
     private static UnitEntityData _ctlUnit;
 
@@ -546,12 +605,13 @@ internal static partial class CommandObs
             var s = Snap(__instance);
             var tile = TileHandler.LastUpdateFrame;
             var frame = Time.frameCount;
+            var tb = global::TurnBased.Controllers.CombatController.IsInTurnBasedCombat();
             Sched.Obs("ag_req", j =>
             {
                 j.Prop("fn", "pathto"); j.Prop("u", u); WriteId(j, "c", c); j.Prop("p", destination); j.Prop("r", approachRadius);
                 j.Prop("mr", maxApproachRadius); j.Prop("xz", distanceXZ); j.Prop("da", da); j.Prop("dself", dself);
                 j.Prop("dhas", dhas); j.Prop("dview", dview); j.Prop("dattached", dattached); j.Prop("dsame", dsame);
-                j.Prop("tile", tile); j.Prop("frame", frame); WriteState(j, s);
+                j.Prop("tile", tile); j.Prop("frame", frame); j.Prop("tb", tb); WriteState(j, s);
             });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_req pathto", e); }
@@ -564,9 +624,10 @@ internal static partial class CommandObs
             if (!AgObserved()) return;
             var u = UnitOfAgent(__instance);
             var s = Snap(__instance);
+            var tb = global::TurnBased.Controllers.CombatController.IsInTurnBasedCombat();
             Sched.Obs("ag_req", j =>
             {
-                j.Prop("fn", "find"); j.Prop("u", u); j.Prop("p", destination); NullableFloat(j, "r", approachRadius);
+                j.Prop("fn", "find"); j.Prop("tb", tb); j.Prop("u", u); j.Prop("p", destination); NullableFloat(j, "r", approachRadius);
                 j.Prop("los", needLOS); j.Prop("ibr", ignoreBlockerRadius); WriteState(j, s);
             });
         }
@@ -641,11 +702,13 @@ internal static partial class CommandObs
             var pts = p?.vectorPath?.ToList();
             var err = p != null && p.error;
             var state = p == null ? -1 : (int)p.CompleteState;
+            var data = __instance.Unit != null ? __instance.Unit.EntityData : null;
+            var combat = data != null && data.IsInCombat;
             var s = Snap(__instance);
             Sched.Obs("ag_done", j =>
             {
                 j.Prop("u", u); j.Prop("path", key); j.Prop("kind", kind); j.Prop("forced", forcedPath); j.Prop("cur", current);
-                j.Prop("err", err); j.Prop("cs", state);
+                j.Prop("err", err); j.Prop("cs", state); j.Prop("combat", combat);
                 j.Arr("v"); if (pts != null) foreach (var x in pts) j.Vec(x); j.EndArr();
                 WriteState(j, s);
             });
@@ -868,6 +931,8 @@ internal static partial class CommandObs
         var approach = M(Ag, "CheckApproachRadius");
         var slowRot = M(typeof(UnitEntityData), nameof(UnitEntityData.UpdateSlowRotation));
         var connect = M(typeof(ObstaclesHelper), nameof(ObstaclesHelper.ConnectToGroups));
+        var tags = M(Ag, "ConstructTags");
+        var done = Ag.GetMethods(all).Single(m => m.Name == "OnPathComplete" && m.GetParameters().Length == 2);
         var raycastArgs = new[] { typeof(Vector3), typeof(Vector3), typeof(RaycastHit).MakeByRefType(), typeof(float), typeof(int) };
         var discArgs = new[] { typeof(Vector3), typeof(float), typeof(RaycastHit).MakeByRefType(), typeof(float), typeof(int) };
         return new List<(MethodBase, Type, string, Type[], string, int)>
@@ -886,6 +951,15 @@ internal static partial class CommandObs
             (ctl, typeof(UnitState), "get_CanRotate", Type.EmptyTypes, nameof(TapCtlCanRotate), 1),
             (slowRot, typeof(UnitState), "get_CanRotate", Type.EmptyTypes, nameof(TapCtlCanRotate), 1),
             (connect, typeof(UnitEntityData), "get_Group", Type.EmptyTypes, nameof(TapAgGroup), 4),
+            (pathTo, typeof(UnitEntityView), "get_Corpulence", Type.EmptyTypes, nameof(TapAgCorpulence), 2),
+            (find, typeof(UnitEntityView), "get_Corpulence", Type.EmptyTypes, nameof(TapAgCorpulence), 2),
+            (tags, typeof(UnitEntityView), nameof(UnitEntityView.GetSizeInCells), new[] { typeof(Pathfinding.GridGraph) }, nameof(TapAgSizeInCells), 1),
+            (pathTo, typeof(UnitCommand), nameof(UnitCommand.GetTargetLOSObjectFudgeRadius), Type.EmptyTypes, nameof(TapAgFudge), 2),
+            (pathTo, typeof(UnitEntityData), "get_CurrentSpeedMps", Type.EmptyTypes, nameof(TapAgSpeedMps), 1),
+            (find, typeof(UnitEntityData), "get_CurrentSpeedMps", Type.EmptyTypes, nameof(TapAgSpeedMps), 1),
+            (pathTo, typeof(ObstacleAnalyzer), nameof(ObstacleAnalyzer.GetNearestNode), new[] { typeof(Vector3), typeof(GraphNode) }, nameof(TapAgNavNode), 1),
+            (pathTo, typeof(Kingmaker.UnitLogic.Commands.UnitCommands), "get_Move", Type.EmptyTypes, nameof(TapAgMove), 1),
+            (done, typeof(HashSet<UnitEntityData>), "Add", new[] { typeof(UnitEntityData) }, nameof(TapAgUnreachable), 1),
             (pathTo, typeof(Path), nameof(Path.IsDone), Type.EmptyTypes, nameof(TapAgIsDone), 1),
             (find, typeof(Path), nameof(Path.IsDone), Type.EmptyTypes, nameof(TapAgIsDone), 2),
             (really, typeof(Path), nameof(Path.IsDone), Type.EmptyTypes, nameof(TapAgIsDone), 1),

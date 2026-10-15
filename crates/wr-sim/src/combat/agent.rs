@@ -191,6 +191,40 @@ pub trait AgentInputs {
     fn saddled(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
     /// The destination's proxy, for a destination view that lost its data.
     fn dest_proxy(&mut self, w: &mut World, u: EntityIdx, view: &str) -> R<Proxy>;
+    /// `command.AccelerateIfPathIsLong(path)` for every command of the unit (`OnPathComplete`),
+    /// the path's total length given.
+    fn accelerate_if_long(&mut self, w: &mut World, u: EntityIdx, path: &AgentPath) -> R<()>;
+    /// `CombatState.AIData.UnreachableUnits.Add(destination)` (a unit in combat whose path to a
+    /// destination agent wasn't found).
+    fn unreachable(&mut self, w: &mut World, u: EntityIdx, dest_view: &str) -> R<()>;
+    /// `Unit.OnMovementStarted(pathDestination)` (the UI's click pointer: presentation).
+    fn movement_started(&mut self, w: &mut World, u: EntityIdx, dest: V3) -> R<()>;
+    /// `unit.Commands != null` (`OnPathComplete`'s not-found branch stops a unit with commands).
+    fn has_commands(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
+    /// The destination agent's unit's `SoftCollider` (`None`: no collider) and its
+    /// `ClosestPoint(point)` (`CheckApproachRadius`).
+    fn soft_collider_closest(&mut self, w: &mut World, u: EntityIdx, point: V3) -> R<Option<V3>>;
+    /// `ObstacleAnalyzer.GetNearestNode(position, hint).node != null` (`PathTo` gives up off the
+    /// navmesh).
+    fn on_navmesh(&mut self, w: &mut World, u: EntityIdx, pos: V3) -> R<bool>;
+    /// `Time.frameCount` and `TileHandler.LastUpdateFrame` (`PathTo`'s request throttling).
+    fn frames(&mut self, w: &mut World) -> R<(i32, i32)>;
+    /// `InitMoveDirection()`: `Unit.EntityData.OrientationDirection.To2D()`.
+    fn init_move_direction(&mut self, w: &mut World, u: EntityIdx) -> R<V2>;
+    /// `UnitEntityView.Corpulence` (each evaluation).
+    fn corpulence(&mut self, w: &mut World, u: EntityIdx) -> R<f32>;
+    /// `UnitEntityView.GetSizeInCells(gridGraph)`.
+    fn size_in_cells(&mut self, w: &mut World, u: EntityIdx) -> R<i32>;
+    /// The grid graph's `erodeIterations` and `erosionFirstTag` (`None`: no grid graph).
+    fn grid_erosion(&mut self, w: &mut World) -> R<Option<(i32, i32)>>;
+    /// `command?.GetTargetLOSObjectFudgeRadius() ?? 0f`.
+    fn fudge_radius(&mut self, w: &mut World, u: EntityIdx, command: Option<u32>) -> R<f32>;
+    /// `Unit.Data.CurrentSpeedMps`.
+    fn speed_mps(&mut self, w: &mut World, u: EntityIdx) -> R<f32>;
+    /// `Unit.EntityData.Commands.Move`: its `MovementDelay` and `Roaming` (`None`: no move).
+    fn move_command(&mut self, w: &mut World, u: EntityIdx) -> R<Option<(f32, bool)>>;
+    /// The key of the request `PathTo` starts (WrathOracle's `PathSync` key, `<unit>#<n>`).
+    fn request_key(&mut self, w: &mut World, u: EntityIdx) -> R<String>;
     /// `UnitEntityView.IsProne`.
     fn prone(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
     /// `RepathNeeded = true` on every agent of `UnitMovementAgentBase.AllAgents` (the enabled
@@ -852,6 +886,272 @@ pub fn tick_movement(w: &mut World, u: EntityIdx, dt: f32, inp: &mut dyn AgentIn
         reset_stuck(agent_mut(w, u)?);
     }
     Ok(vector3)
+}
+
+/// A path request (`SeekerWithClearance.StartPathWithClerance`: an `ABPathWithClearance` with a
+/// `LosPathConditionForGrid`), as `PathTo` starts it in turn-based combat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathRequest {
+    pub key: String,
+    pub start: V3,
+    pub end: V3,
+    /// The seeker's clearance (corpulence * 2 in x and z).
+    pub clearance: V3,
+    /// `enabledTags` (`ConstructTags`).
+    pub tags: i32,
+    pub graph_mask: i32,
+    pub approach: f32,
+    pub los: bool,
+    pub ignore_blocker: f32,
+    pub max_distance: f32,
+    pub distance_xz: bool,
+}
+
+/// `Vector3 ==`: the squared difference below 9.9999994e-11.
+#[must_use]
+pub fn v3_eq(a: V3, b: V3) -> bool {
+    let x = a[0] - b[0];
+    let y = a[1] - b[1];
+    let z = a[2] - b[2];
+    store_f32(d(x) * d(x) + d(y) * d(y) + d(z) * d(z)) < 9.999_999_4e-11
+}
+
+/// `ConstructTags()` in turn-based combat: every erosion tag a unit of this size can't stand on
+/// cleared from `int.MaxValue` (-1 without a grid graph).
+fn construct_tags(w: &mut World, u: EntityIdx, inp: &mut dyn AgentInputs) -> R<i32> {
+    let Some((erode, first)) = inp.grid_erosion(w)? else { return Ok(-1) };
+    let mut num = inp.size_in_cells(w, u)?.max(1);
+    if num > erode {
+        num = erode;
+    }
+    let mut mask = i32::MAX;
+    for i in 0..num - 1 {
+        mask &= !(1i32.wrapping_shl((i + first) as u32));
+    }
+    Ok(mask)
+}
+
+/// `PathTo(command, destination, approachRadius, maxApproachRadius, distanceXZ,
+/// destinationAgent)` in turn-based combat: `None` when it keeps the current request or path,
+/// else the request it starts (`RequestedPath`, awaiting its delivery to `OnPathComplete`).
+/// `dest_is_self`: the destination agent is this agent.
+#[allow(clippy::too_many_arguments)]
+pub fn path_to(
+    w: &mut World,
+    u: EntityIdx,
+    command: Option<u32>,
+    destination: V3,
+    approach: f32,
+    max_approach: f32,
+    distance_xz: bool,
+    dest_agent: Option<DestAgent>,
+    dest_is_self: bool,
+    inp: &mut dyn AgentInputs,
+) -> R<Option<PathRequest>> {
+    if !w.combat.turn_based {
+        return bad("PathTo outside turn-based combat (real time isn't ported)");
+    }
+    let a = agent(w, u)?;
+    let flag = a.dest.is_some_and(|x| v3_eq(destination, x));
+    let flag2 = a.no_path_dest.is_some_and(|x| v3_eq(destination, x));
+    let new =
+        !flag && !flag2 && (dest_agent.is_none() || dest_is_self || dest_agent != a.dest_agent);
+    agent_mut(w, u)?.requested_new = new;
+    let (frame, tile) = inp.frames(w)?;
+    let a = agent(w, u)?;
+    if let Some(req) = a.requested.as_ref().map(|r| r.key.clone()) {
+        if !new {
+            return Ok(None);
+        }
+        let path_frame = a.path_frame;
+        if !inp.is_done(w, u, &req)? && path_frame < tile.wrapping_add(3) {
+            return Ok(None);
+        }
+    }
+    let a = agent(w, u)?;
+    let wants = a.path.is_some() || a.requested.is_some();
+    if !new && (wants | flag) && (flag | flag2) && a.path_frame > tile && !a.repath {
+        agent_mut(w, u)?.dest_agent = dest_agent;
+        return Ok(None);
+    }
+    let pos = agent(w, u)?.pos;
+    if !inp.on_navmesh(w, u, pos)? {
+        return Ok(None);
+    }
+    let a = agent_mut(w, u)?;
+    if !flag {
+        reset_stuck(a);
+    }
+    a.approach = approach;
+    a.max_approach = max_approach;
+    a.dest = Some(destination);
+    a.dest_agent = dest_agent.clone();
+    let dir = inp.init_move_direction(w, u)?;
+    let a = agent_mut(w, u)?;
+    a.move_dir = dir;
+    a.path_frame = frame;
+    a.repath = false;
+    let cx = inp.corpulence(w, u)? * 2.0;
+    let cz = inp.corpulence(w, u)? * 2.0;
+    let tags = construct_tags(w, u, inp)?;
+    let ignore = inp.fudge_radius(w, u, command)?;
+    let max_distance = 6.0 * inp.speed_mps(w, u)?;
+    let key = inp.request_key(w, u)?;
+    let req = PathRequest {
+        key: key.clone(),
+        start: pos,
+        end: destination,
+        clearance: [cx, 0.0, cz],
+        tags,
+        graph_mask: 2,
+        approach,
+        los: dest_agent.is_some(),
+        ignore_blocker: ignore,
+        max_distance,
+        distance_xz,
+    };
+    agent_mut(w, u)?.requested = Some(AgentPath { key, points: Vec::new(), forced: false });
+    if agent(w, u)?.force_roaming {
+        agent_mut(w, u)?.roaming = true;
+        return Ok(Some(req));
+    }
+    match inp.move_command(w, u)? {
+        Some((delay, roaming)) => {
+            if agent(w, u)?.requested_new && !is_really_moving(w, u, inp)? {
+                agent_mut(w, u)?.warmup = delay;
+            }
+            agent_mut(w, u)?.roaming = roaming;
+        }
+        None => agent_mut(w, u)?.roaming = false,
+    }
+    Ok(Some(req))
+}
+
+/// `CheckApproachRadius(point)`: the path's end within `MaxApproachRadius` of the destination,
+/// or of the destination agent's soft collider.
+fn check_approach_radius(
+    w: &mut World,
+    u: EntityIdx,
+    point: V3,
+    inp: &mut dyn AgentInputs,
+) -> R<bool> {
+    let a = agent(w, u)?;
+    let num = store_f32(d(a.max_approach) * d(a.max_approach));
+    let Some(dest) = a.dest else { return bad("CheckApproachRadius without a destination") };
+    if m::sqr_mechanics_distance(point, dest) < num {
+        return Ok(true);
+    }
+    if a.dest_agent.is_none() {
+        return Ok(false);
+    }
+    let Some(closest) = inp.soft_collider_closest(w, u, point)? else { return Ok(false) };
+    Ok(m::sqr_mechanics_distance(point, closest) < num)
+}
+
+/// `OnPathComplete(p, forcedPath)` in turn-based combat (no `RemoveExcessPoints`, no standing
+/// obstacles): the path taken (its first waypoint set, the unit told) when it ends within the
+/// approach radius, else the destination noted as without a path and the unit stopped.
+pub fn on_path_complete(
+    w: &mut World,
+    u: EntityIdx,
+    p: &AgentPath,
+    error: bool,
+    forced: bool,
+    inp: &mut dyn AgentInputs,
+) -> R<()> {
+    if !w.combat.turn_based {
+        return bad("OnPathComplete outside turn-based combat (real time isn't ported)");
+    }
+    if agent(w, u)?.requested.as_ref().map(|r| &r.key) != Some(&p.key) {
+        return Ok(());
+    }
+    inp.accelerate_if_long(w, u, p)?;
+    let a = agent_mut(w, u)?;
+    if a.requested_new {
+        a.last_turn = 0.0;
+        a.first_tick = true;
+    }
+    a.requested = None;
+    a.requested_new = false;
+    if a.dest.is_none() {
+        return Ok(());
+    }
+    a.force = forced;
+    a.follow = false;
+    let mut vector = p.points.last().copied().unwrap_or([0.0; 3]);
+    let mut flag = !error;
+    if flag {
+        flag = check_approach_radius(w, u, vector, inp)?;
+    }
+    let a = agent_mut(w, u)?;
+    a.no_path_dest = if flag { None } else { a.dest };
+    if !flag {
+        let dest_view = a.dest_agent.as_ref().and_then(|x| x.view.clone());
+        if inp.in_combat(w, u)?
+            && let Some(view) = dest_view
+        {
+            inp.unreachable(w, u, &view)?;
+        }
+        // `PathAroundStandingObstacles` isn't consulted in turn-based combat, so its result is
+        // `PathClear` (not `NoPath`): a unit with commands always stops here.
+        if inp.has_commands(w, u)? || p.points.is_empty() {
+            return stop(w, u, inp);
+        }
+        vector = *p.points.last().unwrap_or(&vector);
+    }
+    let a = agent_mut(w, u)?;
+    // `m_StuckTimeStop <= 1f || IsInTurnBasedCombat()`.
+    reset_stuck(a);
+    a.repath_after = -1;
+    a.path = Some(p.clone());
+    set_waypoint(w, u, 1, inp)?;
+    inp.movement_started(w, u, vector)?;
+    remove_from_group(w, u, inp)
+}
+
+/// `FollowPrecomputedPath(p, forcedPath, maxApproachRadius)`.
+pub fn follow_precomputed_path(
+    w: &mut World,
+    u: EntityIdx,
+    p: &AgentPath,
+    error: bool,
+    forced: bool,
+    max_approach: f32,
+    inp: &mut dyn AgentInputs,
+) -> R<()> {
+    let Some(&last) = p.points.last() else {
+        return bad("FollowPrecomputedPath: an empty path (the game throws)");
+    };
+    let a = agent_mut(w, u)?;
+    a.requested = Some(p.clone());
+    a.max_approach = max_approach;
+    a.approach = max_approach;
+    a.requested_new = true;
+    a.dest = Some(last);
+    on_path_complete(w, u, p, error, forced, inp)?;
+    agent_mut(w, u)?.follow = true;
+    Ok(())
+}
+
+/// `ForcePath(p, disableApproachRadius)`.
+pub fn force_path(
+    w: &mut World,
+    u: EntityIdx,
+    p: &AgentPath,
+    error: bool,
+    disable_approach: bool,
+    inp: &mut dyn AgentInputs,
+) -> R<()> {
+    let Some(&last) = p.points.last() else {
+        return bad("ForcePath: an empty path (the game throws)");
+    };
+    let a = agent_mut(w, u)?;
+    a.approach = if disable_approach { 0.05 } else { 0.3 };
+    a.max_approach = if disable_approach { 0.05 } else { 1.0 };
+    a.requested = Some(p.clone());
+    a.requested_new = true;
+    a.dest = Some(last);
+    on_path_complete(w, u, p, error, true, inp)
 }
 
 /// `UpdateVelocity()`: the next velocity while really moving or warming up, else zero.

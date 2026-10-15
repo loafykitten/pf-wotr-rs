@@ -136,6 +136,14 @@ fn diff(ours: &Agent, want: &Agent, has_conn: bool) -> Vec<String> {
         vel,
         next_vel,
         requested_new,
+        force_roaming,
+        avoidance_off,
+        accel,
+        angular,
+        combat_angular,
+        max_speed_override,
+        path_frame,
+        charging,
         roaming,
         first_tick,
         force,
@@ -177,6 +185,10 @@ fn diff(ours: &Agent, want: &Agent, has_conn: bool) -> Vec<String> {
             ours.path.as_ref().map(|p| &p.key),
             want.path.as_ref().map(|p| &p.key)
         ));
+    }
+    if ours.requested_find.as_ref().map(|p| &p.key) != want.requested_find.as_ref().map(|p| &p.key)
+    {
+        out.push("requested_find".into());
     }
     if ours.requested.as_ref().map(|p| &p.key) != want.requested.as_ref().map(|p| &p.key) {
         out.push("requested".into());
@@ -227,6 +239,11 @@ struct Recorded<'a> {
     errors: Vec<String>,
     /// The capture records the agent's callbacks into the view (`ag_cb`, since `poc5-tb-103`).
     has_cb: bool,
+    /// For `PathTo`: the request's recorded key, `InitMoveDirection`'s result (taken from the
+    /// state after until orientation is modelled) and the grid's erosion settings (nav file).
+    key: Option<String>,
+    init_dir: Option<V2>,
+    erosion: Option<(i32, i32)>,
 }
 
 /// Records that aren't checked in order: `canmovetb` (the postfix of the call around its
@@ -484,6 +501,87 @@ impl AgentInputs for Recorded<'_> {
         }
         Ok(())
     }
+    fn accelerate_if_long(&mut self, _: &mut World, _: EntityIdx, _: &AgentPath) -> R<()> {
+        // The commands' acceleration: no agent records (its effect reaches the agent as MaxSpeed).
+        Ok(())
+    }
+    fn unreachable(&mut self, _: &mut World, _: EntityIdx, dest_view: &str) -> R<()> {
+        // Recorded since `poc5-tb-105` (the call's leaf); before, unchecked.
+        if self.tick.get("combat").is_none() {
+            return Ok(());
+        }
+        let r = self.take_leaf("unreach")?;
+        if r["v"].as_str() != Some(dest_view) {
+            return Err(Desync(format!(
+                "UnreachableUnits.Add({dest_view}): the recording's is {r}"
+            )));
+        }
+        Ok(())
+    }
+    fn movement_started(&mut self, _: &mut World, _: EntityIdx, _: V3) -> R<()> {
+        Ok(())
+    }
+    fn has_commands(&mut self, _: &mut World, _: EntityIdx) -> R<bool> {
+        Ok(true)
+    }
+    fn soft_collider_closest(&mut self, _: &mut World, _: EntityIdx, point: V3) -> R<Option<V3>> {
+        if !b(&self.take_leaf("softcol")?["v"]) {
+            return Ok(None);
+        }
+        let r = self.take_leaf("closest")?.clone();
+        if bits(&v3(&r["p"])) != bits(&point) {
+            self.errors
+                .push(format!("ClosestPoint({point:?}): the recording's is of {:?}", v3(&r["p"])));
+        }
+        Ok(Some(v3(&r["v"])))
+    }
+    fn on_navmesh(&mut self, _: &mut World, _: EntityIdx, pos: V3) -> R<bool> {
+        let r = self.take_leaf("navnode")?.clone();
+        if bits(&v3(&r["p"])) != bits(&pos) {
+            self.errors
+                .push(format!("GetNearestNode({pos:?}): the recording's is of {:?}", v3(&r["p"])));
+        }
+        Ok(b(&r["v"]))
+    }
+    fn frames(&mut self, _: &mut World) -> R<(i32, i32)> {
+        let n = |k: &str| {
+            self.tick[k]
+                .as_i64()
+                .map(|x| x as i32)
+                .ok_or_else(|| Desync(format!("ag_req without {k}")))
+        };
+        Ok((n("frame")?, n("tile")?))
+    }
+    fn init_move_direction(&mut self, _: &mut World, _: EntityIdx) -> R<V2> {
+        self.init_dir.ok_or_else(|| Desync("InitMoveDirection: orientation isn't modelled".into()))
+    }
+    fn corpulence(&mut self, _: &mut World, _: EntityIdx) -> R<f32> {
+        Ok(f(&self.take_leaf("corp")?["v"]))
+    }
+    fn size_in_cells(&mut self, _: &mut World, _: EntityIdx) -> R<i32> {
+        Ok(self.take_leaf("cells")?["v"].as_i64().unwrap_or(-1) as i32)
+    }
+    fn grid_erosion(&mut self, _: &mut World) -> R<Option<(i32, i32)>> {
+        Ok(self.erosion)
+    }
+    fn fudge_radius(&mut self, _: &mut World, _: EntityIdx, command: Option<u32>) -> R<f32> {
+        if command.is_none() {
+            return Ok(0.0);
+        }
+        Ok(f(&self.take_leaf("fudge")?["v"]))
+    }
+    fn speed_mps(&mut self, _: &mut World, _: EntityIdx) -> R<f32> {
+        Ok(f(&self.take_leaf("speedmps")?["v"]))
+    }
+    fn move_command(&mut self, _: &mut World, _: EntityIdx) -> R<Option<(f32, bool)>> {
+        let r = self.take_leaf("move")?.clone();
+        Ok(b(&r["v"]).then(|| (f(&r["delay"]), b(&r["roaming"]))))
+    }
+    fn request_key(&mut self, _: &mut World, _: EntityIdx) -> R<String> {
+        self.key
+            .clone()
+            .ok_or_else(|| Desync("PathTo made a request; the recording has none".into()))
+    }
     fn rider_in_combat(&mut self, _: &mut World, _: EntityIdx) -> R<bool> {
         Ok(false)
     }
@@ -556,10 +654,11 @@ fn inside(r: &Value, u: &str) -> bool {
 }
 
 /// The captures checked: `WR_AGENT_CAPTURES` (comma-separated labels), by default `poc5-tb-100`
-/// (it has a stopping tick where `Mathf.Sqrt`'s float argument shows) to `-103`.
+/// (it has a stopping tick where `Mathf.Sqrt`'s float argument shows) to `-105`.
 fn captures() -> Vec<PathBuf> {
-    let labels = std::env::var("WR_AGENT_CAPTURES")
-        .unwrap_or_else(|_| "poc5-tb-100,poc5-tb-101,poc5-tb-102,poc5-tb-103".into());
+    let labels = std::env::var("WR_AGENT_CAPTURES").unwrap_or_else(|_| {
+        "poc5-tb-100,poc5-tb-101,poc5-tb-102,poc5-tb-103,poc5-tb-104,poc5-tb-105".into()
+    });
     let mut out = Vec::new();
     for label in labels.split(',') {
         let root =
@@ -574,7 +673,7 @@ fn captures() -> Vec<PathBuf> {
 }
 
 #[test]
-#[ignore = "needs the poc5-tb-100 to -103 captures"]
+#[ignore = "needs the poc5-tb-100 to -105 captures"]
 fn every_recorded_tick_reruns_bit_for_bit() {
     let mut total = 0;
     let mut real_time = 0;
@@ -613,7 +712,16 @@ fn every_recorded_tick_reruns_bit_for_bit() {
             let unit_ix = unit(&mut w, &u, None, 10);
             w.combat.turn_based = b(&r["tb"]);
             w.unit_mut(unit_ix).unwrap().combat.agent = agent_from(&r["s"], &paths);
-            let mut inp = Recorded { tick: r, recs: inner, at: 0, errors: Vec::new(), has_cb };
+            let mut inp = Recorded {
+                tick: r,
+                recs: inner,
+                at: 0,
+                errors: Vec::new(),
+                has_cb,
+                key: None,
+                init_dir: None,
+                erosion: None,
+            };
             let got = tick_movement(&mut w, unit_ix, f(&r["dt"]), &mut inp);
             let want_state = agent_from(&recs[end]["s"], &paths);
             let want_ret = v3(&recs[end]["ret"]);
@@ -649,6 +757,334 @@ fn every_recorded_tick_reruns_bit_for_bit() {
         "{total} turn-based ticks, {} differ; {real_time} real-time ticks not checked",
         failures.len()
     );
+    for x in failures.iter().take(30) {
+        eprintln!("  {x}");
+    }
+    assert!(failures.is_empty());
+}
+
+/// The agent's state after a call, compared, and every input record consumed.
+fn outcome(
+    got: R<()>,
+    inp: &Recorded<'_>,
+    w: &World,
+    unit_ix: EntityIdx,
+    want: &Value,
+    paths: &Paths,
+) -> Vec<String> {
+    let mut why = inp.errors.clone();
+    match got {
+        Ok(()) => {
+            let want_state = agent_from(want, paths);
+            why.extend(diff(&w.unit(unit_ix).unwrap().combat.agent, &want_state, true));
+            let left = inp.recs[inp.at..].iter().filter(|x| !not_input(x)).count();
+            if left > 0 {
+                why.push(format!("records left unread: {left}"));
+            }
+        }
+        Err(e) => why.push(format!("desync: {}", e.0)),
+    }
+    why
+}
+
+#[test]
+#[ignore = "needs the poc5-tb-105 capture"]
+fn every_recorded_path_completion_reruns_bit_for_bit() {
+    let mut total = 0;
+    let mut real_time = 0;
+    let mut failures = Vec::new();
+    // `OnPathComplete`'s records need the `ag_cb` era (the callbacks, the gmem leaf).
+    let labels = std::env::var("WR_AGENT_CAPTURES").unwrap_or_else(|_| "poc5-tb-105".into());
+    for label in labels.split(',') {
+        let root =
+            wr_paths::repo_root().join("fixtures/captures/oracle").join(label).join("fixtures");
+        for (fx, run) in ["tb-nearest", "tb-focus"]
+            .iter()
+            .flat_map(|fx| ["record", "replay-1", "replay-2"].map(|r| (*fx, r)))
+        {
+            let path = root.join(fx).join(format!("{run}.trace.jsonl.gz"));
+            let trace = Trace::load(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+            let recs = &trace.records;
+            let mut paths = Paths::default();
+            let mut tb = false;
+            let mut i = 0;
+            while i < recs.len() {
+                let r = &recs[i];
+                paths.note(r);
+                if r["ev"] == "ag_tick" {
+                    tb = b(&r["tb"]);
+                }
+                let ev = r["ev"].as_str().unwrap_or("");
+                let call = ev == "ag_call"
+                    && (r["fn"] == "FollowPrecomputedPath" || r["fn"] == "ForcePath");
+                if !(ev == "ag_done" || call) {
+                    i += 1;
+                    continue;
+                }
+                let u = r["u"].as_str().unwrap_or("").to_owned();
+                let (end_ev, f) = if call {
+                    ("ag_call_end", r["fn"].as_str().unwrap_or(""))
+                } else {
+                    ("ag_done_end", "")
+                };
+                let Some(end) = (i + 1..recs.len()).find(|&j| {
+                    recs[j]["ev"] == end_ev
+                        && recs[j]["u"] == u.as_str()
+                        && (!call || recs[j]["fn"] == f)
+                }) else {
+                    failures.push(format!("{run} {fx}: {ev} {i} of {u} has no end"));
+                    break;
+                };
+                if !tb {
+                    real_time += 1;
+                    i = end + 1;
+                    continue;
+                }
+                for x in &recs[i + 1..end] {
+                    paths.note(x);
+                }
+                // The state before: a completion's own; a call's from its nested completion's
+                // prefix is after the call's own writes, so take the latest state before it.
+                let before = if call {
+                    recs[..i]
+                        .iter()
+                        .rev()
+                        .find(|x| {
+                            x["u"] == u.as_str() && x["s"].is_object() && x["ev"] != "ag_tick"
+                        })
+                        .map_or(Value::Null, |x| x["s"].clone())
+                } else {
+                    r["s"].clone()
+                };
+                // The unit's combat flag at the completion (`ag_done`'s, since `poc5-tb-105`; a call's
+                // from its nested completion).
+                let done = if call {
+                    recs[i + 1..end].iter().find(|x| x["ev"] == "ag_done" && x["u"] == u.as_str())
+                } else {
+                    Some(r)
+                };
+                // The AI's `FindPath` callback clears `m_RequestedFindPath` unobserved; neither call
+                // writes it and nothing runs between the call's start and its nested completion,
+                // so that completion's state has its value at the call.
+                let mut before = before;
+                if call
+                    && let Some(d) = done.and_then(|x| x.get("s"))
+                    && before.is_object()
+                {
+                    before["find"] = d["find"].clone();
+                }
+                if before.is_null() {
+                    failures.push(format!("{run} {fx} t={}: no state of {u} before {ev}", r["t"]));
+                    i = end + 1;
+                    continue;
+                }
+                let inner: Vec<&Value> =
+                    recs[i + 1..end].iter().filter(|x| inside(x, &u)).collect();
+                let mut w = world();
+                let unit_ix = unit(&mut w, &u, None, 10);
+                w.combat.turn_based = true;
+                w.unit_mut(unit_ix).unwrap().combat.agent = agent_from(&before, &paths);
+                let mut ctx = serde_json::json!({ "s": before });
+                if let Some(c) = done.and_then(|x| x.get("combat")) {
+                    ctx["combat"] = c.clone();
+                }
+                let mut inp = Recorded {
+                    tick: &ctx,
+                    recs: inner,
+                    at: 0,
+                    errors: Vec::new(),
+                    has_cb: true,
+                    key: None,
+                    init_dir: None,
+                    erosion: None,
+                };
+                let pts: Vec<V3> =
+                    r["v"].as_array().map(|a| a.iter().map(v3).collect()).unwrap_or_default();
+                let key = if call { r["rq"]["path"].as_str() } else { r["path"].as_str() }
+                    .unwrap_or("")
+                    .to_owned();
+                let p = AgentPath { forced: key.starts_with("?ForcedPath"), key, points: pts };
+                let got = if call {
+                    // The nested completion's error flag (the call doesn't record one).
+                    let err = recs[i + 1..end]
+                        .iter()
+                        .find(|x| x["ev"] == "ag_done" && x["u"] == u.as_str())
+                        .is_some_and(|x| b(&x["err"]));
+                    let arg = |k: usize| r["args"][k].as_str().unwrap_or("");
+                    if f == "FollowPrecomputedPath" {
+                        let max = arg(1).parse::<f32>().unwrap_or(f32::NAN);
+                        follow_precomputed_path(
+                            &mut w,
+                            unit_ix,
+                            &p,
+                            err,
+                            arg(0) == "1",
+                            max,
+                            &mut inp,
+                        )
+                    } else {
+                        force_path(&mut w, unit_ix, &p, err, arg(0) == "1", &mut inp)
+                    }
+                } else {
+                    on_path_complete(&mut w, unit_ix, &p, b(&r["err"]), b(&r["forced"]), &mut inp)
+                };
+                let why = outcome(got, &inp, &w, unit_ix, &recs[end]["s"], &paths);
+                if !why.is_empty() {
+                    failures.push(format!(
+                        "{run} {fx} t={} {u} {ev} {f}: {}",
+                        r["t"],
+                        why.join("; ")
+                    ));
+                }
+                total += 1;
+                i = end + 1;
+            }
+        }
+    }
+    eprintln!(
+        "{total} turn-based completions and precomputed or forced paths, {} differ; {real_time} in real time not checked",
+        failures.len()
+    );
+    assert!(total > 0, "the captures exercise no turn-based completion");
+    for x in failures.iter().take(30) {
+        eprintln!("  {x}");
+    }
+    assert!(failures.is_empty());
+}
+
+/// A recorded request (`ag_req_end`'s `rq`) against ours.
+fn request_diff(ours: &PathRequest, rq: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cmp = |what: &str, a: String, b: String| {
+        if a != b {
+            out.push(format!("request {what}: {a} != {b}"));
+        }
+    };
+    cmp("kind", "ABPathWithClearance".into(), rq["kind"].as_str().unwrap_or("").into());
+    cmp("ending", "LosPathConditionForGrid".into(), rq["ec"].as_str().unwrap_or("").into());
+    cmp("key", ours.key.clone(), rq["path"].as_str().unwrap_or("").into());
+    cmp("start", bits(&ours.start), bits(&v3(&rq["start"])));
+    cmp("end", bits(&ours.end), bits(&v3(&rq["end"])));
+    cmp("clearance", bits(&ours.clearance), bits(&v3(&rq["clear"])));
+    cmp("tags", ours.tags.to_string(), rq["tags"].to_string());
+    cmp("graph mask", ours.graph_mask.to_string(), rq["gmask"].to_string());
+    cmp("approach", bits(&ours.approach), bits(&f(&rq["ar"])));
+    cmp("los", ours.los.to_string(), rq["los"].to_string());
+    cmp("ignore", bits(&ours.ignore_blocker), bits(&f(&rq["ibr"])));
+    cmp("max distance", bits(&ours.max_distance), bits(&f(&rq["maxd"])));
+    cmp("xz", ours.distance_xz.to_string(), rq["xz"].to_string());
+    out
+}
+
+#[test]
+#[ignore = "needs the poc5-tb-104 and -105 captures"]
+fn every_recorded_path_to_reruns_bit_for_bit() {
+    let nav = wr_nav::NavFile::read(&wr_nav::path_for("bad465e5404604346bdf71ef50b3299a"))
+        .expect("the caves' nav file");
+    let erosion = nav.world.grid.as_ref().map(|g| (g.erode_iterations, g.erosion_first_tag));
+    let (mut total, mut requests, mut real_time) = (0, 0, 0);
+    let mut failures = Vec::new();
+    let labels =
+        std::env::var("WR_AGENT_CAPTURES").unwrap_or_else(|_| "poc5-tb-104,poc5-tb-105".into());
+    for label in labels.split(',') {
+        let root =
+            wr_paths::repo_root().join("fixtures/captures/oracle").join(label).join("fixtures");
+        for (fx, run) in ["tb-nearest", "tb-focus"]
+            .iter()
+            .flat_map(|fx| ["record", "replay-1", "replay-2"].map(|r| (*fx, r)))
+        {
+            let path = root.join(fx).join(format!("{run}.trace.jsonl.gz"));
+            let trace = Trace::load(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+            let recs = &trace.records;
+            let mut paths = Paths::default();
+            let mut i = 0;
+            while i < recs.len() {
+                let r = &recs[i];
+                paths.note(r);
+                if !(r["ev"] == "ag_req" && r["fn"] == "pathto") {
+                    i += 1;
+                    continue;
+                }
+                let u = r["u"].as_str().unwrap_or("").to_owned();
+                let Some(end) = (i + 1..recs.len())
+                    .find(|&j| recs[j]["ev"] == "ag_req_end" && recs[j]["u"] == u.as_str())
+                else {
+                    failures.push(format!("{run} {fx}: PathTo {i} of {u} has no end"));
+                    break;
+                };
+                let Some(tb) = r["tb"].as_bool() else {
+                    failures.push(format!(
+                        "{run} {fx}: PathTo without `tb` (a capture before poc5-tb-104)"
+                    ));
+                    break;
+                };
+                if !tb {
+                    real_time += 1;
+                    i = end + 1;
+                    continue;
+                }
+                for x in &recs[i + 1..end] {
+                    paths.note(x);
+                }
+                let e = &recs[end];
+                let inner: Vec<&Value> =
+                    recs[i + 1..end].iter().filter(|x| inside(x, &u)).collect();
+                let mut w = world();
+                let unit_ix = unit(&mut w, &u, None, 10);
+                w.combat.turn_based = true;
+                w.unit_mut(unit_ix).unwrap().combat.agent = agent_from(&r["s"], &paths);
+                let made = e["s"]["req"] != r["s"]["req"] && !e["rq"].is_null();
+                let mut inp = Recorded {
+                    tick: r,
+                    recs: inner,
+                    at: 0,
+                    errors: Vec::new(),
+                    has_cb: true,
+                    key: made.then(|| e["rq"]["path"].as_str().unwrap_or("").to_owned()),
+                    init_dir: Some(v2(&e["s"]["mdir"])),
+                    erosion,
+                };
+                let dest = b(&r["dhas"]).then(|| DestAgent {
+                    view: r["dview"].as_str().map(str::to_owned),
+                    attached: b(&r["dattached"]),
+                });
+                let command = r["c"].as_u64().map(|c| c as u32);
+                let got = path_to(
+                    &mut w,
+                    unit_ix,
+                    command,
+                    v3(&r["p"]),
+                    f(&r["r"]),
+                    f(&r["mr"]),
+                    b(&r["xz"]),
+                    dest,
+                    b(&r["dself"]),
+                    &mut inp,
+                );
+                let mut why = Vec::new();
+                match &got {
+                    Ok(Some(req)) if made => why.extend(request_diff(req, &e["rq"])),
+                    Ok(Some(_)) => why.push("PathTo made a request the game didn't".into()),
+                    Ok(None) if made => why.push("the game made a request PathTo didn't".into()),
+                    _ => {}
+                }
+                if made {
+                    requests += 1;
+                }
+                why.extend(outcome(got.map(|_| ()), &inp, &w, unit_ix, &e["s"], &paths));
+                if !why.is_empty() {
+                    failures.push(format!("{run} {fx} t={} {u}: {}", r["t"], why.join("; ")));
+                }
+                total += 1;
+                i = end + 1;
+            }
+        }
+    }
+    eprintln!(
+        "{total} turn-based PathTo calls ({requests} requests), {} differ; {real_time} in real time not checked",
+        failures.len()
+    );
+    assert!(requests > 0, "the captures exercise no turn-based PathTo request");
     for x in failures.iter().take(30) {
         eprintln!("  {x}");
     }
