@@ -1093,6 +1093,18 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             recs.insert(tick, r);
             renumber(recs);
         }),
+        ("the delivered path differs from the sim's", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "ag_done");
+            recs[at]["kind"] = json!("XPath");
+        }),
+        ("a pending definition after its return", |recs| {
+            let fin = fin_of_done(recs);
+            let m = of_path(recs, fin, "path_mod");
+            let r = json!({"k": "obs", "t": recs[m]["t"], "ev": "ag_pathdef",
+                "path": recs[fin]["path"], "kind": "ABPathWithClearance", "pending": true});
+            recs.insert(m + 1, r);
+            renumber(recs);
+        }),
         ("the recording's path_to", |recs| {
             let at = tb(recs, |r| ev(r, "path_to"));
             recs[at]["radius"] = json!(0.25);

@@ -1325,7 +1325,8 @@ impl Driver<'_> {
         }
         // The sim's path when it computes it (the recorded one a check), else the recording's.
         let cs = r["cs"].as_i64().ok_or_else(|| Desync("OnPathComplete: no state".into()))?;
-        let pts = match self.nav_delivered(&key, Some((&pts, err, cs)))? {
+        let kind = r["kind"].as_str().unwrap_or("");
+        let pts = match self.nav_delivered(&key, Some((&pts, err, cs, kind)))? {
             Some(v) => {
                 self.out.nav.delivered_to_agent += 1;
                 v

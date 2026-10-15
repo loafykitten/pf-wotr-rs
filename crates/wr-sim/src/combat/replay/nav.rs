@@ -977,7 +977,13 @@ impl Driver<'_> {
         if kind != "ABPathWithClearance" {
             Self::nav_unsupported(w, format!("{key}: a definition of a {kind} path"));
         }
-        let Some((v, err, cs)) = def else { return true };
+        let Some((v, err, cs)) = def else {
+            // The observer writes a pending definition only while the path is queued or searched.
+            if self.ags.nav.computed.contains_key(key) {
+                Self::nav_unsupported(w, format!("{key}: a pending definition after its return"));
+            }
+            return true;
+        };
         if let Some(p) = self.ags.nav.pending.get_mut(key) {
             p.defs.push((v.to_vec(), err, cs));
             return true;
@@ -1000,7 +1006,7 @@ impl Driver<'_> {
     pub(super) fn nav_delivered(
         &mut self,
         key: &str,
-        recorded: Option<(&[V3], bool, i64)>,
+        recorded: Option<(&[V3], bool, i64, &str)>,
     ) -> R<Option<Vec<V3>>> {
         if !self.ags.nav.paths || self.ags.nav.failed.contains_key(key) {
             return Ok(None);
@@ -1021,8 +1027,8 @@ impl Driver<'_> {
         let Some(v) = c.delivered().map(<[V3]>::to_vec) else {
             return Err(Desync(format!("{key}: delivered before its modifiers (path_mod)")));
         };
-        if let Some((pts, err, cs)) = recorded
-            && (!same_pts(pts, &v) || err != c.err || cs != c.cs)
+        if let Some((pts, err, cs, kind)) = recorded
+            && (!same_pts(pts, &v) || err != c.err || cs != c.cs || kind != "ABPathWithClearance")
         {
             return Err(Desync(format!(
                 "{key}: the delivered path differs from the sim's {v:?} (error {}, state {}): {pts:?}",
@@ -1045,7 +1051,8 @@ impl Driver<'_> {
         if !self.ags.nav.paths {
             return Ok(());
         }
-        let Some(key) = self.ags.nav.last_find.clone() else {
+        // (Each `ScorePath` reads the path of its own `FindPath`, once.)
+        let Some(key) = self.ags.nav.last_find.take() else {
             return Err(Desync("ScorePath's path without the sim's FindPath".into()));
         };
         if self.ags.nav.failed.contains_key(&key) {
