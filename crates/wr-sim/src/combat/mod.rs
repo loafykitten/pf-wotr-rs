@@ -37,6 +37,7 @@ pub mod replay;
 pub mod rules;
 pub mod spells;
 pub mod targets;
+pub mod ties;
 pub mod turn_tick;
 pub mod turns;
 pub mod units;

@@ -269,6 +269,8 @@ pub struct SortChecks {
     pub equal: usize,
     /// Orders that needed the comparer's identity-hash fallback (the recording decides).
     pub hash_fallback: usize,
+    /// The comparers' recorded identity-hash decisions the sim's sorts took (`init_tie`).
+    pub hash_decisions: usize,
     /// Rolled initiatives that differ from the recorded ones.
     pub initiative_mismatch: usize,
     /// Sorts whose units (`m_Units`) differ from the sim's.
@@ -1495,6 +1497,8 @@ impl<'t> Driver<'t> {
                 "driven replay: a recording without WrathOracle's turn-controller records (turn_start_begin, turn_clear, loot_timer)",
             );
         }
+        // The comparers' identity-hash decisions (WrathOracle's `init_ties`).
+        super::ties::load(w, recs, declared.contains(&"init_ties"), d.port);
         w.combat.timer_frames_recorded = d.turn_records;
         w.combat.cooldown_clears = d.cd.then(std::collections::VecDeque::new);
         d
@@ -1525,6 +1529,7 @@ impl<'t> Driver<'t> {
             self.eng_finish(w);
         }
         self.frame_leftovers(w);
+        self.out.sorts.hash_decisions = super::ties::finish(w);
         // Draws left pending after the last record.
         let pending = std::mem::take(&mut self.cx.sink.borrow_mut().pending);
         for p in pending {
@@ -1590,6 +1595,7 @@ impl Driver<'_> {
             return;
         }
         super::initiative::prepare_flush(w);
+        super::ties::frame_end(w);
         if !w.combat.turns.log.is_empty() {
             w.combat.turns.log.clear();
             w.coverage.unsupported("driven replay: a turn event the recording doesn't have");
@@ -3028,6 +3034,7 @@ impl Driver<'_> {
                     let t = r["t"].as_i64().unwrap_or(-1);
                     w.combat.turns.choose =
                         self.choose_by_tick.remove(&t).unwrap_or_default().into();
+                    super::ties::frame_start(w, t);
                     self.started_this_frame = false;
                     self.turn_go_on = true;
                 }

@@ -664,7 +664,25 @@ make the tie reproducible.
 
 ### Results
 
-Pending: the main session's capture of `poc5-tb8` (`tb-tie`).
+[M] **`poc5-tb-127/tb-tie`** (plan `poc5-tb8`, Manual_18; record and two replays). In the game it is tick-exact:
+replays valid, offset 0, tapes used up. `seedinit_fired` is 1, and `seedinit-search --verify` passes: the batch at
+tick 173 gives 51DD = 7,2 and 51FC = 7,2, as predicted. The comparers reached the hash 8 times: the prepare sort once,
+`SortUnits` 7 times (`init_ties_prepare` 1, `init_ties_turn` 7), every record naming 51DD and 51FC. **In the driven
+replay all three runs are valid**, each taking the 8 decisions (`SortChecks.hash_decisions` 8, every sort equal to
+the recorded one). Each run's `Compare` calls equal the end record's counts (48 for `SortUnits`, 11 for the
+prepare sort): an aggregate check of the sorts' comparison sequence, whose exact pairs and order are checked only at the
+fallbacks.
+`crates/wr-sim/tests/poc5_ties.rs` asserts this, and damages the recording 11 ways, each reported:
+- a turn or prepare decision dropped, or one added;
+- a result flipped, or the units swapped;
+- a decision moved to the next sort call or the next frame;
+- a unit given two hashes;
+- the declaration removed;
+- an end-record count changed;
+- an `init_tie_bad`.
+
+The captures valid before (`poc5-tb-109`, `-111` to `-117`, `-122/tb-focus`, `-95`, `-96`) are still valid on all
+54 runs, and so is `poc5-tb-126` (declares `init_ties`, no tie).
 
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
