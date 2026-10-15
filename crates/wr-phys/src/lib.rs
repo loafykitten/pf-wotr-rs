@@ -79,9 +79,16 @@ pub enum ShapeKind {
     Box { local_to_world: [f32; 16], center: [f32; 3], size: [f32; 3] },
     /// A non-convex `MeshCollider`: the triangles PhysX cooked (the mesh's
     /// `m_BakedTriangleCollisionMesh`) under the GameObject's `localToWorldMatrix`.
-    Mesh { local_to_world: [f32; 16], vertices: Vec<[f32; 3]>, triangles: Vec<[u32; 3]> },
-    /// Another collider kind (capsule, sphere, character controller, convex mesh): its
-    /// world-space bounding box, enough to fail closed.
+    Mesh {
+        local_to_world: [f32; 16],
+        vertices: Vec<[f32; 3]>,
+        triangles: Vec<[u32; 3]>,
+        /// `mGeomEpsilon` as cooking computes it: the largest absolute vertex coordinate
+        /// times 2^-22 (BV4's barycentric enlargement).
+        geom_epsilon: f32,
+    },
+    /// Another collider kind (capsule, sphere, character controller, convex mesh): a
+    /// world-space box sure to enclose it, enough to fail closed.
     Other { class: String, min: [f32; 3], max: [f32; 3] },
 }
 

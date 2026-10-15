@@ -91,7 +91,8 @@ impl HeightField {
 
     /// `HeightFieldUtil::computeLocalBounds`: the data's bounds (`getMin()`/`getMax()` of the
     /// `CenterExtents`) through the scale matrix.
-    fn local_bounds(&self) -> Bounds {
+    #[must_use]
+    pub fn local_bounds(&self) -> Bounds {
         let (center, extents) = self.data_aabb();
         let (min, max) = (center.minus(extents), center.plus(extents));
         let (rs, hs, cs) = (self.row_scale, self.height_scale, self.column_scale);
@@ -125,6 +126,21 @@ impl HeightField {
         max_dist: f32,
         mesh_both_sides: bool,
     ) -> Option<RayHit> {
+        self.raycast_in(self.local_bounds(), pose, ray_origin, ray_dir, max_dist, mesh_both_sides)
+    }
+
+    /// [`Self::raycast`] with [`Self::local_bounds`] computed beforehand (PhysX keeps the data
+    /// bounds with the height field; computing them scans every sample).
+    #[must_use]
+    pub fn raycast_in(
+        &self,
+        local_bounds: Bounds,
+        pose: Transform,
+        ray_origin: Vec3,
+        ray_dir: Vec3,
+        max_dist: f32,
+        mesh_both_sides: bool,
+    ) -> Option<RayHit> {
         let inv = pose.inverse();
         let local_orig = inv.transform(ray_origin);
         let local_dir = inv.rotate(ray_dir);
@@ -132,7 +148,7 @@ impl HeightField {
         let one_over_row = 1.0 / self.row_scale;
         let one_over_column = 1.0 / self.column_scale;
         let norm_dir = local_dir.normalize_safe();
-        let mut bounds = self.local_bounds();
+        let mut bounds = local_bounds;
         let center = bounds.center();
         let extents = bounds.extents().scale(1.01);
         bounds.min = center.minus(extents);

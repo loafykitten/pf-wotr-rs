@@ -116,8 +116,14 @@ these vertical results: the origins lie inside the field's inflated bounds, so t
 
 `Scene` answers only what is established; otherwise a `QueryError` the caller reports:
 
-- `Unverified { shape }`: the ray may touch a box, mesh or other collider within `[0, max]` (an `f64` test on its
-  geometry with a 1 mm margin). PhysX's per-shape box raycast is ported and exact, but how Unity turns a
+- `Unverified { shape }`: the ray may touch a box, mesh or other collider within `[0, max]`. The test is in `f64` on
+  the collider's geometry under its `localToWorldMatrix`, with 1 mm along the ray and around the edges, plus, for a
+  mesh's triangles, BV4's barycentric enlargement (`mGeomEpsilon`, 2^-22 of the largest local coordinate, as cooking
+  computes it) and a float-error allowance that grows as the ray turns parallel to the triangle (within a milliradian
+  of parallel, any overlap with the triangle's grown bounds counts). Spheres, capsules and controllers count as the
+  sphere of radius `(r + h/2)` times the largest scale, convex meshes as their grown bounds. The importer refuses a
+  sheared transform (a rotated child of a non-uniformly scaled parent: its matrix-transformed shape needn't enclose
+  what Unity hands PhysX); none occurs here. PhysX's per-shape box raycast is ported and exact, but how Unity turns a
   `BoxCollider` into a `PxBoxGeometry` and shape pose (centre, lossy scale, its tolerance for "unscaled") isn't
   verified, and the BVH34 mesh raycast (`BV4_RaycastSingle`'s `RayTriOverlapT` and its transforms) isn't ported.
 - `Unsupported`: a trigger collider in the mask (`queriesHitTriggers`), the `*_!Visual` layer ambiguity above, two
@@ -158,7 +164,9 @@ Unbuilt, for the main session to build and record (`oracle/mods/WrathOracle/`):
    and `ph_probe`: rays straight down (100 m, the walkable mask) over a 9 × 9 grid on each walkable box and mesh
    collider's bounds, with the hit's distance, point and collider. That gives boxes and meshes the check the terrain
    has (Unity's box pose and scale handling, the BVH34 raycast), the run-time layers and enabled flags, and the
-   global query settings the file now assumes.
+   global query settings the file now assumes. The probe's raycasts are reads, but with `autoSyncTransforms` on (the
+   begin record's `physics_auto_sync`) each query first syncs pending transforms into PhysX, as the agent's own
+   queries do every tick; the recording should confirm the replays stay tick-exact with it.
 
 ## Reproduce
 

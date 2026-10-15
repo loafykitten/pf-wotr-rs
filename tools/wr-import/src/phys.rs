@@ -87,6 +87,11 @@ pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackRe
                 ensure!(layer < 32, "{name}: layer {layer}");
                 let is_trigger = bool_of(v, "m_IsTrigger").unwrap_or(false);
                 let m = g.world.matrix;
+                // A sheared transform (a rotated child of a non-uniformly scaled parent) makes the
+                // matrix's shape differ from what Unity hands PhysX (a pose and a scale): refused.
+                if class != "TerrainCollider" && !orthogonal(&m) {
+                    bail!("{name}: a sheared transform (Unity's shape isn't established)");
+                }
                 let kind = match class {
                     "BoxCollider" => ShapeKind::Box {
                         local_to_world: m,
@@ -96,11 +101,13 @@ pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackRe
                     "MeshCollider" => mesh_shape(universe, s, v, m, &name, &mut rep)?,
                     "TerrainCollider" => terrain_shape(universe, s, v, &g, &name)?,
                     _ => {
+                        // Spheres, capsules and controllers: Unity scales the radius by the
+                        // largest (transverse) scale, so a sphere of radius (r + h/2) times the
+                        // largest column norm around the centre encloses them.
                         let c = vec3(v, "m_Center")?;
-                        let r = f32_of(v, "m_Radius")?;
-                        let h = v.f32_at("m_Height").unwrap_or(0.0);
-                        let e = r.max(h * 0.5).abs();
-                        let (lo, hi) = world_bounds(&m, c, [e, e, e]);
+                        let r = f32_of(v, "m_Radius")?.abs();
+                        let h = v.f32_at("m_Height").unwrap_or(0.0).abs();
+                        let (lo, hi) = sphere_bounds(&m, c, r + h * 0.5);
                         ShapeKind::Other { class: class.to_owned(), min: lo, max: hi }
                     }
                 };
@@ -124,6 +131,27 @@ pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackRe
     rep.shapes = world.shapes.len();
     world.validate()?;
     Ok((world, rep))
+}
+
+/// The 3x3 part's columns are orthogonal (relative tolerance 1e-4).
+fn orthogonal(m: &[f32; 16]) -> bool {
+    let col = |j: usize| [0, 1, 2].map(|k| f64::from(m[4 * j + k]));
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (c0, c1, c2) = (col(0), col(1), col(2));
+    let n = [dot(c0, c0).sqrt(), dot(c1, c1).sqrt(), dot(c2, c2).sqrt()];
+    [(c0, c1, 0, 1), (c0, c2, 0, 2), (c1, c2, 1, 2)]
+        .iter()
+        .all(|&(a, b, i, j)| dot(a, b).abs() <= 1e-4 * n[i] * n[j])
+}
+
+/// World bounds of the sphere of local radius `r` around the local point `c`, scaled by the
+/// largest column norm, grown by 1 cm.
+fn sphere_bounds(m: &[f32; 16], c: [f32; 3], r: f32) -> ([f32; 3], [f32; 3]) {
+    let norm = |j: usize| (0..3).map(|k| f64::from(m[4 * j + k]).powi(2)).sum::<f64>().sqrt();
+    let s = norm(0).max(norm(1)).max(norm(2));
+    let radius = (f64::from(r) * s + 0.01) as f32;
+    let (lo, hi) = world_bounds(m, c, [0.0; 3]);
+    (lo.map(|x| x - radius), hi.map(|x| x + radius))
 }
 
 fn world_bounds(m: &[f32; 16], c: [f32; 3], e: [f32; 3]) -> ([f32; 3], [f32; 3]) {
@@ -159,7 +187,8 @@ fn mesh_shape(
     if bool_of(v, "m_Convex") == Some(true) {
         let c = mv.path("m_LocalAABB.m_Center").and_then(Value::vec3).unwrap_or_default();
         let e = mv.path("m_LocalAABB.m_Extent").and_then(Value::vec3).unwrap_or_default();
-        let (lo, hi) = world_bounds(&m, c, e);
+        // Grown by 1% and 1 cm (cooking may inflate the hull slightly).
+        let (lo, hi) = world_bounds(&m, c, e.map(|x| x.abs() * 1.01 + 0.01));
         return Ok(ShapeKind::Other { class: "MeshCollider (convex)".into(), min: lo, max: hi });
     }
     let baked = mv
@@ -187,10 +216,15 @@ fn mesh_shape(
         cooked_triangles: cooked.triangles.len(),
         render_triangles: render_tris as usize,
     });
+    // `mGeomEpsilon` as `MeshBuilder` computes it from the local bounds (2^-22 of the largest
+    // absolute coordinate).
+    let extent = cooked.vertices.iter().flatten().fold(0.0f32, |a, &x| a.max(x.abs()));
+    let geom_epsilon = extent * 2f32.powi(-22);
     Ok(ShapeKind::Mesh {
         local_to_world: m,
         vertices: cooked.vertices,
         triangles: cooked.triangles,
+        geom_epsilon,
     })
 }
 

@@ -49,7 +49,10 @@ impl fmt::Display for QueryError {
 impl std::error::Error for QueryError {}
 
 enum Prepared {
-    HeightField,
+    /// The field's local bounds (PhysX keeps them with the height field).
+    HeightField {
+        bounds: crate::px::Bounds,
+    },
     /// World-space bounds, then the exact-enough test.
     Box {
         m: M4,
@@ -60,6 +63,7 @@ enum Prepared {
     },
     Mesh {
         tris: Vec<[[f64; 3]; 3]>,
+        eps: f64,
         lo: [f64; 3],
         hi: [f64; 3],
     },
@@ -92,7 +96,9 @@ impl<'w> Scene<'w> {
             .shapes
             .iter()
             .map(|s| match &s.kind {
-                ShapeKind::HeightField { .. } => Prepared::HeightField,
+                ShapeKind::HeightField { field, .. } => {
+                    Prepared::HeightField { bounds: field.local_bounds() }
+                }
                 ShapeKind::Box { local_to_world, center, size } => {
                     let m = M4::from_f32(local_to_world);
                     let center = f64x3(*center);
@@ -100,7 +106,7 @@ impl<'w> Scene<'w> {
                     let (lo, hi) = conservative::box_bounds(&m, center, half);
                     Prepared::Box { m, center, half, lo, hi }
                 }
-                ShapeKind::Mesh { local_to_world, vertices, triangles } => {
+                ShapeKind::Mesh { local_to_world, vertices, triangles, geom_epsilon } => {
                     let m = M4::from_f32(local_to_world);
                     let w: Vec<[f64; 3]> = vertices.iter().map(|v| m.point(f64x3(*v))).collect();
                     let tris: Vec<[[f64; 3]; 3]> = triangles
@@ -115,7 +121,7 @@ impl<'w> Scene<'w> {
                             hi[k] = hi[k].max(p[k]);
                         }
                     }
-                    Prepared::Mesh { tris, lo, hi }
+                    Prepared::Mesh { tris, eps: f64::from(*geom_epsilon), lo, hi }
                 }
                 ShapeKind::Other { min, max, .. } => {
                     Prepared::Other { lo: f64x3(*min), hi: f64x3(*max) }
@@ -166,8 +172,8 @@ impl<'w> Scene<'w> {
                 )));
             }
             match (&s.kind, p) {
-                (ShapeKind::HeightField { pose, field }, _) => {
-                    if let Some(h) = field.raycast(*pose, o, dir, max, false) {
+                (ShapeKind::HeightField { pose, field }, Prepared::HeightField { bounds }) => {
+                    if let Some(h) = field.raycast_in(*bounds, *pose, o, dir, max, false) {
                         hits.push((i, h));
                     }
                 }
@@ -228,16 +234,14 @@ fn in_mask(layer: u32, mask: i32) -> bool {
 fn may_touch(p: &Prepared, o: [f64; 3], max: f64) -> bool {
     const DOWN: [f64; 3] = [0.0, -1.0, 0.0];
     match p {
-        Prepared::HeightField => false,
+        Prepared::HeightField { .. } => false,
         Prepared::Box { m, center, half, lo, hi } => {
             conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi)
                 && conservative::ray_hits_box(o, DOWN, max, m, *center, *half)
         }
-        Prepared::Mesh { tris, lo, hi } => {
+        Prepared::Mesh { tris, eps, lo, hi } => {
             conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi)
-                && tris
-                    .iter()
-                    .any(|t| conservative::ray_hits_triangle(o, DOWN, max, t[0], t[1], t[2]))
+                && tris.iter().any(|t| conservative::ray_hits_triangle(o, DOWN, max, *t, *eps))
         }
         Prepared::Other { lo, hi } => conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi),
     }

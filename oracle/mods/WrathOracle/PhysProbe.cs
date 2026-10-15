@@ -8,7 +8,7 @@ namespace WrathOracle;
 // Observer "phys_probe" (docs/poc5/physics.md, "Observer changes requested"): the colliders the
 // physics queries see and a probe of the ones no recorded query reaches, so the sim's physics
 // (crates/wr-phys) can verify boxes and triangle meshes as it verified the terrain. Run once,
-// right after a fixture's begin record (record and replays alike: the probe only reads):
+// right after a turn-based fixture's begin record (record and replays alike: the probe only reads):
 //  - ph_settings: Physics.queriesHitTriggers, queriesHitBackfaces, autoSyncTransforms;
 //  - ph_col: every Collider in the loaded scenes, inactive ones included: identity (scene, hierarchy
 //    path, sibling path, type, instance id), the GameObject's layer and activity, enabled, isTrigger,

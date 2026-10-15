@@ -163,6 +163,49 @@ fn unverified_shapes_fail_closed() {
 }
 
 #[test]
+fn meshes_and_other_shapes_fail_closed() {
+    let id = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    let world = World {
+        shapes: vec![
+            Shape {
+                name: "mesh".into(),
+                layer: 0,
+                is_trigger: false,
+                visual_layer_move: false,
+                kind: ShapeKind::Mesh {
+                    local_to_world: id,
+                    vertices: vec![[0.0, 0.0, 0.0], [0.0, 0.0, 100.0], [100.0, 0.0, 0.0]],
+                    triangles: vec![[0, 1, 2]],
+                    geom_epsilon: 100.0 * 2f32.powi(-22),
+                },
+            },
+            Shape {
+                name: "capsule".into(),
+                layer: 1,
+                is_trigger: false,
+                visual_layer_move: false,
+                kind: ShapeKind::Other {
+                    class: "CapsuleCollider".into(),
+                    min: [200.0, 0.0, 0.0],
+                    max: [201.0, 2.0, 1.0],
+                },
+            },
+        ],
+    };
+    let scene = Scene::new(&world);
+    let unverified = |o: [f32; 3], mask: i32| {
+        matches!(scene.raycast_down(o, 100.0, mask), Err(QueryError::Unverified { .. }))
+    };
+    assert!(unverified([30.0, 1.0, 30.0], 1));
+    // 1.41 mm outside the triangle, inside BV4's enlargement.
+    assert!(unverified([50.001, 1.0, 50.001], 1));
+    assert_eq!(scene.raycast_down([60.0, 1.0, 60.0], 100.0, 1).unwrap(), None);
+    assert_eq!(scene.raycast_down([30.0, 1.0, 30.0], 100.0, 2).unwrap(), None, "other layer");
+    assert!(unverified([200.5, 5.0, 0.5], 2));
+    assert_eq!(scene.raycast_down([202.5, 5.0, 0.5], 100.0, 2).unwrap(), None);
+}
+
+#[test]
 fn disc_points_match_the_static_constructor() {
     let p = query::disc_points();
     // sin(3π/4) and sin(π/2) as Mathf computes them.

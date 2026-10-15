@@ -120,8 +120,9 @@ internal static class Fixture
             j.Key("rng_sites"); Rng.WriteSites(j, compact: true);
         });
         Rng.Checkpoint(); // the gap baseline: the window starts here
-        // The colliders and a probe of them (observer phys_probe; reads only).
-        if (Fidelity.Observers.Contains("phys_probe")) PhysProbe.Run();
+        // The colliders and a probe of them (observer phys_probe; reads only), where the window records
+        // observations (Sched.On: turn-based windows), so no unrecorded query runs elsewhere.
+        if (Fidelity.Observers.Contains("phys_probe") && Sched.On) PhysProbe.Run();
         Main.Note($"fixture {Mode} {name} -> {PathNow}");
         PrePathSync.Flush(Time.frameCount);
         if (prePath != null && Sched.Replay) Sched.Invalidate(prePath);

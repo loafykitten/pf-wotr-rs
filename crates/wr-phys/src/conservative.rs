@@ -103,8 +103,8 @@ pub fn ray_hits_box(
         return true;
     }
     FACES.iter().any(|f| {
-        ray_hits_triangle(o, d, max, c[f[0]], c[f[1]], c[f[2]])
-            || ray_hits_triangle(o, d, max, c[f[0]], c[f[2]], c[f[3]])
+        ray_hits_triangle(o, d, max, [c[f[0]], c[f[1]], c[f[2]]], 0.0)
+            || ray_hits_triangle(o, d, max, [c[f[0]], c[f[2]], c[f[3]]], 0.0)
     })
 }
 
@@ -134,59 +134,43 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-/// Does the ray touch the triangle (either side), within a margin of `MARGIN` metres around
-/// its edges and along the ray?
+/// Does the ray touch the triangle (either side)? Conservative: a margin of `MARGIN` metres
+/// along the ray, and around the edges `MARGIN` plus, relative to the edges' lengths, PhysX's
+/// barycentric enlargement `bary_eps` (a mesh's `mGeomEpsilon`) and the float error of a
+/// crossing point, which grows as the ray turns parallel to the plane. Within a thousandth of a
+/// radian of parallel, any overlap of the segment with the triangle's grown bounds counts.
 #[must_use]
 pub fn ray_hits_triangle(
     o: [f64; 3],
     d: [f64; 3],
     max: f64,
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
+    tri: [[f64; 3]; 3],
+    bary_eps: f64,
 ) -> bool {
+    let [a, b, c] = tri;
     let e1 = sub(b, a);
     let e2 = sub(c, a);
     let n = cross(e1, e2);
     let nn = dot(n, n).sqrt();
-    if nn == 0.0 {
-        return false;
+    let edges = dot(e1, e1).sqrt() + dot(e2, e2).sqrt() + dot(sub(c, b), sub(c, b)).sqrt();
+    if nn == 0.0 || !nn.is_finite() {
+        // Degenerate: PhysX rejects it (det below its epsilon); a NaN or inf one counts.
+        return !nn.is_finite();
     }
-    let dn = dot(d, n);
-    // Distance of the origin from the plane, and where the ray crosses it.
-    let s = dot(sub(a, o), n);
-    if dn.abs() < 1e-12 * nn {
-        // Parallel: only a ray lying in the plane can touch it; PhysX rejects these
-        // (det below its epsilon), but count it anyway when within the margin.
-        if (s / nn).abs() > MARGIN {
-            return false;
-        }
-        return segment_near_triangle(o, d, max, a, b, c);
+    let sin = dot(d, n).abs() / nn;
+    if sin < 1e-3 {
+        let lo = [0, 1, 2].map(|k| a[k].min(b[k]).min(c[k]));
+        let hi = [0, 1, 2].map(|k| a[k].max(b[k]).max(c[k]));
+        let grow = MARGIN + (2.0 * bary_eps + 1e-2) * edges;
+        return ray_hits_aabb(o, d, max, lo.map(|x| x - grow), hi.map(|x| x + grow));
     }
-    let t = s / dn;
+    let t = dot(sub(a, o), n) / dot(d, n);
     if t < -MARGIN || t > max + MARGIN {
         return false;
     }
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
-    // Distance from p (in the plane) to the triangle, compared with the margin.
-    point_triangle_distance(p, a, b, c) <= MARGIN
-}
-
-fn segment_near_triangle(
-    o: [f64; 3],
-    d: [f64; 3],
-    max: f64,
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-) -> bool {
-    // Sample the segment finely enough for a margin test (rare: rays in a triangle's plane).
-    let steps = ((max / MARGIN).ceil() as usize).clamp(1, 1_000_000);
-    (0..=steps).any(|i| {
-        let t = max * i as f64 / steps as f64;
-        let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
-        point_triangle_distance(p, a, b, c) <= MARGIN
-    })
+    let margin = MARGIN + (2.0 * bary_eps + 1e-5 / sin) * edges;
+    point_triangle_distance(p, a, b, c) <= margin
 }
 
 /// Euclidean distance from `p` to the triangle `abc` (Ericson, Real-Time Collision Detection 5.1.5).
@@ -258,14 +242,33 @@ mod tests {
 
     #[test]
     fn triangles_count_within_the_margin() {
-        let (a, b, c) = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
-        assert!(ray_hits_triangle([0.2, 5.0, 0.2], DOWN, 10.0, a, b, c));
-        assert!(ray_hits_triangle([0.2, 5.0, 0.2], DOWN, 10.0, a, c, b), "either side");
-        assert!(ray_hits_triangle([-0.0005, 5.0, 0.2], DOWN, 10.0, a, b, c), "within the margin");
-        assert!(!ray_hits_triangle([-0.01, 5.0, 0.2], DOWN, 10.0, a, b, c));
-        assert!(!ray_hits_triangle([0.2, 5.0, 0.2], DOWN, 4.9, a, b, c), "beyond max");
-        assert!(ray_hits_triangle([0.2, 5.0, 0.2], DOWN, 4.9995, a, b, c));
-        assert!(!ray_hits_triangle([0.2, -1.0, 0.2], DOWN, 10.0, a, b, c), "behind the origin");
+        let tri = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let flipped = [tri[0], tri[2], tri[1]];
+        let hits = |o: [f64; 3], max: f64| ray_hits_triangle(o, DOWN, max, tri, 0.0);
+        assert!(hits([0.2, 5.0, 0.2], 10.0));
+        assert!(ray_hits_triangle([0.2, 5.0, 0.2], DOWN, 10.0, flipped, 0.0), "either side");
+        assert!(hits([-0.0005, 5.0, 0.2], 10.0), "within the margin");
+        assert!(!hits([-0.01, 5.0, 0.2], 10.0));
+        assert!(!hits([0.2, 5.0, 0.2], 4.9), "beyond max");
+        assert!(hits([0.2, 5.0, 0.2], 4.9995));
+        assert!(!hits([0.2, -1.0, 0.2], 10.0), "behind the origin");
+    }
+
+    #[test]
+    fn a_meshs_barycentric_epsilon_widens_the_margin() {
+        // PhysX's BV4 test accepts u, v down to -mGeomEpsilon: 100 / 2^22 here, 1.41 mm outside.
+        let tri = [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0], [100.0, 0.0, 0.0]];
+        let eps = 100.0 / f64::from(1u32 << 22);
+        assert!(ray_hits_triangle([50.001, 1.0, 50.001], DOWN, 10.0, tri, eps));
+    }
+
+    #[test]
+    fn near_parallel_triangles_are_not_skipped() {
+        // Nearly containing the vertical ray, crossed 1.5 m down; a long ray must still count.
+        let tri = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [5e-13, 1.0, 0.0]];
+        assert!(ray_hits_triangle([2.5e-13, 2.0, 0.25], DOWN, 1e7, tri, 0.0));
+        assert!(ray_hits_triangle([2.5e-13, 2.0, 0.25], DOWN, 3.0, tri, 0.0));
+        assert!(!ray_hits_triangle([0.5, 2.0, 0.25], DOWN, 3.0, tri, 0.0));
     }
 
     #[test]
