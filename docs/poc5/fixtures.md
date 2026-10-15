@@ -80,7 +80,7 @@ driver is Enlarge Person.
 
 All on `Manual_18_WR_FirstBattle` (party: the PC, Seelah 558A, Camelia 5671; Anevia 5198 follows the PC as an AI ally).
 
-- **`tb-cast`** (`poc5-tb5`): the first battle (`move:57,34.5,155.5` as `tb-focus`), everyone `nearest` but Camelia,
+- **`tb-cast`** (`poc5-tb7`): the first battle (`move:57,34.5,155.5` as `tb-focus`), everyone `nearest` but Camelia,
   whose policy is `cast/c60969e7f264e6d4b84a1499fdcf9039/558A`: Enlarge Person (her memorized level-1 slot, close range)
   on Seelah in her first turn, approaching if needed, then (the slot spent) the nearest enemy. Exercises a spell from a
   memorized slot: `UnitUseAbility`, the ability's approach, its execution process, the slot spent, a buff that changes
