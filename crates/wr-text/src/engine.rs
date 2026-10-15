@@ -612,7 +612,8 @@ fn log_template(l: LogTag, params: &[String], env: &mut dyn Env) -> Result<Strin
     let unit = |env: &mut dyn Env, f| -> Result<String, TextError> {
         Ok(env.log_unit(f)?.map_or_else(|| "<no unit>".to_owned(), |u| u.rich()))
     };
-    let int = |env: &mut dyn Env, f| -> Result<String, TextError> { Ok(env.log_int(f)?.to_string()) };
+    let int =
+        |env: &mut dyn Env, f| -> Result<String, TextError> { Ok(env.log_int(f)?.to_string()) };
     let roll = |env: &mut dyn Env, f| -> Result<String, TextError> {
         // A null roll: `LogHelper` logs an error and writes "".
         Ok(env.log_roll(f)?.map(|r| r.description()).unwrap_or_default())

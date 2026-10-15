@@ -96,7 +96,8 @@ pub fn activate(w: &mut World, begin: &J) {
         return;
     }
     // m_RootRulesTypes.
-    let roots: Option<Vec<&str>> = g["roots"].as_array().map(|a| a.iter().filter_map(J::as_str).collect());
+    let roots: Option<Vec<&str>> =
+        g["roots"].as_array().map(|a| a.iter().filter_map(J::as_str).collect());
     let mut ours = root_rules();
     ours.sort_unstable();
     if roots.as_deref() != Some(ours.as_slice()) {
@@ -114,7 +115,9 @@ pub fn activate(w: &mut World, begin: &J) {
             continue;
         };
         let names: Vec<&str> = by.iter().filter_map(|x| x[0].as_str()).collect();
-        let ours: Vec<&str> = parse_type(ev).map(|ty| threads_of(ty).into_iter().map(|i| THREADS[i].0).collect()).unwrap_or_default();
+        let ours: Vec<&str> = parse_type(ev)
+            .map(|ty| threads_of(ty).into_iter().map(|i| THREADS[i].0).collect())
+            .unwrap_or_default();
         if names != ours || names.len() != by.len() {
             unsupported(w, format!("{ev}'s threads differ from the game's ({names:?})"));
         }
@@ -123,7 +126,10 @@ pub fn activate(w: &mut World, begin: &J) {
     let our_keys: std::collections::BTreeSet<&str> =
         THREADS.iter().flat_map(|(_, h)| h.iter().copied()).collect();
     if keys != our_keys.len() {
-        unsupported(w, format!("the game dispatches {keys} event types, the sim {}", our_keys.len()));
+        unsupported(
+            w,
+            format!("the game dispatches {keys} event types, the sim {}", our_keys.len()),
+        );
     }
     if g["ready"].as_array().is_none_or(|a| !a.is_empty()) || g["stack"] != 0 {
         unsupported(w, "events queued or open when the window opened");
@@ -137,7 +143,8 @@ pub fn activate(w: &mut World, begin: &J) {
     match (&c["SourceFact"], int("Rations"), int("RoundNumber"), int("RollChance")) {
         (f, Some(rations), Some(round), Some(chance)) => {
             if !f.is_null() {
-                w.game_log.ctx.source_fact = super::SourceFact::Unknown(format!("from before the window: {f}"));
+                w.game_log.ctx.source_fact =
+                    super::SourceFact::Unknown(format!("from before the window: {f}"));
             }
             w.game_log.ctx.rations = rations;
             w.game_log.ctx.round_number = round;
@@ -152,9 +159,15 @@ pub fn activate(w: &mut World, begin: &J) {
     }
     // The fields `Clear` resets are at their defaults outside a scope.
     for (k, v) in c.as_object().into_iter().flatten() {
-        let sticky = matches!(k.as_str(), "SourceFact" | "Formula" | "Rations" | "RoundNumber" | "RollChance");
+        let sticky = matches!(
+            k.as_str(),
+            "SourceFact" | "Formula" | "Rations" | "RoundNumber" | "RollChance"
+        );
         if !sticky && !(v.is_null() || *v == 0) {
-            unsupported(w, format!("GameLogContext.{k} set outside a scope when the window opened"));
+            unsupported(
+                w,
+                format!("GameLogContext.{k} set outside a scope when the window opened"),
+            );
         }
     }
 }
@@ -162,7 +175,12 @@ pub fn activate(w: &mut World, begin: &J) {
 /// The recording's inputs: a `clog_q` of an event the sim doesn't raise, queued at its record.
 /// `rec_q` counts the recording's `clog_q`s seen so far, `rule_q` maps a recorded rule id to its
 /// event's place in the queue order.
-pub fn input(w: &mut World, r: &J, inputs: &mut std::collections::BTreeMap<String, usize>, rule_q: &HashMap<i64, usize>) {
+pub fn input(
+    w: &mut World,
+    r: &J,
+    inputs: &mut std::collections::BTreeMap<String, usize>,
+    rule_q: &HashMap<i64, usize>,
+) {
     let ty = r["e"].as_str().unwrap_or("");
     match ty {
         "GameLogEventBark" => {
@@ -176,7 +194,12 @@ pub fn input(w: &mut World, r: &J, inputs: &mut std::collections::BTreeMap<Strin
                 unsupported(w, "a bark without its text");
                 return;
             };
-            super::add_event(w, "GameLogEventBark", Payload::Bark { unit, text: text.to_owned() }, [unit, None]);
+            super::add_event(
+                w,
+                "GameLogEventBark",
+                Payload::Bark { unit, text: text.to_owned() },
+                [unit, None],
+            );
         }
         "GameLogEventProjectileHit" => {
             let rule = &r["f"]["Projectile"];
@@ -187,17 +210,27 @@ pub fn input(w: &mut World, r: &J, inputs: &mut std::collections::BTreeMap<Strin
                     unsupported(w, "a projectile hit whose attack roll wasn't queued");
                     return;
                 };
-                let ev = w.game_log.out.iter().filter_map(|o| match o {
-                    Out::Queued { event, .. } => Some(*event),
-                    _ => None,
-                }).nth(*q);
+                let ev = w
+                    .game_log
+                    .out
+                    .iter()
+                    .filter_map(|o| match o {
+                        Out::Queued { event, .. } => Some(*event),
+                        _ => None,
+                    })
+                    .nth(*q);
                 let Some(ev) = ev else {
                     unsupported(w, "a projectile hit whose attack roll the sim didn't queue");
                     return;
                 };
                 Some(ev)
             };
-            super::add_event(w, "GameLogEventProjectileHit", Payload::ProjectileHit { attack }, [None, None]);
+            super::add_event(
+                w,
+                "GameLogEventProjectileHit",
+                Payload::ProjectileHit { attack },
+                [None, None],
+            );
         }
         _ => return,
     }
@@ -225,6 +258,24 @@ pub fn is_input(ty: &str) -> bool {
     matches!(ty, "GameLogEventBark" | "GameLogEventProjectileHit")
 }
 
+/// A non-rule event's `f` as the observer writes the sim's event (`None` for a rule event).
+fn event_fields(w: &World, p: &Payload) -> Option<J> {
+    let unit = |u: crate::world::EntityIdx| serde_json::json!({"$unit": w.entity(u).unique_id});
+    Some(match p {
+        Payload::AttackOfOpportunity { attacker, target } => {
+            serde_json::json!({"Attacker": unit(*attacker), "Target": unit(*target)})
+        }
+        Payload::LifeState { unit: u, prev } => {
+            serde_json::json!({"Unit": unit(*u), "PrevLifeState": prev})
+        }
+        Payload::CombatState { in_combat } => serde_json::json!({"InCombat": in_combat}),
+        Payload::PartyExperience { experience } => serde_json::json!({"Experience": experience}),
+        // `InspectUnitsManager`'s `UnitInfo` (an object the observer names by type).
+        Payload::Knowledge => serde_json::json!({"UnitInfo": {"$type": "UnitInfo"}}),
+        _ => return None,
+    })
+}
+
 fn diff(w: &mut World, s: &mut Summary, what: String) {
     s.differences += 1;
     if s.differences <= 20 {
@@ -235,14 +286,32 @@ fn diff(w: &mut World, s: &mut Summary, what: String) {
 }
 
 /// Compares the sim's stream with the recording's records.
-pub fn compare(w: &mut World, recs: &[J], inputs: std::collections::BTreeMap<String, usize>) -> Summary {
+pub fn compare(
+    w: &mut World,
+    recs: &[J],
+    inputs: std::collections::BTreeMap<String, usize>,
+) -> Summary {
     let mut s = Summary { inputs, ..Summary::default() };
-    let obs = |ev: &str| -> Vec<&J> { recs.iter().filter(|r| r["k"] == "obs" && r["ev"] == ev).collect() };
+    let obs = |ev: &str| -> Vec<&J> {
+        recs.iter().filter(|r| r["k"] == "obs" && r["ev"] == ev).collect()
+    };
     let (rq, rt, rm) = (obs("clog_q"), obs("clog_tick"), obs("clog_msg"));
     let out = w.game_log.out.clone();
-    let sq: Vec<(i64, usize)> = out.iter().filter_map(|o| match o { Out::Queued { frame, event } => Some((*frame, *event)), _ => None }).collect();
+    let sq: Vec<(i64, usize)> = out
+        .iter()
+        .filter_map(|o| match o {
+            Out::Queued { frame, event } => Some((*frame, *event)),
+            _ => None,
+        })
+        .collect();
     let st: Vec<&Out> = out.iter().filter(|o| matches!(o, Out::Tick { .. })).collect();
-    let sm: Vec<&super::Msg> = out.iter().filter_map(|o| match o { Out::Msg(m) => Some(m), _ => None }).collect();
+    let sm: Vec<&super::Msg> = out
+        .iter()
+        .filter_map(|o| match o {
+            Out::Msg(m) => Some(m),
+            _ => None,
+        })
+        .collect();
     s.queued = [rq.len(), sq.len()];
     s.ticks = [rt.len(), st.len()];
     s.messages = [rm.len(), sm.len()];
@@ -261,7 +330,8 @@ pub fn compare(w: &mut World, recs: &[J], inputs: std::collections::BTreeMap<Str
     if rq.len() != sq.len() {
         diff(w, &mut s, format!("{} events queued, the sim queued {}", rq.len(), sq.len()));
     }
-    let uid = |w: &World, u: Option<crate::world::EntityIdx>| u.map(|u| w.entity(u).unique_id.clone());
+    let uid =
+        |w: &World, u: Option<crate::world::EntityIdx>| u.map(|u| w.entity(u).unique_id.clone());
     for (k, (r, (frame, e))) in rq.iter().zip(sq.iter()).enumerate() {
         let ev = w.game_log.events[*e].clone();
         let mut bad = Vec::new();
@@ -276,11 +346,20 @@ pub fn compare(w: &mut World, recs: &[J], inputs: std::collections::BTreeMap<Str
                 Some((c, a, b)) => {
                     let ours = (uid(w, ev.units[0]), uid(w, ev.units[1]));
                     if c != class || *a != ours.0 || (b.is_some() && *b != ours.1) {
-                        bad.push(format!("rule {c} {a:?}->{b:?} vs {class} {:?}->{:?}", ours.0, ours.1));
+                        bad.push(format!(
+                            "rule {c} {a:?}->{b:?} vs {class} {:?}->{:?}",
+                            ours.0, ours.1
+                        ));
                     }
                 }
                 None => bad.push("its rule isn't recorded".into()),
             }
+        }
+        // A non-rule event's fields, as the observer writes them.
+        if let Some(f) = event_fields(w, &ev.payload)
+            && r["f"] != f
+        {
+            bad.push(format!("fields {} vs {f}", r["f"]));
         }
         if r["en"].as_bool() != Some(ev.enabled) {
             bad.push(format!("enabled {} vs {}", r["en"], ev.enabled));
@@ -300,12 +379,32 @@ pub fn compare(w: &mut World, recs: &[J], inputs: std::collections::BTreeMap<Str
         let Out::Tick { frame, queue, stack } = o else { continue };
         let rec: Option<Vec<(usize, bool)>> = r["q"].as_array().map(|a| {
             a.iter()
-                .map(|x| (x[0].as_i64().and_then(|id| rec_pos.get(&id).copied()).unwrap_or(usize::MAX), x[1] == true))
+                .map(|x| {
+                    (
+                        x[0].as_i64()
+                            .and_then(|id| rec_pos.get(&id).copied())
+                            .unwrap_or(usize::MAX),
+                        x[1] == true,
+                    )
+                })
                 .collect()
         });
-        let ours: Vec<(usize, bool)> = queue.iter().map(|(e, en)| (sim_pos.get(e).copied().unwrap_or(usize::MAX - 1), *en)).collect();
-        if r["t"].as_i64() != Some(*frame) || rec.as_ref() != Some(&ours) || r["stack"].as_u64() != u64::try_from(*stack).ok() {
-            diff(w, &mut s, format!("tick #{k} at {}: queue {:?} stack {} vs {frame}: {ours:?} stack {stack}", r["t"], rec, r["stack"]));
+        let ours: Vec<(usize, bool)> = queue
+            .iter()
+            .map(|(e, en)| (sim_pos.get(e).copied().unwrap_or(usize::MAX - 1), *en))
+            .collect();
+        if r["t"].as_i64() != Some(*frame)
+            || rec.as_ref() != Some(&ours)
+            || r["stack"].as_u64() != u64::try_from(*stack).ok()
+        {
+            diff(
+                w,
+                &mut s,
+                format!(
+                    "tick #{k} at {}: queue {:?} stack {} vs {frame}: {ours:?} stack {stack}",
+                    r["t"], rec, r["stack"]
+                ),
+            );
         }
     }
     // Messages.
@@ -352,7 +451,10 @@ pub fn compare(w: &mut World, recs: &[J], inputs: std::collections::BTreeMap<Str
                 }
             }
             (Tip::Simple { cls, header, desc }, t) => {
-                if t["cls"].as_str() != Some(cls) || t["h"].as_str() != header.as_deref() || t["d"].as_str() != desc.as_deref() {
+                if t["cls"].as_str() != Some(cls)
+                    || t["h"].as_str() != header.as_deref()
+                    || t["d"].as_str() != desc.as_deref()
+                {
                     bad.push("tooltip".into());
                 } else {
                     s.tips_equal += 1;

@@ -318,7 +318,10 @@ fn log_strings(
     let mut out = BTreeMap::new();
     for (name, ix) in containers {
         let entry = entries.get(usize::try_from(*ix)?).with_context(|| format!("{name}: index"))?;
-        let p = entry.get("Asset").and_then(Value::as_pptr).with_context(|| format!("{name}: Asset"))?;
+        let p = entry
+            .get("Asset")
+            .and_then(Value::as_pptr)
+            .with_context(|| format!("{name}: Asset"))?;
         if p.file_id != 0 || p.path_id == 0 {
             continue;
         }

@@ -1199,8 +1199,11 @@ impl<'t> Driver<'t> {
                     d.clog_rule_q.insert(id, k);
                 }
                 let ty = r["e"].as_str().unwrap_or("");
-                if !crate::game_log::check::is_input(ty) && !crate::game_log::check::raised_by_sim(ty) {
-                    w.coverage.unsupported(format!("combat log: a {ty} event the sim doesn't raise"));
+                if !crate::game_log::check::is_input(ty)
+                    && !crate::game_log::check::raised_by_sim(ty)
+                {
+                    w.coverage
+                        .unsupported(format!("combat log: a {ty} event the sim doesn't raise"));
                 }
             }
         }
@@ -1471,7 +1474,9 @@ impl Driver<'_> {
     /// from its `clog_q` (an input); the rest are compared when the run ends.
     fn clog_record(&mut self, w: &mut World, r: &J) {
         if !self.clog {
-            w.coverage.unsupported("combat log: a clog record in a recording that doesn't declare combat_log");
+            w.coverage.unsupported(
+                "combat log: a clog record in a recording that doesn't declare combat_log",
+            );
             return;
         }
         if r["ev"] != "clog_q" {

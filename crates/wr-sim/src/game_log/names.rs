@@ -35,7 +35,11 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
         }
         // `DefaultNonIdentifiedName`: a weapon's is its type's `DefaultName`.
         if v.is("BlueprintItemWeapon") {
-            let ty = bp(w, v.guid("m_Type").ok_or_else(|| TextError::Unsupported("weapon without type".into()))?)?;
+            let ty = bp(
+                w,
+                v.guid("m_Type")
+                    .ok_or_else(|| TextError::Unsupported("weapon without type".into()))?,
+            )?;
             return loc(w, ty.view(), "m_DefaultNameText");
         }
         return Err(TextError::Unsupported(format!(
@@ -50,7 +54,10 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
     }
     // `BlueprintItemWeapon.Name`: the type's default name with the enchantments' prefixes
     // (each followed by a space) and suffixes (each after one).
-    let ty = bp(w, v.guid("m_Type").ok_or_else(|| TextError::Unsupported("weapon without type".into()))?)?;
+    let ty = bp(
+        w,
+        v.guid("m_Type").ok_or_else(|| TextError::Unsupported("weapon without type".into()))?,
+    )?;
     let default = loc(w, ty.view(), "m_DefaultNameText")?;
     let (mut pre, mut suf) = (String::new(), String::new());
     for e in v.guids("m_Enchantments") {

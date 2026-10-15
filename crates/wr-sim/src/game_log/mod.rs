@@ -20,7 +20,9 @@ pub mod strings;
 
 use std::collections::HashMap;
 
-use wr_text::{Color32, Env, LogIntField, LogRoll, LogRollField, LogStrField, LogUnit, LogUnitField};
+use wr_text::{
+    Color32, Env, LogIntField, LogRoll, LogRollField, LogStrField, LogUnit, LogUnitField,
+};
 use wr_text::{Gender, TextError};
 
 use crate::rulebook::RuleEvent;
@@ -116,11 +118,8 @@ pub const THREADS: &[(&str, &[&str])] = &[
 /// `m_RootRulesTypes`: the rule types a thread handles.
 #[must_use]
 pub fn root_rules() -> Vec<&'static str> {
-    let mut v: Vec<&str> = THREADS
-        .iter()
-        .flat_map(|(_, h)| h.iter())
-        .filter_map(|h| h.strip_prefix("R:"))
-        .collect();
+    let mut v: Vec<&str> =
+        THREADS.iter().flat_map(|(_, h)| h.iter()).filter_map(|h| h.strip_prefix("R:")).collect();
     v.sort_unstable();
     v.dedup();
     v
@@ -158,7 +157,12 @@ impl EventType {
 #[must_use]
 pub fn threads_of(ty: EventType) -> Vec<usize> {
     let k = ty.key();
-    THREADS.iter().enumerate().filter(|(_, (_, h))| h.contains(&k.as_str())).map(|(i, _)| i).collect()
+    THREADS
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, h))| h.contains(&k.as_str()))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// A roll in `GameLogContext.D20`/`D100`.
@@ -256,6 +260,8 @@ pub enum Payload {
     },
     LifeState {
         unit: EntityIdx,
+        /// `PrevLifeState` (not read by its thread).
+        prev: i32,
     },
     CombatState {
         in_combat: bool,
@@ -263,6 +269,8 @@ pub enum Payload {
     PartyExperience {
         experience: i32,
     },
+    /// `IKnowledgeHandler` (no thread handles it).
+    Knowledge,
     /// A recorded input: the bark's speaker and text.
     Bark {
         unit: Option<EntityIdx>,
@@ -335,7 +343,11 @@ pub struct Event {
 pub enum Tip {
     None,
     /// A `TooltipTemplateSimple` (or subclass): its class, header and description.
-    Simple { cls: &'static str, header: Option<String>, desc: Option<String> },
+    Simple {
+        cls: &'static str,
+        header: Option<String>,
+        desc: Option<String>,
+    },
     /// One the sim doesn't make (its class): not compared.
     NotPorted(&'static str),
 }
@@ -359,10 +371,17 @@ pub struct Msg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Out {
     /// `AddReadyEvent` (an event index).
-    Queued { frame: i64, event: usize },
+    Queued {
+        frame: i64,
+        event: usize,
+    },
     /// `Tick` with something queued or open: the queue (event index, `IsEnabled`), the open
     /// stack's size.
-    Tick { frame: i64, queue: Vec<(usize, bool)>, stack: usize },
+    Tick {
+        frame: i64,
+        queue: Vec<(usize, bool)>,
+        stack: usize,
+    },
     Msg(Msg),
 }
 
@@ -468,7 +487,8 @@ pub fn did_trigger(w: &mut World, rule: &mut dyn RuleEvent) {
 /// The payload of a finished rule.
 fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
     use crate::combat::attack::{RuleAttackRoll, RuleAttackWithWeapon, RuleDealDamage};
-    let explicit_reason = rule.base().reason.as_deref().is_some_and(|r| r != "self" && !r.starts_with("previous:"));
+    let explicit_reason =
+        rule.base().reason.as_deref().is_some_and(|r| r != "self" && !r.starts_with("previous:"));
     let any = rule.as_any();
     if let Some(r) = any.downcast_ref::<RuleAttackRoll>() {
         let suspend = r.reason_full_attack.is_some() && r.weapon.is_ranged();
@@ -596,8 +616,13 @@ pub fn attack_of_opportunity(w: &mut World, attacker: EntityIdx, target: EntityI
 }
 
 /// `IUnitLifeStateChanged.HandleUnitLifeStateChanged` (`UnitLifeController`).
-pub fn life_state_changed(w: &mut World, unit: EntityIdx) {
-    add_event(w, "GameLogEventUnitLifeStateChanged", Payload::LifeState { unit }, [Some(unit), None]);
+pub fn life_state_changed(w: &mut World, unit: EntityIdx, prev: i32) {
+    add_event(
+        w,
+        "GameLogEventUnitLifeStateChanged",
+        Payload::LifeState { unit, prev },
+        [Some(unit), None],
+    );
 }
 
 /// `IPartyCombatHandler.HandlePartyCombatStateChanged`: two handlers subscribe, in
@@ -610,12 +635,17 @@ pub fn party_combat_changed(w: &mut World, in_combat: bool) {
 
 /// `IPartyGainExperienceHandler.HandlePartyGainExperience` (`Player.GainPartyExperience`).
 pub fn party_gain_experience(w: &mut World, experience: i32) {
-    add_event(w, "GameLogEventPartyGainExperience", Payload::PartyExperience { experience }, [None, None]);
+    add_event(
+        w,
+        "GameLogEventPartyGainExperience",
+        Payload::PartyExperience { experience },
+        [None, None],
+    );
 }
 
 /// `IKnowledgeHandler.HandleKnowledgeUpdated` (`InspectUnitsManager.TryMakeKnowledgeCheck`).
 pub fn knowledge_updated(w: &mut World) {
-    add_event(w, "GameLogEventKnowledge", Payload::None, [None, None]);
+    add_event(w, "GameLogEventKnowledge", Payload::Knowledge, [None, None]);
 }
 
 /// The `GameEventsHandler`s of `IPartyCombatHandler`, in subscription order.
@@ -673,7 +703,10 @@ fn handle(w: &mut World, th: usize, e: usize) {
         ("UnitInitiativeLogThread", Payload::Initiative { initiator, result, d20, modifier }) => {
             initiative_thread(w, th, e, initiator, result, d20, modifier)
         }
-        ("RulebookAttackWithWeaponLogThread", Payload::AttackWithWeapon { explicit_reason, .. }) => {
+        (
+            "RulebookAttackWithWeaponLogThread",
+            Payload::AttackWithWeapon { explicit_reason, .. },
+        ) => {
             if explicit_reason {
                 Err(TextError::Unsupported(
                     "RuleAttackWithWeapon with an explicit reason (its context's blueprint)".into(),
@@ -691,7 +724,9 @@ fn handle(w: &mut World, th: usize, e: usize) {
                 Ok(())
             }
         }
-        ("UnitLifeStateChangedLogThread", Payload::LifeState { unit }) => death_thread(w, th, e, unit),
+        ("UnitLifeStateChangedLogThread", Payload::LifeState { unit, .. }) => {
+            death_thread(w, th, e, unit)
+        }
         ("PartyCombatLogThread", Payload::CombatState { in_combat }) => {
             party_combat_thread(w, th, e, in_combat)
         }
@@ -702,7 +737,9 @@ fn handle(w: &mut World, th: usize, e: usize) {
         ("PartyGainExperienceLogThread", Payload::PartyExperience { experience }) => {
             party_xp_thread(w, th, e, experience)
         }
-        ("ProjectileHitLogThread", Payload::ProjectileHit { attack }) => projectile_thread(w, th, e, attack),
+        ("ProjectileHitLogThread", Payload::ProjectileHit { attack }) => {
+            projectile_thread(w, th, e, attack)
+        }
         (n, p) => Err(TextError::Unsupported(format!(
             "{n} handling {} ({}) isn't ported",
             w.game_log.events[e].ty.name(),
@@ -784,7 +821,11 @@ fn localized(w: &World, key: &str) -> Result<String, TextError> {
     if key.is_empty() {
         return Ok(String::new());
     }
-    let pack = &w.text.as_deref().ok_or_else(|| TextError::Unsupported("no localization pack loaded".into()))?.pack;
+    let pack = &w
+        .text
+        .as_deref()
+        .ok_or_else(|| TextError::Unsupported("no localization pack loaded".into()))?
+        .pack;
     wr_text::display(Some(pack), key, &mut LogEnv { w })
 }
 
@@ -856,14 +897,23 @@ fn attack_thread(w: &mut World, th: usize, e: usize, a: &AttackRollLog) -> R {
     if !is_in_game(w, a.initiator) || !is_in_game(w, a.target) || a.auto_hit {
         return Ok(());
     }
-    let st = w.game_log.attack_state.entry(a.seq).or_insert_with(|| AttackState {
-        suspend: a.suspend,
-        ..AttackState::default()
-    });
+    let st = w
+        .game_log
+        .attack_state
+        .entry(a.seq)
+        .or_insert_with(|| AttackState { suspend: a.suspend, ..AttackState::default() });
     let kept = st.entry.clone();
     let msg = match kept {
         Some(m) => Some(m),
-        None => attack_data(w, a)?.map(|m| Msg { frame: 0, thread: th, src: Some(e), text: m.text, color: m.color, icon: m.icon, tip: m.tip }),
+        None => attack_data(w, a)?.map(|m| Msg {
+            frame: 0,
+            thread: th,
+            src: Some(e),
+            text: m.text,
+            color: m.color,
+            icon: m.icon,
+            tip: m.tip,
+        }),
     };
     // `GetParryData`: the sim has no parry (`Parry` null).
     let st = w.game_log.attack_state.entry(a.seq).or_default();
@@ -878,7 +928,12 @@ fn attack_thread(w: &mut World, th: usize, e: usize, a: &AttackRollLog) -> R {
     if let Some(m) = msg
         && a.result != 9
     {
-        add_message(w, th, Some(e), Msg0 { text: m.text, color: m.color, icon: m.icon, tip: m.tip });
+        add_message(
+            w,
+            th,
+            Some(e),
+            Msg0 { text: m.text, color: m.color, icon: m.icon, tip: m.tip },
+        );
     }
     Ok(())
 }
@@ -944,9 +999,13 @@ fn attack_data_in_scope(w: &mut World, a: &AttackRollLog) -> Result<Option<Msg0>
 
 /// `rule.Weapon.Wielder == null ? rule.Reason.Name : rule.Weapon.Name`.
 fn weapon_text(w: &World, a: &AttackRollLog) -> Result<String, TextError> {
-    let item = w.item(a.weapon_item).ok_or_else(|| TextError::Unsupported("the weapon isn't an item".into()))?;
+    let item = w
+        .item(a.weapon_item)
+        .ok_or_else(|| TextError::Unsupported("the weapon isn't an item".into()))?;
     if item.wielder.is_none() {
-        return Err(TextError::Unsupported("an attack with a weapon without a wielder (Reason.Name)".into()));
+        return Err(TextError::Unsupported(
+            "an attack with a weapon without a wielder (Reason.Name)".into(),
+        ));
     }
     crate::game_log::names::item_name(w, a.weapon_item)
 }
@@ -980,7 +1039,10 @@ fn damage_data(w: &mut World, d: &DealDamageLog) -> Result<Option<Msg0>, TextErr
         }
         let has_source = w.game_log.ctx.source_unit.is_some();
         let text = if has_source {
-            text_of(w, if reduced { "GameLog/Damage/MessageReduced" } else { "GameLog/Damage/Message" })?
+            text_of(
+                w,
+                if reduced { "GameLog/Damage/MessageReduced" } else { "GameLog/Damage/Message" },
+            )?
         } else {
             // `DamageBundle.First.CausedByCheckFail`: a weapon attack's damage isn't.
             text_of(w, "GameLog/Damage/MessageUnknownSource")?
@@ -1066,7 +1128,8 @@ fn aoo_thread(w: &mut World, th: usize, e: usize, attacker: EntityIdx, target: E
 fn party_xp_thread(w: &mut World, th: usize, e: usize, experience: i32) -> R {
     w.game_log.retain();
     let rate = w.player.experience_rate_percent;
-    w.game_log.ctx.count = crate::csharp::arith::div(crate::csharp::arith::mul(experience, rate), 100).unwrap_or(0);
+    w.game_log.ctx.count =
+        crate::csharp::arith::div(crate::csharp::arith::mul(experience, rate), 100).unwrap_or(0);
     let r = game_log_message(w, "GameLog/XpGain");
     w.game_log.release();
     if let Some(m) = r? {
@@ -1098,9 +1161,15 @@ fn projectile_thread(w: &mut World, th: usize, e: usize, attack: Option<usize>) 
         return Ok(());
     };
     let Payload::AttackRoll(a) = w.game_log.events[ae].payload.clone() else {
-        return Err(TextError::Unsupported("a projectile's attack roll the sim doesn't have".into()));
+        return Err(TextError::Unsupported(
+            "a projectile's attack roll the sim doesn't have".into(),
+        ));
     };
-    w.game_log.attack_state.entry(a.seq).or_insert_with(|| AttackState { suspend: a.suspend, ..AttackState::default() }).suspend = false;
+    w.game_log
+        .attack_state
+        .entry(a.seq)
+        .or_insert_with(|| AttackState { suspend: a.suspend, ..AttackState::default() })
+        .suspend = false;
     if !is_in_game(w, a.initiator) || !is_in_game(w, a.target) || a.auto_hit {
         return Ok(());
     }
@@ -1111,7 +1180,15 @@ fn projectile_thread(w: &mut World, th: usize, e: usize, attack: Option<usize>) 
     };
     let st = w.game_log.attack_state.entry(a.seq).or_default();
     if st.suspend {
-        st.entry = msg.map(|m| Msg { frame: 0, thread: th, src: Some(e), text: m.text, color: m.color, icon: m.icon, tip: m.tip });
+        st.entry = msg.map(|m| Msg {
+            frame: 0,
+            thread: th,
+            src: Some(e),
+            text: m.text,
+            color: m.color,
+            icon: m.icon,
+            tip: m.tip,
+        });
         return Ok(());
     }
     st.added = true;
@@ -1136,7 +1213,8 @@ struct LogEnv<'a> {
 
 fn log_unit(w: &World, u: EntityIdx) -> Result<LogUnit, TextError> {
     let unit = w.unit(u).ok_or_else(|| TextError::Unsupported("not a unit".into()))?;
-    let bp = unit.blueprint.ok_or_else(|| TextError::Unsupported("unit without blueprint".into()))?;
+    let bp =
+        unit.blueprint.ok_or_else(|| TextError::Unsupported("unit without blueprint".into()))?;
     Ok(LogUnit {
         name: crate::text::character_name(w, u)?,
         color_rgb: crate::text::blueprint_color_html(w, bp)?,
