@@ -223,8 +223,14 @@ struct Fake {
     peaceful: bool,
     ready: Vec<u8>,
     near: HashMap<u8, Vec<u32>>,
-    ignored: HashSet<u32>,
+    /// Units of a peaceful faction, passive units.
+    peaceful_units: HashSet<u32>,
+    passive: HashSet<u32>,
+    passive_reads: Vec<u32>,
     group: HashMap<u32, u8>,
+    /// Fake groups, and the real group each unit's `GroupId` names.
+    fake: HashSet<u8>,
+    by_id: HashMap<u32, u8>,
     stealth: HashSet<(u32, u8)>,
     enemies: HashSet<(u8, u32)>,
     delta: f32,
@@ -237,7 +243,6 @@ struct Fake {
     mem: HashMap<u8, GroupMemory<u32>>,
     resolved: HashMap<u32, Resolved>,
     disposed: HashSet<u32>,
-    observer_group: HashMap<u32, u8>,
     woken: Vec<u32>,
     log: Vec<String>,
     /// Reads that fail (the game's exception): the invisibility loop, a unit's `Wake`.
@@ -257,8 +262,18 @@ impl MemoryWorld<u32, u8> for Fake {
     fn near_units(&mut self, g: u8) -> Result<Vec<u32>, MemError> {
         Ok(self.near.get(&g).cloned().unwrap_or_default())
     }
-    fn ignored(&mut self, u: u32) -> Result<bool, MemError> {
-        Ok(self.ignored.contains(&u))
+    fn faction_peaceful(&mut self, u: u32) -> Result<bool, MemError> {
+        Ok(self.peaceful_units.contains(&u))
+    }
+    fn passive(&mut self, u: u32) -> Result<bool, MemError> {
+        self.passive_reads.push(u);
+        Ok(self.passive.contains(&u))
+    }
+    fn is_fake(&mut self, g: u8) -> bool {
+        self.fake.contains(&g)
+    }
+    fn group_by_id(&mut self, u: u32) -> Result<u8, MemError> {
+        Ok(self.by_id[&u])
     }
     fn group_of(&mut self, u: u32) -> Result<u8, MemError> {
         Ok(self.group[&u])
@@ -295,20 +310,20 @@ impl MemoryWorld<u32, u8> for Fake {
     fn game_time(&mut self) -> Result<TimeSpan, MemError> {
         Ok(self.now)
     }
-    fn memory(&mut self, g: u8) -> &mut GroupMemory<u32> {
-        self.mem.entry(g).or_default()
+    fn memory(&mut self, g: u8) -> Result<&mut GroupMemory<u32>, MemError> {
+        Ok(self.mem.entry(g).or_default())
     }
-    fn resolve(&mut self, u: u32) -> Result<Resolved, MemError> {
+    fn resolves(&mut self, u: u32) -> Result<bool, MemError> {
         if self.fail_resolve == Some(u) {
             return Err(MemError::NullReference);
         }
-        Ok(self.resolved.get(&u).copied().unwrap_or(IN))
+        Ok(self.resolved.get(&u).copied().unwrap_or(IN) != Resolved::Missing)
+    }
+    fn in_game(&mut self, u: u32) -> Result<bool, MemError> {
+        Ok(self.resolved.get(&u).copied().unwrap_or(IN).in_game())
     }
     fn disposed(&mut self, u: u32) -> Result<bool, MemError> {
         Ok(self.disposed.contains(&u))
-    }
-    fn observer_group(&mut self, u: u32) -> Result<u8, MemError> {
-        Ok(self.observer_group.get(&u).copied().unwrap_or(self.group[&u]))
     }
     fn wake(&mut self, u: u32) -> Result<(), MemError> {
         if self.fail_wake == Some(u) {
@@ -388,7 +403,7 @@ fn a_tick_forgets_after_nine_seconds_and_drops_stealthed_and_ignored_units() {
     tick(&mut c, &mut f).unwrap();
     assert!(f.mem[&1].contains(20));
     f.stealth.insert((20, 1));
-    f.ignored.insert(11);
+    f.passive.insert(11);
     let before = f.mem[&1].find(11).copied();
     f.now = at(f.now, secs(1));
     tick(&mut c, &mut f).unwrap();
@@ -426,7 +441,10 @@ fn queued_additions_go_to_the_observer_group_and_wake_it() {
     let mut f = fight();
     f.ready.clear();
     f.group.extend([(40, 4), (41, 5), (42, 5)]);
-    f.observer_group.insert(40, 6); // a fake group: the real one by GroupId
+    // 40's group is a fake one: the addition goes to the real one its GroupId names.
+    f.group.insert(40, 7);
+    f.fake.insert(7);
+    f.by_id.insert(40, 6);
     f.disposed.insert(42);
     f.stealth.insert((20, 5));
     let mut c = MemoryController::default();

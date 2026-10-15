@@ -137,6 +137,82 @@ impl<K: Copy + Eq + Hash, V> CsDict<K, V> {
     pub fn keys(&self) -> impl Iterator<Item = K> + '_ {
         self.iter().map(|(k, _)| *k)
     }
+
+    /// A dictionary with this layout: the runtime's `entries[0, count)` (a used slot's key and
+    /// value, or a freed slot's free-list link), `freeList` and `freeCount`. `None` when no
+    /// dictionary holds it: a key twice, or a free list that doesn't chain through exactly the
+    /// freed slots to -1. (`freeList` is read only while a slot is free: a dictionary that never
+    /// held a key has 0 there, a cleared one -1.)
+    #[must_use]
+    pub fn from_slots(
+        slots: Vec<RawSlot<K, V>>,
+        free_list: i32,
+        free_count: usize,
+    ) -> Option<Self> {
+        let mut index = HashMap::new();
+        let mut entries = Vec::with_capacity(slots.len());
+        let mut free = 0usize;
+        for (i, s) in slots.into_iter().enumerate() {
+            match s {
+                RawSlot::Used(k, v) => {
+                    if index.insert(k, i).is_some() {
+                        return None;
+                    }
+                    entries.push(Slot::Used(k, v));
+                }
+                RawSlot::Free(next) => {
+                    free += 1;
+                    entries.push(Slot::Free(next));
+                }
+            }
+        }
+        if free != free_count {
+            return None;
+        }
+        // With no freed slot the head is -1, or 0 in a dictionary that never held a key (its
+        // arrays not yet made: no slots).
+        if free_count == 0 && free_list != -1 && !(free_list == 0 && entries.is_empty()) {
+            return None;
+        }
+        let free_list = if free_count == 0 { -1 } else { free_list };
+        // The chain from `freeList` visits every freed slot once and ends at -1.
+        let mut at = free_list;
+        let mut seen = 0usize;
+        while at != -1 {
+            let i = usize::try_from(at).ok()?;
+            let Some(Slot::Free(next)) = entries.get(i) else { return None };
+            seen += 1;
+            if seen > free_count {
+                return None;
+            }
+            at = *next;
+        }
+        (seen == free_count).then_some(Self { entries, index, free_list, free_count })
+    }
+
+    /// The layout [`Self::from_slots`] takes: the slots in array order, `freeList` (-1 while no
+    /// slot is free) and `freeCount`.
+    #[must_use]
+    pub fn slots(&self) -> (Vec<RawSlot<K, &V>>, i32, usize) {
+        let slots = self
+            .entries
+            .iter()
+            .map(|s| match s {
+                Slot::Used(k, v) => RawSlot::Used(*k, v),
+                Slot::Free(next) => RawSlot::Free(*next),
+            })
+            .collect();
+        (slots, self.free_list, self.free_count)
+    }
+}
+
+/// One of a dictionary's entry slots, as the runtime keeps it (`CsDict::from_slots`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawSlot<K, V> {
+    /// A key and its value.
+    Used(K, V),
+    /// Freed: the next freed slot (-1 for none).
+    Free(i32),
 }
 
 #[cfg(test)]
@@ -163,5 +239,49 @@ mod tests {
         d.clear();
         d.insert(1, 1);
         assert_eq!(d.keys().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn a_layout_round_trips_and_its_free_list_is_followed() {
+        let mut d = CsDict::new();
+        for k in [10, 20, 30, 40] {
+            d.insert(k, k);
+        }
+        d.remove(&20);
+        d.remove(&40);
+        let (slots, free, n) = d.slots();
+        let owned: Vec<RawSlot<i32, i32>> = slots
+            .into_iter()
+            .map(|s| match s {
+                RawSlot::Used(k, v) => RawSlot::Used(k, *v),
+                RawSlot::Free(x) => RawSlot::Free(x),
+            })
+            .collect();
+        assert_eq!(
+            owned,
+            [RawSlot::Used(10, 10), RawSlot::Free(-1), RawSlot::Used(30, 30), RawSlot::Free(1)]
+        );
+        assert_eq!((free, n), (3, 2));
+        let mut e = CsDict::from_slots(owned.clone(), free, n).unwrap();
+        e.insert(50, 50);
+        e.insert(60, 60);
+        e.insert(70, 70);
+        assert_eq!(e.keys().collect::<Vec<_>>(), vec![10, 60, 30, 50, 70]);
+        // Not a dictionary: a free count or a chain that doesn't match the freed slots, a cycle,
+        // a key twice.
+        assert!(CsDict::from_slots(owned.clone(), free, 1).is_none());
+        assert!(CsDict::from_slots(owned.clone(), 1, 2).is_none());
+        let cyc = vec![RawSlot::<i32, i32>::Free(1), RawSlot::Free(0)];
+        assert!(CsDict::from_slots(cyc, 0, 2).is_none());
+        assert!(
+            CsDict::from_slots(vec![RawSlot::Used(1, 1), RawSlot::Used(1, 2)], -1, 0).is_none()
+        );
+        // With no freed slot, freeList isn't read: -1, or 0 in a dictionary that never held a key.
+        let f = CsDict::<i32, i32>::from_slots(Vec::new(), 0, 0).unwrap();
+        assert_eq!(f.slots().1, -1);
+        assert!(CsDict::from_slots(vec![RawSlot::Used(1, 1)], -1, 0).is_some());
+        assert!(CsDict::from_slots(vec![RawSlot::Used(1, 1)], 0, 0).is_none());
+        assert!(CsDict::from_slots(vec![RawSlot::Used(1, 1)], 42, 0).is_none());
+        assert!(CsDict::<i32, i32>::from_slots(Vec::new(), 42, 0).is_none());
     }
 }

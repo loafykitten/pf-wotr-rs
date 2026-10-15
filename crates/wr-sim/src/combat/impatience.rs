@@ -86,6 +86,68 @@ pub struct Impatience {
     /// Each `UnitAttack`'s attack rolls (`AllAttacks[i].Rule.AttackRoll`), by command, as its
     /// attack rules fire.
     pub rolls: HashMap<u32, Vec<u64>>,
+    /// The memory controller's `AddToMemory(observer, target)` calls an offensive action makes
+    /// (`UnitMemoryController.HandleUnitMakeOffensiveAction`, the other subscriber of the event),
+    /// not yet matched with their `mem_q` records; `None` without WrathOracle's `memory` observer
+    /// (docs/poc5/memory.md).
+    pub memory_adds: Option<VecDeque<(EntityIdx, EntityIdx)>>,
+    /// Its `AddToMemory` calls at a command's act (`HandleUnitCommandDidAct`), not yet matched;
+    /// `None` as `memory_adds`.
+    pub memory_acts: Option<VecDeque<(EntityIdx, EntityIdx)>>,
+}
+
+/// `UnitMemoryController.HandleUnitCommandDidAct(command)`'s `AddToMemory` calls, as the command
+/// acts: a players' enemy's command on a unit of the player's faction makes the executor remember
+/// the target (unless it's invisible: reported, see-invisibility isn't ported) and the target the
+/// executor. Matched with their `mem_q` records as they come (the memory queue itself isn't wired).
+pub fn memory_command_did_act(w: &mut World, executor: Option<EntityIdx>, target: Option<&str>) {
+    if w.combat.impatience.memory_acts.is_none() {
+        return;
+    }
+    // `command.TargetUnit == null` returns before anything.
+    let Some(t) = target.and_then(|id| w.by_id.get(id).copied()).filter(|t| w.unit(*t).is_some())
+    else {
+        return;
+    };
+    let Some(e) = executor else {
+        w.coverage.unsupported("memory: a command acting without its executor");
+        return;
+    };
+    if !(super::units::is_players_enemy(w, e) && super::units::is_player_faction(w, t)) {
+        return;
+    }
+    if crate::unit_state::has_condition(w, t, crate::combat::memory::INVISIBLE) {
+        w.coverage.unsupported("memory: a command acting on an invisible target");
+        return;
+    }
+    if let Some(q) = w.combat.impatience.memory_acts.as_mut() {
+        q.push_back((e, t));
+        q.push_back((t, e));
+    }
+}
+
+/// `UnitMemoryController.HandleUnitMakeOffensiveAction(unit, target)`'s `AddToMemory` calls, as
+/// the event raises it (`OffensiveActionsController`'s gates passed: both units in the game): the
+/// unit remembers the target unless it's invisible to it, then the target the unit. The queue
+/// itself is the memory model's (`combat/memory.rs`), not wired: each call's record is matched.
+/// Reported: the target's `UnitAggroFilter` (its `OnAggroAction` runs first), an invisible target
+/// (see-invisibility and blindsense aren't ported).
+fn memory_offensive_action(w: &mut World, unit: EntityIdx, target: EntityIdx) {
+    if w.combat.impatience.memory_adds.is_none() {
+        return;
+    }
+    let bp = w.unit(target).and_then(|x| x.blueprint).and_then(|g| w.content.get(g));
+    if bp.is_some_and(|b| crate::unit_facts::has_component(&b, "UnitAggroFilter")) {
+        w.coverage.unsupported("memory: an offensive action on a target with a UnitAggroFilter");
+    }
+    if crate::unit_state::has_condition(w, target, crate::combat::memory::INVISIBLE) {
+        w.coverage.unsupported("memory: an offensive action on an invisible target");
+        return;
+    }
+    if let Some(q) = w.combat.impatience.memory_adds.as_mut() {
+        q.push_back((unit, target));
+        q.push_back((target, unit));
+    }
 }
 
 /// What the controller's code reads outside the sim, its draws and its checks.
@@ -348,6 +410,7 @@ pub fn rule_did_trigger(w: &mut World, rule: &mut dyn crate::rulebook::RuleEvent
             w.coverage.unsupported("impatience: an offensive action of a rider or a mount");
             return;
         }
+        memory_offensive_action(w, a, t);
         let cond = super::is_in_combat(w, t) && super::units::is_enemy(w, t, a);
         w.combat.impatience.queue.push_back(Op::Bother { u: t, b: a, cond, damage: false });
     }

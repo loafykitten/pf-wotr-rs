@@ -364,6 +364,7 @@ impl Driver<'_> {
                 if !own {
                     self.imp_due(w)?;
                 }
+                self.mem_due(w);
                 // Each record is of the frame it's made in.
                 if r["t"].as_i64() != Some(self.tick) {
                     let d = describe(r);
@@ -2616,6 +2617,22 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                             "RuleAttackRoll",
                         )
                     )
+            }
+            // The memory controller's `AddToMemory` (`HandleUnitMakeOffensiveAction`), raised by
+            // `OffensiveActionsController`'s did handler of this very attack roll: the rule's two
+            // units, either way. Matched with the sim's calls after it fires the rule (`imp_span`).
+            Some("obs") if x["ev"] == "mem_q" => {
+                let pair = (x.get("o"), x.get("tgt"));
+                let (a, t) = (top.initiator.get("$unit"), top.target.get("$unit"));
+                impatience
+                    && own_handler
+                    && stage == 3
+                    && short_class(&top.class) == "RuleAttackRoll"
+                    && handler_classes.last().map(String::as_str)
+                        == Some("Kingmaker.Controllers.OffensiveActionsController")
+                    && a.is_some()
+                    && t.is_some()
+                    && (pair == (a, t) || pair == (t, a))
             }
             Some("obs") if x["ev"] == "eng_prov" => {
                 // Called by the handler of this very rule (its subscribers list's type argument).
