@@ -132,3 +132,13 @@ None needed for what was done. For the next steps: an IdTrace-style record of wh
 `ActivatableAbility.Stop` during a load (with the call chain) would show why the party's toggles
 restart; and a dump of `Suppressed`/`IsInFogOfWar`/`AwakeTimer` per unit at the first
 `SleepingUnitsController` tick after the load would confirm the suppression inference above.
+
+## Review
+
+gpt-6.1-sol (high) reviewed the branch in five rounds until it found nothing: runtime-component
+lookups (`SelectComponentsWithRuntime`, `GetComponent`'s fallback without runtime providers),
+`HandSlot.HasWeapon`, items resolved by live registration, part disposal on every removal,
+`Stop`'s restriction clause, resource spending reported over the fact's runtimes, and the
+context's owner as the target of fact context actions came from it. Verified after the last
+round: `scripts/check.sh` (531 tests), the ignored real-save and POC-5 suites (33 tests), and the
+regression above.
