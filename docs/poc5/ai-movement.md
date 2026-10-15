@@ -105,8 +105,10 @@ two replays). Two ways, by capture:
   the rest of its `ScorePath`'s steps), unless what it compared before the missing input already
   differs; a step after the simulation stopped, or whose `maxMoveLength` isn't `num5 -
   LastMoveLength` of the step before, is reported. `the_checker_reads_older_captures` (not
-  ignored) checks this path on `poc5-tb-103`'s `ScorePath` written out, two inputs removed (counted,
-  not checked) and three damages (another unit's query, a step after the end, a position).
+  ignored) checks this path on `poc5-tb-103`'s `ScorePath` written out, five inputs not established
+  (counted, not checked: the constructor's corpulences missing, another unit's or unreadable, the
+  earlier speed missing, another unit's FindPath speed) and four damages (another unit's query, a step after the end, a position, a query after the last
+  step).
 
 **Result: the captures hold 21 steps, in `poc5-tb-100/tb-nearest` (3 per run), `-101/tb-focus` (3)
 and `-103/tb-focus` (1); every one is a two-point path whose end lies within one step (the first
