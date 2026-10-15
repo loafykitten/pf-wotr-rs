@@ -20,7 +20,7 @@
 
 use serde_json::{Value as J, json};
 
-use super::oracle::Trace;
+use super::oracle::{Obj, Rv, Trace};
 
 /// Result fields compared per rule class (the rest of a rule's snapshot is its inputs or
 /// derived views of the same values).
@@ -75,8 +75,8 @@ fn short(class: &str) -> &str {
     class.rsplit(['.', '+']).next().unwrap_or(class)
 }
 
-fn unit_id(v: &J) -> J {
-    v.get("$unit").cloned().unwrap_or(J::Null)
+fn unit_id(v: &Rv) -> J {
+    v.get("$unit").map_or(J::Null, Rv::to_json)
 }
 
 fn result_fields(class: &str) -> Option<&'static [&'static str]> {
@@ -104,14 +104,14 @@ pub fn project_oracle(t: &Trace) -> Vec<J> {
 
 /// Projects a slice of an oracle trace's records (`t` supplies the call-site table).
 #[must_use]
-pub fn project_records(t: &Trace, records: &[J]) -> Vec<J> {
+pub fn project_records<'r>(t: &Trace, records: impl IntoIterator<Item = &'r Rv>) -> Vec<J> {
     let mut out = Vec::new();
     // Per open rule id: (class, accumulated changes).
     let mut open: std::collections::HashMap<i64, (String, serde_json::Map<String, J>)> =
         std::collections::HashMap::new();
     // Per open rule id: the additions its `rule_bonus` mutations asked for, in order.
     let mut adds: std::collections::HashMap<i64, Vec<J>> = std::collections::HashMap::new();
-    let fact_id = |f: &J| f.get("$fact").cloned().unwrap_or(J::Null);
+    let fact_id = |f: &Rv| f.get("$fact").map_or(J::Null, Rv::to_json);
     // The last rule id allocated (WrathOracle numbers rules in push order): an addition's place is
     // the rules pushed after its rule before it.
     let mut last_rule = 0;
@@ -126,7 +126,7 @@ pub fn project_records(t: &Trace, records: &[J]) -> Vec<J> {
                 );
                 // Results start from the pushed snapshot: fields a rule never changes keep
                 // their initial values.
-                let init = r["fields"].as_object().cloned().unwrap_or_default();
+                let init = r["fields"].as_object().map(Obj::to_json).unwrap_or_default();
                 last_rule = last_rule.max(r["id"].as_i64().unwrap_or(0));
                 open.insert(r["id"].as_i64().unwrap_or(-1), (class, init));
             }
@@ -139,7 +139,7 @@ pub fn project_records(t: &Trace, records: &[J]) -> Vec<J> {
                 if let Some((_, acc)) = open.get_mut(&id) {
                     for c in r["changes"].as_array().into_iter().flatten() {
                         if let (Some(name), Some(v)) = (c[0].as_str(), c.get(1)) {
-                            acc.insert(name.to_owned(), v.clone());
+                            acc.insert(name.to_owned(), v.to_json());
                         }
                     }
                 }
@@ -225,7 +225,7 @@ pub fn project_records(t: &Trace, records: &[J]) -> Vec<J> {
                 }
                 let mut o = json!({"k": "cmd", "ev": ev, "class": r["class"], "unit": unit_id(&r["unit"]), "target": unit_id(&r["target"])});
                 if ev == "end" {
-                    o["result"] = r["result"].clone();
+                    o["result"] = r["result"].to_json();
                 }
                 out.push(o);
             }
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn handler_about_and_trig_changes_reach_the_result() {
         let t = Trace {
-            records: vec![
+            records: [
                 json!({"k": "rule", "id": 7, "class": "Kingmaker.RuleSystem.Rules.RuleCanApplyBuff",
                     "initiator": null, "target": null, "depth": 0,
                     "fields": {"CanApply": true, "Immunity": false}}),
@@ -302,7 +302,10 @@ mod tests {
                 json!({"k": "h_end", "id": 1, "rule": 7, "changes": [["Immunity", true]]}),
                 json!({"k": "trig", "id": 7, "changes": [["CanApply", true]]}),
                 json!({"k": "rule_end", "id": 7, "changes": []}),
-            ],
+            ]
+            .iter()
+            .map(Rv::from_json)
+            .collect(),
             sites: Default::default(),
         };
         let out = project_oracle(&t);

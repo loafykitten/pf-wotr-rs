@@ -12,6 +12,7 @@ use std::any::Any;
 
 use serde_json::{Value as J, json};
 
+use super::oracle::Rv;
 use super::rules::rule_boilerplate;
 use super::weapon::{self, Hand, Weapon};
 use crate::components::mechanics::RulePort;
@@ -83,7 +84,7 @@ impl RuleCalculateAttacksCount {
 
     /// From a recorded push snapshot; `ForcePrimaryAttackWeapon` and `WeaponFilter` are
     /// reported when set.
-    pub fn from_snapshot(w: &mut World, initiator: EntityIdx, f: &J) -> Self {
+    pub fn from_snapshot(w: &mut World, initiator: EntityIdx, f: &Rv) -> Self {
         if !f["ForcePrimaryAttackWeapon"].is_null() || !f["WeaponFilter"].is_null() {
             w.coverage.unsupported(
                 "RuleCalculateAttacksCount: ForcePrimaryAttackWeapon or WeaponFilter set",
@@ -256,7 +257,7 @@ pub struct RuleCalculateAttacksCountLimbs {
 }
 
 impl RuleCalculateAttacksCountLimbs {
-    pub fn from_snapshot(w: &mut World, initiator: EntityIdx, f: &J) -> Self {
+    pub fn from_snapshot(w: &mut World, initiator: EntityIdx, f: &Rv) -> Self {
         if !f["ForcePrimaryAttackWeapon"].is_null() || !f["WeaponFilter"].is_null() {
             w.coverage.unsupported(
                 "RuleCalculateAttacksCountLimbs: ForcePrimaryAttackWeapon or WeaponFilter set",

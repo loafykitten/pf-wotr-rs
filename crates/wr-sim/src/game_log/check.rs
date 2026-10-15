@@ -14,6 +14,8 @@ use std::collections::HashMap;
 
 use serde_json::Value as J;
 
+use crate::combat::oracle::Rv;
+
 use super::{EventType, Out, Payload, THREADS, Tip, root_rules, threads_of, unsupported};
 use crate::world::World;
 
@@ -36,8 +38,8 @@ pub struct Summary {
 }
 
 /// The rule records' classes and units, by the recording's rule id.
-fn rule_table(recs: &[J]) -> HashMap<i64, (String, Option<String>, Option<String>)> {
-    let unit = |v: &J| v.get("$unit").and_then(J::as_str).map(str::to_owned);
+fn rule_table(recs: &[Rv]) -> HashMap<i64, (String, Option<String>, Option<String>)> {
+    let unit = |v: &Rv| v.get("$unit").and_then(Rv::as_str).map(str::to_owned);
     recs.iter()
         .filter(|r| r["k"] == "rule")
         .filter_map(|r| {
@@ -74,7 +76,7 @@ fn leak(s: &str) -> &'static str {
 /// The begin record's `game_log`: checks the dispatch tables against [`THREADS`], takes the
 /// context's fields that outlive scopes, and turns the model on. A recording without it is
 /// reported (a run that declares `combat_log` must have it).
-pub fn activate(w: &mut World, begin: &J) {
+pub fn activate(w: &mut World, begin: &Rv) {
     let g = &begin["game_log"];
     if !g.is_object() {
         unsupported(w, "the begin record declares combat_log without its game_log");
@@ -91,8 +93,7 @@ pub fn activate(w: &mut World, begin: &J) {
             Err(e) => unsupported(w, format!("the localization pack: {e:#}")),
         }
     }
-    let mut keys: Vec<&str> =
-        g.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+    let mut keys: Vec<&str> = g.as_object().map(|o| o.keys().collect()).unwrap_or_default();
     keys.sort_unstable();
     if keys != ["controller", "ctx", "ready", "roots", "scope", "stack", "threads"] {
         unsupported(w, format!("game_log's fields ({keys:?})"));
@@ -103,7 +104,7 @@ pub fn activate(w: &mut World, begin: &J) {
     }
     // m_RootRulesTypes.
     let roots: Option<Vec<&str>> =
-        g["roots"].as_array().and_then(|a| a.iter().map(J::as_str).collect::<Option<Vec<&str>>>());
+        g["roots"].as_array().and_then(|a| a.iter().map(Rv::as_str).collect::<Option<Vec<&str>>>());
     let mut ours = root_rules();
     ours.sort_unstable();
     if roots.as_deref() != Some(ours.as_slice()) {
@@ -137,7 +138,7 @@ pub fn activate(w: &mut World, begin: &J) {
         let ours = threads_of(ty);
         let rec: Option<Vec<(&str, i64)>> = by
             .iter()
-            .map(|x| match x.as_array().map(Vec::as_slice) {
+            .map(|x| match x.as_array() {
                 Some([n, o]) => Some((n.as_str()?, o.as_i64()?)),
                 _ => None,
             })
@@ -181,7 +182,7 @@ pub fn activate(w: &mut World, begin: &J) {
 
 /// A reference as `LogObs.Val` writes it, of the kind the field holds: a unit by id, a fact by id
 /// and blueprint, a localized string by key, a roll by its rule's id and class, a tooltip's object.
-fn reference_ok(field: &str, v: &J) -> bool {
+fn reference_ok(field: &str, v: &Rv) -> bool {
     match field {
         "SourceUnit" | "Target" => keys_are(v, &["$unit"]) && v["$unit"].is_string(),
         "SourceFact" => {
@@ -204,7 +205,7 @@ fn reference_ok(field: &str, v: &J) -> bool {
 
 /// `GameLogContext`'s fields when the window opens: every one, of its type; the ones `Clear`
 /// leaves taken, the others at their defaults (outside a scope).
-fn context(w: &mut World, c: &J) {
+fn context(w: &mut World, c: &Rv) {
     // (name, kind: 'i' an int, 's' a string, else an object or null)
     const FIELDS: [(&str, char); 22] = [
         ("SourceUnit", 'o'),
@@ -254,7 +255,7 @@ fn context(w: &mut World, c: &J) {
         let int = || v.as_i64().and_then(|x| i32::try_from(x).ok()).unwrap_or(0);
         match k {
             "SourceFact" if !v.is_null() => {
-                w.game_log.ctx.source_fact = super::SourceFact::Unknown(v.clone());
+                w.game_log.ctx.source_fact = super::SourceFact::Unknown(v.to_json());
             }
             "SourceFact" => {}
             "Formula" => w.game_log.ctx.formula = v.as_str().map(str::to_owned),
@@ -276,7 +277,7 @@ fn context(w: &mut World, c: &J) {
 /// event's place in the queue order.
 pub fn input(
     w: &mut World,
-    r: &J,
+    r: &Rv,
     inputs: &mut std::collections::BTreeMap<String, usize>,
     rule_q: &HashMap<i64, usize>,
 ) {
@@ -402,11 +403,11 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
 /// - `GameLogEventPartyCombatState` right after `GameLogEventCombatStateChanged` of the same
 ///   state (the next subscriber of the same raise), which comes after the turn controller's
 ///   handler of that raise (its `tb` `combat_start`/`combat_end`, the last of the frame).
-fn raise_point_ok(recs: &[J], i: usize) -> bool {
+fn raise_point_ok(recs: &[Rv], i: usize) -> bool {
     let r = &recs[i];
     let prev = i.checked_sub(1).map(|j| &recs[j]);
     let not_log =
-        |x: &&J| !(x["k"] == "obs" && x["ev"].as_str().is_some_and(|e| e.starts_with("clog_")));
+        |x: &&Rv| !(x["k"] == "obs" && x["ev"].as_str().is_some_and(|e| e.starts_with("clog_")));
     let prev_other = recs[..i].iter().rev().find(not_log);
     let next_other = recs[i + 1..].iter().find(not_log);
     let f = &r["f"];
@@ -465,16 +466,16 @@ fn raise_point_ok(recs: &[J], i: usize) -> bool {
 }
 
 /// A record's fields, exactly.
-fn keys_are(r: &J, want: &[&str]) -> bool {
+fn keys_are(r: &Rv, want: &[&str]) -> bool {
     r.as_object().is_some_and(|o| o.len() == want.len() && want.iter().all(|k| o.contains_key(*k)))
 }
 
-fn int_or_null(v: &J) -> bool {
+fn int_or_null(v: &Rv) -> bool {
     v.is_null() || v.is_i64()
 }
 
 /// A `clog_q` as `LogObs.QueuedPostfix` writes it.
-fn q_shape(r: &J) -> bool {
+fn q_shape(r: &Rv) -> bool {
     const BASE: [&str; 9] = ["seq", "k", "t", "ev", "id", "e", "rule", "en", "ov"];
     let fields = if r["rule"].is_null() {
         let mut v = BASE.to_vec();
@@ -491,7 +492,7 @@ fn q_shape(r: &J) -> bool {
 }
 
 /// A `clog_tick` as `LogObs.TickPrefix` writes it (before the tick's own scope).
-fn tick_shape(r: &J) -> bool {
+fn tick_shape(r: &Rv) -> bool {
     keys_are(r, &["seq", "k", "t", "ev", "q", "stack", "scope"])
         && r["t"].is_i64()
         && r["stack"].as_u64().is_some()
@@ -505,7 +506,7 @@ fn tick_shape(r: &J) -> bool {
 }
 
 /// A `clog_msg` as `LogObs.AddPostfix` writes it: in a thread's handler, inside the tick's scope.
-fn msg_shape(r: &J) -> bool {
+fn msg_shape(r: &Rv) -> bool {
     let keys = [
         "seq",
         "k",
@@ -524,7 +525,7 @@ fn msg_shape(r: &J) -> bool {
         "ctx",
     ];
     let tip_ok = match &r["tip"] {
-        J::Null => true,
+        Rv::Null => true,
         t => {
             keys_are(t, &["cls", "h", "d"])
                 && t["cls"].is_string()
@@ -561,7 +562,7 @@ fn diff(w: &mut World, s: &mut Summary, what: String) {
 /// Compares the sim's stream with the recording's records.
 pub fn compare(
     w: &mut World,
-    recs: &[J],
+    recs: &[Rv],
     inputs: std::collections::BTreeMap<String, usize>,
 ) -> Summary {
     let mut s = Summary { inputs, ..Summary::default() };
@@ -621,7 +622,11 @@ pub fn compare(
     let mut rec_muts = Vec::new();
     let mut n_muts = 0_usize;
     for (i, r) in recs.iter().enumerate() {
-        if r["k"] == "mut" && r.as_object().is_some_and(super::counted_mut) {
+        if r["k"] == "mut"
+            && r.as_object().is_some_and(|o| {
+                matches!(o.get("what").and_then(Rv::as_str), Some("xp" | "damage"))
+            })
+        {
             n_muts += 1;
         }
         if r["k"] == "obs" && r["ev"] == "clog_q" && r["rule"].is_null() {
@@ -700,7 +705,7 @@ pub fn compare(
         let at = rec_kinds.iter().zip(&sim_kinds).position(|(a, b)| a != b);
         diff(w, &mut s, format!("the log's records in another order (from record {at:?})"));
     }
-    let obs = |ev: &str| -> Vec<&J> {
+    let obs = |ev: &str| -> Vec<&Rv> {
         recs.iter().filter(|r| r["k"] == "obs" && r["ev"] == ev).collect()
     };
     let (rq, rt, rm) = (obs("clog_q"), obs("clog_tick"), obs("clog_msg"));
@@ -859,8 +864,8 @@ pub fn compare(
         }
         let text_ok = bad.is_empty();
         match (&m.tip, &r["tip"]) {
-            (Tip::None, J::Null) => {}
-            (Tip::None, _) | (_, J::Null) => bad.push("tooltip presence".into()),
+            (Tip::None, Rv::Null) => {}
+            (Tip::None, _) | (_, Rv::Null) => bad.push("tooltip presence".into()),
             (Tip::NotPorted(cls), t) => {
                 if t["cls"].as_str() != Some(cls) {
                     bad.push(format!("tooltip class {} vs {cls}", t["cls"]));

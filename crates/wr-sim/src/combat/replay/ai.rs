@@ -4,7 +4,7 @@
 //! runs and its checks (`ai_sc`, `ai_best`, `ai_sel`) in order, as the commands model does
 //! ([`super::commands`]).
 
-use serde_json::Value as J;
+use crate::combat::oracle::Rv;
 use wr_content::Guid;
 
 use super::Driver;
@@ -16,30 +16,30 @@ use crate::combat::commands::R;
 use crate::world::World;
 
 /// A `float` written round-trip as a string (finite).
-fn float(v: &J) -> Option<f32> {
+fn float(v: &Rv) -> Option<f32> {
     v.as_str().and_then(|s| s.parse::<f32>().ok()).filter(|f| f.is_finite())
 }
 
 /// A blueprint written as `BlueprintGuid.ToString()` (32 lowercase digits).
-fn guid(v: &J) -> Option<Option<Guid>> {
+fn guid(v: &Rv) -> Option<Option<Guid>> {
     match v {
-        J::Null => Some(None),
-        J::String(s) => Guid::parse(s).filter(|g| g.to_string() == *s).map(Some),
+        Rv::Null => Some(None),
+        Rv::String(s) => Guid::parse(s).filter(|g| g.to_string() == *s).map(Some),
         _ => None,
     }
 }
 
 /// A unit the sim has, or null.
-fn unit_or_null(w: &World, v: &J) -> Option<Option<String>> {
+fn unit_or_null(w: &World, v: &Rv) -> Option<Option<String>> {
     match v {
-        J::Null => Some(None),
-        J::String(s) if is_unit(w, s) => Some(Some(s.clone())),
+        Rv::Null => Some(None),
+        Rv::String(s) if is_unit(w, s) => Some(Some(s.as_str().to_owned())),
         _ => None,
     }
 }
 
 /// A C# `int`.
-fn int(v: &J) -> Option<i64> {
+fn int(v: &Rv) -> Option<i64> {
     v.as_i64().filter(|x| i32::try_from(*x).is_ok())
 }
 
@@ -53,9 +53,9 @@ fn same_points(a: Option<&[[f32; 3]]>, b: Option<&[[f32; 3]]>) -> bool {
 }
 
 /// A recorded path: null, or points.
-fn path_points(v: &J) -> Option<Option<Vec<[f32; 3]>>> {
+fn path_points(v: &Rv) -> Option<Option<Vec<[f32; 3]>>> {
     match v {
-        J::Null => Some(None),
+        Rv::Null => Some(None),
         v => points(v).map(Some),
     }
 }
@@ -70,7 +70,7 @@ fn kept_two_points(p: &[[f32; 3]]) -> bool {
 }
 
 /// Exactly these fields besides the envelope (`seq`, `k`, `t`, `ev`).
-fn fields(r: &J, payload: &[&str]) -> bool {
+fn fields(r: &Rv, payload: &[&str]) -> bool {
     const BASE: [&str; 4] = ["seq", "k", "t", "ev"];
     r.as_object().is_some_and(|o| {
         o.len() == BASE.len() + payload.len()
@@ -80,7 +80,7 @@ fn fields(r: &J, payload: &[&str]) -> bool {
 
 impl Driver<'_> {
     /// A draw of `SelectAction` (with the `ai` observer a lifecycle record: the sim's draw takes it).
-    pub(super) fn ai_draw_record(&self, r: &J) -> bool {
+    pub(super) fn ai_draw_record(&self, r: &Rv) -> bool {
         self.ai
             && r["k"] == "draw"
             && (r["site"].as_i64().is_some_and(|s| self.ai_sites.contains(&s))
@@ -220,7 +220,7 @@ fn with_unit(u: Option<&str>) -> &'static [&'static str] {
 
 impl Driver<'_> {
     /// An `ai_nct` record outside the AI: a write of `NextCommandTime` by another writer (an input).
-    pub(super) fn ai_nct_input(&mut self, w: &mut World, r: &J) {
+    pub(super) fn ai_nct_input(&mut self, w: &mut World, r: &Rv) {
         if !self.ai {
             w.coverage.unsupported("driven replay: an ai_nct record without the ai observer");
             return;
@@ -444,7 +444,7 @@ impl AiInputs for Driver<'_> {
     fn ai_sim_step(&mut self, w: &mut World, max: f32) -> R<SimStep> {
         let at = self.ai_leaf(w, "msim", &["max", "v", "p", "len", "rmd", "wi"])?;
         let r = &self.trace.records[at];
-        let p = points(&J::Array(vec![r["p"].clone()])).and_then(|v| v.first().copied());
+        let p = points(&Rv::Array(Box::new([r["p"].clone()]))).and_then(|v| v.first().copied());
         match (
             float(&r["max"]).map(f32::to_bits) == Some(max.to_bits()),
             r["v"].as_bool(),
@@ -512,12 +512,12 @@ impl AiInputs for Driver<'_> {
 
     fn ai_groups(&mut self, w: &mut World) -> R<Vec<GroupRow>> {
         let at = self.ai_leaf(w, "groups", &["v"])?;
-        let row = |x: &J| -> Option<GroupRow> {
-            let [id, units, in_combat] = x.as_array()?.as_slice() else { return None };
+        let row = |x: &Rv| -> Option<GroupRow> {
+            let [id, units, in_combat] = x.as_array()? else { return None };
             Some(GroupRow {
                 id: match id {
-                    J::Null => None,
-                    J::String(s) => Some(s.clone()),
+                    Rv::Null => None,
+                    Rv::String(s) => Some(s.as_str().to_owned()),
                     _ => return None,
                 },
                 units: units
@@ -552,10 +552,10 @@ impl AiInputs for Driver<'_> {
             && r["h"] == 0
             && r.get("ctx").is_none()
             && r.get("forced").is_some() == self.replay_mode
-            && super::commands::draw_ok(r, &self.trace.sites)
+            && super::commands::draw_ok(&r.to_json(), &self.trace.sites)
             && r["a"].as_array().is_some_and(|a| {
                 #[allow(clippy::cast_possible_truncation)]
-                let f = |x: &J| x.as_f64().map(|v| (v as f32).to_bits());
+                let f = |x: &Rv| x.as_f64().map(|v| (v as f32).to_bits());
                 a.len() == 2
                     && f(&a[0]) == Some(0.0f32.to_bits())
                     && f(&a[1]) == Some(0.1f32.to_bits())

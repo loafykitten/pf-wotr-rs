@@ -12,7 +12,7 @@
 //! modelled: reported. The AI's and the engagement's reads (`last`, `manual`) are checked
 //! against the sim's values.
 
-use serde_json::Value as J;
+use crate::combat::oracle::Rv;
 
 use super::Driver;
 use super::commands::{describe, is_unit, obs, opt_str};
@@ -128,7 +128,7 @@ fn writer(f: Field, origin: &str) -> Option<Writer> {
 
 /// A `tgt_w` read: unit, field, value, writer and chain; `None` when it can't be read or its
 /// writer isn't one the sim models.
-fn parse(w: &World, r: &J) -> Option<(EntityIdx, Field, Option<EntityIdx>, Writer, String)> {
+fn parse(w: &World, r: &Rv) -> Option<(EntityIdx, Field, Option<EntityIdx>, Writer, String)> {
     let f = field(&r["f"])?;
     let origin = opt_str(r, "origin")??;
     let writer = writer(f, origin)?;
@@ -142,8 +142,8 @@ fn parse(w: &World, r: &J) -> Option<(EntityIdx, Field, Option<EntityIdx>, Write
 
 /// A click's `at` (`TurnBased.IssueHovered`): the unit's and the target's positions, what the
 /// pointer is on and its handler, the predicted path's point count and (with points) its end.
-fn click_at(v: &J) -> bool {
-    let vec3 = |x: &J| {
+fn click_at(v: &Rv) -> bool {
+    let vec3 = |x: &Rv| {
         x.as_array().is_some_and(|a| {
             a.len() == 3 && a.iter().all(|f| f.as_f64().is_some_and(|f| (f as f32).is_finite()))
         })
@@ -170,7 +170,7 @@ fn short(f: &str) -> String {
     format!("{ty}.{m}")
 }
 
-fn field(v: &J) -> Option<Field> {
+fn field(v: &Rv) -> Option<Field> {
     match v.as_str()? {
         "last" => Some(Field::Last),
         "manual" => Some(Field::Manual),
@@ -179,15 +179,15 @@ fn field(v: &J) -> Option<Field> {
 }
 
 /// A unit's id the sim has, or an explicit null.
-fn unit_or_null(w: &World, v: &J) -> Option<Option<EntityIdx>> {
+fn unit_or_null(w: &World, v: &Rv) -> Option<Option<EntityIdx>> {
     match v {
-        J::Null => Some(None),
-        J::String(s) if is_unit(w, s) => Some(w.by_id.get(s.as_str()).copied()),
+        Rv::Null => Some(None),
+        Rv::String(s) if is_unit(w, s) => Some(w.by_id.get(s.as_str()).copied()),
         _ => None,
     }
 }
 
-fn unit_of(w: &World, v: &J) -> Option<EntityIdx> {
+fn unit_of(w: &World, v: &Rv) -> Option<EntityIdx> {
     v.as_str().filter(|s| is_unit(w, s)).and_then(|s| w.by_id.get(s).copied())
 }
 
@@ -418,7 +418,7 @@ impl Driver<'_> {
     }
 
     /// An unreadable write: its unit's targets are no longer established.
-    fn tgt_lost(&mut self, w: &mut World, r: &J) {
+    fn tgt_lost(&mut self, w: &mut World, r: &Rv) {
         if let Some(u) = unit_of(w, &r["u"])
             && let Some(x) = w.unit_mut(u)
         {
@@ -439,7 +439,7 @@ impl Driver<'_> {
         if !self.tgt {
             return Ok(());
         }
-        let Some(field) = field(&J::String(f.to_owned())) else { return Ok(()) };
+        let Some(field) = field(&Rv::from(f)) else { return Ok(()) };
         let Some(e) = w.by_id.get(u).copied() else {
             return self.uc_reject(at, format!("a read of {f} of {u}, which the sim doesn't have"));
         };
@@ -500,7 +500,7 @@ impl Driver<'_> {
 
     /// A record that ends an open `Clear`'s target writes: anything but a target write (nothing
     /// else is recorded between `Cooldowns.Clear` and them).
-    pub(super) fn tgt_clear_boundary(&mut self, w: &mut World, r: &J) {
+    pub(super) fn tgt_clear_boundary(&mut self, w: &mut World, r: &Rv) {
         if self.tgt_clear.u.is_some() && obs(r, "tgt_w").is_none() {
             self.tgt_close_clear(w, Some(r));
         }
@@ -509,7 +509,7 @@ impl Driver<'_> {
     /// The end of an open `Clear` at record `r` (`None`: the frame's end): the sim's writes of it
     /// must all have come, and when it took any, `r` is the `InterruptAiCommands` its
     /// `UnitEntityData.LeaveCombat` calls next, from the same chain.
-    fn tgt_close_clear(&mut self, w: &mut World, r: Option<&J>) {
+    fn tgt_close_clear(&mut self, w: &mut World, r: Option<&Rv>) {
         let TgtClear { u: Some(u), tails } = std::mem::take(&mut self.tgt_clear) else { return };
         if w.combat.targets.pending.iter().any(|x| x.u == u) {
             w.combat.targets.pending.retain(|x| x.u != u);

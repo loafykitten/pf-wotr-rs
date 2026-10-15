@@ -251,8 +251,8 @@ pub struct Cmd {
 impl Cmd {
     /// `uc_new`'s description; its type, target and executor must be its state row's.
     #[must_use]
-    pub fn parse(r: &serde_json::Value) -> Option<Self> {
-        use serde_json::Value as J;
+    pub fn parse(r: &super::oracle::Rv) -> Option<Self> {
+        use super::oracle::Rv as J;
         let b = |k: &str| r[k].as_bool();
         let ignore_before = match r.get("ign_before")? {
             J::Null => None,
@@ -279,7 +279,7 @@ impl Cmd {
         };
         let exec = match r.get("exec")? {
             J::Null => None,
-            J::String(e) => Some(e.clone()),
+            J::String(e) => Some(e.as_str().to_owned()),
             _ => return None,
         };
         let target_ok = match (&s.target, tgt, pt) {

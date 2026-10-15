@@ -16,44 +16,80 @@ use serde_json::Value as J;
 
 use crate::rng::{CallSite, Draw, DrawKind, DrawValue, Rng, RngFailure};
 
+pub mod rv;
+pub use rv::{Obj, Rv};
+
 /// A fixture trace in memory.
 #[derive(Debug)]
 pub struct Trace {
-    pub records: Vec<J>,
+    /// The records, as compact [`Rv`]s (they read like `serde_json::Value`s).
+    pub records: Vec<Rv>,
     /// Call-site id → (key, class `sim`/`pres`).
     pub sites: HashMap<i64, (String, String)>,
 }
 
 impl Trace {
-    /// Reads `*.trace.jsonl` or `*.trace.jsonl.gz` (through the system's `gzip -dc`).
+    /// Reads `*.trace.jsonl` or `*.trace.jsonl.gz` (through the system's `gzip -dc`), a line at a
+    /// time.
     ///
     /// # Errors
     ///
     /// I/O, a bad record, or a trace without a `begin` record.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = if path.extension().is_some_and(|e| e == "gz") {
-            let out = std::process::Command::new("gzip")
+        let mut interner = rv::Interner::default();
+        let mut records = Vec::new();
+        let mut read = |input: &mut dyn std::io::BufRead| -> Result<()> {
+            let mut line = String::new();
+            let mut n = 0;
+            loop {
+                line.clear();
+                if input.read_line(&mut line)? == 0 {
+                    return Ok(());
+                }
+                n += 1;
+                // As `str::lines`: the line feed, then a carriage return before it.
+                let l = line
+                    .strip_suffix('\n')
+                    .map_or(line.as_str(), |l| l.strip_suffix('\r').unwrap_or(l));
+                if l.trim().is_empty() {
+                    continue;
+                }
+                records.push(
+                    interner.parse(l).with_context(|| format!("{}: line {n}", path.display()))?,
+                );
+            }
+        };
+        if path.extension().is_some_and(|e| e == "gz") {
+            let mut child = std::process::Command::new("gzip")
                 .arg("-dc")
                 .arg(path)
-                .output()
+                .stdout(std::process::Stdio::piped())
+                .spawn()
                 .with_context(|| format!("gzip -dc {}", path.display()))?;
-            if !out.status.success() {
+            let stdout = child.stdout.take().context("gzip's output")?;
+            let res = read(&mut std::io::BufReader::with_capacity(1 << 20, stdout));
+            if res.is_err() {
+                let _ = child.kill();
+            }
+            let status = child.wait().with_context(|| format!("gzip -dc {}", path.display()))?;
+            res?;
+            if !status.success() {
                 bail!("gzip -dc {} failed", path.display());
             }
-            String::from_utf8(out.stdout)?
         } else {
-            std::fs::read_to_string(path)?
-        };
-        let mut records = Vec::new();
-        for (n, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            records.push(
-                serde_json::from_str::<J>(line)
-                    .with_context(|| format!("{}: line {}", path.display(), n + 1))?,
-            );
+            read(&mut std::io::BufReader::new(std::fs::File::open(path)?))?;
         }
+        drop(interner);
+        records.shrink_to_fit();
+        Self::with_records(records)
+    }
+
+    /// A trace of `records` (the call-site table from their `begin` record).
+    ///
+    /// # Errors
+    ///
+    /// No `begin` record.
+    pub fn with_records(records: Vec<Rv>) -> Result<Self> {
         let begin = records.iter().find(|r| r["k"] == "begin").context("no begin record")?;
         let mut sites = HashMap::new();
         for e in begin["rng_sites"].as_array().into_iter().flatten() {
@@ -64,9 +100,34 @@ impl Trace {
         Ok(Self { records, sites })
     }
 
+    /// The records as `serde_json::Value`s.
+    #[must_use]
+    pub fn to_json(&self) -> Vec<J> {
+        self.records.iter().map(Rv::to_json).collect()
+    }
+
+    /// A trace of `records` with this one's call-site table.
+    #[must_use]
+    pub fn from_json(&self, records: &[J]) -> Self {
+        let mut interner = rv::Interner::default();
+        Self {
+            records: records.iter().map(|r| interner.from_json(r)).collect(),
+            sites: self.sites.clone(),
+        }
+    }
+
+    /// A copy of this trace with its records (as `serde_json::Value`s) changed by `change`, and
+    /// this one's call-site table.
+    #[must_use]
+    pub fn edited(&self, change: impl FnOnce(&mut Vec<J>)) -> Self {
+        let mut v = self.to_json();
+        change(&mut v);
+        self.from_json(&v)
+    }
+
     /// The call-site key of a `draw` record (`key` for global-hook draws).
     #[must_use]
-    pub fn site_key(&self, r: &J) -> Option<String> {
+    pub fn site_key(&self, r: &Rv) -> Option<String> {
         if let Some(k) = r["key"].as_str() {
             return Some(k.to_owned());
         }
@@ -86,12 +147,12 @@ impl Trace {
                 (Some("Range_ii"), Some(a)) => DrawKind::RangeInt {
                     min: a
                         .first()
-                        .and_then(J::as_i64)
+                        .and_then(Rv::as_i64)
                         .and_then(|v| i32::try_from(v).ok())
                         .unwrap_or(0),
                     max: a
                         .get(1)
-                        .and_then(J::as_i64)
+                        .and_then(Rv::as_i64)
                         .and_then(|v| i32::try_from(v).ok())
                         .unwrap_or(0),
                 },
@@ -127,14 +188,14 @@ impl Trace {
 
 /// A JSON number (or the strings `NaN`/`Infinity`) parsed to `f32` (the oracle writes
 /// floats round-trip).
-fn f32_of(v: Option<&J>) -> f32 {
+fn f32_of(v: Option<&Rv>) -> f32 {
     match v {
-        Some(J::Number(n)) => {
+        Some(Rv::Number(n)) => {
             #[allow(clippy::cast_possible_truncation)]
             let f = n.as_f64().unwrap_or(0.0) as f32;
             f
         }
-        Some(J::String(s)) => match s.as_str() {
+        Some(Rv::String(s)) => match s.as_str() {
             "NaN" => f32::NAN,
             "Infinity" => f32::INFINITY,
             "-Infinity" => f32::NEG_INFINITY,

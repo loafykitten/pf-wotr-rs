@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value as J;
+use crate::combat::oracle::Rv;
 
 use super::commands::describe;
 use super::{Driver, Phase};
@@ -59,7 +59,7 @@ pub(super) struct MemDriver {
 type Changes = Vec<(String, Change<EntityIdx>)>;
 
 /// Exactly these fields besides the envelope (`seq`, `k`, `t`, `ev`, and `f` for a leaf).
-fn has_fields(r: &J, payload: &[&str]) -> bool {
+fn has_fields(r: &Rv, payload: &[&str]) -> bool {
     let base: &[&str] =
         if r["ev"] == "mem_v" { &["seq", "k", "t", "ev", "f"] } else { &["seq", "k", "t", "ev"] };
     r.as_object().is_some_and(|o| {
@@ -71,12 +71,12 @@ fn has_fields(r: &J, payload: &[&str]) -> bool {
 const ROW: [&str; 7] = ["at", "g", "slots", "free", "nfree", "list", "enemies"];
 const INIT: [&str; 6] = ["g", "slots", "free", "nfree", "list", "enemies"];
 
-fn obs<'r>(r: &'r J, ev: &str) -> Option<&'r J> {
+fn obs<'r>(r: &'r Rv, ev: &str) -> Option<&'r Rv> {
     (r["k"] == "obs" && r["ev"] == ev).then_some(r)
 }
 
 /// A unit the sim has, by id.
-fn unit(w: &World, v: &J) -> Option<EntityIdx> {
+fn unit(w: &World, v: &Rv) -> Option<EntityIdx> {
     let e = *w.by_id.get(v.as_str()?)?;
     w.unit(e).is_some().then_some(e)
 }
@@ -93,7 +93,7 @@ fn sim_changes(w: &mut World) -> Changes {
 }
 
 /// A memory change record (`mem_add`, `mem_remove`, `mem_clear`) of its writer's shape.
-fn change_of(w: &World, r: &J) -> Option<(String, Change<EntityIdx>)> {
+fn change_of(w: &World, r: &Rv) -> Option<(String, Change<EntityIdx>)> {
     let g = r["group"].as_str()?.to_owned();
     let c = match r["ev"].as_str()? {
         "mem_add" if has_fields(r, &["group", "u", "by"]) && r["by"].is_string() => {
@@ -114,14 +114,14 @@ fn change_of(w: &World, r: &J) -> Option<(String, Change<EntityIdx>)> {
 
 /// A memory record's group (a live group), its id and its layout, in the sim's units, checked as
 /// recorded to be a dictionary's, then as the sim holds it.
-fn layout_of(w: &World, r: &J) -> Result<(GroupIdx, String, MemoryLayout<EntityIdx>), String> {
+fn layout_of(w: &World, r: &Rv) -> Result<(GroupIdx, String, MemoryLayout<EntityIdx>), String> {
     let id = r["g"].as_str().ok_or("a memory record without its group")?;
     let g = w
         .combat
         .groups
         .find(id)
         .ok_or_else(|| format!("a memory of a group the sim doesn't have ({id})"))?;
-    let units = |v: &J| -> Result<Vec<EntityIdx>, String> {
+    let units = |v: &Rv| -> Result<Vec<EntityIdx>, String> {
         v.as_array()
             .ok_or("a cache that isn't a list")?
             .iter()
@@ -132,8 +132,8 @@ fn layout_of(w: &World, r: &J) -> Result<(GroupIdx, String, MemoryLayout<EntityI
     };
     let mut slots = Vec::new();
     for s in r["slots"].as_array().ok_or("a memory without its slots")? {
-        match s.as_array().map(Vec::as_slice) {
-            Some([J::Null, next]) => {
+        match s.as_array() {
+            Some([Rv::Null, next]) => {
                 let next = next.as_i64().and_then(|n| i32::try_from(n).ok());
                 slots.push(RawSlot::Free(next.ok_or("a free slot it can't read")?));
             }
@@ -156,7 +156,7 @@ fn layout_of(w: &World, r: &J) -> Result<(GroupIdx, String, MemoryLayout<EntityI
     let (Some(free), Some(nfree)) = (free, nfree) else {
         return Err("a memory without its free list".into());
     };
-    let cache = |v: &J| if v.is_null() { Ok(None) } else { units(v).map(Some) };
+    let cache = |v: &Rv| if v.is_null() { Ok(None) } else { units(v).map(Some) };
     let raw = MemoryLayout {
         slots,
         free_list: free,
@@ -174,7 +174,7 @@ fn adopt(w: &mut World, g: GroupIdx, l: MemoryLayout<EntityIdx>) {
 }
 
 /// A float written as C#'s round-trip string.
-fn float_of(r: &J, k: &str) -> Option<f32> {
+fn float_of(r: &Rv, k: &str) -> Option<f32> {
     r[k].as_str()?.parse::<f32>().ok()
 }
 
@@ -235,7 +235,7 @@ impl Driver<'_> {
 
     /// `hash`: a unit's identity hash (WrathOracle records it once a window, on first use; in a
     /// replay with whether it was the record run's, checked against that run's when given).
-    fn mem_hash(&mut self, w: &mut World, r: &J) {
+    fn mem_hash(&mut self, w: &mut World, r: &Rv) {
         let shape: &[&str] = if self.mem.replay { &["u", "h", "tape"] } else { &["u", "h"] };
         let (true, Some(u), Some(h)) = (
             has_fields(r, shape),
@@ -266,7 +266,7 @@ impl Driver<'_> {
     }
 
     /// `mem_init`: a group's memory at the window's start, the sim's from now on.
-    fn mem_init(&mut self, w: &mut World, r: &J) {
+    fn mem_init(&mut self, w: &mut World, r: &Rv) {
         if self.mem.started || !has_fields(r, &INIT) {
             w.coverage
                 .unsupported("driven replay: memory: a mem_init out of place or of another shape");
@@ -290,7 +290,7 @@ impl Driver<'_> {
 
     /// `mem_initq`: the controller's queue and `s_UnitsForRemove`; every live group's memory is
     /// established by now.
-    fn mem_initq(&mut self, w: &mut World, r: &J) {
+    fn mem_initq(&mut self, w: &mut World, r: &Rv) {
         self.mem.initq += 1;
         let pairs = mem_pairs(w, &r["q"]);
         let pending = mem_units(w, &r["pending"]);
@@ -680,17 +680,17 @@ impl Driver<'_> {
 }
 
 /// A queue's pairs (observer, target), in the sim's units.
-fn mem_pairs(w: &World, v: &J) -> Option<Vec<(EntityIdx, EntityIdx)>> {
+fn mem_pairs(w: &World, v: &Rv) -> Option<Vec<(EntityIdx, EntityIdx)>> {
     v.as_array()?
         .iter()
-        .map(|p| match p.as_array().map(Vec::as_slice) {
+        .map(|p| match p.as_array() {
             Some([o, t]) => Some((unit(w, o)?, unit(w, t)?)),
             _ => None,
         })
         .collect()
 }
 
-fn mem_units(w: &World, v: &J) -> Option<Vec<EntityIdx>> {
+fn mem_units(w: &World, v: &Rv) -> Option<Vec<EntityIdx>> {
     v.as_array()?.iter().map(|x| unit(w, x)).collect()
 }
 
@@ -724,7 +724,7 @@ impl<'t> MemWorld<'_, 't> {
     }
 
     /// A record passed on the way to the next one the tick asks for.
-    fn on_the_way(&mut self, r: &J) -> Result<(), Desync> {
+    fn on_the_way(&mut self, r: &Rv) -> Result<(), Desync> {
         if r["t"].as_i64() != Some(self.d.tick) {
             return Err(Desync(format!(
                 "a record of another frame inside the tick ({})",
@@ -769,7 +769,7 @@ impl<'t> MemWorld<'_, 't> {
 
     /// The next record the tick asks for, after the changes the recording shows before it are
     /// compared with the sim's.
-    fn next(&mut self, what: &str) -> Result<&'t J, Desync> {
+    fn next(&mut self, what: &str) -> Result<&'t Rv, Desync> {
         self.drain()?;
         self.compare()?;
         let trace: &'t crate::combat::oracle::Trace = self.d.trace;
@@ -787,7 +787,7 @@ impl<'t> MemWorld<'_, 't> {
     }
 
     /// The next leaf, of `f`, with exactly its writer's fields.
-    fn leaf(&mut self, f: &str, payload: &[&str]) -> Result<&'t J, Desync> {
+    fn leaf(&mut self, f: &str, payload: &[&str]) -> Result<&'t Rv, Desync> {
         let r = self.next(&format!("the sim reads {f}"))?;
         if obs(r, "mem_v").is_none() || r["f"] != f {
             self.d.i -= 1;
@@ -800,7 +800,7 @@ impl<'t> MemWorld<'_, 't> {
     }
 
     /// The leaf is about this unit or group (its id, or its key).
-    fn about(r: &J, k: &str, want: &str) -> Result<(), Desync> {
+    fn about(r: &Rv, k: &str, want: &str) -> Result<(), Desync> {
         if r[k].as_str() == Some(want) {
             return Ok(());
         }
@@ -812,7 +812,7 @@ impl<'t> MemWorld<'_, 't> {
     }
 
     /// A leaf's boolean.
-    fn bool_of(r: &J, k: &str) -> Result<bool, Desync> {
+    fn bool_of(r: &Rv, k: &str) -> Result<bool, Desync> {
         r[k].as_bool().ok_or_else(|| Desync(format!("a leaf {} it can't read", r["f"])))
     }
 
@@ -1009,7 +1009,7 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         let id = self.uid(u);
         Self::about(r, "u", &id)?;
         let rec = match &r["v"] {
-            J::Null => false,
+            Rv::Null => false,
             v if v.as_str() == Some(id.as_str()) => true,
             _ => return Err(Desync("a reference resolved to another unit".into())),
         };

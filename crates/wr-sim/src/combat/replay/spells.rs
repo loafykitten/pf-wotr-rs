@@ -8,7 +8,7 @@
 //! records there (`RuleSpellResistanceCheck`, `RuleRollDice`, `RuleCanApplyBuff`,
 //! `RuleApplySpell`) are the sim's own, compared through the T0 stream.
 
-use serde_json::Value as J;
+use crate::combat::oracle::Rv;
 
 use super::{Driver, Phase, unit_id};
 use crate::combat::commands::class;
@@ -134,7 +134,7 @@ impl Driver<'_> {
 
     /// The running `UnitUseAbility` of the root's initiator (the command whose `OnAction` this
     /// is): its id.
-    fn casting_command(&self, w: &World, r: &J) -> Result<u32, String> {
+    fn casting_command(&self, w: &World, r: &Rv) -> Result<u32, String> {
         let u = unit_id(&r["initiator"]).ok_or("no initiator")?;
         let m = &w.combat.commands;
         let cmds: Vec<u32> = m
@@ -150,7 +150,7 @@ impl Driver<'_> {
 
     /// `RuleCalculateAbilityParams` of `new RuleCastSpell(Ability, Target)`: its snapshot names
     /// the command's spell (blueprint, spellbook, level), checked; the sim's cast begins.
-    fn begin_cast(&mut self, w: &mut World, r: &J) -> Result<(), String> {
+    fn begin_cast(&mut self, w: &mut World, r: &Rv) -> Result<(), String> {
         if w.combat.spells.pending.take().is_some() {
             w.coverage.unsupported("driven replay: a cast's context without its RuleCastSpell");
         }
@@ -190,7 +190,7 @@ impl Driver<'_> {
     }
 
     /// The pending cast's `RuleCastSpell`: its snapshot's spell, context and target the pending cast's.
-    fn cast(&mut self, w: &mut World, r: &J) -> Result<(), String> {
+    fn cast(&mut self, w: &mut World, r: &Rv) -> Result<(), String> {
         let i = w.combat.spells.pending.take().ok_or("no context before it")?;
         let ctx = w.combat.spells.context(i).cloned().ok_or("its context")?;
         let c = self.casting_command(w, r)?;

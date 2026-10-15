@@ -2184,7 +2184,7 @@ pub fn attack_from_snapshot(
     w: &World,
     a: EntityIdx,
     t: EntityIdx,
-    fields: &J,
+    fields: &super::oracle::Rv,
 ) -> Option<RuleAttackWithWeapon> {
     let item_id = fields["Weapon"]["$item"].as_str()?;
     let item = w.by_id.get(item_id).copied().or_else(|| {

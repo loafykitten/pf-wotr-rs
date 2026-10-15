@@ -5,33 +5,33 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde_json::Value;
+use crate::combat::oracle::Rv;
 
 use super::*;
 use crate::combat::oracle::Trace;
 use crate::combat::turns::tests::{unit, world};
 
-fn f(v: &Value) -> f32 {
+fn f(v: &Rv) -> f32 {
     v.as_f64().map_or(f32::NAN, |x| x as f32)
 }
 
-fn v3(v: &Value) -> V3 {
+fn v3(v: &Rv) -> V3 {
     [f(&v[0]), f(&v[1]), f(&v[2])]
 }
 
-fn v2(v: &Value) -> V2 {
+fn v2(v: &Rv) -> V2 {
     [f(&v[0]), f(&v[1])]
 }
 
-fn opt_v3(v: &Value) -> Option<V3> {
+fn opt_v3(v: &Rv) -> Option<V3> {
     if v.is_null() { None } else { Some(v3(v)) }
 }
 
-fn opt_f(v: &Value) -> Option<f32> {
+fn opt_f(v: &Rv) -> Option<f32> {
     if v.is_null() { None } else { Some(f(v)) }
 }
 
-fn b(v: &Value) -> bool {
+fn b(v: &Rv) -> bool {
     v.as_bool().unwrap_or(false)
 }
 
@@ -40,7 +40,7 @@ fn b(v: &Value) -> bool {
 struct Paths(HashMap<String, Vec<V3>>);
 
 impl Paths {
-    fn note(&mut self, r: &Value) {
+    fn note(&mut self, r: &Rv) {
         let ev = r["ev"].as_str().unwrap_or("");
         let key = r["path"].as_str().map(str::to_owned);
         if let (Some(key), true) =
@@ -51,7 +51,7 @@ impl Paths {
         }
     }
 
-    fn get(&self, key: &Value, kind_forced: bool) -> Option<AgentPath> {
+    fn get(&self, key: &Rv, kind_forced: bool) -> Option<AgentPath> {
         let key = key.as_str()?;
         Some(AgentPath {
             key: key.to_owned(),
@@ -63,14 +63,14 @@ impl Paths {
 
 /// `m_DestinationAgent` from a recorded state (`dhas` since `poc5-tb-102`; before, a destination
 /// is known only with its view).
-fn dest_from(s: &Value) -> Option<DestAgent> {
+fn dest_from(s: &Rv) -> Option<DestAgent> {
     let view = s["dview"].as_str().map(str::to_owned);
     let has = s.get("dhas").map_or(view.is_some(), b);
     has.then(|| DestAgent { view, attached: b(&s["dattached"]) })
 }
 
 /// An agent from a recorded state `s`.
-fn agent_from(s: &Value, paths: &Paths) -> Agent {
+fn agent_from(s: &Rv, paths: &Paths) -> Agent {
     Agent {
         pos: v3(&s["pos"]),
         vel: v3(&s["vel"]),
@@ -233,8 +233,8 @@ impl<T: Bits> Bits for Option<T> {
 
 /// The inputs recorded inside one `TickMovement` (its agent records and draws, in order).
 struct Recorded<'a> {
-    tick: &'a Value,
-    recs: Vec<&'a Value>,
+    tick: &'a Rv,
+    recs: Vec<&'a Rv>,
     at: usize,
     errors: Vec<String>,
     /// The capture records the agent's callbacks into the view (`ag_cb`, since `poc5-tb-103`).
@@ -248,7 +248,7 @@ struct Recorded<'a> {
 
 /// Records that aren't checked in order: `canmovetb` (the postfix of the call around its
 /// leaves), the ends of the agent's own calls (their starts are checked) and path definitions.
-fn not_input(r: &Value) -> bool {
+fn not_input(r: &Rv) -> bool {
     (r["ev"] == "ag_v" && r["f"] == "canmovetb")
         || r["ev"] == "ag_call_end"
         || r["ev"] == "ag_pathdef"
@@ -256,7 +256,7 @@ fn not_input(r: &Value) -> bool {
 
 impl Recorded<'_> {
     /// The next input record (consumed).
-    fn next_input(&mut self) -> Option<&Value> {
+    fn next_input(&mut self) -> Option<&Rv> {
         while let Some(r) = self.recs.get(self.at).copied() {
             self.at += 1;
             if !not_input(r) {
@@ -267,7 +267,7 @@ impl Recorded<'_> {
     }
 
     /// The next input record, which must be an `ev` record.
-    fn take_ev(&mut self, ev: &str) -> R<Value> {
+    fn take_ev(&mut self, ev: &str) -> R<Rv> {
         match self.next_input() {
             Some(r) if r["ev"] == ev => Ok(r.clone()),
             Some(r) => Err(Desync(format!("wanted {ev}, the recording has {r}"))),
@@ -276,7 +276,7 @@ impl Recorded<'_> {
     }
 
     /// The next record that must be the agent leaf `f`.
-    fn take_leaf(&mut self, f: &str) -> R<&Value> {
+    fn take_leaf(&mut self, f: &str) -> R<&Rv> {
         match self.next_input() {
             Some(r) if r["ev"] == "ag_v" && r["f"] == f => Ok(r),
             Some(r) => Err(Desync(format!("wanted leaf {f}, the recording has {r}"))),
@@ -285,7 +285,7 @@ impl Recorded<'_> {
     }
 
     /// The next record of any kind, not consumed (the agent's calls included).
-    fn peek_leaf(&self) -> Option<&Value> {
+    fn peek_leaf(&self) -> Option<&Rv> {
         self.recs[self.at..]
             .iter()
             .copied()
@@ -293,7 +293,7 @@ impl Recorded<'_> {
     }
 
     /// The next input record, not consumed.
-    fn peek_input(&self) -> Option<&Value> {
+    fn peek_input(&self) -> Option<&Rv> {
         self.recs[self.at..].iter().copied().find(|r| !not_input(r))
     }
 
@@ -724,7 +724,7 @@ impl AgentInputs for Recorded<'_> {
 }
 
 /// Is `r` a record the agent's code makes (or reads) inside a tick of `u`?
-fn inside(r: &Value, u: &str) -> bool {
+fn inside(r: &Rv, u: &str) -> bool {
     if r["k"] == "draw" {
         return true;
     }
@@ -797,7 +797,7 @@ fn every_recorded_tick_reruns_bit_for_bit() {
                 failures.push(format!("{}: tick {i} of {u} has no end", path.display()));
                 break;
             };
-            let inner: Vec<&Value> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
+            let inner: Vec<&Rv> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
             for x in &inner {
                 paths.note(x);
             }
@@ -862,7 +862,7 @@ fn outcome(
     inp: &Recorded<'_>,
     w: &World,
     unit_ix: EntityIdx,
-    want: &Value,
+    want: &Rv,
     paths: &Paths,
 ) -> Vec<String> {
     let mut why = inp.errors.clone();
@@ -945,7 +945,7 @@ fn every_recorded_path_completion_reruns_bit_for_bit() {
                         .find(|x| {
                             x["u"] == u.as_str() && x["s"].is_object() && x["ev"] != "ag_tick"
                         })
-                        .map_or(Value::Null, |x| x["s"].clone())
+                        .map_or(Rv::Null, |x| x["s"].clone())
                 } else {
                     r["s"].clone()
                 };
@@ -959,27 +959,28 @@ fn every_recorded_path_completion_reruns_bit_for_bit() {
                 // The AI's `FindPath` callback clears `m_RequestedFindPath` unobserved; neither call
                 // writes it and nothing runs between the call's start and its nested completion,
                 // so that completion's state has its value at the call.
-                let mut before = before;
+                let mut before = before.to_json();
                 if call
                     && let Some(d) = done.and_then(|x| x.get("s"))
                     && before.is_object()
                 {
-                    before["find"] = d["find"].clone();
+                    before["find"] = d["find"].to_json();
                 }
                 if before.is_null() {
                     failures.push(format!("{run} {fx} t={}: no state of {u} before {ev}", r["t"]));
                     i = end + 1;
                     continue;
                 }
-                let inner: Vec<&Value> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
+                let inner: Vec<&Rv> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
                 let mut w = world();
                 let unit_ix = unit(&mut w, &u, None, 10);
                 w.combat.turn_based = true;
-                w.unit_mut(unit_ix).unwrap().combat.agent = agent_from(&before, &paths);
+                w.unit_mut(unit_ix).unwrap().combat.agent = agent_from(&Rv::from(&before), &paths);
                 let mut ctx = serde_json::json!({ "s": before });
                 if let Some(c) = done.and_then(|x| x.get("combat")) {
-                    ctx["combat"] = c.clone();
+                    ctx["combat"] = c.to_json();
                 }
+                let ctx = Rv::from(ctx);
                 let mut inp = Recorded {
                     tick: &ctx,
                     recs: inner,
@@ -1045,7 +1046,7 @@ fn every_recorded_path_completion_reruns_bit_for_bit() {
 }
 
 /// A recorded request (`ag_req_end`'s `rq`) against ours.
-fn request_diff(ours: &PathRequest, rq: &Value) -> Vec<String> {
+fn request_diff(ours: &PathRequest, rq: &Rv) -> Vec<String> {
     let mut out = Vec::new();
     let mut cmp = |what: &str, a: String, b: String| {
         if a != b {
@@ -1119,7 +1120,7 @@ fn every_recorded_path_to_reruns_bit_for_bit() {
                     paths.note(x);
                 }
                 let e = &recs[end];
-                let inner: Vec<&Value> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
+                let inner: Vec<&Rv> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
                 let mut w = world();
                 let unit_ix = unit(&mut w, &u, None, 10);
                 w.combat.turn_based = true;

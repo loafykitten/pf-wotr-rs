@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value as J, json};
 
+use crate::combat::oracle::{Rv, rv};
+
 use super::{Driver, Phase};
 use crate::combat::commands::{self as uc, Cmd, Desync, Fx, Inputs, Of, R, Set, State};
 use crate::world::{EntityIdx, World};
@@ -31,28 +33,28 @@ pub(super) struct Rows {
     pub ready: bool,
 }
 
-pub(super) fn obs<'a>(r: &'a J, ev: &str) -> Option<&'a J> {
+pub(super) fn obs<'a>(r: &'a Rv, ev: &str) -> Option<&'a Rv> {
     (r["k"] == "obs" && r["ev"] == ev).then_some(r)
 }
 
-pub(super) fn id(v: &J) -> Option<u32> {
+pub(super) fn id(v: &Rv) -> Option<u32> {
     v.as_u64().and_then(|x| u32::try_from(x).ok())
 }
 
 /// A field that must be there: `Some(None)` for an explicit null, `Some(Some(s))` for a string,
 /// `None` when it's missing or of another type.
-pub(super) fn opt_str<'a>(r: &'a J, k: &str) -> Option<Option<&'a str>> {
+pub(super) fn opt_str<'a>(r: &'a Rv, k: &str) -> Option<Option<&'a str>> {
     match r.get(k)? {
-        J::Null => Some(None),
-        J::String(s) => Some(Some(s)),
+        Rv::Null => Some(None),
+        Rv::String(s) => Some(Some(s)),
         _ => None,
     }
 }
 
 /// A field that must be there: an explicit null or an id.
-pub(super) fn opt_id(r: &J, k: &str) -> Option<Option<u32>> {
+pub(super) fn opt_id(r: &Rv, k: &str) -> Option<Option<u32>> {
     match r.get(k)? {
-        J::Null => Some(None),
+        Rv::Null => Some(None),
         v => id(v).map(Some),
     }
 }
@@ -63,7 +65,7 @@ pub(super) fn is_unit(w: &World, id: &str) -> bool {
 }
 
 /// A lifecycle record of the entry being run: one the sim asks for, never processed on the way.
-fn boundary(r: &J) -> bool {
+fn boundary(r: &Rv) -> bool {
     if r["k"] == "tick" {
         return true;
     }
@@ -86,7 +88,7 @@ fn boundary(r: &J) -> bool {
 }
 
 /// A `cd_spend` from `UnitCommandController` (a command acted).
-pub(super) fn from_controller(r: &J) -> bool {
+pub(super) fn from_controller(r: &Rv) -> bool {
     r["caller"]
         .as_str()
         .is_some_and(|c| c.contains("Kingmaker.Controllers.Units.UnitCommandController."))
@@ -120,7 +122,7 @@ fn see_wrapper(w: &mut World, id: Option<u32>) {
 }
 
 /// A record's short description, for reports.
-pub(super) fn describe(r: &J) -> String {
+pub(super) fn describe(r: &Rv) -> String {
     if r["k"] == "tick" {
         return format!("the next frame ({})", r["t"]);
     }
@@ -279,7 +281,7 @@ impl Driver<'_> {
 
     /// After a desync: the entry's remaining records, up to its end record (`end`), are skipped
     /// (its rows are still taken and everything else is processed as usual).
-    pub(super) fn uc_skip(&mut self, w: &mut World, end: impl Fn(&J) -> bool) {
+    pub(super) fn uc_skip(&mut self, w: &mut World, end: impl Fn(&Rv) -> bool) {
         let trace = self.trace;
         let recs = &trace.records;
         let was = std::mem::replace(&mut self.uc_skipping, true);
@@ -350,7 +352,7 @@ impl Driver<'_> {
         &mut self,
         w: &mut World,
         what: &str,
-        want: impl Fn(&J) -> bool,
+        want: impl Fn(&Rv) -> bool,
     ) -> R<usize> {
         let trace = self.trace;
         let recs = &trace.records;
@@ -388,7 +390,7 @@ impl Driver<'_> {
 
     /// A draw of `TickApproaching` (with the `approach` observer a lifecycle record: the sim's draw
     /// takes it).
-    pub(super) fn approach_draw_record(&self, r: &J) -> bool {
+    pub(super) fn approach_draw_record(&self, r: &Rv) -> bool {
         // By its numeric site (a contradictory `key` doesn't hide it) or its key.
         self.uc_approach
             && r["k"] == "draw"
@@ -397,7 +399,7 @@ impl Driver<'_> {
     }
 
     /// The next lifecycle record (a pull would stop there), without processing anything.
-    fn uc_peek(&self) -> Option<&J> {
+    fn uc_peek(&self) -> Option<&Rv> {
         let trace = self.trace;
         trace.records[self.i..].iter().find(|r| {
             boundary(r)
@@ -436,7 +438,7 @@ impl Driver<'_> {
         Err(Desync(what.into()))
     }
 
-    fn uc_new(&mut self, w: &mut World, r: &J) {
+    fn uc_new(&mut self, w: &mut World, r: &Rv) {
         let (Some(c), Some(x)) = (id(&r["c"]), Cmd::parse(r)) else {
             w.coverage.unsupported("driven replay: a uc_new record it can't read");
             return;
@@ -500,7 +502,7 @@ impl Driver<'_> {
         }
     }
 
-    fn uc_state_row(&mut self, w: &mut World, r: &J) {
+    fn uc_state_row(&mut self, w: &mut World, r: &Rv) {
         let (Some(s), Some(row)) = (id(&r["set"]), r["s"].as_str()) else {
             w.coverage.unsupported("driven replay: a uc_state record it can't read");
             return;
@@ -510,8 +512,8 @@ impl Driver<'_> {
             return;
         };
         let unit = match &r["u"] {
-            J::Null if r.get("u").is_some() => None,
-            J::String(u) => Some(u.clone()),
+            Rv::Null if r.get("u").is_some() => None,
+            Rv::String(u) => Some(u.as_str().to_owned()),
             _ => {
                 w.coverage.unsupported("driven replay: a uc_state record it can't read");
                 return;
@@ -929,8 +931,8 @@ impl Driver<'_> {
                 Entry::Mutator => {
                     // `raise`: InterruptAll's argument, an explicit null for the others.
                     let raise = match r.get("raise") {
-                        Some(J::Null) => None,
-                        Some(J::Bool(b)) => Some(*b),
+                        Some(Rv::Null) => None,
+                        Some(Rv::Bool(b)) => Some(*b),
                         _ => return Err(Desync("a uc_x record it can't read".into())),
                     };
                     match (r["fn"].as_str(), raise) {
@@ -1070,7 +1072,7 @@ impl Driver<'_> {
     }
 
     /// An end made outside base lifecycle code (class code, the movement agent, the AI): an input.
-    fn uc_input_end(&mut self, w: &mut World, r: &J) {
+    fn uc_input_end(&mut self, w: &mut World, r: &Rv) {
         let (Some(c), Some(result), Some(_), Some(Some(origin))) = (
             id(&r["c"]),
             r["res"].as_u64().and_then(|x| u8::try_from(x).ok()).filter(|x| *x <= uc::res::SUCCESS),
@@ -1104,8 +1106,8 @@ impl Driver<'_> {
 
     /// A running-list call outside base lifecycle code (in class code: an overridden `OnRun`; the
     /// movement agent's interrupt): an input.
-    fn uc_input_rc(&mut self, w: &mut World, r: &J) {
-        let to_len = |v: &J| v.as_u64().and_then(|x| usize::try_from(x).ok());
+    fn uc_input_rc(&mut self, w: &mut World, r: &Rv) {
+        let to_len = |v: &Rv| v.as_u64().and_then(|x| usize::try_from(x).ok());
         let (Some(c), Some(op), Some(b), Some(a), Some(current)) = (
             id(&r["c"]),
             r["op"].as_str().filter(|o| *o == "add" || *o == "remove"),
@@ -1194,7 +1196,7 @@ impl Driver<'_> {
 
 /// The rule whose engagement handler made a provoke (its subscribers list's type argument, as the
 /// recorded caller has it): `RuleAttackRoll` or `RuleAttackWithWeapon`.
-fn provoke_rule(r: &J) -> Option<&'static str> {
+fn provoke_rule(r: &Rv) -> Option<&'static str> {
     let o = r["origin"].as_str()?;
     ["RuleAttackRoll", "RuleAttackWithWeapon"].into_iter().find(|c| {
         o.contains(&format!(
@@ -1204,7 +1206,7 @@ fn provoke_rule(r: &J) -> Option<&'static str> {
 }
 
 /// A path's points (`[[x, y, z], ...]`, finite `f32`s).
-pub(super) fn points(v: &J) -> Option<Vec<[f32; 3]>> {
+pub(super) fn points(v: &Rv) -> Option<Vec<[f32; 3]>> {
     v.as_array()?
         .iter()
         .map(|p| {
@@ -1391,7 +1393,7 @@ impl Inputs for Driver<'_> {
             return self.uc_reject(at, format!("an exception out of {f}"));
         }
         let ret = match &r["ret"] {
-            J::Null if r.get("ret").is_some() => None,
+            Rv::Null if r.get("ret").is_some() => None,
             v => match v
                 .as_u64()
                 .and_then(|x| u8::try_from(x).ok())
@@ -1412,7 +1414,7 @@ impl Inputs for Driver<'_> {
                 // A UnitAttack's class state: with the attacks observer, and only then.
                 let ua = match r.get("ua") {
                     None => None,
-                    Some(J::String(x)) => Some(x.clone()),
+                    Some(Rv::String(x)) => Some(x.as_str().to_owned()),
                     Some(_) => return self.uc_reject(at, "a uc_fx record whose ua it can't read"),
                 };
                 let attack = w.combat.commands.attacks
@@ -1623,8 +1625,8 @@ impl Inputs for Driver<'_> {
         let v: Option<Vec<Option<String>>> = r["v"].as_array().and_then(|a| {
             a.iter()
                 .map(|x| match x {
-                    J::Null => Some(None),
-                    J::String(s) => Some(Some(s.clone())),
+                    Rv::Null => Some(None),
+                    Rv::String(s) => Some(Some(s.as_str().to_owned())),
                     _ => None,
                 })
                 .collect()
@@ -1666,8 +1668,8 @@ impl Inputs for Driver<'_> {
             return self.uc_reject(at, "an exception out of InitAttacks");
         }
         let attacks = match r.get("list") {
-            Some(J::Null) => Some(None),
-            Some(J::Array(a)) => a
+            Some(Rv::Null) => Some(None),
+            Some(Rv::Array(a)) => a
                 .iter()
                 .map(|x| x.as_str().and_then(uc::attack::Entry::parse))
                 .collect::<Option<Vec<_>>>()
@@ -1726,7 +1728,7 @@ impl Inputs for Driver<'_> {
             want.insert("ForceIterativeNaturalAttacks".into(), J::Bool(false));
             want.insert("Result".into(), json!({"PrimaryHand": zero, "SecondaryHand": zero}));
         }
-        if r["fields"].as_object() != Some(&want) {
+        if !r["fields"].as_object().is_some_and(|o| *o == want) {
             return self
                 .uc_reject(at, format!("a {class} of UnitAttack with fields it doesn't set"));
         }
@@ -1748,7 +1750,7 @@ impl Inputs for Driver<'_> {
                 if &r["id"] != id {
                     continue;
                 }
-                for p in r.get("changes").and_then(J::as_array).into_iter().flatten() {
+                for p in r.get("changes").and_then(Rv::as_array).into_iter().flatten() {
                     if p[0] != "Slots" {
                         continue;
                     }
@@ -1802,7 +1804,7 @@ impl Inputs for Driver<'_> {
                 .uc_reject(at, format!("the sim reads {f} of command {c}, the recording has {d}"));
         }
         match &r["v"] {
-            J::Null => Ok(None),
+            Rv::Null => Ok(None),
             v => match points(v) {
                 Some(p) => Ok(Some(p)),
                 None => self.uc_reject(at, format!("a {f} record it can't read")),
@@ -1880,7 +1882,8 @@ impl Inputs for Driver<'_> {
         };
         let ok = match call {
             Call::MoveTo { c, unit, point, radius, max_radius, target, xz } => {
-                let p = points(&json!([r["p"].clone()])).and_then(|v| v.first().copied());
+                let p =
+                    points(&Rv::Array(Box::new([r["p"].clone()]))).and_then(|v| v.first().copied());
                 r["fn"] == "moveto"
                     && opt_str(r, "u") == Some(Some(unit.as_str()))
                     && opt_id(r, "c") == Some(Some(*c))
@@ -1944,10 +1947,10 @@ impl Inputs for Driver<'_> {
             && r["h"] == 0
             && r.get("ctx").is_none()
             && r.get("forced").is_some() == self.replay_mode
-            && draw_ok(r, &self.trace.sites)
+            && draw_ok(&r.to_json(), &self.trace.sites)
             && r["a"].as_array().is_some_and(|a| {
                 #[allow(clippy::cast_possible_truncation)]
-                let f = |x: &J| x.as_f64().map(|v| (v as f32).to_bits());
+                let f = |x: &Rv| x.as_f64().map(|v| (v as f32).to_bits());
                 a.len() == 2
                     && f(&a[0]) == Some(0.2f32.to_bits())
                     && f(&a[1]) == Some(0.6f32.to_bits())
@@ -2027,16 +2030,19 @@ impl Inputs for Driver<'_> {
         ] {
             want.insert(k.into(), v);
         }
-        let differ: Vec<&String> = want
+        let differ: Vec<&str> = want
             .keys()
+            .map(String::as_str)
             .chain(f.keys())
-            .filter(|k| !matches!(k.as_str(), "Weapon" | "WeaponSlot") && want.get(*k) != f.get(*k))
+            .filter(|k| {
+                !matches!(*k, "Weapon" | "WeaponSlot") && !rv::opt_eq(f.get(*k), want.get(*k))
+            })
             .collect();
         // The weapon: the slot's (by item and blueprint; a limb's items get fresh ids at load, so
         // by blueprint), and the slot: the attacker's, holding the sim's item, as active.
         let (weapon_id, limb) = attack_weapon_id(w, spec);
         let bp = w.item(spec.weapon).and_then(|x| x.blueprint).map(|g| g.to_string());
-        let wp = &f.get("Weapon").cloned().unwrap_or(J::Null);
+        let wp = &f.get("Weapon").cloned().unwrap_or(Rv::Null);
         let weapon_ok = wp.as_object().is_some_and(|o| o.len() == 2)
             && wp["blueprint"].as_str() == bp.as_deref()
             && wp["$item"].as_str() == Some(weapon_id);
@@ -2121,7 +2127,7 @@ impl Inputs for Driver<'_> {
         if self.trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
             b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
         }) {
-            let launches: Vec<&J> = trace.records[at..=end]
+            let launches: Vec<&Rv> = trace.records[at..=end]
                 .iter()
                 .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
                 .collect();
@@ -2220,7 +2226,7 @@ fn slot_snapshot_ok(
     u: EntityIdx,
     slot: uc::attack::Slot,
     item: &str,
-    x: &J,
+    x: &Rv,
     weapon: Option<(EntityIdx, Option<&str>)>,
 ) -> bool {
     let Some(o) = x.as_object() else { return false };
@@ -2249,7 +2255,7 @@ fn slot_snapshot_ok(
     };
     if o.len() != KEYS.len() + usize::from(limb.is_none())
         || !KEYS.iter().all(|k| o.contains_key(*k))
-        || limb.is_none() != o.get("IsDirty").is_some_and(J::is_boolean)
+        || limb.is_none() != o.get("IsDirty").is_some_and(Rv::is_boolean)
     {
         return false;
     }
@@ -2260,16 +2266,16 @@ fn slot_snapshot_ok(
     // The slot's item: the sim's (a limb's items get fresh ids at load: the one `InitAttacks`
     // recorded, then), an item reference, and the attack's weapon when the slot holds one.
     let item_ok = match (&o["m_ItemRef"], held) {
-        (J::Null, None) => item.is_empty(),
-        (J::Object(r), Some(i)) => {
-            let id = r.get("$entity").and_then(J::as_str);
+        (Rv::Null, None) => item.is_empty(),
+        (Rv::Object(r), Some(i)) => {
+            let id = r.get("$entity").and_then(Rv::as_str);
             r.len() == 2
-                && r.get("class").and_then(J::as_str) == Some("ItemEntity")
+                && r.get("class").and_then(Rv::as_str) == Some("ItemEntity")
                 && id == Some(item)
                 && (limb.is_some() || id == Some(w.entity(i).unique_id.as_str()))
                 // The weapon is the active slot's item, or (shield bash) its shield's weapon component.
                 && weapon.is_none_or(|(wpn, weapon_item)| {
-                    o.get("m_Active") != Some(&J::Bool(true))
+                    o.get("m_Active") != Some(&Rv::Bool(true))
                         || weapon_item == id
                         || (w.item(i).and_then(|x| x.weapon_component) == Some(wpn)
                             && weapon_item == Some(w.entity(wpn).unique_id.as_str()))
@@ -2278,22 +2284,22 @@ fn slot_snapshot_ok(
         _ => false,
     };
     // `CountableFlag`: a `short` count, `Value` exactly `m_Count > 0`.
-    let flag = |v: &J| {
+    let flag = |v: &Rv| {
         v.as_object().is_some_and(|f| {
-            let count = f.get("m_Count").and_then(J::as_i64).filter(|c| i16::try_from(*c).is_ok());
+            let count = f.get("m_Count").and_then(Rv::as_i64).filter(|c| i16::try_from(*c).is_ok());
             f.len() == 3
                 && count.is_some()
                 && f.get("Count") == f.get("m_Count")
-                && f.get("Value") == count.map(|c| J::Bool(c > 0)).as_ref()
+                && f.get("Value") == count.map(|c| Rv::Bool(c > 0)).as_ref()
         })
     };
-    let snap = |v: &J| match v {
-        J::Null => true,
-        J::Object(m) => {
+    let snap = |v: &Rv| match v {
+        Rv::Null => true,
+        Rv::Object(m) => {
             // `WeaponParticlesSnapMap` (no subclass), by `Snap.Value`'s runtime type name.
             m.len() == 2
-                && m.get("$unity").and_then(J::as_str) == Some("WeaponParticlesSnapMap")
-                && m.get("name").is_some_and(J::is_string)
+                && m.get("$unity").and_then(Rv::as_str) == Some("WeaponParticlesSnapMap")
+                && m.get("name").is_some_and(Rv::is_string)
         }
         _ => false,
     };
@@ -2302,24 +2308,25 @@ fn slot_snapshot_ok(
         p.len() == 4
             && match parent {
                 None => {
-                    p.get("IsNull") == Some(&J::Bool(true))
-                        && p.get("m_Proxy") == Some(&J::Null)
-                        && p.get("EntityId") == Some(&J::Null)
-                        && p.get("FactId") == Some(&J::Null)
+                    p.get("IsNull") == Some(&Rv::Bool(true))
+                        && p.get("m_Proxy") == Some(&Rv::Null)
+                        && p.get("EntityId") == Some(&Rv::Null)
+                        && p.get("FactId") == Some(&Rv::Null)
                 }
                 // The proxy, when resolved, is the owner's.
                 Some(fact) => {
-                    p.get("IsNull") == Some(&J::Bool(false))
-                        && p.get("EntityId").and_then(J::as_str) == Some(owner.as_str())
-                        && p.get("FactId").and_then(J::as_str)
+                    p.get("IsNull") == Some(&Rv::Bool(false))
+                        && p.get("EntityId").and_then(Rv::as_str) == Some(owner.as_str())
+                        && p.get("FactId").and_then(Rv::as_str)
                             == Some(w.fact(fact).unique_id.as_str())
                         && match p.get("m_Proxy") {
-                            Some(J::Null) => true,
-                            Some(J::Object(m)) => {
+                            Some(Rv::Null) => true,
+                            Some(Rv::Object(m)) => {
                                 m.len() == 3
-                                    && m.get("Entity") == Some(&json!({"$unit": owner}))
-                                    && m.get("Id").and_then(J::as_str) == Some(owner.as_str())
-                                    && m.get("IsDisposed") == Some(&J::Bool(false))
+                                    && m.get("Entity")
+                                        .is_some_and(|e| *e == json!({"$unit": owner}))
+                                    && m.get("Id").and_then(Rv::as_str) == Some(owner.as_str())
+                                    && m.get("IsDisposed") == Some(&Rv::Bool(false))
                             }
                             _ => false,
                         }
@@ -4064,19 +4071,21 @@ impl Driver<'_> {
         let r = &self.trace.records[at];
         let call = w.combat.commands.class_call.last().copied().unwrap_or("");
         let target_ok = match t {
-            Some(t) => r.get("target") == Some(&json!({"$unit": w.entity(t).unique_id})),
-            None => r.get("target") == Some(&J::Null),
+            Some(t) => {
+                r.get("target").is_some_and(|x| *x == json!({"$unit": w.entity(t).unique_id}))
+            }
+            None => r.get("target") == Some(&Rv::Null),
         };
         let ok = r["class"].as_str() == Some(&format!("Kingmaker.RuleSystem.Rules.{class}"))
             && r["parent"] == 0
             && r["context_parent"] == 0
             && r["handler"] == 0
-            && r.get("reason_at_push") == Some(&J::Null)
+            && r.get("reason_at_push") == Some(&Rv::Null)
             && r["id"].as_i64().is_some_and(|x| x > 0)
             && r["origin"]
                 .as_str()
                 .is_some_and(|o| attack_chain(o, t_class, frame, call, &self.uc_origin))
-            && r.get("initiator") == Some(&json!({"$unit": w.entity(a).unique_id}))
+            && r.get("initiator").is_some_and(|x| *x == json!({"$unit": w.entity(a).unique_id}))
             && target_ok;
         if !ok {
             return self.uc_reject(
@@ -4110,7 +4119,7 @@ impl Driver<'_> {
         let ok = end > at
             && recs[end]["k"] == "rule_end"
             && span_ok(
-                &recs[at..=end],
+                &recs[at..=end].iter().map(Rv::to_json).collect::<Vec<_>>(),
                 &SpanCx {
                     tick: self.tick,
                     w,
@@ -4413,7 +4422,7 @@ mod tests {
             u,
             spec.slot,
             &spec.item,
-            &slot,
+            &Rv::from(&slot),
             Some((bash, Some(bid.as_str())))
         ));
         assert!(
@@ -4422,7 +4431,7 @@ mod tests {
                 u,
                 spec.slot,
                 &spec.item,
-                &slot,
+                &Rv::from(&slot),
                 Some((bash, Some("another-item")))
             ),
             "another weapon"
@@ -4435,7 +4444,7 @@ mod tests {
                 u,
                 spec.slot,
                 &spec.item,
-                &other,
+                &Rv::from(&other),
                 Some((bash, Some(bid.as_str())))
             ),
             "the slot holding the component"
@@ -4682,7 +4691,7 @@ mod tests {
             if let (J::Object(o), J::Object(e)) = (&mut o, extra) {
                 o.extend(e);
             }
-            o
+            Rv::from(o)
         };
         assert!(boundary(&rec("uc_v", serde_json::json!({}))));
         assert!(boundary(&rec("uc_end", serde_json::json!({"ctx": "base"}))));
@@ -4697,7 +4706,7 @@ mod tests {
             "cd_spend",
             serde_json::json!({"caller": "x < TurnBased.Controllers.TurnController.Prepare"})
         )));
-        assert!(boundary(&serde_json::json!({"k": "tick"})));
-        assert!(!boundary(&serde_json::json!({"k": "rule"})));
+        assert!(boundary(&Rv::from(serde_json::json!({"k": "tick"}))));
+        assert!(!boundary(&Rv::from(serde_json::json!({"k": "rule"}))));
     }
 }

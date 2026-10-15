@@ -11,6 +11,10 @@ fn world_in_area() -> (World, EntityIdx) {
     (w, u)
 }
 
+fn rvs(v: &[J]) -> Vec<Rv> {
+    v.iter().map(Rv::from_json).collect()
+}
+
 fn rec(k: &str, extra: J) -> J {
     let mut v = json!({"k": k});
     if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
@@ -30,7 +34,7 @@ fn trace(mut records: Vec<J>) -> Trace {
             o.entry("seq").or_insert(J::from(n));
         }
     }
-    Trace { records, sites: HashMap::default() }
+    Trace { records: rvs(&records), sites: HashMap::default() }
 }
 
 fn tick(t: i64, mode: i64) -> J {
@@ -462,11 +466,11 @@ fn the_turn_based_state_is_checked_against_the_time_records() {
 #[test]
 fn an_echoed_root_must_be_inert() {
     let clean = [rec("h", json!({})), rec("rule_end", json!({}))];
-    assert!(echo_span_is_inert(&clean));
-    assert!(echo_span_is_inert(&[rec("draw", json!({"c": "pres"}))]));
-    assert!(!echo_span_is_inert(&[rec("draw", json!({"c": "sim", "rule": 3}))]));
-    assert!(!echo_span_is_inert(&[rec("mut", json!({"what": "damage"}))]));
-    assert!(!echo_span_is_inert(&[rec("rule", json!({"depth": 1}))]));
+    assert!(echo_span_is_inert(&rvs(&clean)));
+    assert!(echo_span_is_inert(&rvs(&[rec("draw", json!({"c": "pres"}))])));
+    assert!(!echo_span_is_inert(&rvs(&[rec("draw", json!({"c": "sim", "rule": 3}))])));
+    assert!(!echo_span_is_inert(&rvs(&[rec("mut", json!({"what": "damage"}))])));
+    assert!(!echo_span_is_inert(&rvs(&[rec("rule", json!({"depth": 1}))])));
 }
 
 /// The observation rows establish a position only where they were written for a unit that was
@@ -546,9 +550,9 @@ fn a_recorded_distance_outcome_is_the_about_handlers() {
         )
     };
     let span = [h(1, "about"), end(1, true), h(2, "did"), end(2, false)];
-    assert_eq!(recorded_distance(&span).get("51BB"), Some(&true));
+    assert_eq!(recorded_distance(&rvs(&span)).get("51BB"), Some(&true));
     let span = [h(1, "about"), end(1, false)];
-    assert_eq!(recorded_distance(&span).get("51BB"), Some(&false));
+    assert_eq!(recorded_distance(&rvs(&span)).get("51BB"), Some(&false));
 }
 
 /// An attack environment with a value the oracle couldn't read (flanking outside turn-based
@@ -930,13 +934,13 @@ fn a_dying_current_units_clear_is_the_life_controllers() {
     let mut t = trace(recs.clone());
     let _ = run(&mut w, &t);
     w.unit_mut(u).expect("unit").marked_for_death = true;
-    t.records = vec![
+    t.records = rvs(&[
         tick(3, 1),
         tb(3, "turn_clear", Some("u"), 5 * S),
         json!({"k": "rule", "t": 3, "id": 1, "depth": 0, "class": "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll",
             "initiator": {"$unit": "u"}, "fields": {}}),
         json!({"k": "rule_end", "t": 3, "id": 1}),
-    ];
+    ]);
     // `run` starts with combat off: carry the turn controller's state over.
     let (units, cur) = (w.combat.tb_units.clone(), w.combat.current_unit);
     w.combat.tb_units = units;
@@ -1186,7 +1190,7 @@ fn a_call_site_root_holds_nothing_but_itself() {
     };
     let steps = [rec("about", json!({})), rec("h", json!({})), rec("h_end", json!({}))];
     let ok = [steps.to_vec(), vec![env("a", "b"), rec("rule_end", json!({}))]].concat();
-    assert!(origin_span_is_inert(&root, &ok));
+    assert!(origin_span_is_inert(&Rv::from(&root), &rvs(&ok)));
     for bad in [
         rec("obs", json!({"ev": "join_combat"})),
         rec("obs", json!({"ev": "u"})),
@@ -1196,13 +1200,16 @@ fn a_call_site_root_holds_nothing_but_itself() {
         env("a", "c"),
     ] {
         let span = [steps.to_vec(), vec![bad.clone()]].concat();
-        assert!(!origin_span_is_inert(&root, &span), "{bad}");
+        assert!(!origin_span_is_inert(&Rv::from(&root), &rvs(&span)), "{bad}");
     }
-    assert!(!origin_span_is_inert(&root, &[env("a", "b"), env("a", "b")]), "two envs");
+    assert!(
+        !origin_span_is_inert(&Rv::from(&root), &rvs(&[env("a", "b"), env("a", "b")])),
+        "two envs"
+    );
     // Only a flat-footed check has an env of its own.
     let count = json!({"k": "rule", "class": "Kingmaker.RuleSystem.Rules.RuleCalculateAttacksCount",
         "initiator": {"$unit": "a"}, "target": null, "depth": 0});
-    assert!(!origin_span_is_inert(&count, &[env("a", "b")]));
+    assert!(!origin_span_is_inert(&Rv::from(&count), &rvs(&[env("a", "b")])));
 }
 
 /// `BuffCollection.Postpone` moves every finite buff time by the time since the last tick that

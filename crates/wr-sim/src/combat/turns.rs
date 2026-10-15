@@ -54,7 +54,7 @@ pub struct ChooseInput {
 impl ChooseInput {
     /// Parses a `choose_next` observation.
     #[must_use]
-    pub fn parse(r: &serde_json::Value) -> Option<Self> {
+    pub fn parse(r: &super::oracle::Rv) -> Option<Self> {
         let units = r["units"]
             .as_array()?
             .iter()
