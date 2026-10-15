@@ -5979,7 +5979,40 @@ fn missing_or_wrong_memory_additions_are_reported() {
     }
     const C: &str = "driven replay: commands:";
     const M: &str = "driven replay: memory:";
-    let cases: [(&str, Change); 9] = [
+    let cases: [(&str, Change); 12] = [
+        // Both calls after the impatience handler's record.
+        (M, |recs| {
+            let at = mem_q(recs);
+            let pair = [recs.remove(at), recs.remove(at)];
+            let bother = at + recs[at..].iter().position(|r| r["ev"] == "imp_s").unwrap();
+            for (n, r) in pair.into_iter().enumerate() {
+                recs.insert(bother + 1 + n, r);
+            }
+            renumber(recs);
+        }),
+        // One more after its rule's end, outside the span.
+        (M, |recs| {
+            let at = mem_q(recs);
+            let end = at
+                + recs[at..]
+                    .iter()
+                    .position(|r| r["k"] == "rule_end" && r["id"] == recs[at - 1]["rule"])
+                    .unwrap();
+            let r = recs[at].clone();
+            recs.insert(end + 1, r);
+            renumber(recs);
+        }),
+        // A command's act's with another producer.
+        (M, |recs| {
+            let at = recs
+                .iter()
+                .position(|r| {
+                    r["ev"] == "mem_q"
+                        && r["by"].as_str().is_some_and(|b| b.contains("HandleUnitCommandDidAct"))
+                })
+                .unwrap();
+            recs[at]["by"] = json!("UnitMemoryController.AddToMemory<StartCombat.RunAction");
+        }),
         // The observer's and the target's addition swapped.
         (M, |recs| {
             let at = mem_q(recs);

@@ -151,6 +151,8 @@ pub struct Outcome {
     /// The memory controller's `AddToMemory` calls in offensive actions (`memory` observer), each
     /// matched with the sim's.
     pub mem_adds: usize,
+    /// Its `AddToMemory` calls in commands' acts, taken as inputs (`mem_q` outside a rule).
+    pub mem_act_inputs: usize,
     /// The movement agent (`agent` observer): its entries run (`TickUnit`, `PathTo`,
     /// `OnPathComplete`, calls), the states checked, the units ticked, the requests checked, its
     /// draws, and what it still takes from the recording, by kind.
@@ -3154,6 +3156,8 @@ impl Driver<'_> {
                 }
                 super::life::join_combat(w, u);
             }
+            // The memory controller's `AddToMemory` outside a rule's span.
+            Some("mem_q") => self.mem_q_outside(w, r),
             _ => {}
         }
     }

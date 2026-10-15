@@ -385,6 +385,36 @@ impl Driver<'_> {
         Ok(())
     }
 
+    /// A `mem_q` outside a rule's span: only a command's act makes one there in these fights
+    /// (`HandleUnitCommandDidAct`: a players' enemy's command on a unit of the player's faction),
+    /// taken as an input of its writer's shape, of its frame, its units the sim's (the commands
+    /// model doesn't raise it to the memory model yet: docs/poc5/memory.md, wiring notes).
+    /// Anything else (an offensive action's outside its rule, `StartCombat`, a random encounter,
+    /// a dungeon) is reported.
+    pub(super) fn mem_q_outside(&mut self, w: &mut World, r: &J) {
+        let unit = |k: &str| r[k].as_str().is_some_and(|id| is_unit(w, id));
+        let ok = fields(r, &["o", "tgt", "peaceful", "queued", "exc", "by"])
+            && r["t"].as_i64() == Some(self.tick)
+            && r["exc"] == false
+            && r["peaceful"].is_boolean()
+            && r["queued"].is_boolean()
+            && unit("o")
+            && unit("tgt")
+            && r["by"].as_str().is_some_and(|b| {
+                b.starts_with(
+                "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitCommandDidAct<",
+            )
+            });
+        if ok {
+            self.out.mem_act_inputs += 1;
+        } else {
+            w.coverage.unsupported(format!(
+                "driven replay: memory: an AddToMemory outside an offensive action's rule that isn't a command's act ({})",
+                describe(r)
+            ));
+        }
+    }
+
     /// The impatience records inside a rule's span (`start..=end`), after the sim fired it. Each
     /// must be of its frame and written inside a did handler of its rule: the impatience
     /// controller's for a `RuleDealDamage` (the damaged unit's bother unit, then the handler's end,
@@ -528,6 +558,22 @@ impl Driver<'_> {
                         let damage = handlers.last().is_some_and(|(class, ..)| {
                             class == "Kingmaker.Controllers.UnitImpatienceController"
                         });
+                        // The event's memory subscriber runs before the impatience one: its calls
+                        // are all in by an offensive action's bother record.
+                        if !damage
+                            && w.combat
+                                .impatience
+                                .memory_adds
+                                .as_ref()
+                                .is_some_and(|q| !q.is_empty())
+                        {
+                            w.coverage.unsupported(
+                                "driven replay: memory: an offensive action's AddToMemory after its impatience record",
+                            );
+                            if let Some(q) = w.combat.impatience.memory_adds.as_mut() {
+                                q.clear();
+                            }
+                        }
                         self.imp_record_in(w, k, Some(damage));
                     } else {
                         w.coverage.unsupported(format!(

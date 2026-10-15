@@ -285,10 +285,41 @@ struct TickWorld<'c, 'a> {
     frame: i32,
     /// `Cleanup`'s removals (`mem_remove`, by `Cleanup`) seen on the way: (group, unit).
     removals: Vec<(u32, u32)>,
+    /// The memory's recorded changes since the last comparison, in order.
     changes: Changes,
+    /// The model's, in the order it made them (collected from the memories it touched before each
+    /// read: a step changes one memory at most between two reads).
+    model_changes: Changes,
 }
 
 impl<'a> TickWorld<'_, 'a> {
+    /// The model's changes since the last read, appended in order.
+    fn sync(&mut self) -> Result<(), Desync> {
+        let mut changed = Vec::new();
+        for (&g, m) in &mut self.mem {
+            let c = m.take_changes();
+            if !c.is_empty() {
+                changed.push((g, c));
+            }
+        }
+        if changed.len() > 1 {
+            return Err(Desync("the model changed two memories between two reads".into()));
+        }
+        for (g, c) in changed {
+            self.model_changes.extend(c.into_iter().map(|x| (g, x)));
+        }
+        Ok(())
+    }
+
+    /// The recorded changes so far equal the model's, in order.
+    fn compare_changes(&mut self) -> Result<(), Desync> {
+        self.sync()?;
+        let (rec, model) =
+            (std::mem::take(&mut self.changes), std::mem::take(&mut self.model_changes));
+        check_changes(self.c, &rec, &model);
+        Ok(())
+    }
+
     /// A record passed on the way to the next one the tick asks for.
     fn on_the_way(&mut self, r: &Value) -> Result<(), Desync> {
         if r["t"].as_i64() != Some(self.c.t) {
@@ -339,6 +370,7 @@ impl<'a> TickWorld<'_, 'a> {
 
     /// The next record the tick asks for (a structural one is left in place).
     fn next(&mut self, what: &str) -> Result<&'a Value, Desync> {
+        self.sync()?;
         self.drain()?;
         let recs: &'a [Value] = self.c.recs;
         let r = recs.get(self.c.i).ok_or_else(|| Desync(format!("{what}: the recording ends")))?;
@@ -384,26 +416,24 @@ impl<'a> TickWorld<'_, 'a> {
     }
 }
 
-/// The memory's recorded additions (new keys) and removals by `Remove` of one group, in order,
-/// are the model's.
-fn check_changes(c: &mut Check<'_>, recorded: &mut Changes, g: u32, model: &[Change<u32>]) {
-    let mine: Vec<Change<u32>> = recorded.iter().filter(|x| x.0 == g).map(|x| x.1).collect();
-    recorded.retain(|x| x.0 != g);
-    if mine != model {
-        let show = |v: &[Change<u32>]| -> Vec<String> {
+/// The memory's recorded additions (new keys) and removals by `Remove`, in order across every
+/// memory, are the model's.
+fn check_changes(c: &mut Check<'_>, recorded: &Changes, model: &Changes) {
+    if recorded != model {
+        let show = |v: &Changes| -> Vec<String> {
             v.iter()
-                .map(|x| match *x {
-                    Change::Added(k) => format!("+{}", c.name(k)),
-                    Change::Removed(k) => format!("-{}", c.name(k)),
+                .map(|&(g, x)| match x {
+                    Change::Added(k) => format!("{}+{}", c.name(g), c.name(k)),
+                    Change::Removed(k) => format!("{}-{}", c.name(g), c.name(k)),
                 })
                 .collect()
         };
-        let (a, b) = (show(model), show(&mine));
-        c.fail(format!("{}'s changes: model {a:?}, game {b:?}", c.name(g)));
+        let (a, b) = (show(model), show(recorded));
+        c.fail(format!("the memories' changes: model {a:?}, game {b:?}"));
     }
-    let adds = mine.iter().filter(|x| matches!(x, Change::Added(_))).count();
+    let adds = recorded.iter().filter(|x| matches!(x.1, Change::Added(_))).count();
     c.count("additions recorded", adds);
-    c.count("removals recorded", mine.len() - adds);
+    c.count("removals recorded", recorded.len() - adds);
 }
 
 fn bool_of(r: &Value, k: &str) -> Result<bool, Desync> {
@@ -606,9 +636,8 @@ impl MemoryWorld<u32, u32> for TickWorld<'_, '_> {
             let n = self.c.name(g).to_owned();
             self.c.fail(format!("{n}'s memory after its pass: model {a}, game {b}"));
         }
-        // What the pass added and removed, in order.
-        let changes = self.memory(g)?.take_changes();
-        check_changes(self.c, &mut self.changes, g, &changes);
+        // What the tick added and removed so far, in order.
+        self.compare_changes()?;
         // `Cleanup`'s removals, in removal order.
         let seen: Vec<u32> = self.removals.iter().filter(|x| x.0 == g).map(|x| x.1).collect();
         self.removals.retain(|x| x.0 != g);
@@ -816,14 +845,17 @@ impl Check<'_> {
             frame,
             removals: Vec::new(),
             changes: Vec::new(),
+            model_changes: Vec::new(),
         };
-        let res = super::tick(&mut ctl, &mut w).and_then(|()| w.drain());
-        let TickWorld { mem, removals, changes, .. } = w;
+        let res = super::tick(&mut ctl, &mut w).and_then(|()| w.drain()).and_then(|()| w.sync());
+        let TickWorld { mem, removals, changes, model_changes, .. } = w;
         let res = res.and_then(|()| {
             if !removals.is_empty() {
                 return Err(Desync(format!("Cleanup removals outside a pass: {removals:?}")));
             }
-            self.tick_end(gt, mem, changes)
+            // The queue's changes, in order.
+            check_changes(self, &changes, &model_changes);
+            self.tick_end(gt, mem)
         });
         match res {
             Ok(()) => {
@@ -839,14 +871,8 @@ impl Check<'_> {
     }
 
     /// The tick's end: each group whose memory changed since its last record (`mem_s` at "end"),
-    /// then `mem_tick_end`; every memory the tick touched equals its last record, and the queue's
-    /// recorded additions are the model's.
-    fn tick_end(
-        &mut self,
-        gt: i64,
-        mut mem: HashMap<u32, GroupMemory<u32>>,
-        mut changes: Changes,
-    ) -> Result<(), Desync> {
+    /// then `mem_tick_end`; every memory the tick touched equals its last record.
+    fn tick_end(&mut self, gt: i64, mut mem: HashMap<u32, GroupMemory<u32>>) -> Result<(), Desync> {
         let recs = self.recs;
         let mut seen = BTreeSet::new();
         loop {
@@ -865,10 +891,7 @@ impl Check<'_> {
                 if !seen.insert(g) || row == before {
                     return Err(Desync(format!("{}'s end row twice or unchanged", self.name(g))));
                 }
-                let (model, model_changes) = match mem.remove(&g) {
-                    Some(mut m) => (m.layout(), m.take_changes()),
-                    None => (before, Vec::new()),
-                };
+                let model = mem.remove(&g).map_or(before, |m| m.layout());
                 if model != row {
                     let (a, b) = (self.show(&model), self.show(&row));
                     self.fail(format!(
@@ -876,7 +899,6 @@ impl Check<'_> {
                         self.name(g)
                     ));
                 }
-                check_changes(self, &mut changes, g, &model_changes);
                 self.recorded.insert(g, row);
                 self.count("changed by the queue", 1);
                 continue;
@@ -897,7 +919,7 @@ impl Check<'_> {
             )));
         }
         // The memories the tick touched and the game didn't record as changed.
-        for (g, mut m) in mem {
+        for (g, m) in mem {
             let model = m.layout();
             let last =
                 self.recorded.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
@@ -908,12 +930,6 @@ impl Check<'_> {
                     self.name(g)
                 ));
             }
-            let model_changes = m.take_changes();
-            check_changes(self, &mut changes, g, &model_changes);
-        }
-        if !changes.is_empty() {
-            let n = changes.len();
-            self.fail(format!("{n} recorded changes of memories the model didn't touch"));
         }
         Ok(())
     }
@@ -1212,8 +1228,13 @@ fn window() -> Vec<Value> {
         q("e1", "f1", false, true),
         q("e1", "f1", false, false),
         q("e1", "p1", true, false),
+        q("a1", "x7", false, true),
         frame(1),
-        rec(1, "mem_tick", json!({"gt": GT + 1, "frame": 102, "q": [["e1", "f1"]], "pending": []})),
+        rec(
+            1,
+            "mem_tick",
+            json!({"gt": GT + 1, "frame": 102, "q": [["e1", "f1"], ["a1", "x7"]], "pending": []}),
+        ),
         row(
             1,
             Some("pre"),
@@ -1223,7 +1244,11 @@ fn window() -> Vec<Value> {
         leaf(1, "apeace", json!({"v": true})),
         rec(1, "mem_tick_end", json!({"gt": GT + 1, "exc": false})),
         frame(2),
-        rec(2, "mem_tick", json!({"gt": GT + 2, "frame": 103, "q": [["e1", "f1"]], "pending": []})),
+        rec(
+            2,
+            "mem_tick",
+            json!({"gt": GT + 2, "frame": 103, "q": [["e1", "f1"], ["a1", "x7"]], "pending": []}),
+        ),
         leaf(2, "apeace", json!({"v": false})),
         leaf(2, "ready", json!({"v": []})),
         leaf(2, "disp", json!({"u": "e1", "v": false})),
@@ -1234,7 +1259,22 @@ fn window() -> Vec<Value> {
         leaf(2, "grp", json!({"u": "e1", "v": "E"})),
         rec(2, "mem_add", json!({"group": "E", "u": "f1", "by": "x"})),
         leaf(2, "wake", json!({"u": "e1", "time": "0", "fade": false, "b": "3", "a": "3"})),
+        // a1 (group A) remembers x7, in A's freed slot.
+        leaf(2, "disp", json!({"u": "a1", "v": false})),
+        leaf(2, "disp", json!({"u": "x7", "v": false})),
+        leaf(2, "grp", json!({"u": "a1", "v": "A"})),
+        leaf(2, "stl", json!({"u": "x7", "g": "A", "v": false})),
+        leaf(2, "grp", json!({"u": "a1", "v": "A"})),
+        leaf(2, "grp", json!({"u": "a1", "v": "A"})),
+        rec(2, "mem_add", json!({"group": "A", "u": "x7", "by": "x"})),
+        leaf(2, "wake", json!({"u": "a1", "time": "0", "fade": false, "b": "0", "a": "0"})),
         row(2, Some("end"), "E", json!([["f1", GT + 2, false]])),
+        row(
+            2,
+            Some("end"),
+            "A",
+            json!([["a1", GT, false], ["x7", GT + 2, false], ["e1", GT, false], ["a2", GT, false]]),
+        ),
         rec(2, "mem_tick_end", json!({"gt": GT + 2, "exc": false})),
     ]
 }
@@ -1256,11 +1296,11 @@ fn a_hand_made_window_checks_clean() {
     assert_eq!(c.counts["groups passed"], 1);
     assert_eq!(c.counts["forgotten"], 1);
     assert_eq!(c.counts["friend phase computed"], 1);
-    assert_eq!(c.counts["changed by the queue"], 2);
-    assert_eq!(c.counts["additions recorded"], 4);
-    assert_eq!(c.counts["additions queued"], 1);
+    assert_eq!(c.counts["changed by the queue"], 3);
+    assert_eq!(c.counts["additions recorded"], 5);
+    assert_eq!(c.counts["additions queued"], 2);
     assert_eq!(c.counts["additions not queued"], 2);
-    assert_eq!(c.counts["observers woken"], 2);
+    assert_eq!(c.counts["observers woken"], 3);
 }
 
 #[test]
@@ -1273,10 +1313,10 @@ fn a_tick_after_a_desync_is_still_checked() {
     c.run();
     assert_eq!(c.errors.len(), 1, "{:?}", c.errors);
     assert_eq!(c.counts["ticks"], 3);
-    assert_eq!(c.counts["changed by the queue"], 1);
+    assert_eq!(c.counts["changed by the queue"], 2);
     // And the third tick's own damage is still caught.
     let j = v.iter().rposition(|r| r["f"] == "wake").unwrap();
-    v[j]["a"] = json!("0");
+    v[j]["a"] = json!("5");
     assert_eq!(errors_of(&v).len(), 2);
 }
 
@@ -1363,6 +1403,15 @@ fn a_damaged_window_is_caught() {
                 let (x, y) = (v[add]["u"].clone(), v[add + 1 + j]["u"].clone());
                 v[add]["u"] = y;
                 v[add + 1 + j]["u"] = x;
+            }),
+        ),
+        (
+            "two groups' additions in the queue swapped",
+            Box::new(|v| {
+                let adds: Vec<usize> =
+                    (0..v.len()).filter(|&i| v[i]["ev"] == "mem_add" && v[i]["t"] == 2).collect();
+                let [a, b] = adds[..] else { panic!("two additions in the third tick") };
+                v.swap(a, b);
             }),
         ),
         ("a pre row twice", twice(pre)),
