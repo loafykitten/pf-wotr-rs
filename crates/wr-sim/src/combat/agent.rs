@@ -182,6 +182,8 @@ pub trait AgentInputs {
     /// The agent called its own method `f` (`Stop`, `CompleteMovement`, `InterruptMovement`,
     /// `SetWaypoint` with its index): the recording's call must be it.
     fn call(&mut self, w: &mut World, u: EntityIdx, f: &'static str, index: Option<i32>) -> R<()>;
+    /// The agent's own method `f` returned: the recording's end of that call (its state after).
+    fn call_end(&mut self, w: &mut World, u: EntityIdx, f: &'static str) -> R<()>;
     /// `unit.EntityData.Group?.Memory != null` (`ConnectToGroups` returns before marking the
     /// agents without it).
     fn group_memory(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
@@ -478,7 +480,8 @@ pub fn stop(w: &mut World, u: EntityIdx, inp: &mut dyn AgentInputs) -> R<()> {
     a.dest = None;
     a.next_index = 0;
     a.vel = [0.0; 3];
-    connect_to_groups(w, u, inp)
+    connect_to_groups(w, u, inp)?;
+    inp.call_end(w, u, "Stop")
 }
 
 /// `ObstaclesHelper.GroupingForbidden`: a unit that wants to move, or is prone.
@@ -521,7 +524,8 @@ pub fn interrupt_movement(w: &mut World, u: EntityIdx, inp: &mut dyn AgentInputs
     if let Some(dest) = agent(w, u)?.dest {
         inp.movement_interrupted(w, u, dest)?;
     }
-    stop(w, u, inp)
+    stop(w, u, inp)?;
+    inp.call_end(w, u, "InterruptMovement")
 }
 
 /// `CompleteMovement()`: stopped within the approach radius of the destination, else
@@ -542,12 +546,19 @@ pub fn complete_movement(w: &mut World, u: EntityIdx, inp: &mut dyn AgentInputs)
     } else {
         interrupt_movement(w, u, inp)?;
     }
-    inp.movement_complete(w, u)
+    inp.movement_complete(w, u)?;
+    inp.call_end(w, u, "CompleteMovement")
 }
 
 /// `SetWaypoint(index)` (an invalid index only logs).
 pub fn set_waypoint(w: &mut World, u: EntityIdx, index: i32, inp: &mut dyn AgentInputs) -> R<()> {
     inp.call(w, u, "SetWaypoint", Some(index))?;
+    set_waypoint_body(w, u, index, inp)?;
+    inp.call_end(w, u, "SetWaypoint")
+}
+
+/// `SetWaypoint`'s body (an invalid index only logs).
+fn set_waypoint_body(w: &mut World, u: EntityIdx, index: i32, inp: &mut dyn AgentInputs) -> R<()> {
     let a = agent_mut(w, u)?;
     let Some(path) = a.path.as_ref() else { return Ok(()) };
     let n = path.points.len() as i32;

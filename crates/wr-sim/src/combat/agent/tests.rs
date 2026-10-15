@@ -442,6 +442,28 @@ impl AgentInputs for Recorded<'_> {
             }
         }
     }
+    fn call_end(&mut self, w: &mut World, u: EntityIdx, f: &'static str) -> R<()> {
+        // The call's end record: the next one of the agent's (ends are skipped by the input pulls),
+        // its state compared with the agent's now.
+        let Some(k) = self.recs[self.at..]
+            .iter()
+            .position(|r| !(r["ev"] == "ag_v" && r["f"] == "canmovetb") && r["ev"] != "ag_pathdef")
+        else {
+            return Err(Desync(format!("{f} returned; the tick's records ended")));
+        };
+        let r = self.recs[self.at + k];
+        if r["ev"] != "ag_call_end" || r["fn"] != f {
+            return Err(Desync(format!("{f} returned; the recording has {r}")));
+        }
+        self.at += k + 1;
+        let want = agent_from(&r["s"], &Paths::default());
+        let ours = &w.unit(u).ok_or_else(|| Desync("no unit".into()))?.combat.agent;
+        // Paths compare by key (the empty table gives keys only).
+        for d in diff(ours, &want, r["s"].get("conn").is_some()) {
+            self.errors.push(format!("at {f}'s end: {d}"));
+        }
+        Ok(())
+    }
     fn group_memory(&mut self, _: &mut World, _: EntityIdx) -> R<bool> {
         // Since `poc5-tb-103` the evaluation `ConnectToGroups` makes (the `Group` getter resolves the
         // group lazily); before, the state at the tick's start.
