@@ -260,6 +260,15 @@ split snapshot block; FindPath callbacks' provenance, a real-time frame without 
 defaults; position writes inside the controller, deliveries' pairing and uniqueness, carried requests; the last
 frame's delivery, the request frame. Round 6 found nothing.
 
+**`poc5-tb-114`** (with the `paths` observer too) ends its fight while the UI guard is up: the frame's
+`UnitMoveController` returns early (`turn_tick` says `guard=1`), and the guard drops later in the frame, inside the
+UI's `HandlePartyCombatStateChanged` right before `HandleCombatEnd`. The replay's `ui_guard` handler had placed that
+change in the turn controller's phase, so the move batch saw the guard down and expected every unit. A guard change
+followed in its frame by `combat_start`/`combat_end` (only other guard records or `delayed_schedule` between) is now
+placed with the combat change (`Phase::Join`, after the move phase): **every run of `-114` is valid with the agent
+driven**, and `-113`, `-112`, `-111` and `-109` still are (`-115` to `-117` report only the combat log, not the agent).
+`driven_agent_replays_are_valid` (`poc5_agent.rs`) replays `-113` and `-114`. gpt-6.1-sol: no findings.
+
 Left: `UnitCommands.InterruptMove` from `TickUnit` (reported where reached), `LookAt`/`DesiredOrientation`, the
 units' `ControlledByDirector` (reported in a cutscene), mounts, real time.
 
