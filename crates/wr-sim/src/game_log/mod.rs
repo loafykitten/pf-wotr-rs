@@ -240,9 +240,11 @@ pub enum Payload {
     Initiative {
         initiator: EntityIdx,
         result: i32,
-        d20: i32,
+        d20: Roll,
         modifier: i32,
     },
+    /// A `RuleRollD20`.
+    D20(Roll),
     CanApplyBuff {
         initiator: EntityIdx,
         blueprint: wr_content::Guid,
@@ -281,6 +283,8 @@ pub struct AttackRollLog {
     pub weapon_item: EntityIdx,
     pub weapon_bp: wr_content::Guid,
     pub d20: i32,
+    /// `D20` as a roll (its first d20).
+    pub d20_roll: Roll,
     pub attack_bonus: i32,
     pub target_ac: i32,
     /// `AttackResult`.
@@ -381,6 +385,8 @@ pub struct GameLog {
     /// Attack rolls' log state by rule sequence number: `AttackLogEntry` (a message made and
     /// kept while `SuspendCombatLog`), `SuspendCombatLog`, `AddedToCombatLog`.
     pub attack_state: HashMap<u64, AttackState>,
+    /// The d20 rolls finished inside each open event, in order.
+    pub d20s: HashMap<usize, Vec<Roll>>,
     pub out: Vec<Out>,
 }
 
@@ -448,13 +454,19 @@ pub fn did_trigger(w: &mut World, rule: &mut dyn RuleEvent) {
         return;
     }
     w.game_log.stack.pop();
-    let payload = payload_of(w, rule);
+    let payload = payload_of(w, rule, top);
+    // A d20 roll is its parent's `D20` (the first) or another of its rolls.
+    if let Payload::D20(r) = &payload
+        && let Some(&parent) = w.game_log.stack.last()
+    {
+        w.game_log.d20s.entry(parent).or_default().push(r.clone());
+    }
     w.game_log.events[top].payload = payload;
     add_ready(w, top);
 }
 
 /// The payload of a finished rule.
-fn payload_of(w: &mut World, rule: &mut dyn RuleEvent) -> Payload {
+fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
     use crate::combat::attack::{RuleAttackRoll, RuleAttackWithWeapon, RuleDealDamage};
     let explicit_reason = rule.base().reason.as_deref().is_some_and(|r| r != "self" && !r.starts_with("previous:"));
     let any = rule.as_any();
@@ -467,6 +479,7 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent) -> Payload {
             weapon_item: r.weapon.item,
             weapon_bp: r.weapon.bp.guid,
             d20: r.d20,
+            d20_roll: first_d20(w, ev, r.d20),
             attack_bonus: r.attack_bonus,
             target_ac: r.target_ac,
             result: r.result,
@@ -496,7 +509,7 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent) -> Payload {
         return Payload::Initiative {
             initiator: r.initiator,
             result: r.result(),
-            d20: r.d20,
+            d20: first_d20(w, ev, r.d20),
             modifier: r.modifier,
         };
     }
@@ -507,8 +520,33 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent) -> Payload {
             immunity: r.immunity,
         };
     }
-    let _ = w;
+    if let Some(r) = any.downcast_ref::<crate::rules::checks::RuleRollDice>()
+        && r.d20
+    {
+        // `Rerolls` (each reroll's source) isn't kept by the sim: a roll with rerolls is known by
+        // its result only.
+        return Payload::D20(if r.reroll_amount == 0 {
+            Roll::Known(LogRoll {
+                result: r.result(),
+                history: r.roll_history.clone(),
+                replaced_one: r.replaced_one(),
+                replace_one_with_max: r.replace_one_with_max,
+                rerolls: None,
+            })
+        } else {
+            Roll::ResultOnly(r.result())
+        });
+    }
     Payload::None
+}
+
+/// A rule's `D20`: the first d20 rolled inside it (its event's child), when its result is the
+/// rule's; else known by its result only.
+fn first_d20(w: &World, ev: usize, result: i32) -> Roll {
+    match w.game_log.d20s.get(&ev).and_then(|v| v.first()) {
+        Some(Roll::Known(r)) if r.result == result => Roll::Known(r.clone()),
+        _ => Roll::ResultOnly(result),
+    }
 }
 
 /// `GameLogController.AddReadyEvent`: `IsEnabled` (a rule event's reads its rule's
@@ -863,7 +901,7 @@ fn attack_data_in_scope(w: &mut World, a: &AttackRollLog) -> Result<Option<Msg0>
         c.source_unit = Some(a.initiator);
         c.target = Some(a.target);
         c.roll = crate::csharp::arith::add(a.d20, a.attack_bonus);
-        c.d20 = Roll::ResultOnly(a.d20);
+        c.d20 = a.d20_roll.clone();
         c.modifier = a.attack_bonus;
         c.dc = a.target_ac;
     }
@@ -965,7 +1003,7 @@ fn initiative_thread(
     e: usize,
     initiator: EntityIdx,
     result: i32,
-    d20: i32,
+    d20: Roll,
     modifier: i32,
 ) -> R {
     w.game_log.retain();
@@ -973,7 +1011,7 @@ fn initiative_thread(
         let c = &mut w.game_log.ctx;
         c.source_unit = Some(initiator);
         c.roll = result;
-        c.d20 = Roll::ResultOnly(d20);
+        c.d20 = d20;
         c.modifier = modifier;
     }
     let r = game_log_message(w, "GameLog/InitiativeRoll");
