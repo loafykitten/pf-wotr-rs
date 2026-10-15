@@ -6118,3 +6118,184 @@ fn missing_or_wrong_memory_additions_are_reported() {
     }
     assert!(missed.is_empty(), "{missed:#?}");
 }
+
+/// With the `memory` observer the group memory is the sim's (docs/poc5/memory.md, H2): every run of
+/// `-111` and `-114` is valid with the controller's ticks run, their reads and states checked, and
+/// the other models' memory reads checked; every way of damaging what the memory follows is
+/// reported.
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18 and the poc5-tb-111 and -114 captures"]
+#[allow(clippy::too_many_lines)]
+fn computed_memory_replays_are_valid_and_damage_is_reported() {
+    use serde_json::Value as V;
+    for (capture, fight) in [
+        ("poc5-tb-111", "tb-nearest"),
+        ("poc5-tb-111", "tb-focus"),
+        ("poc5-tb-114", "tb-nearest"),
+        ("poc5-tb-114", "tb-focus"),
+    ] {
+        let Some(dir) = fixture_in(capture, fight) else {
+            eprintln!("{capture}/{fight} not present: skipped");
+            continue;
+        };
+        for run in ["record", "replay-1", "replay-2"] {
+            let name = format!("{capture}/{fight} {run}");
+            let (out, w) = replay::run_fixture(SAVE, &dir, run).expect("replay");
+            assert!(w.valid(), "{name}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+            assert!(out.diff.equal, "{name}: {:?}", out.diff.first_difference);
+            assert!(
+                out.mem_ticks > 1000 && out.mem_reads > 100_000 && out.mem_rows > 1000,
+                "{name}"
+            );
+            assert!(
+                out.mem_checked.get("engagement's Enemies").copied().unwrap_or(0) > 1000,
+                "{name}"
+            );
+            assert!(
+                out.mem_checked.get("flat-footed check's Contains").copied().unwrap_or(0) > 0,
+                "{name}"
+            );
+            assert!(out.mem_queued_checked > 0, "{name}");
+        }
+    }
+    let Some(dir) = fixture_in("poc5-tb-111", "tb-nearest") else { return };
+    type Change = fn(&mut Vec<V>);
+    fn ev(r: &V, e: &str) -> bool {
+        r["k"] == "obs" && r["ev"] == e
+    }
+    fn leaf(r: &V, f: &str) -> bool {
+        ev(r, "mem_v") && r["f"] == f && r["t"].as_i64() > Some(300)
+    }
+    fn pos(recs: &[V], f: impl Fn(&V) -> bool) -> usize {
+        recs.iter().position(f).expect("a record to damage")
+    }
+    fn flip(r: &mut V, k: &str) {
+        let b = r[k].as_bool().expect("a boolean");
+        r[k] = json!(!b);
+    }
+    const M: &str = "driven replay: memory:";
+    const S: &str = "memory: the sim's";
+    let cases: [(&str, Change); 16] = [
+        // Inputs the memory follows: the sim's memory then differs from the recorded states.
+        (M, |recs| {
+            let at = pos(recs, |r| leaf(r, "los") && r["v"] == true);
+            flip(&mut recs[at], "v");
+        }),
+        (M, |recs| {
+            let at =
+                pos(recs, |r| leaf(r, "near") && r["v"].as_array().is_some_and(|a| a.len() > 3));
+            recs[at]["v"].as_array_mut().unwrap().reverse();
+        }),
+        // Reads the sim makes itself, each against its leaf.
+        (M, |recs| {
+            let at = pos(recs, |r| leaf(r, "peace"));
+            flip(&mut recs[at], "v");
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| leaf(r, "enemy"));
+            flip(&mut recs[at], "v");
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| leaf(r, "ingame"));
+            flip(&mut recs[at], "v");
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| leaf(r, "gdt"));
+            recs[at]["v"] = json!("0.0166666694");
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| leaf(r, "grp"));
+            recs[at]["v"] = json!("~fake");
+        }),
+        // The states and the clocks.
+        (M, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "mem_s")
+                    && r["at"] == "pass"
+                    && r["t"].as_i64() > Some(300)
+                    && r["slots"].as_array().is_some_and(|s| !s.is_empty())
+            });
+            recs[at]["slots"][0][1] = json!(0);
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "mem_init") && r["slots"].as_array().is_some_and(|s| s.len() > 1)
+            });
+            recs[at]["slots"].as_array_mut().unwrap().swap(0, 1);
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "mem_s")
+                    && r["at"] == "pre"
+                    && r["enemies"].as_array().is_some_and(|e| !e.is_empty())
+            });
+            let e = recs[at]["enemies"].as_array_mut().unwrap();
+            e.push(json!("35fffa0a-06ba-4cba-be40-7914924be190"));
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| ev(r, "mem_tick") && r["t"].as_i64() > Some(300));
+            recs[at]["frame"] = json!(recs[at]["frame"].as_i64().unwrap() + 1);
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| ev(r, "hash"));
+            recs[at]["h"] = json!(recs[at]["h"].as_i64().unwrap() + 4);
+        }),
+        // The queue: whether an offensive action's pair was taken.
+        (M, |recs| {
+            let at = pos(recs, |r| ev(r, "mem_q"));
+            flip(&mut recs[at], "queued");
+        }),
+        // The other models' reads of the memory.
+        (S, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "uc_v")
+                    && r["f"] == "enemies"
+                    && r["t"].as_i64() > Some(300)
+                    && r["v"].as_array().is_some_and(|a| !a.is_empty())
+            });
+            recs[at]["v"] = json!([]);
+        }),
+        (S, |recs| {
+            let at = pos(recs, |r| r["k"] == "env" && r["target_remembers_initiator"] == true);
+            flip(&mut recs[at], "target_remembers_initiator");
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "leave_tick")
+                    && r["groups"].as_array().is_some_and(|g| {
+                        g.iter().any(|x| {
+                            x[1].as_str().and_then(|s| s.split_once("dict=")).is_some_and(
+                                |(_, rest)| rest.split('|').next().is_some_and(|d| d.contains(',')),
+                            )
+                        })
+                    })
+            });
+            for g in recs[at]["groups"].as_array_mut().unwrap() {
+                let s = g[1].as_str().unwrap().to_owned();
+                let Some((head, rest)) = s.split_once("dict=") else { continue };
+                let Some((dict, tail)) = rest.split_once('|') else { continue };
+                if !dict.contains(',') {
+                    continue;
+                }
+                let mut ids: Vec<&str> = dict.split(',').collect();
+                ids.reverse();
+                g[1] = json!(format!("{head}dict={}|{tail}", ids.join(",")));
+                return;
+            }
+        }),
+    ];
+    let mut missed = Vec::new();
+    for (i, (want, change)) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+        change(&mut changed.records);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
+            missed.push(format!(
+                "case {i}: {want}: {:?}",
+                w.coverage.unsupported.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}
