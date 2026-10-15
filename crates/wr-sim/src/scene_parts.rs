@@ -200,6 +200,15 @@ pub fn part_hook(w: &mut World, e: EntityIdx, clr: &str, hook: &str) -> bool {
             }
             true
         }
+        // `ShiftersFuryPart.OnTurnOn`/`OnTurnOff`: `m_IsOn`, with the part's subscription.
+        (crate::components::shifters_fury::PART, "OnTurnOn") => {
+            crate::components::shifters_fury::part_turn_on(w, e);
+            true
+        }
+        (crate::components::shifters_fury::PART, "OnTurnOff") => {
+            crate::components::shifters_fury::part_turn_off(w, e);
+            true
+        }
         ("UnitPartFollowUnit", "OnTurnOff") => {
             crate::components::etudes::follow_release(w, e);
             true

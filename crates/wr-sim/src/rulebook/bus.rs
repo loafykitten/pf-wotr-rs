@@ -30,6 +30,9 @@ pub enum Sub {
     /// A handler outside the game's own types (tests, the oracle's hooks), dispatched
     /// through [`EventBus::external`].
     External(u32),
+    /// A unit part (`EntityPart.Subscribe` in its `TurnOn`): the unit and the part's class. Only
+    /// the parts in [`PART_HANDLERS`] subscribe in the sim.
+    Part(EntityIdx, &'static str),
 }
 
 /// `SubscribersList<T>`.
@@ -221,6 +224,11 @@ fn interfaces(w: &World, s: Sub) -> Vec<String> {
             out
         }
         Sub::External(id) => w.bus.external.get(&id).map(|h| h.interfaces()).unwrap_or_default(),
+        Sub::Part(_, clr) => PART_HANDLERS
+            .iter()
+            .find(|(c, _)| *c == clr)
+            .map(|(_, i)| i.iter().map(|x| (*x).to_owned()).collect())
+            .unwrap_or_default(),
         Sub::Runtime(c) => w
             .component(c)
             .ty()
@@ -260,6 +268,10 @@ const ENTITY_HANDLERS: &[(&str, &[&str])] = &[
     ("TrapObjectData", &["IAreaHandler"]),
     ("UnitEntityData", &["IAreaHandler"]),
 ];
+
+/// The handler interfaces of the unit parts the sim subscribes (from their declarations).
+const PART_HANDLERS: &[(&str, &[&str])] =
+    &[(crate::components::shifters_fury::PART, crate::components::shifters_fury::PART_HANDLERS)];
 
 /// The handler interfaces of the `EntityFact` classes that implement any (from the decompiled
 /// declarations; `UnitFact` and `EntityFact` implement none): the save schema has none of these
@@ -311,7 +323,7 @@ fn subscribing_unit(w: &World, s: Sub) -> Option<EntityIdx> {
         // The runtime's own interfaces are global ones.
         Sub::Runtime(_) => None,
         Sub::Fact(f) => w.fact(f).owner,
-        Sub::Entity(e) => Some(e),
+        Sub::Entity(e) | Sub::Part(e, _) => Some(e),
         Sub::External(_) => None,
     }?;
     if w.unit(owner).is_some() {
@@ -485,6 +497,15 @@ fn deliver_event_inner(w: &mut World, s: Sub, iface: &str) {
                 h.event(w, iface);
             }
         }
+        Sub::Part(e, clr) => {
+            if clr == crate::components::shifters_fury::PART
+                && crate::components::shifters_fury::part_event(w, e, iface)
+            {
+                w.coverage.executed(format!("{clr}.{iface}"));
+            } else {
+                w.coverage.unsupported(format!("{clr}: {iface}"));
+            }
+        }
     }
 }
 
@@ -636,6 +657,7 @@ fn deliver_rule_inner(w: &mut World, s: Sub, rule: &mut dyn RuleEvent, step: Rul
         Sub::Entity(e) => {
             w.coverage.unsupported(format!("{}: {}", w.entity(e).clr, rule.chain()[0]))
         }
+        Sub::Part(_, clr) => w.coverage.unsupported(format!("{clr}: {}", rule.chain()[0])),
         Sub::External(id) => {
             if let Some(h) = w.bus.external.get(&id).cloned() {
                 h.rule(w, rule, step);

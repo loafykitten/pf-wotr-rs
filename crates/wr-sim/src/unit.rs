@@ -134,6 +134,8 @@ pub struct Proficiencies {
 #[derive(Debug, Clone, Default)]
 pub struct Unit {
     pub blueprint: Option<Guid>,
+    /// `ShiftersFuryPart` (present with the part).
+    pub shifters_fury: Option<crate::components::shifters_fury::Part>,
     pub original_blueprint: Option<Guid>,
     pub stats: Stats,
     pub progression: Progression,

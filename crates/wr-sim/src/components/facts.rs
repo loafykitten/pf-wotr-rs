@@ -2,11 +2,16 @@
 //! (`Kingmaker.UnitLogic.FactLogic/AddFacts.cs`), `AddFeatureToNPC`
 //! (`Kingmaker.Designers.Mechanics.Facts/AddFeatureToNPC.cs`), `FactSinglify`
 //! (`Kingmaker.Designers.Mechanics.Facts/FactSinglify.cs`), `AddFeatureOnAlignment`
-//! (`Kingmaker.Designers.Mechanics.Facts/AddFeatureOnAlignment.cs`).
+//! (`Kingmaker.Designers.Mechanics.Facts/AddFeatureOnAlignment.cs`), `AddFeatureOnSkill`
+//! (`Kingmaker.Designers.Mechanics.Facts/AddFeatureOnSkill.cs`), `BuffExtraEffects`
+//! (`Kingmaker.Designers.Mechanics.Facts/BuffExtraEffects.cs`), `BuffOnEntityCreated`
+//! (`Kingmaker.Designers.TempMapCode.Ambush/BuffOnEntityCreated.cs`: its buff's unique id in
+//! the component's data, `BuffId`).
 //!
 //! Each keeps its applied facts in its runtime data, as the C# does (`AddFactsData.
 //! AppliedFacts`, `AddFeatureToNPCData.AppliedFact`, `FactSinglifyData.AppliedFacts`,
-//! `AddFeatureOnAlignmentData.AppliedFacts`), in
+//! `AddFeatureOnAlignmentData.AppliedFacts`, `AddFeatureOnSkillData.AppliedFacts`,
+//! `BuffExtraEffectsData.AppliedBuff`), in
 //! the component's `fact_refs`.
 
 use super::{Port, bits, owner_unit, with_settings};
@@ -34,6 +39,81 @@ pub fn register(r: &mut Registry) {
     p.handlers = &["IAlignmentChangeHandler"];
     p.ev = Some(add_feature_on_alignment_event);
     r.register(Box::new(p));
+    let mut p = Port::new(
+        "BuffExtraEffects",
+        bits(&[Activate, Deactivate, ApplyPostLoadFixes]),
+        buff_extra_effects,
+    );
+    p.handlers = &["IUnitBuffHandler"];
+    p.ev = Some(buff_extra_effects_event);
+    r.register(Box::new(p));
+    r.register(Box::new(Port::new(
+        "BuffOnEntityCreated",
+        bits(&[Activate, Deactivate]),
+        buff_on_entity_created,
+    )));
+    let mut p = Port::new("AddFeatureOnSkill", bits(&[Activate, Deactivate]), add_feature_on_skill);
+    p.handlers = &["IOwnerGainLevelHandler"];
+    p.ev = Some(add_feature_on_skill_event);
+    r.register(Box::new(p));
+}
+
+/// `AddFeatureOnSkill.OnActivate` / `OnDeactivate`.
+fn add_feature_on_skill(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    match h {
+        Hook::Activate => add_feature_on_skill_apply(w, c, u),
+        // `Data.AppliedFacts.ForEach(Owner.RemoveFact)`, then `Clear()`.
+        Hook::Deactivate => {
+            for f in applied(w, c, "AppliedFacts") {
+                remove_fact(w, u, f);
+            }
+            set_applied(w, c, "AppliedFacts", Vec::new());
+        }
+        _ => {}
+    }
+}
+
+/// `IOwnerGainLevelHandler.HandleUnitGainLevel` (raised for the owner): as `OnActivate`.
+fn add_feature_on_skill_event(w: &mut World, c: CompRef, _iface: &str) {
+    if let Some(u) = owner_unit(w, c) {
+        add_feature_on_skill_apply(w, c, u);
+    }
+}
+
+/// With the stat's `PermanentValue` at least `MinimalStat`, each listed fact the owner doesn't
+/// have is added (`Data.AppliedFacts.Add(Owner.AddFact(fact))`, nulls included).
+fn add_feature_on_skill_apply(w: &mut World, c: CompRef, u: EntityIdx) {
+    let Some((stat, minimal, facts)) = with_settings(w, c, |v| {
+        (v.i32("StatType"), v.i32("MinimalStat"), v.guids_with_nulls("m_Facts"))
+    }) else {
+        return;
+    };
+    let Some(permanent) = w
+        .unit(u)
+        .and_then(|x| x.stats.get(crate::stats::types::StatType(stat)))
+        .map(|s| s.permanent_value)
+    else {
+        w.coverage.unsupported("AddFeatureOnSkill: the owner has no such stat");
+        return;
+    };
+    if permanent < minimal {
+        return;
+    }
+    for g in facts {
+        // `Owner.HasFact(fact)` (a null blueprint: `HasFact(null)` is false, `AddFact(null)` null).
+        let has = g.is_some_and(|g| {
+            w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g))
+        });
+        if has {
+            continue;
+        }
+        let f =
+            g.and_then(|g| w.content.get(g)).and_then(|bp| crate::unit_facts::add_fact(w, u, &bp));
+        let mut v = applied(w, c, "AppliedFacts");
+        v.push(f);
+        set_applied(w, c, "AppliedFacts", v);
+    }
 }
 
 /// `AddFeatureOnAlignment.OnActivate` / `OnDeactivate` / `OnApplyPostLoadFixes`.
@@ -354,6 +434,186 @@ fn fact_singlify(w: &mut World, c: CompRef, h: Hook) {
                 remove_fact(w, u, f);
             }
             set_applied(w, c, "AppliedFacts", Vec::new());
+        }
+        _ => {}
+    }
+}
+
+/// `BuffExtraEffects`' settings: the checked buffs (`m_CheckedBuff`, then `m_CheckedBuffList`),
+/// the extra buff, the exception fact and `m_UseBaffContext`.
+struct ExtraEffects {
+    checked: Option<wr_content::Guid>,
+    list: Vec<Option<wr_content::Guid>>,
+    extra: Option<wr_content::Guid>,
+    exception: Option<wr_content::Guid>,
+    buff_context: bool,
+}
+
+fn extra_effects(w: &World, c: CompRef) -> Option<ExtraEffects> {
+    with_settings(w, c, |v| ExtraEffects {
+        checked: v.guid("m_CheckedBuff"),
+        list: v.guids_with_nulls("m_CheckedBuffList"),
+        extra: v.guid("m_ExtraEffectBuff"),
+        exception: v.guid("m_ExceptionFact"),
+        buff_context: v.bool("m_UseBaffContext"),
+    })
+}
+
+/// `Owner.HasFact(blueprint)` (`false` for a null blueprint).
+fn owner_has(w: &World, u: EntityIdx, g: Option<wr_content::Guid>) -> bool {
+    g.is_some_and(|g| w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g)))
+}
+
+impl ExtraEffects {
+    /// `CheckHadPrerequiredBuff()`.
+    fn had_prerequired(&self, w: &World, u: EntityIdx) -> bool {
+        owner_has(w, u, self.checked) || self.list.iter().any(|g| owner_has(w, u, *g))
+    }
+
+    /// `buff.Blueprint == CheckedBuff || m_CheckedBuffList` contains it.
+    fn checks(&self, bp: Option<wr_content::Guid>) -> bool {
+        bp == self.checked || self.list.contains(&bp)
+    }
+
+    /// `ExceptionFact == null || !Owner.HasFact(ExceptionFact)`.
+    fn allowed(&self, w: &World, u: EntityIdx) -> bool {
+        self.exception.is_none() || !owner_has(w, u, self.exception)
+    }
+}
+
+/// `Data.AppliedBuff?.Remove()`: off its owner (a buff no longer attached only gets its end
+/// time, which nothing reads off the unit).
+fn remove_applied_buff(w: &mut World, c: CompRef) {
+    if let Some(b) = applied(w, c, "AppliedBuff").first().copied().flatten()
+        && let Some(o) = w.fact(b).owner
+    {
+        crate::unit_facts::remove(w, o, b);
+    }
+}
+
+/// `Owner.AddBuff(ExtraEffectBuff, parentContext)`: the parent context cloned for the buff, or
+/// (none) a context of the owner's own; a missing blueprint gives null.
+fn add_extra_buff(
+    w: &mut World,
+    u: EntityIdx,
+    extra: Option<wr_content::Guid>,
+    parent: Option<crate::context::MechanicsContext>,
+) -> Option<FactIdx> {
+    let bp = extra.and_then(|g| w.content.get(g))?;
+    let ctx = match &parent {
+        Some(p) => {
+            w.pending_buffs.parent_descriptor = p.spell_descriptor;
+            crate::unit_facts::clone_for(w, p, &bp, u)
+        }
+        None => crate::unit_facts::context(w, Some(u), Some(u), &bp),
+    };
+    crate::unit_facts::add_buff(w, u, &bp, ctx, None)
+}
+
+/// `BuffExtraEffects.OnActivate` / `OnApplyPostLoadFixes` (`CheckAndReapply`) / `OnDeactivate`.
+fn buff_extra_effects(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    let Some(s) = extra_effects(w, c) else { return };
+    match h {
+        Hook::Activate | Hook::ApplyPostLoadFixes => {
+            remove_applied_buff(w, c);
+            set_applied(w, c, "AppliedBuff", vec![None]);
+            if s.allowed(w, u) && s.had_prerequired(w, u) {
+                let ctx = w.fact(c.fact).context.clone();
+                let b = add_extra_buff(w, u, s.extra, ctx);
+                set_applied(w, c, "AppliedBuff", vec![b]);
+            }
+        }
+        // `Owner.RemoveFact(ExtraEffectBuff)`: the owner's first fact of that blueprint
+        // (`Data.AppliedBuff` stays).
+        Hook::Deactivate => {
+            let first = s.extra.and_then(|g| {
+                w.entity(u).facts.list.iter().copied().find(|f| w.fact(*f).blueprint == Some(g))
+            });
+            if let Some(f) = first {
+                crate::unit_facts::remove(w, u, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `HandleBuffDidAdded(buff)` / `HandleBuffDidRemoved(buff)` for a buff of the owner's that the
+/// component checks: added, with no applied buff, the extra buff goes on (in the buff's context
+/// with `m_UseBaffContext`); removed, with an applied buff and no checked buff left, it comes off.
+fn buff_extra_effects_event(w: &mut World, c: CompRef, _iface: &str) {
+    let Some(u) = owner_unit(w, c) else { return };
+    let method = w.bus.call.last().map_or("", |x| x.0);
+    let Some(Some(buff)) = w.bus.call_fact.last().copied() else {
+        w.coverage.unsupported("BuffExtraEffects: IUnitBuffHandler without its buff");
+        return;
+    };
+    if w.fact(buff).owner != Some(u) {
+        return;
+    }
+    let Some(s) = extra_effects(w, c) else { return };
+    let applied_buff = applied(w, c, "AppliedBuff").first().copied().flatten();
+    match method {
+        "HandleBuffDidAdded" => {
+            if applied_buff.is_none()
+                && s.allowed(w, u)
+                && s.checks(w.fact(buff).blueprint)
+                && s.had_prerequired(w, u)
+            {
+                let ctx = if s.buff_context {
+                    w.fact(buff).context.clone()
+                } else {
+                    w.fact(c.fact).context.clone()
+                };
+                let b = add_extra_buff(w, u, s.extra, ctx);
+                set_applied(w, c, "AppliedBuff", vec![b]);
+            }
+        }
+        "HandleBuffDidRemoved" => {
+            if applied_buff.is_some()
+                && s.checks(w.fact(buff).blueprint)
+                && !s.had_prerequired(w, u)
+            {
+                remove_applied_buff(w, c);
+                set_applied(w, c, "AppliedBuff", vec![None]);
+            }
+        }
+        m => w.coverage.unsupported(format!("BuffExtraEffects: IUnitBuffHandler.{m}")),
+    }
+}
+
+/// `BuffOnEntityCreated.OnActivate`: `GameHelper.ApplyBuff(Owner, Buff)` (the owner its own
+/// caster, permanent), its unique id kept; `OnDeactivate`: the owner's fact of that id is removed
+/// (`Facts.FindById`), the id cleared.
+fn buff_on_entity_created(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    match h {
+        Hook::Activate => {
+            let buff = with_settings(w, c, |v| v.guid("m_Buff"))
+                .flatten()
+                .and_then(|g| w.content.get(g))
+                .and_then(|bp| {
+                    let ctx = crate::unit_facts::context(w, Some(u), Some(u), &bp);
+                    crate::unit_facts::add_buff(w, u, &bp, ctx, None)
+                });
+            let id = buff.map(|b| w.fact(b).unique_id.clone());
+            w.component_mut(c).data = Some(serde_json::json!({ "BuffId": id }));
+        }
+        Hook::Deactivate => {
+            let id = w
+                .component(c)
+                .data
+                .as_ref()
+                .and_then(|d| d.get("BuffId"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            if let Some(id) = id {
+                let f = w.entity(u).facts.list.iter().copied().find(|f| w.fact(*f).unique_id == id);
+                if let Some(f) = f {
+                    crate::unit_facts::remove(w, u, f);
+                }
+                w.component_mut(c).data = Some(serde_json::json!({ "BuffId": null }));
+            }
         }
         _ => {}
     }

@@ -204,10 +204,33 @@ impl Player {
             let id = format!("{:X}", w.player.max_unique_id);
             w.player.max_unique_id += 1;
             if !w.by_id.contains_key(&id) && !fact_id_in_use(w, &id) {
+                if std::env::var_os("WR_DEBUG_IDS").is_some() {
+                    trace_id(&id);
+                }
                 return id;
             }
         }
     }
+}
+
+/// `WR_DEBUG_IDS`: each allocated id with the sim's call chain (`IDTRACE <id> <fn@file:line> <
+/// …`, on stderr; needs debug line tables), to compare with WrathOracle's `IdTrace`.
+fn trace_id(id: &str) {
+    let bt = std::backtrace::Backtrace::force_capture().to_string();
+    let lines: Vec<&str> = bt.lines().map(str::trim).collect();
+    let mut frames: Vec<String> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(at) = l.strip_prefix("at ./crates/")
+            && i > 0
+        {
+            let f = lines[i - 1].split_once(": ").map_or(lines[i - 1], |x| x.1);
+            if f != "new_unique_id" && f != "trace_id" {
+                frames.push(format!("{f}@{}", at.rsplit('/').next().unwrap_or(at)));
+            }
+        }
+    }
+    frames.truncate(16);
+    eprintln!("IDTRACE {id} {}", frames.join(" < "));
 }
 
 fn fact_id_in_use(w: &World, id: &str) -> bool {

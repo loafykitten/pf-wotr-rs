@@ -338,11 +338,7 @@ fn on_activate(w: &mut World, f: FactIdx) {
         "Quest" | "QuestObjective" | "Tutorial" => {}
         // `ActivatableAbility.OnActivate`: a targeted toggle adds its target-selection
         // ability.
-        "ActivatableAbility" => {
-            if w.fact(f).bp.as_ref().is_some_and(|b| b.view().bool("IsTargeted")) {
-                w.coverage.unsupported("ActivatableAbility.OnActivate: targeted");
-            }
-        }
+        "ActivatableAbility" => activatable_on_activate(w, f),
         _ => {
             if !matches!(
                 w.fact(f).kind,
@@ -370,9 +366,34 @@ fn on_deactivate(w: &mut World, f: FactIdx) {
         "ItemEnchantment" => w.fact_mut(f).context = None,
         // `ActivatableAbility.OnDeactivate`: remove the target-selection ability (targeted
         // toggles only), then `Stop()`.
-        "ActivatableAbility" => crate::unit_facts::stop(w, f),
+        "ActivatableAbility" => {
+            if let Some(a) = w.fact_mut(f).select_target.take()
+                && let Some(o) = w.fact(f).owner
+            {
+                crate::unit_facts::remove(w, o, a);
+            }
+            crate::unit_facts::stop(w, f);
+        }
         _ => {}
     }
+}
+
+/// `ActivatableAbility.OnActivate`: a targeted toggle adds its target-selection ability
+/// (`Owner.Unit.Facts.Add(new Ability(Blueprint.SelectTargetAbility, Owner))`); a missing
+/// blueprint is reported.
+fn activatable_on_activate(w: &mut World, f: FactIdx) {
+    let Some(bp) = w.fact(f).bp.clone() else { return };
+    if !bp.view().bool("IsTargeted") {
+        return;
+    }
+    let Some(owner) = w.fact(f).owner.filter(|o| w.unit(*o).is_some()) else { return };
+    let Some(ab) = bp.view().guid("m_SelectTargetAbility").and_then(|g| w.content.get(g)) else {
+        w.coverage.unsupported("ActivatableAbility.OnActivate: no target-selection ability");
+        return;
+    };
+    let a = crate::unit_facts::create_fact(w, &ab, owner, None);
+    let added = crate::unit_facts::add(w, owner, a);
+    w.fact_mut(f).select_target = added;
 }
 
 /// `EntityFact.PostLoad()`.

@@ -617,3 +617,202 @@ fn armor_unlocks_add_their_fact_when_every_filter_passes() {
     assert_eq!(has(&w), 0);
     assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
 }
+
+fn action_list(actions: Vec<Node>) -> Node {
+    Node::Object(Box::new(obj(
+        "Kingmaker.ElementsSystem.ActionList",
+        &[("Actions", Node::Seq(actions))],
+    )))
+}
+
+fn apply_buff_action(buff: u128, as_child: bool, ignore_parent: bool) -> Node {
+    Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Mechanics.Actions.ContextActionApplyBuff",
+        &[
+            ("name", Node::Str("$ContextActionApplyBuff$t".into())),
+            ("m_Buff", Node::BpRef(Guid(buff))),
+            ("Permanent", Node::Bool(true)),
+            ("AsChild", Node::Bool(as_child)),
+            ("IgnoreParentContext", Node::Bool(ignore_parent)),
+        ],
+    )))
+}
+
+fn context_actions(activated: Vec<Node>) -> Node {
+    Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Mechanics.Components.AddFactContextActions",
+        &[
+            ("name", Node::Str("$AddFactContextActions$t".into())),
+            ("Activated", action_list(activated)),
+            ("Deactivated", action_list(Vec::new())),
+            ("NewRound", action_list(Vec::new())),
+            ("Dispose", action_list(Vec::new())),
+        ],
+    )))
+}
+
+/// `ContextActionApplyBuff` from a buff's `AddFactContextActions`: the child buff goes on the
+/// owner in the parent's cloned context, the parent stores it (`AsChild`), and removing the
+/// parent removes it (`Buff.OnRemove`).
+#[test]
+fn an_applied_child_buff_is_stored_and_leaves_with_its_parent() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 901, BUFF, &[]);
+    let parent = insert_bp(
+        &w,
+        900,
+        BUFF,
+        &[(
+            "Components",
+            Node::Seq(vec![context_actions(vec![apply_buff_action(901, true, false)])]),
+        )],
+    );
+    let p = crate::unit_facts::add_fact(&mut w, u, &parent).expect("parent");
+    let c = find_fact(&w, u, Guid(901)).expect("child applied");
+    assert_eq!(w.fact(p).buff.as_ref().map(|b| b.stored_facts.clone()), Some(vec![c]));
+    let ctx = w.fact(c).context.clone().expect("context");
+    assert_eq!(ctx.parent_associated_blueprint, Some(Guid(900)), "cloned from the parent's");
+    crate::unit_facts::remove(&mut w, u, p);
+    assert!(find_fact(&w, u, Guid(901)).is_none(), "the stored child leaves with the parent");
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// A feature's `AddFactContextActions` with `IgnoreParentContext`: a context of the owner's own
+/// (no parent), and no `Buff.Data` scope to store the buff in.
+#[test]
+fn a_buff_applied_without_its_parent_context_is_its_own() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 911, BUFF, &[]);
+    let f = feature(&w, 910, vec![context_actions(vec![apply_buff_action(911, true, true)])]);
+    crate::unit_facts::add_fact(&mut w, u, &f).expect("feature");
+    let c = find_fact(&w, u, Guid(911)).expect("applied");
+    let ctx = w.fact(c).context.clone().expect("context");
+    assert_eq!(ctx.parent_associated_blueprint, None);
+    assert_eq!(ctx.associated_blueprint, Some(Guid(911)));
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// A duration the action computes from context values isn't modelled: reported, no buff.
+#[test]
+fn an_apply_buff_with_a_context_duration_is_reported() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 921, BUFF, &[]);
+    let timed = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Mechanics.Actions.ContextActionApplyBuff",
+        &[("name", Node::Str("$A$t".into())), ("m_Buff", Node::BpRef(Guid(921)))],
+    )));
+    let f = feature(&w, 920, vec![context_actions(vec![timed])]);
+    crate::unit_facts::add_fact(&mut w, u, &f).expect("feature");
+    assert!(find_fact(&w, u, Guid(921)).is_none());
+    assert!(
+        w.coverage.unsupported.keys().any(|k| k.contains("ContextActionApplyBuff: DurationValue")),
+        "{:?}",
+        w.coverage.unsupported
+    );
+}
+
+/// `BuffExtraEffects`: the checked buff arriving puts the extra buff on; its leaving (no checked
+/// buff left) takes the extra one off.
+#[test]
+fn extra_effects_follow_the_checked_buff() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 931, BUFF, &[]);
+    insert_bp(&w, 932, BUFF, &[]);
+    let comp = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.Mechanics.Facts.BuffExtraEffects",
+        &[
+            ("name", Node::Str("$BuffExtraEffects$t".into())),
+            ("m_CheckedBuff", Node::BpRef(Guid(931))),
+            ("m_ExtraEffectBuff", Node::BpRef(Guid(932))),
+        ],
+    )));
+    let f = feature(&w, 930, vec![comp]);
+    let ff = crate::unit_facts::add_fact(&mut w, u, &f).expect("feature");
+    fl::turn_on(&mut w, ff);
+    assert!(find_fact(&w, u, Guid(932)).is_none(), "nothing to extend yet");
+    let checked = w.content.get(Guid(931)).expect("bp");
+    let b = crate::unit_facts::add_fact(&mut w, u, &checked).expect("checked buff");
+    assert!(find_fact(&w, u, Guid(932)).is_some(), "the extra buff follows");
+    crate::unit_facts::remove(&mut w, u, b);
+    assert!(find_fact(&w, u, Guid(932)).is_none(), "and leaves with it");
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// `AddFeatureOnSkill`: its facts are added when the stat's permanent value reaches the minimum.
+#[test]
+fn skill_features_need_the_minimal_stat() {
+    let (mut w, u) = registry_world();
+    feature(&w, 941, Vec::new());
+    let comp = |min: i64| {
+        Node::Object(Box::new(obj(
+            "Kingmaker.Designers.Mechanics.Facts.AddFeatureOnSkill",
+            &[
+                ("name", Node::Str("$AddFeatureOnSkill$t".into())),
+                ("StatType", Node::Enum(i64::from(S::Strength.0))),
+                ("MinimalStat", Node::Int(min)),
+                ("m_Facts", Node::Seq(vec![Node::BpRef(Guid(941))])),
+            ],
+        )))
+    };
+    let strength = w.stats(u).v(S::Strength).permanent_value;
+    let high = feature(&w, 942, vec![comp(i64::from(strength) + 1)]);
+    crate::unit_facts::add_fact(&mut w, u, &high).expect("added");
+    assert!(find_fact(&w, u, Guid(941)).is_none());
+    let low = feature(&w, 943, vec![comp(i64::from(strength))]);
+    let f = crate::unit_facts::add_fact(&mut w, u, &low).expect("added");
+    assert!(find_fact(&w, u, Guid(941)).is_some());
+    crate::unit_facts::remove(&mut w, u, f);
+    assert!(find_fact(&w, u, Guid(941)).is_none());
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// `BuffOnEntityCreated`: the buff goes on with activation, its id kept; deactivation removes the
+/// fact of that id.
+#[test]
+fn an_entity_created_buff_is_removed_by_its_id() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 951, BUFF, &[]);
+    let comp = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.TempMapCode.Ambush.BuffOnEntityCreated",
+        &[("name", Node::Str("$BuffOnEntityCreated$t".into())), ("m_Buff", Node::BpRef(Guid(951)))],
+    )));
+    let f = feature(&w, 950, vec![comp]);
+    let ff = crate::unit_facts::add_fact(&mut w, u, &f).expect("added");
+    let b = find_fact(&w, u, Guid(951)).expect("buff");
+    let c = crate::world::CompRef { fact: ff, comp: 0 };
+    assert_eq!(
+        w.component(c).data.as_ref().and_then(|d| d["BuffId"].as_str()),
+        Some(w.fact(b).unique_id.as_str())
+    );
+    crate::unit_facts::remove(&mut w, u, ff);
+    assert!(find_fact(&w, u, Guid(951)).is_none());
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// `AddFeatureOnApply` outside a level-up adds its feature and updates a progression on a new
+/// state; inside one whose state its code holds (not lent to the world), it is reported.
+#[test]
+fn feature_on_apply_needs_the_level_ups_state_when_one_runs() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 961, "Kingmaker.Blueprints.Classes.BlueprintProgression", &[]);
+    let comp = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.Mechanics.Facts.AddFeatureOnApply",
+        &[
+            ("name", Node::Str("$AddFeatureOnApply$t".into())),
+            ("m_Feature", Node::BpRef(Guid(961))),
+        ],
+    )));
+    let f = feature(&w, 960, vec![comp.clone()]);
+    crate::unit_facts::add_fact(&mut w, u, &f).expect("added");
+    assert!(find_fact(&w, u, Guid(961)).is_some());
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    let g = feature(&w, 962, vec![comp]);
+    w.level_up.push(crate::spawn::levelup::Slot::Live(None));
+    crate::unit_facts::add_fact(&mut w, u, &g).expect("added");
+    w.level_up.pop();
+    assert!(
+        w.coverage.unsupported.keys().any(|k| k.contains("level-up's state isn't reachable")),
+        "{:?}",
+        w.coverage.unsupported
+    );
+}

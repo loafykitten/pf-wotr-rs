@@ -783,10 +783,11 @@ pub fn after_area_load(w: &mut World, order: &[AreaEntry], spawned: &[EntityIdx]
     let party = crate::narrative::party::character_lists(w).party_and_pets;
     for &e in spawned {
         let extra = w.unit(e).is_some_and(|x| x.is_extra);
-        let mode = match awake_state(w, e, &party) {
+        let mode = match awake_after_spawn(w, e, &party) {
             Awake::No => continue,
             Awake::Unknown if extra => TickMode::AreaUnit,
-            Awake::Yes | Awake::Unknown => TickMode::StartPass,
+            Awake::Yes => TickMode::StartPass,
+            Awake::Unknown => TickMode::StartPassAssumed,
         };
         w.coverage.context = Some(w.entity(e).unique_id.clone());
         activatable_abilities_unit_tick(w, e, false, mode);
@@ -1136,7 +1137,8 @@ fn activatable_on_new_round(w: &mut World, f: crate::world::FactIdx, owner: Enti
     let in_combat = crate::combat::is_in_combat(w, owner);
     w.fact_mut(f).was_in_combat |= in_combat;
     let (on, _, _) = w.fact(f).activatable.unwrap_or((false, false, None));
-    let available = crate::unit_facts::is_available(w, &abp);
+    // `!IsAvailableByRestrictions`.
+    let available = crate::unit_facts::is_available_by_restrictions(w, f);
     // `ActivateOnCombatStarts`: `DeactivateIfCombatEnded && !ActivateWithUnitCommand &&
     // !ActivateOnUnitAction`.
     let on_combat_starts = v.bool("DeactivateIfCombatEnded") && v.int("ActivationType") == 0;
@@ -1180,6 +1182,9 @@ enum TickMode {
     Controller,
     /// The start pass after an area loads, which isn't a controller tick: no rounds.
     StartPass,
+    /// The start pass on a unit taken as awake whose state the sim can't establish (fog of war,
+    /// cutscene control, commands): it acts as `StartPass`, and an action is reported.
+    StartPassAssumed,
     /// An area unit, which may or may not be awake: acts on nothing, and reports the first
     /// toggle the tick would have acted on.
     AreaUnit,
@@ -1195,6 +1200,12 @@ fn activatable_abilities_unit_tick(
 ) {
     // `AreaUnit`: reports instead of acting.
     let area = mode == TickMode::AreaUnit;
+    let assumed = |w: &mut World| {
+        if mode == TickMode::StartPassAssumed && !w.assumed_awake_at_load.contains(&e) {
+            w.assumed_awake_at_load.push(e);
+        }
+    };
+    let mode = if mode == TickMode::StartPassAssumed { TickMode::StartPass } else { mode };
     let would_act = |w: &mut World| {
         w.coverage.unsupported(
             "UnitActivatableAbilitiesController: area unit with a toggle to tick (AwakeUnits)",
@@ -1231,6 +1242,7 @@ fn activatable_abilities_unit_tick(
                 would_act(w);
                 return;
             }
+            assumed(w);
             crate::unit_facts::stop(w, f);
             continue;
         }
@@ -1284,7 +1296,42 @@ fn activatable_abilities_unit_tick(
                 would_act(w);
                 return;
             }
+            assumed(w);
             crate::unit_facts::try_start(w, f);
         }
     }
+}
+
+/// Reports the start pass's assumption ([`World::assumed_awake_at_load`]: units taken as awake
+/// whose sleep the sim can't establish, and whose toggles then acted), one report per unit.
+pub fn report_assumed_awake(w: &mut World) {
+    let outer = w.coverage.context.take();
+    for e in std::mem::take(&mut w.assumed_awake_at_load) {
+        w.coverage.context = Some(w.entity(e).unique_id.clone());
+        w.coverage.unsupported(
+            "SleepingUnitsController: a toggle acts on a unit taken as awake at load (suppression or fog of war unknown)",
+        );
+    }
+    w.coverage.context = outer;
+}
+
+/// `ShouldBeSleeping` at the first tick after a unit was spawned at load. `CreateEntityData`
+/// sets the new unit's `Position` (`new UnitEntityData(view) { Position = … }`), and the setter
+/// wakes it on a change from the default origin (`Wake()`: `AwakeTimer = 0`, which the
+/// controller counts down only after this tick), so the checks after the timer (death, combat,
+/// an extra's camera, cutscene control, the fog of war, commands) don't apply: such a unit is
+/// awake unless one before it puts it to sleep (out of the game, a fake blueprint, suppressed:
+/// [`awake_state`]'s, which report suppression in an area with parts as unknown; a companion
+/// while the party is hidden). A unit at the origin isn't woken: [`awake_state`].
+fn awake_after_spawn(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake {
+    let woken = w.unit(u).is_some_and(|x| {
+        // `Vector3 !=`: a squared distance from the origin of at least 1e-10.
+        let [a, b, c] = x.position.map(f64::from);
+        a * a + b * b + c * c >= 9.999_999_44e-11
+    });
+    let state = awake_state(w, u, party);
+    if !woken || state == Awake::No || crate::scene::area_has_parts(w) {
+        return state;
+    }
+    Awake::Yes
 }

@@ -16,6 +16,7 @@ use crate::world::{EntityIdx, EntityKind, World};
 pub fn pre_post_load(w: &mut World, e: EntityIdx) {
     let id = w.entity(e).unique_id.clone();
     w.by_id.insert(id, e);
+    w.unregistered_items.remove(&e);
     fl::manager_restore_owner_link(w, e);
 }
 
