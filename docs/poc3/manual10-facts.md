@@ -79,12 +79,15 @@ In load order:
   a fact, the resource's amount, judgment's switch) and `IsAvailableByRestrictions` (`OnlyInCombat`,
   `IgnoreIfStarted`, `RestrictionKensaiWeapon`) are computed; other restriction types, a source
   item's charges and a polymorph buff are reported. `OnNewRound` now uses `IsAvailableByRestrictions`
-  as the C# does.
+  as the C# does, and `Stop` turns a toggle off when its restrictions fail. Spending the resource
+  (`OnStart`, rounds, attacks) isn't ported and is reported (the content schema doesn't list
+  `IActivatableAbilitySpendResourceLogic` as a handler, so the old guards never fired).
 - **Slot items that don't resolve.** What decided Christoff's toggles: `ItemSlot.MaybeItem` reads
   `m_ItemRef.Entity` through `EntityService`, where a loaded item is registered only by its
   `PrePostLoad`. A placeholder's saved body is post-loaded in `SetupUnit` (`BeforeAttachView`),
   after the new unit's `Initialize` activated its facts, so during it the body's slots are empty
-  and the empty-hand weapon answers. The sim's hydrated entities were all resolvable; loaded items
+  and the empty-hand weapon answers (`HandSlot.HasWeapon` is `MaybeWeapon != null`; the sim's
+  `Unit::body_pending` marks that window). The sim's hydrated entities were all resolvable; loaded items
   are now unregistered until `pre_post_load` (`World::unregistered_items`), and the new code reads
   slots through `items::hand_maybe_weapon`, `hand_has_weapon`, `limb_slots`. The combat code's own
   slot reads (`combat/weapon.rs`) don't use them yet (other streams own that directory).
@@ -115,6 +118,12 @@ In load order:
   comes from an area effect's unit-enter actions. Why those toggles stopped (they are on and were
   started when saved) isn't established yet: the next step, with the area effects (the second is
   driven by the view).
+- **In `crates/wr-sim/src/combat/` (another stream's, so not changed here)**: `AddAdditionalLimb`
+  fills a limb slot directly, without `ItemSlot.InsertItem`'s `HandleEquipmentSlotUpdated`, so a
+  limb added while `ShiftersFuryPart` is on or a `BuffEnchantAnyWeapon` buff is active isn't seen
+  by them (at Manual_10's load the part turns on after the limbs, so nothing is missed there); and
+  `create_weapon` makes a limb weapon turned on with its facts off (an enchantment added to it is
+  reported). The combat code's slot reads don't resolve items through registration either.
 - `facts.order` (19 units) and the stat differences left (difficulty and a few components) are
   unchanged by this work; Hurlun's difficulty modifier (-29 against -25) predates it.
 

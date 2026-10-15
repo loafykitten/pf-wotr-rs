@@ -581,6 +581,10 @@ pub fn dispose(w: &mut World, e: EntityIdx) {
     // if the owner is on, `Dispose`); the save schema's hook table has no dispose hooks, so
     // only the inert parts are known to do nothing there.
     for p in w.entity(e).parts.clone() {
+        if p.clr == crate::components::shifters_fury::PART {
+            crate::components::shifters_fury::part_dispose(w, e);
+            continue;
+        }
         // `UnitPartSpellResistance` overrides nothing (`EntityPart.OnTurnOff`/`OnDispose` are
         // empty for it).
         if !INERT_PARTS.contains(&p.clr) && p.clr != "UnitPartSpellResistance" {

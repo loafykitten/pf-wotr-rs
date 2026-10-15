@@ -615,6 +615,7 @@ pub fn insert_item(
     // `EntityService.Register(item)`.
     let id = w.entity(item).unique_id.clone();
     w.by_id.insert(id, item);
+    w.unregistered_items.remove(&item);
     if let Some(s) = find_slot_mut(w, u, name) {
         s.item = Some(item);
     }
@@ -1430,6 +1431,14 @@ pub fn add_enchantment_with_parent(
     if !has_enchantments_collection(w, item) {
         return None;
     }
+    // A runtime item's constructor turns its facts on (`EntityDataBase` ctor:
+    // `Facts.TurnOn()`); an item made on without them (`combat::weapon::create_weapon`'s limbs)
+    // would leave the new enchantment off: reported.
+    if w.entity(item).is_turned_on && !w.entity(item).facts.is_turned_on {
+        w.coverage.unsupported(
+            "ItemEntity.AddEnchantment: an item turned on without its facts turned on",
+        );
+    }
     let f = fl::new_fact(w, FactKind::ItemEnchantment, "ItemEnchantment", bp.clone());
     w.fact_mut(f).parent_context = true;
     w.fact_mut(f).enchant_parent = Some(Box::new(parent));
@@ -1678,6 +1687,13 @@ pub fn slot_item_resolves(w: &World, item: EntityIdx) -> bool {
         && !w.item(item).is_some_and(|i| i.remove_from_slot_in_progress)
 }
 
+/// [`slot_item_resolves`] for an item in `u`'s body: none does while a placeholder's saved body
+/// is pending (`Unit::body_pending`: its items are post-loaded only after the new unit's
+/// `Initialize`).
+fn body_item_resolves(w: &World, u: EntityIdx, item: EntityIdx) -> bool {
+    !w.unit(u).is_some_and(|x| x.body_pending) && slot_item_resolves(w, item)
+}
+
 /// `HandSlot.HasItem` of the current hands set's primary or secondary hand.
 #[must_use]
 pub fn hand_has_item(w: &World, u: EntityIdx, primary: bool) -> bool {
@@ -1688,7 +1704,10 @@ pub fn hand_has_item(w: &World, u: EntityIdx, primary: bool) -> bool {
 /// except that a slot whose item doesn't resolve (`MaybeItem == null`) gives the empty-hand
 /// weapon.
 pub fn hand_maybe_weapon(w: &mut World, u: EntityIdx, primary: bool) -> Option<EntityIdx> {
-    if current_hand_item(w, u, primary).is_some_and(|i| !slot_item_resolves(w, i)) {
+    let set = w.unit(u).map_or(0, |x| x.body.current_hand_set);
+    let hand = if primary { "PrimaryHand" } else { "SecondaryHand" };
+    let raw = find_slot(w, u, &format!("HandsEquipmentSets[{set}].{hand}")).and_then(|s| s.item);
+    if raw.is_some_and(|i| !body_item_resolves(w, u, i)) {
         return w.unit(u).and_then(|x| x.body.empty_hand);
     }
     let h = if primary {
@@ -1699,9 +1718,10 @@ pub fn hand_maybe_weapon(w: &mut World, u: EntityIdx, primary: bool) -> Option<E
     crate::combat::weapon::hand_weapon(w, u, h)
 }
 
-/// `WeaponSlot.HasWeapon` of a hand: `HasItem && MaybeWeapon != null`.
+/// `HandSlot.HasWeapon` (the hand's override): `MaybeWeapon != null`, the empty-hand weapon
+/// included.
 pub fn hand_has_weapon(w: &mut World, u: EntityIdx, primary: bool) -> bool {
-    hand_has_item(w, u, primary) && hand_maybe_weapon(w, u, primary).is_some()
+    hand_maybe_weapon(w, u, primary).is_some()
 }
 
 /// `UnitBody.AdditionalLimbs`, each slot's `HasItem` and `MaybeWeapon` (the empty-hand weapon
@@ -1713,7 +1733,7 @@ pub fn limb_slots(w: &World, u: EntityIdx) -> Vec<(bool, Option<EntityIdx>)> {
         .limbs
         .iter()
         .map(|s| {
-            let item = s.item.filter(|i| slot_item_resolves(w, *i));
+            let item = s.item.filter(|i| body_item_resolves(w, u, *i));
             let weapon = match item {
                 Some(i) if s.active => Weapon::of(w, i).map(|_| i),
                 _ => unit.body.empty_hand,

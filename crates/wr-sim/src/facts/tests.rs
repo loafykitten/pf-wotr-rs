@@ -816,3 +816,60 @@ fn feature_on_apply_needs_the_level_ups_state_when_one_runs() {
         w.coverage.unsupported
     );
 }
+
+const TOGGLE: &str = "Kingmaker.UnitLogic.ActivatableAbilities.BlueprintActivatableAbility";
+
+/// An `OnlyInCombat` toggle out of combat isn't available, and stopping it turns it off
+/// (`Stop`: `!IsAvailableByRestrictions`).
+#[test]
+fn a_toggle_stopped_while_restricted_turns_off() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 971, BUFF, &[]);
+    let t = insert_bp(
+        &w,
+        970,
+        TOGGLE,
+        &[("OnlyInCombat", Node::Bool(true)), ("m_Buff", Node::BpRef(Guid(971)))],
+    );
+    let f = crate::unit_facts::add_fact(&mut w, u, &t).expect("toggle");
+    assert!(!crate::unit_facts::is_available(&mut w, f));
+    crate::unit_facts::set_is_on(&mut w, f, true);
+    assert_eq!(w.fact(f).activatable.map(|a| (a.0, a.1)), Some((true, false)), "on, not started");
+    w.fact_mut(f).activatable = Some((true, true, None));
+    crate::unit_facts::stop(&mut w, f);
+    assert_eq!(w.fact(f).activatable.map(|a| (a.0, a.1)), Some((false, false)));
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+}
+
+/// A toggle whose resource logic spends on start (not ported) is reported when it starts, unless
+/// a fact makes it free.
+#[test]
+fn a_toggle_spending_a_resource_on_start_is_reported() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 981, BUFF, &[]);
+    let free = feature(&w, 982, Vec::new());
+    let logic = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbilityResourceLogic",
+        &[
+            ("name", Node::Str("$ActivatableAbilityResourceLogic$t".into())),
+            ("SpendType", Node::Enum(2)),
+            ("m_FreeBlueprint", Node::BpRef(Guid(982))),
+        ],
+    )));
+    let t = insert_bp(
+        &w,
+        980,
+        TOGGLE,
+        &[("m_Buff", Node::BpRef(Guid(981))), ("Components", Node::Seq(vec![logic]))],
+    );
+    crate::unit_facts::add_fact(&mut w, u, &free).expect("free fact");
+    let f = crate::unit_facts::add_fact(&mut w, u, &t).expect("toggle");
+    w.coverage.unsupported.clear();
+    crate::unit_facts::try_start(&mut w, f);
+    assert_eq!(w.fact(f).activatable.map(|a| a.1), Some(true), "free: started");
+    assert!(
+        !w.coverage.unsupported.keys().any(|k| k.contains("OnStart")),
+        "{:?}",
+        w.coverage.unsupported
+    );
+}

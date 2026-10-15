@@ -110,6 +110,18 @@ pub fn part_turn_on(w: &mut World, u: EntityIdx) {
     }
 }
 
+/// The part's removal when its owner is disposed (`EntityPartsManager.Dispose`: `TurnOff` if the
+/// owner is on, then `EntityPart.Dispose`, which unsubscribes unconditionally).
+pub fn part_dispose(w: &mut World, u: EntityIdx) {
+    if w.entity(u).is_turned_on {
+        part_turn_off(w, u);
+    }
+    crate::rulebook::bus::unsubscribe(w, crate::rulebook::bus::Sub::Part(u, PART));
+    if let Some(x) = w.unit_mut(u) {
+        x.shifters_fury = None;
+    }
+}
+
 /// `EntityPart.TurnOff` for the part (if on): `Unsubscribe()`, then `OnTurnOff`
 /// (`m_IsOn = false`).
 pub fn part_turn_off(w: &mut World, u: EntityIdx) {

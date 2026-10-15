@@ -857,6 +857,13 @@ fn on_did_turn_on(w: &mut World, f: FactIdx) {
 }
 
 pub fn has_component(bp: &Blueprint, ty: &str) -> bool {
+    // `IActivatableAbilitySpendResourceLogic` isn't in the content schema's handler lists: its
+    // implementer on toggles is `ActivatableAbilityResourceLogic`.
+    if ty == "IActivatableAbilitySpendResourceLogic"
+        && bp.components_array().iter().any(|o| is_a(o.ty, "ActivatableAbilityResourceLogic"))
+    {
+        return true;
+    }
     bp.components_array().iter().any(|o| {
         is_a(o.ty, ty) || wr_content::schema::ty(o.ty).handlers.iter().any(|h| h.contains(ty))
     })
@@ -894,6 +901,20 @@ pub fn is_available_by_resources(w: &mut World, f: FactIdx) -> bool {
     true
 }
 
+/// `ActivatableAbilityResourceLogic.IsFreeBecauseOfFact`.
+fn free_because_of_fact(w: &World, u: EntityIdx, v: crate::content::View<'_>) -> bool {
+    if v.bool("m_UseListForFreeBlueprints") {
+        v.guids_with_nulls("m_FreeBlueprints")
+            .into_iter()
+            .flatten()
+            .any(|g| w.content.get(g).is_some() && owner_has_fact(w, u, g))
+    } else {
+        v.guid("m_FreeBlueprint")
+            .filter(|g| w.content.get(*g).is_some())
+            .is_some_and(|g| owner_has_fact(w, u, g))
+    }
+}
+
 /// `ActivatableAbilityResourceLogic.SpendType`: `None`, `Judgment`.
 const SPEND_NONE: i64 = 0;
 const SPEND_JUDGMENT: i64 = 5;
@@ -909,18 +930,7 @@ fn resource_logic_available(
     u: EntityIdx,
     v: crate::content::View<'_>,
 ) -> bool {
-    // `IsFreeBecauseOfFact`.
-    let free = if v.bool("m_UseListForFreeBlueprints") {
-        v.guids_with_nulls("m_FreeBlueprints")
-            .into_iter()
-            .flatten()
-            .any(|g| w.content.get(g).is_some() && owner_has_fact(w, u, g))
-    } else {
-        v.guid("m_FreeBlueprint")
-            .filter(|g| w.content.get(*g).is_some())
-            .is_some_and(|g| owner_has_fact(w, u, g))
-    };
-    if free {
+    if free_because_of_fact(w, u, v) {
         return true;
     }
     if let Some(r) = v.guid("m_RequiredResource").filter(|g| w.content.get(*g).is_some()) {
@@ -1089,7 +1099,18 @@ pub fn try_start(w: &mut World, f: FactIdx) {
     w.fact_mut(f).was_in_combat = owner.is_some_and(|o| crate::combat::is_in_combat(w, o));
     set_act(w, f, (on, true, buff));
     reapply_buff(w, f);
-    // `IActivatableAbilitySpendResourceLogic.OnStart` (none: checked in `on_did_turn_on`),
+    // `IActivatableAbilitySpendResourceLogic.OnStart`: `ActivatableAbilityResourceLogic` spends
+    // for `TurnOn`, `Start` and the once-per spend types (not ported: reported).
+    // (`SpendResource` returns at once when free because of a fact.)
+    if let Some(bp) = ability_bp(w, f)
+        && let Some(u) = owner
+        && components_of(&bp, "ActivatableAbilityResourceLogic").iter().any(|o| {
+            let v = crate::content::View(o);
+            matches!(v.int("SpendType"), 1 | 2 | 10..=12) && !free_because_of_fact(w, u, v)
+        })
+    {
+        w.coverage.unsupported("ActivatableAbilityResourceLogic.OnStart: spending a resource");
+    }
     // `IActivatableAbilityStartHandler` (UI and action bar).
     w.fact_mut(f).time_to_next_round = 0.0;
     w.fact_mut(f).ready_to_start = false;
@@ -1111,8 +1132,10 @@ pub fn stop(w: &mut World, f: FactIdx) {
         remove(w, o, b);
     }
     let Some(bp) = ability_bp(w, f) else { return };
+    // `if (m_IsOn && (ActivateWithUnitCommand || !IsAvailableByRestrictions)) m_IsOn = false`
+    // (`IsStarted` is already false).
     let with_command = bp.view().int("ActivationType") == 1;
-    if on && with_command {
+    if on && (with_command || !is_available_by_restrictions(w, f)) {
         set_act(w, f, (false, false, None));
     }
 }
