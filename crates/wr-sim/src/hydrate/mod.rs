@@ -389,6 +389,7 @@ impl Loader<'_> {
                 }
                 found
             },
+            source_ability: None,
         }
     }
 

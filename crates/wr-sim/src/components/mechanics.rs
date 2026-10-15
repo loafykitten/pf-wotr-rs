@@ -321,7 +321,8 @@ fn in_fact_context(
         w.coverage.unsupported("IFactContextOwner.RunActionInContext: the fact has no context");
         return;
     }
-    let mechanics = crate::elements::Ctx::Mechanics { fact, target };
+    let mechanics =
+        crate::elements::Ctx::Mechanics { ctx: crate::elements::MechRef::Fact(fact), target };
     if kind == FactKind::Buff {
         crate::elements::with_ctx(w, crate::elements::Ctx::BuffData(fact), |w| {
             crate::elements::with_ctx(w, mechanics, f);
@@ -437,11 +438,11 @@ pub fn run_context_action(
 /// Durations other than permanent or `DurationSeconds` (`SameDuration`, `DurationValue`'s
 /// dice and context values), `IsNotDispelable` (not modelled on buffs) are reported.
 fn apply_buff(w: &mut World, a: View<'_>, target: Option<EntityIdx>, caster: Option<EntityIdx>) {
-    let Some((fact, _)) = crate::elements::actions::mechanics_scope(w) else {
+    let Some((r, _)) = crate::elements::actions::mechanics_scope(w) else {
         w.log("error", "Unable to apply buff: no context found");
         return;
     };
-    let Some(ctx) = w.fact(fact).context.clone() else {
+    let Some(ctx) = crate::elements::mech_context(w, r).cloned() else {
         w.log("error", "Unable to apply buff: no context found");
         return;
     };
@@ -467,8 +468,19 @@ fn apply_buff(w: &mut World, a: View<'_>, target: Option<EntityIdx>, caster: Opt
             }
         }
     } else {
-        w.coverage.unsupported("ContextActionApplyBuff: DurationValue (ContextDurationValue)");
-        return;
+        let Some(v) = a.obj("DurationValue") else {
+            // (`DurationValue.Calculate` on a null value throws.)
+            w.coverage.unsupported("ContextActionApplyBuff: DurationValue missing");
+            return;
+        };
+        match crate::combat::spells::duration(w, r, v) {
+            Some(d) => Some(d),
+            None => {
+                w.coverage
+                    .unsupported("ContextActionApplyBuff: DurationValue (ContextDurationValue)");
+                return;
+            }
+        }
     };
     if a.bool("IsNotDispelable") {
         w.coverage.unsupported("ContextActionApplyBuff: IsNotDispelable");

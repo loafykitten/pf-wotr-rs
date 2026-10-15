@@ -142,6 +142,23 @@ pub fn register(r: &mut Registry) {
         rule: ac_bonus_against_fact_owner,
     }));
     r.register(Box::new(RulePort {
+        name: "AttackBonusConditional",
+        bits: 0,
+        hooks: no_hooks,
+        handlers: &[
+            "IInitiatorRulebookHandler<RuleAttackRoll>",
+            "IInitiatorRulebookHandler<RuleCalculateAttackBonus>",
+        ],
+        rule: attack_bonus_conditional,
+    }));
+    r.register(Box::new(RulePort {
+        name: "AddInitiatorAttackWithWeaponTrigger",
+        bits: 0,
+        hooks: no_hooks,
+        handlers: &["IInitiatorRulebookHandler<RuleAttackWithWeapon>"],
+        rule: add_initiator_attack_with_weapon_trigger,
+    }));
+    r.register(Box::new(RulePort {
         name: "ImpatienceCalmingPart",
         bits: 0,
         hooks: no_hooks,
@@ -243,6 +260,244 @@ fn ac_bonus_against_fact_owner(w: &mut World, c: CompRef, rule: &mut dyn RuleEve
     } else if about && let Some(evt) = rule.as_any().downcast_mut::<RuleCalculateAC>() {
         ac_bonus_calculate_ac_about(w, c, evt);
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// AttackBonusConditional (`Kingmaker.Designers.Mechanics.Facts/AttackBonusConditional.cs`)
+// ---------------------------------------------------------------------------------------
+
+/// `AttackBonusConditional.RuntimeData` (`AttackBonus`, `Target`: a `UnitReference`, by unique
+/// id). It isn't saved (the save holds the component as null), so `Data` starts at its defaults;
+/// any other shape is reported and read as the defaults.
+fn abc_data(w: &mut World, c: CompRef) -> (i32, Option<String>) {
+    let d = w.component_mut(c).data.get_or_insert_with(
+        || serde_json::json!({ "AttackBonus": 0, "Target": serde_json::Value::Null }),
+    );
+    let ok = d.as_object().is_some_and(|o| {
+        o.len() == 2
+            && o.get("AttackBonus").and_then(serde_json::Value::as_i64).is_some()
+            && o.get("Target").is_some_and(|t| t.is_null() || t.is_string())
+    });
+    if !ok {
+        w.coverage.unsupported("AttackBonusConditional: runtime data of an unknown shape");
+        return (0, None);
+    }
+    let b = d["AttackBonus"].as_i64().and_then(|b| i32::try_from(b).ok()).unwrap_or(0);
+    (b, d["Target"].as_str().map(str::to_owned))
+}
+
+fn set_abc_data(w: &mut World, c: CompRef, bonus: i32, target: Option<&str>) {
+    w.component_mut(c).data = Some(serde_json::json!({ "AttackBonus": bonus, "Target": target }));
+}
+
+/// `AttackBonusConditional` (`IInitiatorRulebookHandler<RuleAttackRoll>` and
+/// `<RuleCalculateAttackBonus>`): before an attack roll, its conditions in the fact's context
+/// (the data scope's target: the wielder with `CheckWielder`, else the attack's target) decide
+/// `Data.AttackBonus = Fact.GetRank() * Bonus.Calculate(Context)` and `Data.Target`; the attack
+/// bonus rule against that target adds it (`AddModifier(Data.AttackBonus, Fact, Descriptor)`);
+/// after the roll `Data.Clear()`. `OnEventDidTrigger(RuleCalculateAttackBonus)` is empty.
+fn attack_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent, about: bool) {
+    if let Some(evt) = rule.as_any().downcast_mut::<RuleAttackRoll>() {
+        if !about {
+            abc_data(w, c);
+            set_abc_data(w, c, 0, None);
+            return;
+        }
+        let target = evt.target;
+        let Some((bp, i)) = crate::components::settings_of(w, c) else { return };
+        let objs = bp.components_array();
+        let v = crate::content::View(objs[i]);
+        // `Context.GetDataScope(CheckWielder ? Owner : evt.Target)`.
+        let scope = if v.bool("CheckWielder") { owner_unit(w, c) } else { Some(target) };
+        if w.fact(c.fact).context.is_none() {
+            w.coverage.unsupported("AttackBonusConditional: the fact has no context");
+            return;
+        }
+        let pass = crate::elements::with_ctx(
+            w,
+            crate::elements::Ctx::Mechanics {
+                ctx: crate::elements::MechRef::Fact(c.fact),
+                target: scope,
+            },
+            |w| crate::elements::check_conditions(w, &bp, v.obj("Conditions")),
+        );
+        if pass {
+            let rank = crate::components::fact_rank(w, c.fact);
+            let value = context_value(w, c, v.obj("Bonus"));
+            let id = w.entity(target).unique_id.clone();
+            abc_data(w, c);
+            set_abc_data(w, c, crate::csharp::arith::mul(rank, value), Some(&id));
+        }
+    } else if about && let Some(evt) = rule.as_any().downcast_mut::<RuleCalculateAttackBonus>() {
+        let (bonus, target) = abc_data(w, c);
+        if target.as_deref() == Some(w.entity(evt.target).unique_id.as_str()) {
+            let Some(d) = with_settings(w, c, |v| MD(v.i32("Descriptor"))) else { return };
+            evt.bonuses.add_in(w, Bonus::desc(bonus, d).of(c.fact));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// AddInitiatorAttackWithWeaponTrigger (`Kingmaker.UnitLogic.Mechanics.Components/
+// AddInitiatorAttackWithWeaponTrigger.cs`, `AbstractWeaponTrigger.cs`)
+// ---------------------------------------------------------------------------------------
+
+/// `AddInitiatorAttackWithWeaponTrigger`: `AbstractWeaponTrigger.AboutToTrigger` (with
+/// `TriggerBeforeAttack`) and `DidTrigger` (without it) on the owner's attacks. `IsSuitable` is
+/// ported for what the sim keeps of the attack; the actions themselves (run in the fact's context
+/// inside a `ContextAttackData` scope) aren't: a suitable attack is reported, as are the checks
+/// that read what the sim doesn't hold.
+fn add_initiator_attack_with_weapon_trigger(
+    w: &mut World,
+    c: CompRef,
+    rule: &mut dyn RuleEvent,
+    about: bool,
+) {
+    let Some(evt) = rule.as_any().downcast_mut::<super::attack::RuleAttackWithWeapon>() else {
+        return;
+    };
+    let Some(before) = with_settings(w, c, |v| v.bool("TriggerBeforeAttack")) else { return };
+    if about != before {
+        return;
+    }
+    let Some(suitable) = weapon_trigger_is_suitable(w, c, evt) else { return };
+    if !suitable {
+        return;
+    }
+    if before {
+        w.coverage.unsupported(
+            "AddInitiatorAttackWithWeaponTrigger: its actions before the attack (not modelled)",
+        );
+        return;
+    }
+    // `foreach resolveRule in evt.ResolveRules`: a triggered one runs the actions when its damage
+    // suits; a waiting one subscribes to `OnResolve`.
+    for triggered in evt.resolves_triggered.clone() {
+        if triggered {
+            w.coverage.unsupported(
+                "AddInitiatorAttackWithWeaponTrigger: its actions on a suitable attack (not modelled)",
+            );
+        } else {
+            w.coverage
+                .unsupported("AddInitiatorAttackWithWeaponTrigger: an OnResolve subscription");
+        }
+    }
+}
+
+/// `AbstractWeaponTrigger.IsSuitable(RuleAttackWithWeapon)`; `None` (reported) where it reads
+/// what the sim doesn't hold.
+fn weapon_trigger_is_suitable(
+    w: &mut World,
+    c: CompRef,
+    evt: &super::attack::RuleAttackWithWeapon,
+) -> Option<bool> {
+    let (bp, i) = crate::components::settings_of(w, c)?;
+    let objs = bp.components_array();
+    let v = crate::content::View(objs[i]);
+    let before = v.bool("TriggerBeforeAttack");
+    fn unsupported<T>(w: &mut World, what: &str) -> Option<T> {
+        w.coverage.unsupported(format!("AddInitiatorAttackWithWeaponTrigger: {what}"));
+        None
+    }
+    // The attack roll's outcome (read only without `TriggerBeforeAttack`).
+    let roll = evt.roll_outcome;
+    let after = |w: &mut World| -> Option<super::attack::RollOutcome> {
+        match roll {
+            Some(r) => Some(r),
+            None => unsupported(w, "the attack's roll isn't known"),
+        }
+    };
+    if !before && v.bool("OnlyNatural20") && after(w)?.d20 != 20 {
+        return Some(false);
+    }
+    // `(Fact as ItemEnchantment)?.Owner`: an enchantment's item must be the attack's weapon.
+    if w.fact(c.fact).kind == FactKind::ItemEnchantment
+        && w.fact(c.fact).owner != Some(evt.weapon.item)
+    {
+        return Some(false);
+    }
+    if !before && v.bool("OnlyHit") && !after(w)?.is_hit {
+        return Some(false);
+    }
+    if !before && v.bool("IgnoreAutoHit") && after(w)?.auto_hit {
+        return Some(false);
+    }
+    if !before && v.bool("OnMiss") && after(w)?.is_hit {
+        return Some(false);
+    }
+    if v.bool("CheckWeaponBlueprint") {
+        if Some(evt.weapon.bp.guid) != v.guid("m_WeaponBlueprint") {
+            return Some(false);
+        }
+    } else {
+        if let Some(t) = v.guid("m_WeaponType")
+            && evt.weapon.ty.guid != t
+        {
+            return Some(false);
+        }
+        if v.bool("CheckWeaponCategory") && v.int("Category") != evt.weapon.category() {
+            return Some(false);
+        }
+        if v.bool("CheckWeaponRangeType") {
+            return unsupported(w, "CheckWeaponRangeType");
+        }
+        if v.bool("CheckWeaponGroup") {
+            return unsupported(w, "CheckWeaponGroup");
+        }
+        if v.bool("AllNaturalAndUnarmed") && !evt.weapon.is_natural() && !evt.weapon.is_unarmed() {
+            return Some(false);
+        }
+        // `flag`, evaluated whatever `DuelistWeapon` says: a light or one-handed piercing
+        // category, a dueling sword with `DuelingMastery`, or (its last operand)
+        // `Ensure<UnitPartDamageGrace>().HasEntry(category)`, which adds the part.
+        let cat = evt.weapon.category();
+        let flag = crate::feature_param::has_sub_category(cat, 9)
+            || crate::feature_param::has_sub_category(cat, 13)
+            || (cat == 49
+                && crate::components::state::has_mechanics_feature(
+                    w,
+                    evt.initiator,
+                    &["DuelingMastery"],
+                ))
+            || damage_grace_has_entry(w, evt.initiator, cat);
+        if v.bool("DuelistWeapon") && !flag {
+            return Some(false);
+        }
+    }
+    if !before && v.bool("CriticalHit") && !after(w)?.is_critical_confirmed {
+        return Some(false);
+    }
+    if !before && v.bool("NotCriticalHit") && after(w)?.is_critical_confirmed {
+        return Some(false);
+    }
+    if v.bool("OnlyOnFullAttack") && !evt.is_full_attack {
+        return Some(false);
+    }
+    if v.bool("OnlyOnFirstAttack") && !evt.is_first_attack {
+        return Some(false);
+    }
+    if !before && v.bool("OnlyOnFirstHit") {
+        return unsupported(w, "OnlyOnFirstHit (Data.HadHit)");
+    }
+    if v.bool("CheckDistance") {
+        return unsupported(w, "CheckDistance");
+    }
+    if !before && v.bool("OnlySneakAttack") && !after(w)?.is_sneak_attack {
+        return Some(false);
+    }
+    if !before && v.bool("NotSneakAttack") && after(w)?.is_sneak_attack {
+        return Some(false);
+    }
+    if v.bool("NotExtraAttack") {
+        return unsupported(w, "NotExtraAttack (ExtraAttack)");
+    }
+    if v.bool("OnCharge") && !evt.is_charge {
+        return Some(false);
+    }
+    if v.bool("OnAttackOfOpportunity") && !evt.is_attack_of_opportunity {
+        return Some(false);
+    }
+    Some(true)
 }
 
 const ATTACK_BONUS: &[&str] = &["IInitiatorRulebookHandler<RuleCalculateAttackBonusWithoutTarget>"];

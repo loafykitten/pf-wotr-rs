@@ -3,8 +3,9 @@
 //! (`Kingmaker.Inspect`). A unit that dies is queued; the controller's next tick makes the
 //! party's knowledge check on its blueprint, adding the blueprint's `UnitInfo` (saved) if it has
 //! none. The check itself (`RuleSkillCheck`, `UnitInfo.SetCheck`) isn't ported: a party member
-//! who would roll is reported. Units revealed by fog of war (`HandleEntityRevealed`) aren't
-//! queued: the sim doesn't run fog of war.
+//! who would roll is reported. A unit revealed by fog of war (`HandleEntityRevealed`) is queued
+//! when the recording says it was revealed (WrathOracle's `inspect_reveal`): the sim doesn't run
+//! fog of war.
 
 use wr_content::Guid;
 
@@ -50,6 +51,32 @@ fn known_parts(w: &World, info: &UnitInfo) -> i32 {
     if margin < 0 { 0 } else { (1 + margin / 5).min(4) }
 }
 
+/// `InspectUnitsController.HandleEntityRevealed` of a unit: queued when the party has no
+/// `UnitInfo` of its `BlueprintForInspection`; whether the call added it to the set. A polymorph's
+/// replacement blueprint (`ReplaceBlueprintForInspection`) is reported (`None`).
+pub fn entity_revealed(w: &mut World, u: EntityIdx) -> Option<bool> {
+    if polymorphed(w, u) {
+        w.coverage.unsupported("InspectUnitsController: a polymorphed unit's inspection blueprint");
+        return None;
+    }
+    let bp = w.unit(u).and_then(|x| x.blueprint);
+    if w.player.inspect_infos.iter().any(|x| Some(x.blueprint) == bp) {
+        return Some(false);
+    }
+    let added = !w.combat.inspect_queue.contains(&u);
+    queue(w, u);
+    Some(added)
+}
+
+/// A unit with a `Polymorph` fact (whose activation may set `ReplaceBlueprintForInspection`).
+fn polymorphed(w: &World, u: EntityIdx) -> bool {
+    w.entity(u).facts.list.iter().any(|f| {
+        w.fact(*f).bp.as_ref().is_some_and(|b| {
+            b.components_array().iter().any(|o| wr_content::schema::ty(o.ty).short == "Polymorph")
+        })
+    })
+}
+
 /// `InspectUnitsController.HandleUnitDeath`: the unit is queued (a `HashSet`).
 pub fn queue(w: &mut World, u: EntityIdx) {
     if !w.combat.inspect_queue.contains(&u) {
@@ -91,11 +118,7 @@ fn try_make_knowledge_check(w: &mut World, u: EntityIdx) -> usize {
     if !inspect_allowed(w, u) {
         return 0;
     }
-    if w.entity(u).facts.list.iter().any(|f| {
-        w.fact(*f).bp.as_ref().is_some_and(|b| {
-            b.components_array().iter().any(|o| wr_content::schema::ty(o.ty).short == "Polymorph")
-        })
-    }) {
+    if polymorphed(w, u) {
         // `ReplaceBlueprintForInspection` (a polymorph's).
         w.coverage.unsupported("InspectUnitsManager: a polymorphed unit's inspection blueprint");
         return 0;

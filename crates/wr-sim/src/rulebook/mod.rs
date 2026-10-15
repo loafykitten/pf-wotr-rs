@@ -34,6 +34,11 @@ pub trait RuleEvent {
     fn target(&self) -> Option<EntityIdx> {
         None
     }
+    /// Whether WrathOracle records the rule's target: its `GetRuleTarget` passes the oracle's
+    /// purity check (`RuleCastSpell`'s and `RuleApplySpell`'s don't: `$impure`, a null target).
+    fn record_target(&self) -> bool {
+        true
+    }
     /// `OnTrigger(context)`.
     fn on_trigger(&mut self, w: &mut World);
     fn base(&self) -> &RuleBase;

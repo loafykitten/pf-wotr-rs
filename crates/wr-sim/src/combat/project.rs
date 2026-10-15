@@ -52,6 +52,21 @@ pub const RESULT_FIELDS: &[(&str, &[&str])] = &[
     ("RuleDealDamage", &["Result"]),
     ("RuleCalculateDamage", &[]),
     ("RuleCanApplyBuff", &["CanApply", "Immunity"]),
+    ("RuleCalculateAbilityParams", &["Result"]),
+    (
+        "RuleCastSpell",
+        &[
+            "Success",
+            "SpellFailureChance",
+            "ArcaneSpellFailureChance",
+            "IsArcaneSpellFailed",
+            "IsSpellFailed",
+        ],
+    ),
+    (
+        "RuleSpellResistanceCheck",
+        &["TargetIsImmune", "SpellResistance", "SpellPenetration", "Roll"],
+    ),
 ];
 
 fn short(class: &str) -> &str {

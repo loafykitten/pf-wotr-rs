@@ -153,9 +153,10 @@ pub fn fire<R: RuleEvent>(
     let a = rule.initiator();
     let b = rule.target();
     let depth = w.rulebook.stack.len();
+    let recorded = if rule.record_target() { uid(w, b) } else { J::Null };
     cx.emit(
         w,
-        json!({"k": "rule", "class": class, "initiator": uid(w, Some(a)), "target": uid(w, b), "depth": depth}),
+        json!({"k": "rule", "class": class, "initiator": uid(w, Some(a)), "target": recorded, "depth": depth}),
     );
     let dmg = |w: &World, u: EntityIdx| w.unit(u).map_or(0, |x| x.damage);
     let b2 = b.filter(|b| *b != a);

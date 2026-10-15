@@ -47,9 +47,35 @@ pub enum Ctx {
     CombatUnit(EntityIdx),
     /// `Buff.Data` (`Buff.RunActionInContext`): the buff.
     BuffData(crate::world::FactIdx),
-    /// `MechanicsContext.Data` (`MechanicsContext.GetDataScope(target)`): the fact whose
-    /// context the actions run in, and the context's current target.
-    Mechanics { fact: crate::world::FactIdx, target: Option<EntityIdx> },
+    /// `MechanicsContext.Data` (`MechanicsContext.GetDataScope(target)`): the context the actions
+    /// run in (a fact's, or an ability's execution context), and its current target.
+    Mechanics { ctx: MechRef, target: Option<EntityIdx> },
+}
+
+/// A `MechanicsContext` a scope names: a fact's (`MaybeContext`), or an ability's execution
+/// context (`AbilityExecutionContext`, [`crate::combat::spells`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MechRef {
+    Fact(crate::world::FactIdx),
+    Ability(u32),
+}
+
+/// The context a [`MechRef`] names.
+#[must_use]
+pub fn mech_context(w: &World, r: MechRef) -> Option<&crate::context::MechanicsContext> {
+    match r {
+        MechRef::Fact(f) => w.fact(f).context.as_ref(),
+        MechRef::Ability(i) => w.combat.spells.context(i).map(|c| &c.mech),
+    }
+}
+
+/// `Context.MaybeCaster` of a [`MechRef`]'s context (a unit the sim has, or none).
+#[must_use]
+pub fn mech_caster(w: &World, r: MechRef) -> Option<EntityIdx> {
+    mech_context(w, r)
+        .and_then(|x| x.caster.clone())
+        .and_then(|id| w.by_id.get(&id).copied())
+        .filter(|u| w.unit(*u).is_some())
 }
 
 /// Why an element stopped (a C# exception).

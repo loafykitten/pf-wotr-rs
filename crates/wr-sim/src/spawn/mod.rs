@@ -456,7 +456,9 @@ fn initialize(w: &mut World, e: EntityIdx, bp: &Rc<Blueprint>, p: Option<&Placeh
         .and_then(|g| w.content.get(g))
         .map(|b| b.view().int("Size"));
     let size = race_size.unwrap_or(v.int("Size"));
-    w.unit_mut(e).expect("unit").original_size = Size::from_i64(size);
+    let u = w.unit_mut(e).expect("unit");
+    u.original_size = Size::from_i64(size);
+    u.state_size = u.original_size;
     update_size_modifiers(w, e);
     // `AttackFactions.UnionWith(blueprint.AttackFactions)`.
     let attack = crate::combat::units::blueprint_attack_factions(w, bp);
@@ -535,7 +537,107 @@ fn ensure_natural_proficiencies(w: &mut World, e: EntityIdx) {
     }
 }
 
-/// `UnitDescriptor.UpdateSizeModifiers()` (`WeaponSizeExtension.GetModifiers`).
+/// `UnitState.Size`'s getter: `m_Size`, set to `OriginalSize` on first read (`None` for a unit
+/// without either). A size part loaded from a save (its facts and `OnPostLoad` aren't hydrated)
+/// is reported.
+pub fn state_size(w: &mut World, e: EntityIdx) -> Option<Size> {
+    let u = w.unit(e)?;
+    if u.size_change_facts.is_empty()
+        && w.entity(e).parts.iter().any(|p| p.clr == "UnitPartSizeModifier")
+    {
+        w.coverage.unsupported("UnitPartSizeModifier from a save (not hydrated)");
+    }
+    let u = w.unit_mut(e)?;
+    if u.state_size.is_none() {
+        u.state_size = u.original_size;
+    }
+    u.state_size
+}
+
+/// `UnitState.Size`'s setter: `m_SizeBeforeDeath` kept for a dead unit, then
+/// `UpdateSizeModifiers` and `IUnitSizeHandler.HandleUnitSizeChanged` (the view's scale, the UI).
+pub fn set_state_size(w: &mut World, e: EntityIdx, size: Size) {
+    let dead = w.unit(e).is_some_and(|u| u.life_state == 2);
+    let Some(u) = w.unit_mut(e) else { return };
+    if dead && u.size_before_death.is_none() {
+        u.size_before_death = u.state_size;
+    }
+    u.state_size = Some(size);
+    update_size_modifiers(w, e);
+    crate::rulebook::bus::raise_global_call(
+        w,
+        "IUnitSizeHandler",
+        "HandleUnitSizeChanged",
+        Some(e),
+    );
+}
+
+/// `UnitPartSizeModifier.UpdateSize()` (`Kingmaker.UnitLogic.Parts/UnitPartSizeModifier.cs`): the
+/// last size-changing fact's first `Polymorph` or `ChangeUnitSize` component sets the size; with
+/// none left the size returns to `OriginalSize` and the part goes; a fact without such a
+/// component is dropped (an error) and the next one tried.
+pub fn update_size_part(w: &mut World, e: EntityIdx) {
+    loop {
+        let Some(f) = w.unit(e).and_then(|u| u.size_change_facts.last().copied()) else {
+            let original = w.unit(e).and_then(|u| u.original_size);
+            if let Some(s) = original {
+                set_state_size(w, e, s);
+            }
+            w.entity_mut(e).parts.retain(|p| p.clr != "UnitPartSizeModifier");
+            return;
+        };
+        let mut size = None;
+        for k in 0..w.fact(f).components.len() {
+            let c = crate::world::CompRef { fact: f, comp: k };
+            let ty = w.component(c).ty().map(|t| wr_content::schema::ty(t).short);
+            match ty {
+                Some("Polymorph") => {
+                    w.coverage.unsupported("UnitPartSizeModifier: a Polymorph's size");
+                    return;
+                }
+                Some("ChangeUnitSize") => {
+                    let Some((value_type, delta, value)) =
+                        crate::components::with_settings(w, c, |v| {
+                            (v.int("m_Type"), v.i32("SizeDelta"), v.int("Size"))
+                        })
+                    else {
+                        continue;
+                    };
+                    // `GetUnitSize`: `Delta` (0) `OriginalSize.Shift(SizeDelta, Fine)`, `Value` (1)
+                    // the size.
+                    size = match value_type {
+                        0 => w.unit(e).and_then(|u| u.original_size).map(|o| shift_size(o, delta)),
+                        1 => Size::from_i64(value),
+                        _ => {
+                            w.coverage.unsupported("ChangeUnitSize: an unknown change type");
+                            return;
+                        }
+                    };
+                }
+                _ => size = None,
+            }
+            if let Some(s) = size {
+                set_state_size(w, e, s);
+                break;
+            }
+        }
+        if size.is_some() {
+            return;
+        }
+        w.log("error", "Invalid fact (has no ChangeUnitSize component)");
+        if let Some(u) = w.unit_mut(e) {
+            u.size_change_facts.pop();
+        }
+    }
+}
+
+/// `Size.Shift(shift, Size.Fine, Size.Colossal)`.
+fn shift_size(s: Size, delta: i32) -> Size {
+    let i = (s as i32).wrapping_add(delta).clamp(Size::Fine as i32, Size::Colossal as i32);
+    Size::from_i64(i64::from(i)).unwrap_or(s)
+}
+
+/// `UnitDescriptor.UpdateSizeModifiers()` (`WeaponSizeExtension.GetModifiers` of `State.Size`).
 pub fn update_size_modifiers(w: &mut World, e: EntityIdx) {
     use crate::stats::types::ModifierDescriptor as D;
     for t in
@@ -543,7 +645,7 @@ pub fn update_size_modifiers(w: &mut World, e: EntityIdx) {
     {
         ops::remove_modifiers(w, e, t, D::Size);
     }
-    let size = w.unit(e).and_then(|u| u.original_size);
+    let size = state_size(w, e);
     // (AttackAndAC, Stealth, Reach) per size, Fine … Colossal.
     let m = match size {
         Some(Size::Fine) => (8, 16, 0),

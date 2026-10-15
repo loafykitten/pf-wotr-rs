@@ -692,9 +692,9 @@ fn a_buff_applied_without_its_parent_context_is_its_own() {
     assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
 }
 
-/// A duration the action computes from context values isn't modelled: reported, no buff.
+/// An action without its duration value is reported, no buff.
 #[test]
-fn an_apply_buff_with_a_context_duration_is_reported() {
+fn an_apply_buff_without_its_duration_value_is_reported() {
     let (mut w, u) = registry_world();
     insert_bp(&w, 921, BUFF, &[]);
     let timed = Node::Object(Box::new(obj(
@@ -709,6 +709,47 @@ fn an_apply_buff_with_a_context_duration_is_reported() {
         "{:?}",
         w.coverage.unsupported
     );
+}
+
+/// `ContextDurationValue.Calculate`: a duration of rounds from a context value (no dice: a
+/// `RuleRollDice` of zero dice, then the bonus) times the rate's rounds; the buff ends that long
+/// after the start.
+#[test]
+fn an_apply_buff_with_a_context_duration_lasts_its_rounds() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 922, BUFF, &[]);
+    let value = |t: i64, v: i64| {
+        Node::Object(Box::new(obj(
+            "Kingmaker.UnitLogic.Mechanics.ContextValue",
+            &[("ValueType", Node::Enum(t)), ("Value", Node::Int(v))],
+        )))
+    };
+    let duration = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Mechanics.ContextDurationValue",
+        &[
+            // `DurationRate.Minutes`: 10 rounds each.
+            ("Rate", Node::Enum(1)),
+            ("DiceType", Node::Enum(0)),
+            ("DiceCountValue", value(0, 0)),
+            ("BonusValue", value(0, 3)),
+            ("m_IsExtendable", Node::Bool(true)),
+        ],
+    )));
+    let timed = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Mechanics.Actions.ContextActionApplyBuff",
+        &[
+            ("name", Node::Str("$A$d".into())),
+            ("m_Buff", Node::BpRef(Guid(922))),
+            ("DurationValue", duration),
+        ],
+    )));
+    let f = feature(&w, 923, vec![context_actions(vec![timed])]);
+    let start = w.clock.game_time.0;
+    crate::unit_facts::add_fact(&mut w, u, &f).expect("feature");
+    let b = find_fact(&w, u, Guid(922)).expect("applied");
+    // 3 minutes: 30 rounds of 6 s.
+    assert_eq!(w.fact(b).buff.as_ref().and_then(|t| t.end_time), Some(start + 180 * 10_000_000));
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
 }
 
 /// `BuffExtraEffects`: the checked buff arriving puts the extra buff on; its leaving (no checked

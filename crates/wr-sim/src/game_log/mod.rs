@@ -212,6 +212,8 @@ pub struct Context {
     pub attacks_count: i32,
     pub round_number: i32,
     pub tooltip: bool,
+    /// `Tooltip`'s object as the observer writes it (`{"$type": …}`), when the sim sets one.
+    pub tooltip_type: Option<&'static str>,
     pub roll_chance: i32,
 }
 
@@ -281,6 +283,19 @@ pub enum Payload {
     /// A recorded input: the projectile's attack roll (its event).
     ProjectileHit {
         attack: Option<usize>,
+    },
+    /// A `RuleCastSpell` (`BaseUseAbilityLogThread.HandleUseAbility(rule.Spell, rule)`): its
+    /// initiator and spell, whether the spell is a spellbook's, its failures.
+    CastSpell {
+        initiator: EntityIdx,
+        spell: wr_content::Guid,
+        spellbook: bool,
+        failed: bool,
+    },
+    /// A `RuleSpellResistanceCheck`: `HasResistanceRoll`, `TargetIsImmune`.
+    SpellResistance {
+        has_roll: bool,
+        immune: bool,
     },
 }
 
@@ -600,6 +615,23 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
             modifier: r.modifier,
         };
     }
+    if let Some(r) = any.downcast_ref::<crate::combat::spells::RuleCastSpell>() {
+        let a = w.combat.spells.context(r.ctx).map(|c| c.ability.spell.blueprint);
+        if let Some(spell) = a {
+            return Payload::CastSpell {
+                initiator: r.initiator,
+                spell,
+                spellbook: true,
+                failed: r.spell_failure_chance > 0,
+            };
+        }
+    }
+    if let Some(r) = any.downcast_ref::<crate::combat::spells::RuleSpellResistanceCheck>() {
+        return Payload::SpellResistance {
+            has_roll: r.spell_resistance > 0,
+            immune: r.target_is_immune,
+        };
+    }
     if let Some(r) = any.downcast_ref::<crate::combat::rules::RuleCanApplyBuff>() {
         return Payload::CanApplyBuff {
             initiator: r.initiator,
@@ -821,6 +853,22 @@ fn handle(w: &mut World, th: usize, e: usize) {
         ("ProjectileHitLogThread", Payload::ProjectileHit { attack }) => {
             projectile_thread(w, th, e, attack)
         }
+        (
+            "RulebookCastSpellLogThread",
+            Payload::CastSpell { initiator, spell, spellbook, failed },
+        ) => cast_spell_thread(w, th, e, initiator, spell, spellbook, failed),
+        // `RulebookSpellResistanceCheckLogThread`: no message without a resistance roll or an
+        // immunity.
+        (
+            "RulebookSpellResistanceCheckLogThread",
+            Payload::SpellResistance { has_roll, immune },
+        ) => {
+            if has_roll || immune {
+                Err(TextError::Unsupported("a spell resistance check's message".into()))
+            } else {
+                Ok(())
+            }
+        }
         (n, p) => Err(TextError::Unsupported(format!(
             "{n} handling {} ({}) isn't ported",
             w.game_log.events[e].ty.name(),
@@ -891,7 +939,7 @@ fn context_json(w: &World) -> Option<serde_json::Value> {
         "AttackNumber": c.attack_number,
         "AttacksCount": c.attacks_count,
         "RoundNumber": c.round_number,
-        "Tooltip": J::Null,
+        "Tooltip": c.tooltip_type.map_or(J::Null, |t| json!({"$type": t})),
         "RollChance": c.roll_chance,
     }))
 }
@@ -1283,6 +1331,53 @@ fn party_xp_thread(w: &mut World, th: usize, e: usize, experience: i32) -> R {
     }
     w.game_log.release();
     r.map(|_| ())
+}
+
+/// `RulebookCastSpellLogThread`: `BaseUseAbilityLogThread.HandleUseAbility(rule.Spell, rule)` for
+/// a spellbook spell that didn't fail: `CastSpell`'s message, its tooltip a
+/// `TooltipTemplateAbility` (not made).
+fn cast_spell_thread(
+    w: &mut World,
+    th: usize,
+    e: usize,
+    initiator: EntityIdx,
+    spell: wr_content::Guid,
+    spellbook: bool,
+    failed: bool,
+) -> R {
+    w.game_log.retain();
+    let r = (|| {
+        let bp = w
+            .content
+            .get(spell)
+            .ok_or_else(|| TextError::Unsupported("the spell's blueprint is missing".into()))?;
+        if bp.view().bool("DisableLog") {
+            return Ok(());
+        }
+        if failed || !spellbook {
+            return Err(TextError::Unsupported("a failed or non-spellbook cast's message".into()));
+        }
+        w.game_log.ctx.source_unit = Some(initiator);
+        // `ability.Name`, `ability.Description`: the blueprint's (no item, param fact or
+        // conversion).
+        let name = names::blueprint_text(w, spell, "m_DisplayName")?;
+        let desc = names::blueprint_text(w, spell, "m_Description")?;
+        w.game_log.ctx.text = Some(name);
+        w.game_log.ctx.description = Some(desc);
+        w.game_log.ctx.tooltip = true;
+        w.game_log.ctx.tooltip_type = Some("AbilityData");
+        if let Some(m) = game_log_message(w, "GameLog/CastSpell")? {
+            add_message(
+                w,
+                th,
+                Some(e),
+                Msg0 { tip: Tip::NotPorted("TooltipTemplateAbility"), ..m },
+            );
+        }
+        Ok(())
+    })();
+    w.game_log.release();
+    r
 }
 
 /// `BarkLogThread` for a unit's bark (a map object's isn't ported).

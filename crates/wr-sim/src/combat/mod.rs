@@ -35,6 +35,7 @@ pub mod paths;
 pub mod project;
 pub mod replay;
 pub mod rules;
+pub mod spells;
 pub mod targets;
 pub mod turn_tick;
 pub mod turns;
@@ -169,6 +170,8 @@ pub struct CombatWorld {
     pub memory: memory::sim::MemoryRun,
     /// `Game.Instance.IsPaused` (the pause mode), for the commands' lifecycle.
     pub commands_paused: bool,
+    /// Spellcasting: the abilities' execution contexts and `AbilityExecutionController`.
+    pub spells: spells::Spells,
 }
 
 /// `UnitEntityData.IsInCombat`.

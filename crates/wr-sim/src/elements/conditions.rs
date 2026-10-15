@@ -10,6 +10,9 @@ use crate::narrative::flags;
 use crate::world::World;
 
 pub const IMPLEMENTED: &[&str] = &[
+    "ContextConditionCasterHasFact",
+    "ContextConditionHasFact",
+    "ContextConditionTargetIsYourself",
     "EtudeStatus",
     "PcRace",
     "PlayerSignificantClassIs",
@@ -46,19 +49,14 @@ pub fn check_condition(w: &mut World, owner: &Rc<Blueprint>, c: View<'_>) -> Res
         // `ContextConditionCasterHasFact.cs`: the context's caster (`MaybeCaster`) has the fact.
         // A `ContextCondition` reads the innermost `MechanicsContext.Data` scope.
         "ContextConditionCasterHasFact" => {
-            let Some((fact, _)) = super::actions::mechanics_scope(w) else {
+            let Some((ctx, _)) = super::actions::mechanics_scope(w) else {
                 return Err(unsupported(
                     w,
                     "condition",
                     "ContextConditionCasterHasFact (no context)",
                 ));
             };
-            let caster = w
-                .fact(fact)
-                .context
-                .as_ref()
-                .and_then(|x| x.caster.clone())
-                .and_then(|id| w.by_id.get(&id).copied());
+            let caster = super::mech_caster(w, ctx);
             let Some(u) = caster else {
                 w.log("error", "Caster is missing");
                 return Ok(false);
@@ -67,6 +65,36 @@ pub fn check_condition(w: &mut World, owner: &Rc<Blueprint>, c: View<'_>) -> Res
             Ok(g.is_some_and(|g| {
                 w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g))
             }))
+        }
+        // `ContextConditionHasFact.cs` (`Kingmaker.UnitLogic.Mechanics.Conditions/`):
+        // `Target.Unit.Descriptor.HasFact(Fact)`, the scope's current target (a missing one throws).
+        "ContextConditionHasFact" => {
+            let Some((_, target)) = super::actions::mechanics_scope(w) else {
+                return Err(unsupported(w, "condition", "ContextConditionHasFact (no context)"));
+            };
+            let Some(u) = target else {
+                return Err(ElementError::Other("NullReferenceException: Target.Unit".into()));
+            };
+            let g = c.guid("m_Fact");
+            Ok(g.is_some_and(|g| {
+                w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g))
+            }))
+        }
+        // `ContextConditionTargetIsYourself.cs`: `Target.Unit == Context.MaybeCaster` (no target
+        // unit: an error logged, false).
+        "ContextConditionTargetIsYourself" => {
+            let Some((ctx, target)) = super::actions::mechanics_scope(w) else {
+                return Err(unsupported(
+                    w,
+                    "condition",
+                    "ContextConditionTargetIsYourself (no context)",
+                ));
+            };
+            let Some(u) = target else {
+                w.log("error", "Target unit is missing");
+                return Ok(false);
+            };
+            Ok(super::mech_caster(w, ctx) == Some(u))
         }
         // `EtudeStatus.cs`.
         "EtudeStatus" => {

@@ -254,6 +254,7 @@ fn command(class: &str, s: State, overrides: &[&str]) -> Cmd {
         ap: None,
         mv: None,
         aoo: None,
+        ability: None,
     }
 }
 

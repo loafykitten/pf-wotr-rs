@@ -1841,6 +1841,22 @@ pub struct RuleAttackWithWeapon {
     pub damage_result: Option<i32>,
     /// `AttackRoll`: its sequence number, once rolled.
     pub attack_roll_seq: Option<u64>,
+    /// What `AttackRoll` decided, once rolled (`D20.Result`, `AutoHit`, `IsHit`,
+    /// `IsCriticalConfirmed`, `IsSneakAttack`): the attack's did-trigger handlers read them.
+    pub roll_outcome: Option<RollOutcome>,
+    /// `ResolveRules`: whether each resolve had triggered when `OnTrigger` returned (a melee
+    /// attack's own resolve) or waits for its projectile (`pending_resolves`).
+    pub resolves_triggered: Vec<bool>,
+}
+
+/// The parts of a `RuleAttackRoll` its attack's handlers read after it triggered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollOutcome {
+    pub d20: i32,
+    pub auto_hit: bool,
+    pub is_hit: bool,
+    pub is_critical_confirmed: bool,
+    pub is_sneak_attack: bool,
 }
 
 impl RuleAttackWithWeapon {
@@ -1889,6 +1905,7 @@ impl RuleAttackWithWeapon {
                 source_id: None,
             };
             w.combat.pending_resolves.push(resolve);
+            self.resolves_triggered.push(false);
             if !roll.is_hit() {
                 calculate_miss_target(w, &projectile);
             }
@@ -1948,6 +1965,8 @@ impl RuleAttackWithWeapon {
             attack_result: 0,
             damage_result: None,
             attack_roll_seq: None,
+            roll_outcome: None,
+            resolves_triggered: Vec::new(),
         }
     }
 }
@@ -2013,6 +2032,13 @@ impl RuleEvent for RuleAttackWithWeapon {
             roll_seq: Some(roll.base.seq),
         };
         self.attack_roll_seq = Some(roll.base.seq);
+        self.roll_outcome = Some(RollOutcome {
+            d20: roll.d20,
+            auto_hit: roll.auto_hit,
+            is_hit: roll.is_hit(),
+            is_critical_confirmed: roll.is_critical_confirmed,
+            is_sneak_attack: roll.is_sneak_attack,
+        });
         if self.skip_animation {
             w.coverage.unsupported("RuleAttackWithWeapon: SkipAnimation");
             return;
@@ -2036,6 +2062,7 @@ impl RuleEvent for RuleAttackWithWeapon {
             source_id: None,
         };
         trigger_any(w, &mut resolve, |_| None);
+        self.resolves_triggered.push(true);
         self.damage_result = resolve.damage.as_ref().filter(|_| roll.is_hit()).map(|d| d.result);
     }
     rule_boilerplate!();

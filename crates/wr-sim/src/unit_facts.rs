@@ -131,6 +131,7 @@ pub fn clone_for(
         parent_source_item: p.source_item.clone(),
         has_ability_context: p.has_ability_context,
         spell_descriptor: p.spell_descriptor | crate::combat::rules::spell_descriptor(bp),
+        source_ability: p.source_ability.clone(),
     }
 }
 

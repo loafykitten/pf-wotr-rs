@@ -160,6 +160,7 @@ pub(super) fn phase_of(origin: &str) -> Option<Phase> {
         "CombatController" => Phase::Turn,
         "UnitFollowUnitController" => Phase::Follow,
         "UnitMoveController" => Phase::Move,
+        "FogOfWarController" | "EntityVisibilityForPlayerController" => Phase::Visibility,
         "UnitCombatJoinController" => Phase::Join,
         "UnitCombatPrepareController" => Phase::Prepare,
         "UnitImpatienceController" => Phase::Impatience,
@@ -865,6 +866,33 @@ impl Driver<'_> {
                         )));
                     }
                     self.out.commands_run += 1;
+                    // The driver's cast: its command's ability is the input's spell.
+                    if let Some(super::targets::DriverInput::Cast {
+                        unit,
+                        ability,
+                        spellbook,
+                        level,
+                        ..
+                    }) = &click
+                    {
+                        let caster = w.by_id.get(unit.as_str()).copied();
+                        let a = caster
+                            .ok_or_else(|| "the caster is unknown".to_owned())
+                            .and_then(|u| {
+                                crate::combat::spells::Ability::memorized(
+                                    w, u, *spellbook, *ability, *level,
+                                )
+                            })
+                            .map_err(|e| Desync(format!("the driver's cast's spell: {e}")))?;
+                        match w.combat.commands.cmds.get_mut(&c) {
+                            Some(x) => x.ability = Some(a),
+                            None => {
+                                return Err(Desync(format!(
+                                    "the driver's command {c} isn't described"
+                                )));
+                            }
+                        }
+                    }
                     self.tgt_run_push(i);
                     uc::run(w, self, s, c, fq, ncq)?;
                     self.tgt_run_pop();
@@ -1454,6 +1482,56 @@ impl Inputs for Driver<'_> {
                 format!("the sim's running list ({op} {c}, {len}), the recording has {d}"),
             );
         }
+        Ok(())
+    }
+
+    fn class_running_call(&mut self, w: &mut World, c: u32, before: usize) -> R<()> {
+        let at = self.uc_pull(w, &format!("the running list's remove of command {c}"), |r| {
+            obs(r, "uc_rc").is_some() && r["ctx"] == "other"
+        })?;
+        let r = &self.trace.records[at];
+        let len = w.combat.commands.running.len();
+        if id(&r["c"]) != Some(c)
+            || r["op"] != "remove"
+            || r["current"] != true
+            || r["b"].as_u64().and_then(|b| usize::try_from(b).ok()) != Some(before)
+            || r["a"].as_u64().and_then(|a| usize::try_from(a).ok()) != Some(len)
+        {
+            let d = describe(r);
+            return self.uc_reject(
+                at,
+                format!("the sim's running list (remove {c}, {len}), the recording has {d}"),
+            );
+        }
+        Ok(())
+    }
+
+    fn class_ended(&mut self, w: &mut World, c: u32, result: u8, raise: bool) -> R<()> {
+        // `UnitCommand.OnEnded < UnitUseAbility.OnEnded < UnitCommand.<the lifecycle's caller>`.
+        const BASE: &str = "Kingmaker.UnitLogic.Commands.Base.UnitCommand.";
+        const CHAIN: &str = "Kingmaker.UnitLogic.Commands.Base.UnitCommand.OnEnded < Kingmaker.UnitLogic.Commands.UnitUseAbility.OnEnded < ";
+        let at = self.uc_pull(w, &format!("the end of command {c}"), |r| {
+            obs(r, "uc_end").is_some() && r["ctx"] == "other"
+        })?;
+        let r = &self.trace.records[at];
+        let chain_ok = opt_str(r, "origin")
+            .flatten()
+            .and_then(|o| o.strip_prefix(CHAIN))
+            .is_some_and(|rest| rest.starts_with(BASE));
+        if id(&r["c"]) != Some(c)
+            || r["res"].as_u64() != Some(u64::from(result))
+            || r["raise"].as_bool() != Some(raise)
+            || !chain_ok
+        {
+            let d = describe(r);
+            return self.uc_reject(
+                at,
+                format!(
+                    "the sim ends command {c} ({result}) through its class, the recording has {d}"
+                ),
+            );
+        }
+        self.out.commands_ends += 1;
         Ok(())
     }
 
