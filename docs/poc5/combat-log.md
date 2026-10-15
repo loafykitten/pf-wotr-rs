@@ -132,7 +132,10 @@ replays, all tick-exact in the game.
 - `check.rs` checks every log record's exact shape and numbering (event ids from 1, messages
   from 0), each rule event's place (right after its rule's `did`, before its `rule_end`, only its
   damage between), each non-rule event's caller (its handler and raiser) and, for one the sim
-  raises, the experience and damage mutations before it, then compares, at the run's end, the sim's queue, ticks and messages with the
+  raises, the experience and damage mutations before it; the driven replay places each log tick
+  and message in `GameLogController`'s phase and the party's combat state events in the join
+  controller's (a record out of the frame's controller order is reported); then it compares, at
+  the run's end, the sim's queue, ticks and messages with the
   recorded ones as one ordered stream (frame, type, the rule itself: the window's rules are
   numbered alike, its class and units; a non-rule event's fields, `IsEnabled`, the override; each
   tick's queue; each message's thread instance, event, text, colour, icon, scope count, context
