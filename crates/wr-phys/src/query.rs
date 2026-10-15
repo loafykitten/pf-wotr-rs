@@ -53,13 +53,10 @@ enum Prepared {
     HeightField {
         bounds: crate::px::Bounds,
     },
-    /// World-space bounds, then the exact-enough test.
     Box {
         m: M4,
         center: [f64; 3],
         half: [f64; 3],
-        lo: [f64; 3],
-        hi: [f64; 3],
     },
     Mesh {
         tris: Vec<[[f64; 3]; 3]>,
@@ -103,8 +100,7 @@ impl<'w> Scene<'w> {
                     let m = M4::from_f32(local_to_world);
                     let center = f64x3(*center);
                     let half = f64x3(*size).map(|x| x.abs() * 0.5);
-                    let (lo, hi) = conservative::box_bounds(&m, center, half);
-                    Prepared::Box { m, center, half, lo, hi }
+                    Prepared::Box { m, center, half }
                 }
                 ShapeKind::Mesh { local_to_world, vertices, triangles, geom_epsilon } => {
                     let m = M4::from_f32(local_to_world);
@@ -121,7 +117,13 @@ impl<'w> Scene<'w> {
                             hi[k] = hi[k].max(p[k]);
                         }
                     }
-                    Prepared::Mesh { tris, eps: f64::from(*geom_epsilon), lo, hi }
+                    // Grown so the prefilter keeps every touch the triangle test may count.
+                    let eps = f64::from(*geom_epsilon);
+                    let grow = tris
+                        .iter()
+                        .map(|t| conservative::triangle_grow(*t, eps))
+                        .fold(0.0, f64::max);
+                    Prepared::Mesh { tris, eps, lo: lo.map(|x| x - grow), hi: hi.map(|x| x + grow) }
                 }
                 ShapeKind::Other { min, max, .. } => {
                     Prepared::Other { lo: f64x3(*min), hi: f64x3(*max) }
@@ -173,7 +175,12 @@ impl<'w> Scene<'w> {
             }
             match (&s.kind, p) {
                 (ShapeKind::HeightField { pose, field }, Prepared::HeightField { bounds }) => {
-                    if let Some(h) = field.raycast_in(*bounds, *pose, o, dir, max, false) {
+                    // `MultiQueryCallback` keeps a blocking hit only when `distance <= shrunk`
+                    // (`max` here): faceHit's distance, recomputed from the rounded point, can
+                    // exceed the traced length.
+                    if let Some(h) = field.raycast_in(*bounds, *pose, o, dir, max, false)
+                        && h.distance <= max
+                    {
                         hits.push((i, h));
                     }
                 }
@@ -235,15 +242,14 @@ fn may_touch(p: &Prepared, o: [f64; 3], max: f64) -> bool {
     const DOWN: [f64; 3] = [0.0, -1.0, 0.0];
     match p {
         Prepared::HeightField { .. } => false,
-        Prepared::Box { m, center, half, lo, hi } => {
-            conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi)
-                && conservative::ray_hits_box(o, DOWN, max, m, *center, *half)
+        Prepared::Box { m, center, half } => {
+            conservative::ray_hits_box(o, DOWN, max, m, *center, *half)
         }
         Prepared::Mesh { tris, eps, lo, hi } => {
-            conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi)
+            conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0)
                 && tris.iter().any(|t| conservative::ray_hits_triangle(o, DOWN, max, *t, *eps))
         }
-        Prepared::Other { lo, hi } => conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi),
+        Prepared::Other { lo, hi } => conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0),
     }
 }
 

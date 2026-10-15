@@ -199,6 +199,8 @@ fn meshes_and_other_shapes_fail_closed() {
     assert!(unverified([30.0, 1.0, 30.0], 1));
     // 1.41 mm outside the triangle, inside BV4's enlargement.
     assert!(unverified([50.001, 1.0, 50.001], 1));
+    // Beyond an outer edge, within the enlargement: the prefilter must not drop it.
+    assert!(unverified([-0.002, 1.0, 25.0], 1));
     assert_eq!(scene.raycast_down([60.0, 1.0, 60.0], 100.0, 1).unwrap(), None);
     assert_eq!(scene.raycast_down([30.0, 1.0, 30.0], 100.0, 2).unwrap(), None, "other layer");
     assert!(unverified([200.5, 5.0, 0.5], 2));
@@ -268,6 +270,16 @@ fn every_recorded_query_is_computed_exactly() {
     let file = PhysFile::read(&path_for("bad465e5404604346bdf71ef50b3299a")).unwrap();
     let scene = Scene::new(&file.world);
     eprintln!("physics file read and prepared in {:?}", t0.elapsed());
+    // faceHit's distance can exceed the traced length; the scene query drops such a hit.
+    let (o, max) = ([128.67328, 62.99409, 67.102905], 21.423319);
+    let hf = file.world.shapes.iter().find_map(|s| match &s.kind {
+        ShapeKind::HeightField { pose, field } => Some((pose, field)),
+        _ => None,
+    });
+    let (pose, field) = hf.unwrap();
+    let alone = field.raycast(*pose, Vec3::from_array(o), Vec3::new(0.0, -1.0, 0.0), max, false);
+    assert!(alone.is_some_and(|h| h.distance > max), "{alone:?}");
+    assert_eq!(scene.raycast_down(o, max, 1 << 8).unwrap(), None);
     let mut distinct = std::collections::HashSet::new();
     let mut total = Tally::default();
     let mut failures = Vec::new();

@@ -46,13 +46,29 @@ pub fn box_bounds(m: &M4, center: [f64; 3], half: [f64; 3]) -> ([f64; 3], [f64; 
     (lo, hi)
 }
 
-/// Does the ray `o + t d`, `t` in `[-MARGIN, max + MARGIN]`, touch the box `[lo, hi]` grown
-/// by `MARGIN`? `d` is a unit vector.
+/// The slack of every test: `MARGIN`, plus a millionth of the coordinates' and the
+/// distance's magnitude (PhysX computes in `f32`, whose rounding grows with them: a box
+/// 1 cm beyond a 1,000 km ray can round into it).
 #[must_use]
-pub fn ray_hits_aabb(o: [f64; 3], d: [f64; 3], max: f64, lo: [f64; 3], hi: [f64; 3]) -> bool {
-    let (mut t0, mut t1) = (-MARGIN, max + MARGIN);
+pub fn slack(o: [f64; 3], max: f64) -> f64 {
+    MARGIN + 1e-6 * (o[0].abs().max(o[1].abs()).max(o[2].abs()) + max)
+}
+
+/// Does the ray `o + t d`, `t` in `[-s, max + s]` (`s` the [`slack`]), touch the box
+/// `[lo, hi]` grown by `s + grow`? `d` is a unit vector.
+#[must_use]
+pub fn ray_hits_aabb(
+    o: [f64; 3],
+    d: [f64; 3],
+    max: f64,
+    lo: [f64; 3],
+    hi: [f64; 3],
+    grow: f64,
+) -> bool {
+    let s = slack(o, max);
+    let (mut t0, mut t1) = (-s, max + s);
     for k in 0..3 {
-        let (a, b) = (lo[k] - MARGIN, hi[k] + MARGIN);
+        let (a, b) = (lo[k] - s - grow, hi[k] + s + grow);
         if d[k] == 0.0 {
             if o[k] < a || o[k] > b {
                 return false;
@@ -84,7 +100,13 @@ pub fn ray_hits_box(
     half: [f64; 3],
 ) -> bool {
     let (lo, hi) = box_bounds(m, center, half);
-    if !ray_hits_aabb(o, d, max, lo, hi) {
+    // The faces' edge allowance (below) reaches at most 1e-2 of a face triangle's perimeter.
+    let world_edge = |k: usize| {
+        let col = [m.0[4 * k], m.0[4 * k + 1], m.0[4 * k + 2]];
+        2.0 * half[k] * dot(col, col).sqrt()
+    };
+    let grow = 1e-2 * 2.0 * (world_edge(0) + world_edge(1) + world_edge(2));
+    if !ray_hits_aabb(o, d, max, lo, hi, grow) {
         return false;
     }
     let corner = |i: usize| {
@@ -119,7 +141,7 @@ fn point_in_box(p: [f64; 3], m: &M4, center: [f64; 3], half: [f64; 3]) -> bool {
         return true;
     }
     let l = [dot(r, cross(c1, c2)) / det, dot(c0, cross(r, c2)) / det, dot(c0, cross(c1, r)) / det];
-    (0..3).all(|k| (l[k] - center[k]).abs() <= half[k].abs() + MARGIN)
+    (0..3).all(|k| (l[k] - center[k]).abs() <= half[k].abs() + MARGIN + 1e-6 * l[k].abs())
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -161,16 +183,26 @@ pub fn ray_hits_triangle(
     if sin < 1e-3 {
         let lo = [0, 1, 2].map(|k| a[k].min(b[k]).min(c[k]));
         let hi = [0, 1, 2].map(|k| a[k].max(b[k]).max(c[k]));
-        let grow = MARGIN + (2.0 * bary_eps + 1e-2) * edges;
-        return ray_hits_aabb(o, d, max, lo.map(|x| x - grow), hi.map(|x| x + grow));
+        return ray_hits_aabb(o, d, max, lo, hi, triangle_grow(tri, bary_eps));
     }
+    let s = slack(o, max);
     let t = dot(sub(a, o), n) / dot(d, n);
-    if t < -MARGIN || t > max + MARGIN {
+    if t < -s || t > max + s {
         return false;
     }
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
-    let margin = MARGIN + (2.0 * bary_eps + 1e-5 / sin) * edges;
+    let margin = s + (2.0 * bary_eps + 1e-5 / sin) * edges;
     point_triangle_distance(p, a, b, c) <= margin
+}
+
+/// How far beyond its vertices' bounds [`ray_hits_triangle`] may count a touch (on top of
+/// the [`slack`]): a prefilter on bounds must grow by at least this.
+#[must_use]
+pub fn triangle_grow(tri: [[f64; 3]; 3], bary_eps: f64) -> f64 {
+    let [a, b, c] = tri;
+    let len = |u: [f64; 3]| dot(u, u).sqrt();
+    let edges = len(sub(b, a)) + len(sub(c, a)) + len(sub(c, b));
+    (2.0 * bary_eps + 1e-2) * edges
 }
 
 /// Euclidean distance from `p` to the triangle `abc` (Ericson, Real-Time Collision Detection 5.1.5).
@@ -281,7 +313,9 @@ mod tests {
         assert!(!ray_hits_box([11.1, 5.0, 0.0], DOWN, 10.0, &m, c, h));
         assert!(ray_hits_box([10.0, 0.0, 0.0], DOWN, 0.1, &m, c, h), "origin inside");
         assert!(!ray_hits_box([10.0, 5.0, 0.0], DOWN, 4.0, &m, c, h));
-        assert!(ray_hits_aabb([0.0, 5.0, 0.0], DOWN, 10.0, [-1.0; 3], [1.0; 3]));
+        assert!(ray_hits_aabb([0.0, 5.0, 0.0], DOWN, 10.0, [-1.0; 3], [1.0; 3], 0.0));
+        // f32 rounding at large magnitudes: a box 1 cm beyond a 1,000 km ray counts.
+        assert!(ray_hits_box([0.0, 1e6, 0.0], DOWN, 1e6, &ID, [0.0, -1.01, 0.0], [1.0; 3]));
         assert!(!ray_hits_box([0.0, 5.0, 0.0], DOWN, 10.0, &ID, [5.0, 0.0, 0.0], h));
     }
 }

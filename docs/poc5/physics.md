@@ -25,8 +25,12 @@ used. The mask is `Layers.WalkableMask`: layers 0 (Default), 8 (Ground), 11 (Opt
   `queriesHitTriggers`); then `PxScene::raycast` (a virtual call) for the closest blocking hit, whose distance and
   position it copies unchanged into the `RaycastHit`. The managed side normalises the direction twice
   (`PhysicsScene.Raycast`, `Ray`); `(0, -1, 0)` stays itself.
-- PhysX's scene query tests the shapes whose (inflated) bounds the ray crosses, each with the distance shrunk to the
-  closest hit so far, and keeps the closest. With one shape hit, the answer doesn't depend on that order.
+- PhysX's scene query (`NpSceneQueries`' `MultiQueryCallback`) tests the shapes whose (inflated) bounds the ray
+  crosses, each with the distance shrunk to the closest hit so far, and keeps a blocking hit only when its distance is
+  `<=` that distance (at first `max`). With one shape hit, the answer doesn't depend on the order. The height field's
+  own distance is recomputed from the rounded hit point, so it can exceed the traced length: on the caves,
+  `raycast_down((128.67328, 62.99409, 67.102905), 21.423319)` gets 21.42332 from `raycast_heightField`, which the
+  scene query drops (a regression in the record test).
 
 ## The colliders [M]
 
@@ -117,8 +121,9 @@ these vertical results: the origins lie inside the field's inflated bounds, so t
 `Scene` answers only what is established; otherwise a `QueryError` the caller reports:
 
 - `Unverified { shape }`: the ray may touch a box, mesh or other collider within `[0, max]`. The test is in `f64` on
-  the collider's geometry under its `localToWorldMatrix`, with 1 mm along the ray and around the edges, plus, for a
-  mesh's triangles, BV4's barycentric enlargement (`mGeomEpsilon`, 2^-22 of the largest local coordinate, as cooking
+  the collider's geometry under its `localToWorldMatrix`, with a slack along the ray and around the edges of 1 mm
+  plus a millionth of the coordinates' and distance's magnitude (`f32` rounding in PhysX: a box 1 cm beyond a
+  1,000 km ray rounds into it), plus, for a mesh's triangles, BV4's barycentric enlargement (`mGeomEpsilon`, 2^-22 of the largest local coordinate, as cooking
   computes it) and a float-error allowance that grows as the ray turns parallel to the triangle (within a milliradian
   of parallel, any overlap with the triangle's grown bounds counts). Spheres, capsules and controllers count as the
   sphere of radius `(r + h/2)` times the largest scale, convex meshes as their grown bounds. The importer refuses a
