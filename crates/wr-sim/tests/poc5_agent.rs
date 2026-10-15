@@ -633,7 +633,7 @@ fn driven_agent_replays_are_valid() {
             ));
         }
     }
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let threads = replays_at_once();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let failed = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|s| {
@@ -683,6 +683,12 @@ fn driven_agent_replays_are_valid() {
     assert!(failed.is_empty(), "{failed:#?}");
 }
 
+/// Driven replays run at once by the physics and paths tests (each holds a capture and a world:
+/// several GB; `WR_TEST_REPLAYS`, default 2, so a test can't take the machine's memory).
+fn replays_at_once() -> usize {
+    std::env::var("WR_TEST_REPLAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(2).max(1)
+}
+
 /// The capture with WrathOracle's `paths` the physics and path records are damaged in.
 const PATHS: (&str, &str) = ("poc5-tb-114", "tb-nearest");
 
@@ -702,7 +708,7 @@ fn damage_cases_of(dir: &std::path::Path, run: &str, cases: &[(&str, Change)], v
         assert!(!valid || w.valid(), "the undamaged run: {:?}", w.coverage.unsupported.keys());
         w.coverage.unsupported.keys().cloned().collect::<Vec<_>>()
     };
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let threads = replays_at_once();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let missed = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|s| {
