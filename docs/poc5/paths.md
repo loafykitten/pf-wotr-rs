@@ -1,10 +1,11 @@
 # POC-5: turn-based paths
 
 Status (2026-10-15, twenty-second session, stream C of `docs/poc5/movement.md` step 3): the movement agent's
-turn-based paths are computed from the fight, and every path `poc5-tb-100` to `-103` delivers is reproduced bit for
-bit: **291 paths, 345 recorded deliveries, 24 runs, 0 differ**. Line of sight inside the search isn't recorded yet;
-the paths that ask for it (246 of the 291) take their one answer from the recorded end (below), until the observer
-`paths` (written, unbuilt) records it. Tags as elsewhere: [M] measured, [C] from the decompiled code, [I] inferred.
+turn-based paths are computed from the fight. On **`poc5-tb-114`**, recorded with this stream's observer `paths`, every
+path is exact: **129 requests, 87 of them with line of sight answered from the recording, 440 deliveries, 1,206 graph
+events and 2,076 `AllyBlocked` reads equal, 6 runs**. On `poc5-tb-100` to `-103` (before the observer) every recorded
+delivery is equal too (291 requests, 345 deliveries, 24 runs), 246 of them with their line-of-sight answer taken from
+the recorded end. Tags as elsewhere: [M] measured, [C] from the decompiled code, [I] inferred.
 
 ## What the game does [C]
 
@@ -72,7 +73,7 @@ combat), `RaycastModifier` with graph raycasting.
 
 - `crates/wr-nav`: `update.rs` (Unity's `Bounds`, managed except the native `Contains`; `IntRect`;
   `GraphUpdateObject`; `GridGraph.UpdateArea` with both erosion branches, `CalculateConnections`,
-  `ErodeWalkableArea`; `World::apply_graph_updates`; the grid's state hash WrathOracle's `nav_tags` will record);
+  `ErodeWalkableArea`; `World::apply_graph_updates`; the grid's state hash WrathOracle's `nav_tags` records);
   `astar.rs` (`ABPathWithClearance`: the provider, `Ending::{Ab, MaxDistance, Los}`, `ModifyHScore`, line-of-sight
   answers through a callback that may say "unknown", which stops the search); `query.rs`
   (`World::turn_based_path`: search and modifiers); `world.rs`/`nearest.rs` (`DynamicBlocked`, `AllyBlocked`,
@@ -97,26 +98,40 @@ combat), `RaycastModifier` with graph raycasting.
   extents, NaN) bit-identical (`native_check`).
 - The oracle's idle queries still 3,387 of 3,387 exact on `check-1` and `oracle-3` (`wr-import diff --nav-file`).
 - **The recorded paths** (`combat::paths::tests::every_turn_based_path_is_computed_bit_for_bit`, ignored; captures
-  from `WR_PATH_CAPTURES`, default `poc5-tb-103`). The checker replays the fight's graph side from the records:
+  from `WR_PATH_CAPTURES`, default `poc5-tb-103,poc5-tb-114`). The checker replays the fight's graph side from the records:
   `m_Units` (`combat_start`, `sort`, joins, leaves; checked against every `choose_next`), positions (`ag_ctl_end`,
   `u` rows), corpulences (`corp` taps), the agents' avoidance flag, `IsEnemy` (the sim's, on the hydrated save), turn
-  starts and clears, removals, the navigation timer; for each `ABPathWithClearance` request (`ag_req_end`'s `rq`) it
+  starts and clears, removals, the navigation timer (a replay reads its recording's clock tape and writes no
+  `nav_clock`, so each read is placed where the recording made it, before the same record of the same tick; its begin
+  record writes the game's timer before WrathOracle sets the recording's); for each `ABPathWithClearance` request (`ag_req_end`'s `rq`) it
   builds the request from the call's arguments (`ag_req`), checks it against the game's (clearance, tags, graph mask,
   ending condition and its parameters, start), computes the path and compares every delivery: the raw `vectorPath`
   (an `ag_pathdef` written before the return), the callback's (`ag_done`, an `ag_pathdef` written by it, the AI's
   `ScorePath` tap), with `error` and `CompleteState` (a request `PathTo` keeps and reports again is checked once:
   15 such reports in the four captures); a `FollowPrecomputedPath` after a `FindPath` whose result was
-  compared must be one of that unit's paths computed since its turn started or its last follow (a path cut short, by `ScorePath`'s movement simulation or the path
-  visualizer's range, fails: neither is computed here; none in these fights).
+  compared must be one of that unit's paths computed since its turn started or its last follow, or, after the path
+  visualizer's `FindPath`, its replacement path (below). With observer `paths` it also pairs every `nav_guo`,
+  `nav_update` and `nav_tags` (the grid hash) with `CombatNav::log`, takes line of sight from `path_fin`, compares
+  `searchedNodes`, and checks each `AllyBlocked` the movement simulation reads (`ag_v near`) against the grid.
 
-| Captures | Runs | Requests compared | Without LOS | LOS from the end | Deliveries equal | `FollowPrecomputedPath` = computed |
-|---|---|---|---|---|---|---|
-| `poc5-tb-103` | 6 | 63 | 9 | 54 | 78 / 78 | 21 / 21 (AI) |
-| `poc5-tb-100` to `-103` | 24 | 291 | 45 | 246 | 345 / 345 | 63 / 63 (AI) |
+| Captures | Runs | Requests compared | Exact | of which LOS recorded | LOS from the end | Deliveries equal | `FollowPrecomputedPath` |
+|---|---|---|---|---|---|---|---|
+| `poc5-tb-114` | 6 | 129 | 129 | 87 | 0 | 440 / 440 | 15 computed, 18 visualizer |
+| `poc5-tb-103` | 6 | 63 | 9 | 0 | 54 | 78 / 78 | 21 computed (AI), 9 unchecked |
+| `poc5-tb-100` to `-103` | 24 | 291 | 45 | 0 | 246 | 345 / 345 | 63 computed (AI), 75 unchecked |
 
-  Not compared: the player's `FindPath`s (the path visualizer's; their results aren't recorded: 54 requests in
-  `-103`'s six runs, 30 of which would need line of sight) and the `FollowPrecomputedPath`s made from them (9).
-  Along the way (six runs): 45 turn starts, 36 removals, 19 tag refreshes. Mutations are caught: no blockers, enemy
+  `poc5-tb-114` also: 1,206 graph events (objects queued, applied with their erosion, 21 tag refreshes with the grid's
+  hash) and 2,076 `AllyBlocked` reads equal; 57 turn starts, 36 removals. What isn't exact, with its cause:
+  - **18 `FollowPrecomputedPath`s on `-114` (3 a run) are the path visualizer's replacement path**
+    (`PathVisualizer`, for the party the fixture driver moves through the UI): the computed path's points up to the
+    last waypoint passed, then a position its movement simulation reached (where the move runs out, by the UI's
+    action predictions). The visualizer isn't ported; the checker requires the follow to be the start, the waypoints
+    `path[1..w]` and the position a recorded simulation step reached (`ag_sim_end`), `w` the waypoint index that step
+    started at (`ag_sim`, whose recorded path must be the computed one), a step before the follow, from the unit's latest `FindPath` in its turn; stream G's `combat/ai_sim.rs` checks those
+    steps. None is an AI path cut by `ScorePath`.
+  - On `-100` to `-103`, before the observer: line of sight taken from the recorded end (246 paths, below), the
+    player's `FindPath` results not recorded (174 requests compared without a delivery, 162 more would need line of
+    sight) and the follows made from them (75). Mutations are caught: no blockers, enemy
   and ally swapped, no erosion, no `ModifyHScore` (through an implied "blocked" answer, below). The start's clearance
   region can only matter for a cell with a connection and a dynamic blocker, which `CalculateConnections` never
   leaves, so not in these fights: its unit test covers it.
@@ -124,14 +139,14 @@ combat), `RaycastModifier` with graph raycasting.
 ## What stays an input
 
 - **Line of sight** (`LineOfSightGeometry`: segments of the scene's `FogOfWarBlocker`s, polygons or mesh convex hulls,
-  in a 3.9 m cell cache). Not computable from what's recorded; porting it means importing the blockers. Until the
-  observer records the answers, the checker answers a query "clear" at the node the recorded path ended on and
+  in a 3.9 m cell cache). Not computable from what's recorded; porting it means importing the blockers. Observer
+  `paths` records the answers (`-114`: 87 paths asked, every call's arguments equal). Without it, the checker answers a query "clear" at the node the recorded path ended on and
   "blocked" elsewhere, and **fails any path that would need a "blocked" answer**: so every LOS path accepted asked
   exactly once, at its end (246 times, 0 implied "blocked"). That shows the search reaches that node first and the
   path from it is exact; it doesn't show that the game's answer there was "clear" (it must have been, or the search
   would have gone on).
 - `AvoidanceDisabled` beyond the agent's field: its counter (cutscene moves, `UnitMoveAlongPath`: none in these
-  fights) and `!IsConscious` (no one is unconscious here). The `nav_guo` records will check the box sizes.
+  fights) and `!IsConscious` (no one is unconscious here). The `nav_guo` records check the box sizes (`-114`: equal).
 - The unit's speed (the maximum distance, `rq.maxd`), the command's fudge radius (`ibr`), corpulence where no tap
   recorded it (Anevia before she joins, the lizard: taken from the request's clearance, 21 requests in `-103`'s six runs).
 - `IsEnemy`: the sim's (`combat::units::is_enemy`) on the save hydrated at the window's start.
@@ -144,10 +159,10 @@ combat), `RaycastModifier` with graph raycasting.
   may have searched without it (it drops the height from `AstarPath.GetNearest`'s distance limit). The request
   carries it; the checker accepts a request with it only when the result is the same either way (all six here).
 
-## Observer changes requested
+## Observer `paths`
 
-`oracle/mods/WrathOracle/CommandObsPaths.cs` (unbuilt; declared `paths`, installed from `CommandObs.Install`, reset with
-the window): `nav_guo` (each `AstarPath.UpdateGraphs(GraphUpdateObject)`: object id, bounds centre and extents, mask,
+`oracle/mods/WrathOracle/CommandObsPaths.cs` (declared `paths`, installed from `CommandObs.Install`, reset with the
+window; recorded in `poc5-tb-114`): `nav_guo` (each `AstarPath.UpdateGraphs(GraphUpdateObject)`: object id, bounds centre and extents, mask,
 flags, tag, caller chain), `nav_update` (`GridGraph.UpdateArea`: object id, the erosion it uses), `nav_tags`
 (`UpdateNavigationGridTags` returning: `erodeIterations`, `erosionOnlyAroundCellsWithTag`, the grid hash
 `Grid::state_hash` computes, blocked and ally-blocked counts), `path_fin` (`Path.ReturnPath`, main thread: key, kind,
@@ -158,8 +173,8 @@ post-processing done: the final `vectorPath`, so the player's `FindPath`s are co
 them when the begin record declares `paths`: graph events paired in order with `CombatNav::log` (object ids mapped one
 to one), line-of-sight answers taken from `path_fin` (each call's arguments checked, their number too; a delivered path
 without `path_fin` fails), `searchedNodes` compared, a definition before `path_mod` taken as the raw path, and `path_mod` required exactly for the paths the seeker
-took with modifiers and that didn't fail. To
-record: `tb-nearest` and `tb-focus` (and a fight where a party member drops unconscious, for `AvoidanceDisabled`).
+took with modifiers and that didn't fail. Still wanted: a fight where a party member drops unconscious, for
+`AvoidanceDisabled`.
 
 ## Review
 
@@ -168,11 +183,14 @@ gpt-6.1-sol (high), eight rounds, the last without findings. Fixed along the way
 guard for one-way connections; `GraphCollision.up` (the funnel's portals) had been replaced by `GraphTransform.up`;
 `distanceXZ` was dropped; a request `PathTo` keeps and reports again was checked twice; and, for the new observer's
 records, the raw/final boundary, empty or malformed line-of-sight transcripts, missing `path_fin`/`path_mod`, and a
-superseded path's skipped modifiers (now recorded as `path_seek`). The observer itself is reviewed statically only.
+superseded path's skipped modifiers (now recorded as `path_seek`). With `poc5-tb-114`: the replays' navigation clock
+tape, the counters (an exact path with recorded line of sight counts as exact), the path visualizer's follows; three
+more gpt-6.1-sol rounds on that, the last without findings (the visualizer's follows now need the step's waypoint
+progress, its recorded path equal to the computed one, and the step before the follow; the counters fixed).
 
 ## Next
 
-- Record with `paths`; then the checker is exact for every path, the player's included.
+- The path visualizer's replacement path, if the sim is to drive the party through the UI's paths.
 - The integration (movement.md step 2): `PathTo`/`FindPath` build `AgentRequest`s from the sim's state and deliver
   `turn_based_path` at the recorded `PathSync` place; `CombatController`'s turn starts and removals drive `CombatNav`.
 - `LineOfSightGeometry` (the `FogOfWarBlocker`s imported with the scene), to take line of sight off the inputs.
