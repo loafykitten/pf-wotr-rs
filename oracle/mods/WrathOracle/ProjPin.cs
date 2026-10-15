@@ -95,6 +95,12 @@ internal static class ProjPin
             Sched.Invalidate("the recording has a projectile launched before its window hitting inside it (proj_untracked): its arrival isn't pinned");
             return;
         }
+        if (ev == "proj_onhit_exc")
+        {
+            // The recording's OnHit threw (and its hit controller skipped the projectiles after it): not followable.
+            Sched.Invalidate("the recording has an OnHit that threw (proj_onhit_exc)");
+            return;
+        }
         if (ev != "proj_launch" && ev != "proj_hit") return;
         if (o["pres"]?.Type == JTokenType.Boolean && (bool)o["pres"]) return;
         var k = o["p"]?.Type == JTokenType.String ? (string)o["p"] : null;
@@ -124,7 +130,11 @@ internal static class ProjPin
             if (r.Hit >= 0) { Sched.Invalidate($"recording's projectile {k} hits twice"); return; }
             if (t.Value < r.Launch) { Sched.Invalidate($"recording's projectile {k} hits before its launch"); return; }
             var pd = o["pd"]?.Type == JTokenType.Float || o["pd"]?.Type == JTokenType.Integer ? (float)(double)o["pd"] : (float?)null;
-            if (o["wall"]?.Type != JTokenType.Boolean || pd == null) { Sched.Invalidate($"recording's hit of projectile {k} lacks fields"); return; }
+            if (o["wall"]?.Type != JTokenType.Boolean || pd == null || o["fl"]?.Type != JTokenType.Integer || (int)o["fl"] != t.Value - r.Launch)
+            {
+                Sched.Invalidate($"recording's hit of projectile {k} lacks fields or its flight length isn't its ticks since the launch");
+                return;
+            }
             r.Hit = t.Value;
             r.Wall = (bool)o["wall"];
             r.Passed = pd.Value;
@@ -258,11 +268,14 @@ internal static class ProjPin
                 Sched.Invalidate($"projectile {t.K} was due to hit at tick {t.Due}; still in flight at tick {now}");
                 return;
             }
+            var rec = Tape[t.K];
             if (!p.IsHit)
             {
-                // What Tick does when it arrives: IsHit, and the distance clamped to the range.
+                // What Tick does when it arrives: IsHit, and, for an arrival at the target or the range (not a
+                // wall: this tick reached neither, or the native flight would have hit), the distance clamped
+                // to the range.
                 IsHitRef(p) = true;
-                if (p.MaxRange > 0f) PassedDistanceRef(p) = p.MaxRange;
+                if (p.MaxRange > 0f && !rec.Wall) PassedDistanceRef(p) = p.MaxRange;
                 t.IsForced = true;
                 Forced++;
             }
@@ -270,7 +283,6 @@ internal static class ProjPin
             Pending.Remove(t);
             // The arrival's kind (a terrain-following projectile stopped by an obstacle: IsHitWall, which
             // AbilityDeliverAttackWithWeapon reads) is the recording's; the distance flown must be too.
-            var rec = Tape[t.K];
             if (p.IsHitWall != rec.Wall) IsHitWallRef(p) = rec.Wall;
             var pd2 = PassedDistanceRef(p);
             if (pd2 != rec.Passed)
