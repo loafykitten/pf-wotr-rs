@@ -467,6 +467,7 @@ fn a_ranged_resolve_stops_an_inactive_toggle_that_deactivates_immediately() {
             target: u,
             damage: None,
             attack_hit: false,
+            attack_result: 3,
             weapon_melee: melee,
             source_id: None,
         };

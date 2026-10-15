@@ -10,6 +10,10 @@ use crate::narrative::flags;
 use crate::world::World;
 
 pub const IMPLEMENTED: &[&str] = &[
+    "ContextConditionCasterHasFact",
+    "ContextConditionDifficultyHigherThan",
+    "ContextConditionHasFact",
+    "ContextConditionTargetIsYourself",
     "EtudeStatus",
     "PcRace",
     "PlayerSignificantClassIs",
@@ -46,19 +50,14 @@ pub fn check_condition(w: &mut World, owner: &Rc<Blueprint>, c: View<'_>) -> Res
         // `ContextConditionCasterHasFact.cs`: the context's caster (`MaybeCaster`) has the fact.
         // A `ContextCondition` reads the innermost `MechanicsContext.Data` scope.
         "ContextConditionCasterHasFact" => {
-            let Some((fact, _)) = super::actions::mechanics_scope(w) else {
+            let Some((ctx, _)) = super::actions::mechanics_scope(w) else {
                 return Err(unsupported(
                     w,
                     "condition",
                     "ContextConditionCasterHasFact (no context)",
                 ));
             };
-            let caster = w
-                .fact(fact)
-                .context
-                .as_ref()
-                .and_then(|x| x.caster.clone())
-                .and_then(|id| w.by_id.get(&id).copied());
+            let caster = super::mech_caster(w, ctx);
             let Some(u) = caster else {
                 w.log("error", "Caster is missing");
                 return Ok(false);
@@ -67,6 +66,81 @@ pub fn check_condition(w: &mut World, owner: &Rc<Blueprint>, c: View<'_>) -> Res
             Ok(g.is_some_and(|g| {
                 w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g))
             }))
+        }
+        // `ContextConditionDifficultyHigherThan.cs`: the checked preset's `StatsAdjustments` (its
+        // `DifficultyPresetAsset`, an asset index resolved through the rules data) first, then for
+        // a caster not of the player's faction (or without `CheckOnlyForMonster`) the setting's
+        // `StatsAdjustments` at least it (at most it with `Less`), `Reverse` negating; otherwise
+        // true. `Context.MaybeCaster.IsPlayerFaction` is read first (a missing caster throws).
+        "ContextConditionDifficultyHigherThan" => {
+            let Some((ctx, _)) = super::actions::mechanics_scope(w) else {
+                return Err(unsupported(
+                    w,
+                    "condition",
+                    "ContextConditionDifficultyHigherThan (no context)",
+                ));
+            };
+            let preset = match c.node("m_Difficulty") {
+                Some(wr_content::node::Node::AssetIndex(i)) => w
+                    .settings
+                    .difficulty
+                    .list
+                    .as_ref()
+                    .and_then(|l| l.preset_at(*i))
+                    .map(|p| p.preset.stats_adjustments),
+                _ => None,
+            };
+            let Some(preset) = preset else {
+                return Err(unsupported(
+                    w,
+                    "condition",
+                    "ContextConditionDifficultyHigherThan (its preset isn't in the rules data)",
+                ));
+            };
+            let Some(caster) = super::mech_caster(w, ctx) else {
+                return Err(ElementError::Other("NullReferenceException: MaybeCaster".into()));
+            };
+            let only_monster = c.bool("CheckOnlyForMonster");
+            if (!crate::combat::units::is_player_faction(w, caster) && only_monster)
+                || !only_monster
+            {
+                let s = crate::combat::units::stats_adjustments(w);
+                let less = c.bool("Less");
+                let flag = (s >= preset && !less) || (less && s <= preset);
+                Ok(flag != c.bool("Reverse"))
+            } else {
+                Ok(true)
+            }
+        }
+        // `ContextConditionHasFact.cs` (`Kingmaker.UnitLogic.Mechanics.Conditions/`):
+        // `Target.Unit.Descriptor.HasFact(Fact)`, the scope's current target (a missing one throws).
+        "ContextConditionHasFact" => {
+            let Some((_, target)) = super::actions::mechanics_scope(w) else {
+                return Err(unsupported(w, "condition", "ContextConditionHasFact (no context)"));
+            };
+            let Some(u) = target else {
+                return Err(ElementError::Other("NullReferenceException: Target.Unit".into()));
+            };
+            let g = c.guid("m_Fact");
+            Ok(g.is_some_and(|g| {
+                w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g))
+            }))
+        }
+        // `ContextConditionTargetIsYourself.cs`: `Target.Unit == Context.MaybeCaster` (no target
+        // unit: an error logged, false).
+        "ContextConditionTargetIsYourself" => {
+            let Some((ctx, target)) = super::actions::mechanics_scope(w) else {
+                return Err(unsupported(
+                    w,
+                    "condition",
+                    "ContextConditionTargetIsYourself (no context)",
+                ));
+            };
+            let Some(u) = target else {
+                w.log("error", "Target unit is missing");
+                return Ok(false);
+            };
+            Ok(super::mech_caster(w, ctx) == Some(u))
         }
         // `EtudeStatus.cs`.
         "EtudeStatus" => {

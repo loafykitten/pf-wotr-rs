@@ -40,6 +40,12 @@ pub struct RuleCalculateAbilityParams {
     pub bonus_concentration: i32,
     /// `Result`: the persisted members of `AbilityParams`.
     pub result: Option<Value>,
+    /// `Spellbook` (its blueprint, of the initiator), `m_SpellLevel`, `m_SpellSource` and
+    /// whether the rule is for an `AbilityData` (`new RuleCalculateAbilityParams(unit, spell)`).
+    pub spellbook: Option<wr_content::Guid>,
+    pub spell_level: Option<i32>,
+    pub spell_source: i64,
+    pub ability_data: bool,
 }
 
 impl RuleCalculateAbilityParams {
@@ -66,6 +72,10 @@ impl RuleCalculateAbilityParams {
             bonus_dc: 0,
             bonus_concentration: 0,
             result: None,
+            spellbook: None,
+            spell_level: None,
+            spell_source: 2,
+            ability_data: false,
         }
     }
 }
@@ -95,19 +105,26 @@ impl RuleEvent for RuleCalculateAbilityParams {
         let mut num3 = self.replace_dc.unwrap_or(-1);
         let mut num4 = self.replace_concentration.unwrap_or(-1);
         if num < 0 {
-            // `Spellbook?.EffectiveCasterLevel ?? Progression.CharacterLevel`: no spellbook.
-            num = crate::unit::character_level(w, u);
+            // `Spellbook?.EffectiveCasterLevel ?? Progression.CharacterLevel`.
+            num = match self.spellbook {
+                Some(sb) => crate::spellbook::effective_caster_level(w, u, sb),
+                None => crate::unit::character_level(w, u),
+            };
         }
         num = num.max(1).wrapping_add(self.bonus_caster_level);
         if num2 < 0 {
             // `m_SpellLevel ?? num / 2` (no metamagic data).
-            num2 = (num / 2).wrapping_add(self.bonus_spell_level);
+            num2 = self.spell_level.unwrap_or(num / 2).wrapping_add(self.bonus_spell_level);
         }
         let num5 = if let Some(v) = self.replace_stat_bonus_modifier {
             v
         } else {
             // `ReplaceStat ?? Spellbook?.Blueprint.CastingAttribute ?? Charisma`.
-            let stat = self.replace_stat.unwrap_or(StatType::Charisma);
+            let casting = self
+                .spellbook
+                .and_then(|sb| w.content.get(sb))
+                .map(|b| StatType(b.view().i32("CastingAttribute")));
+            let stat = self.replace_stat.or(casting).unwrap_or(StatType::Charisma);
             if self.replace_stat.is_some() && self.blueprint_is_ability {
                 // `Features.DomainsByIntelligenceFeature` with `IsDomainAbility`.
                 w.coverage.unsupported("RuleCalculateAbilityParams: ability blueprint");
@@ -123,7 +140,15 @@ impl RuleEvent for RuleCalculateAbilityParams {
             }
         };
         if num3 < 0 {
-            num3 = 10i32.wrapping_add(num2).wrapping_add(num5);
+            num3 = 10i32.wrapping_add(num2);
+            // A standalone mythic spellbook's spell adds the caster's mythic level instead.
+            let mythic = self.ability_data
+                && self.spellbook.is_some_and(|sb| crate::spellbook::standalone_mythic(w, u, sb));
+            num3 = if mythic {
+                num3.wrapping_add(crate::unit::mythic_level(w, u))
+            } else {
+                num3.wrapping_add(num5)
+            };
         }
         if !self.ignore_dc_bonuses {
             num3 = num3.wrapping_add(self.bonus_dc);
@@ -149,10 +174,10 @@ impl RuleEvent for RuleCalculateAbilityParams {
             num4 = num.wrapping_add(num5);
         }
         num4 = num4.wrapping_add(self.bonus_concentration);
-        // `AbilityParams`: `SpellSource` Unknown (2), no metamagic, `RankBonus` the caster
-        // level bonus.
+        // `AbilityParams`: `m_SpellSource` (Unknown 2 without ability data), no metamagic,
+        // `RankBonus` the caster level bonus.
         self.result = Some(json!({
-            "SpellSource": 2,
+            "SpellSource": self.spell_source,
             "CasterLevel": num,
             "SpellLevel": num2,
             "DC": num3,

@@ -52,6 +52,23 @@ pub const RESULT_FIELDS: &[(&str, &[&str])] = &[
     ("RuleDealDamage", &["Result"]),
     ("RuleCalculateDamage", &[]),
     ("RuleCanApplyBuff", &["CanApply", "Immunity"]),
+    ("RuleCalculateAbilityParams", &["Result"]),
+    // Its inputs: the oracle writes its target as `$impure` (`GetRuleTarget`).
+    ("RuleApplySpell", &["Spell", "Context", "SpellTarget", "Place"]),
+    (
+        "RuleCastSpell",
+        &[
+            "Success",
+            "SpellFailureChance",
+            "ArcaneSpellFailureChance",
+            "IsArcaneSpellFailed",
+            "IsSpellFailed",
+        ],
+    ),
+    (
+        "RuleSpellResistanceCheck",
+        &["TargetIsImmune", "SpellResistance", "SpellPenetration", "Roll"],
+    ),
 ];
 
 fn short(class: &str) -> &str {

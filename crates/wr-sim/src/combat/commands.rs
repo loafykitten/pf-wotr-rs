@@ -243,6 +243,9 @@ pub struct Cmd {
     pub ap: Option<approach::Params>,
     pub mv: Option<move_to::Fields>,
     pub aoo: Option<aoo::State>,
+    /// A `UnitUseAbility`'s `Ability`, where a record establishes it (the driver's cast input):
+    /// `None` otherwise (its lifecycle checks are then reported where they read it).
+    pub ability: Option<super::spells::Ability>,
 }
 
 impl Cmd {
@@ -342,6 +345,7 @@ impl Cmd {
             ap,
             mv,
             aoo,
+            ability: None,
         })
     }
 
@@ -558,6 +562,18 @@ pub trait Inputs {
     fn nct_zero(&mut self, w: &mut World, u: &str, site: &'static str) -> R<()>;
     /// A write that changed a unit's `LastTarget` or `ManualTarget` ([`super::targets`]).
     fn tgt_write(&mut self, w: &mut World, x: &super::targets::Write) -> R<()>;
+    /// `RemoveRunningCommand(c)` from the base `OnEnded` that `c`'s class's override calls first
+    /// (`UnitUseAbility.OnEnded`): recorded as its class code's.
+    fn class_running_call(&mut self, w: &mut World, c: u32, before: usize) -> R<()> {
+        let _ = (w, c, before);
+        desync("a command class that overrides OnEnded (not modelled)")
+    }
+    /// The end of `c` made by the base `OnEnded` its class's override calls first: recorded as its
+    /// class code's.
+    fn class_ended(&mut self, w: &mut World, c: u32, result: u8, raise: bool) -> R<()> {
+        let _ = (w, c, result, raise);
+        desync("a command class that overrides OnEnded (not modelled)")
+    }
     /// A boolean leaf read right after the last record taken (code that records nothing in
     /// between): `UpdateCombatTarget`'s.
     fn leaf_next(&mut self, w: &mut World, f: &'static str, of: Of) -> R<bool> {
@@ -652,6 +668,9 @@ pub mod class {
 /// turn's `RemoveRunningCommand`.
 fn on_ended<I: Inputs>(w: &mut World, inp: &mut I, c: u32, raise: bool) -> R<()> {
     if cmd(w, c)?.overrides("OnEnded") {
+        if cmd(w, c)?.class == class::USE_ABILITY {
+            return on_ended_use_ability(w, inp, c, raise);
+        }
         return unsupported(w, "a command class that overrides OnEnded");
     }
     // An end of a finished command (`ForceFinish` doesn't check) is recorded only as a transition.
@@ -673,6 +692,28 @@ fn on_ended<I: Inputs>(w: &mut World, inp: &mut I, c: u32, raise: bool) -> R<()>
     }
     let result = cmd(w, c)?.s.result;
     inp.ended(w, c, result, raise)
+}
+
+/// `UnitUseAbility.OnEnded(raiseEvent)`: `base.OnEnded(raiseEvent)` (finished; the end event;
+/// `EndInTbm`), then the view's off-hand weapon and the cast's effects (presentation). Its
+/// records are the class code's: the base's `NeedEquipWeapons` read isn't a leaf (it decides only
+/// the view's `HandleAttackCommandEnd`), its running-list call and end are taken as the class's.
+fn on_ended_use_ability<I: Inputs>(w: &mut World, inp: &mut I, c: u32, raise: bool) -> R<()> {
+    let was = cmd(w, c)?.s.finished;
+    cmd_mut(w, c)?.s.finished = true;
+    if raise {
+        raise_command(w, c, "IUnitCommandEndHandler", "HandleUnitCommandDidEnd")?;
+    }
+    if current_turn(w).is_some() {
+        let before = w.combat.commands.running.len();
+        remove_running(w, c);
+        inp.class_running_call(w, c, before)?;
+    }
+    if was {
+        return Ok(());
+    }
+    let result = cmd(w, c)?.s.result;
+    inp.class_ended(w, c, result, raise)
 }
 
 fn remove_running(w: &mut World, c: u32) {
@@ -1064,11 +1105,33 @@ fn should_approach<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<bool> {
 fn has_cooldown_for_command(w: &mut World, c: u32) -> R<bool> {
     let x = cmd(w, c)?;
     let ignore = ignores_cooldown(w, x);
-    if x.is(class::USE_ABILITY) {
-        return unsupported(w, "HasCooldownForCommand: an ability (ShouldRestrictCommand)");
-    }
     let t = x.s.ty;
+    let ability = x.is(class::USE_ABILITY).then(|| x.ability.clone());
     let u = executor(w, c)?;
+    // In turn-based combat `ShouldRestrictCommand`: a full-round ability (`IsFullRoundAbility`)
+    // of a unit not surprising needs a full-round action; with one, the command's type is checked
+    // as any other's.
+    if turn_based(w)
+        && super::is_in_combat(w, u)
+        && !ignore
+        && let Some(a) = ability
+        && !super::cooldowns::is_surprising(w, u)
+    {
+        let full = match &a {
+            Some(a) => super::spells::require_full_round_action(w, a),
+            None => Err("its ability isn't established".to_owned()),
+        };
+        match full {
+            Ok(true) if !super::cooldowns::has_full_round_action(w, u) => return Ok(true),
+            Ok(_) => {}
+            Err(e) => {
+                return unsupported(
+                    w,
+                    &format!("HasCooldownForCommand: an ability (ShouldRestrictCommand: {e})"),
+                );
+            }
+        }
+    }
     if ignore {
         return Ok(false);
     }
@@ -1121,8 +1184,25 @@ fn tick_command_turn_based<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<b
                     return unsupported(w, "TickCommandTurnBased: the magus' spell combat attack");
                 }
             }
+            // `command is UnitUseAbility && !Ability.IsAvailableForCast`: interrupted.
             if x.is(class::USE_ABILITY) {
-                return unsupported(w, "TickCommandTurnBased: an ability's IsAvailableForCast");
+                let avail = match &x.ability {
+                    Some(a) => super::spells::is_available_for_cast(w, a),
+                    None => Err("its ability isn't established".to_owned()),
+                };
+                match avail {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        interrupt(w, inp, c, true)?;
+                        go = false;
+                    }
+                    Err(e) => {
+                        return unsupported(
+                            w,
+                            &format!("TickCommandTurnBased: an ability's IsAvailableForCast ({e})"),
+                        );
+                    }
+                }
             }
         }
         // `IsDirectlyControllable && (Prone.Active || View.IsGetUp) && !ShouldBeProne`.
@@ -1221,13 +1301,11 @@ fn tick_command<I: Inputs>(w: &mut World, inp: &mut I, c: u32, can_move: bool) -
             inp.spend(w, u, x.s.ty, full, x.s.time_since_start)?;
         }
         let x = cmd(w, c)?.clone();
+        // `|| (command is UnitUseAbility && !Executor.State.CanCast)`.
         if (x.s.asap && answer(w, inp, "intr", c)?)
             || !inp.leaf(w, "canact", Of::Unit(Some(uid.clone())))?
-            || x.is(class::USE_ABILITY)
+            || (x.is(class::USE_ABILITY) && !super::spells::can_cast(w, u))
         {
-            if x.is(class::USE_ABILITY) {
-                return unsupported(w, "TickCommand: an ability's CanCast");
-            }
             interrupt(w, inp, c, true)?;
         }
     }
@@ -1767,9 +1845,20 @@ fn update_combat_target<I: Inputs>(w: &mut World, inp: &mut I, c: u32, merge: bo
             None => Ok(()),
         }
     };
-    // `cmd is UnitUseAbility && (IsAutoUseAbility(...) || !ShouldUpdateManualTarget)`.
-    if cmd(w, c)?.is(class::USE_ABILITY) {
-        return unsupported(w, "UnitCommands.UpdateCombatTarget for a UnitUseAbility");
+    // `cmd is UnitUseAbility && (Executor.Brain.IsAutoUseAbility(Ability) ||
+    // !ShouldUpdateManualTarget)`: the sim's commands always update it (only a custom handler's
+    // command doesn't, and those aren't modelled); an auto-use ability on the brain can't be
+    // compared with the command's.
+    let ability = cmd(w, c)?.is(class::USE_ABILITY);
+    if ability {
+        let exec = cmd(w, c)?.s.executor.clone();
+        let auto = unit(w, exec.as_deref())
+            .and_then(|e| w.unit(e))
+            .and_then(|x| x.brain.as_ref())
+            .is_some_and(|b| b.auto_use);
+        if auto {
+            return unsupported(w, "UnitCommands.UpdateCombatTarget: a brain's auto-use ability");
+        }
     }
     if inp.leaf_next(w, "tact", Of::Cmd(c))? {
         return unsupported(w, "UnitCommands.UpdateCombatTarget in tactical combat");
@@ -1789,8 +1878,35 @@ fn update_combat_target<I: Inputs>(w: &mut World, inp: &mut I, c: u32, merge: bo
         _ => false,
     };
     let x = cmd(w, c)?;
-    let (ai, mark) = (x.ai, x.is(class::ATTACK));
+    let (ai, attack) = (x.ai, x.is(class::ATTACK));
+    // `MarkManualTarget`: `UnitAttack`'s true; `UnitUseAbility`'s for a sticky touch, an auto-use
+    // ability or the held touch's (read only for a command of the player's).
+    let mark = |w: &mut World| -> R<bool> {
+        if attack {
+            return Ok(true);
+        }
+        if !ability {
+            return Ok(false);
+        }
+        let x = cmd(w, c)?;
+        let Some(a) = x.ability.clone() else {
+            return unsupported(
+                w,
+                "UnitUseAbility.MarkManualTarget: its ability isn't established",
+            );
+        };
+        let sticky = a.bp(w).is_some_and(|b| {
+            b.components_array()
+                .iter()
+                .any(|o| crate::content::is_a(o.ty, "AbilityEffectStickyTouch"))
+        });
+        if w.entity(a.caster).parts.iter().any(|p| p.clr == "UnitPartTouch") {
+            return unsupported(w, "UnitUseAbility.MarkManualTarget: a held touch (UnitPartTouch)");
+        }
+        Ok(sticky)
+    };
     if let Some(t) = target.filter(|_| hit) {
+        let mark = if ai { false } else { mark(w)? };
         set(w, inp, e, Field::Last, Some(t))?;
         if !ai && mark {
             set(w, inp, e, Field::Manual, Some(t))?;

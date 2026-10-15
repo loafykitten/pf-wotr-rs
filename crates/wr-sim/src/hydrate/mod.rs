@@ -389,6 +389,7 @@ impl Loader<'_> {
                 }
                 found
             },
+            source_ability: None,
         }
     }
 
@@ -742,7 +743,14 @@ impl Loader<'_> {
                 chunks: Vec::new(),
                 initialized: false,
             });
+        let size_part_from_save = o
+            .obj("Parts")
+            .map(|p| p.objs("m_Parts"))
+            .unwrap_or_default()
+            .into_iter()
+            .any(|p| p.ty() == "UnitPartSizeModifier");
         let unit = Unit {
+            size_part_from_save,
             blueprint,
             original_blueprint: d.guid("OriginalBlueprint"),
             stats,

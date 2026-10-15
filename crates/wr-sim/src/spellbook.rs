@@ -1535,6 +1535,143 @@ fn persisted_hidden(b: &Spellbook, hidden: &CsDict<i32, CsDict<i32, Slot>>) -> J
     )
 }
 
+// ---- casting (`docs/poc5/spells.md`) ----------------------------------------------------
+
+/// `EffectiveCasterLevel`: `CasterLevel` plus the owner's `BonusCasterLevel` stat.
+#[must_use]
+pub fn effective_caster_level(w: &World, u: EntityIdx, sb: Guid) -> i32 {
+    let bonus = w.stats(u).get(StatType::BonusCasterLevel).map_or(0, |s| s.modified_value);
+    arith::add(caster_level(w, u, sb), bonus)
+}
+
+/// `IsStandaloneMythic`.
+#[must_use]
+pub fn standalone_mythic(w: &World, u: EntityIdx, sb: Guid) -> bool {
+    book(w, u, sb).is_standalone_mythic()
+}
+
+/// `GetSpellLevel(data)` (no metamagic or magic-hack data).
+#[must_use]
+pub fn spell_level(w: &World, u: EntityIdx, sb: Guid, spell: &Spell) -> i32 {
+    book(w, u, sb).spell_level_of(spell)
+}
+
+/// `BlueprintAbility.School` (its `SpellComponent`'s, else `None` 0) and `SpellDescriptor`.
+fn school_and_descriptor(w: &World, spell: Guid) -> (i64, i64) {
+    let Some(b) = bp(w, spell) else { return (0, 0) };
+    let objs = b.components_array();
+    let school = objs
+        .iter()
+        .find(|o| crate::content::is_a(o.ty, "SpellComponent"))
+        .map_or(0, |o| View(o).int("School"));
+    (school, crate::combat::rules::spell_descriptor(&b))
+}
+
+/// `GetAvailableForCastSpellCount(spell)`: -1 for a cantrip; for a memorizing spellbook the
+/// available memorized slots of the spell's blueprint (halved for an opposition school or
+/// descriptor); a spontaneous spellbook's slots of the level (none if it also memorizes and has
+/// no such slot).
+#[must_use]
+pub fn available_for_cast_count(w: &World, u: EntityIdx, sb: Guid, spell: &Spell) -> i32 {
+    let b = book(w, u, sb);
+    let level = b.spell_level_of(spell);
+    if level < 0 {
+        return 0;
+    }
+    if level == 0 {
+        return -1;
+    }
+    let Some(lv) = usize::try_from(level).ok().filter(|l| *l < LEVELS) else { return 0 };
+    let spontaneous = sb_flag(w, sb, "Spontaneous");
+    let memorize = !spontaneous || sb_flag(w, sb, "IsArcanist");
+    let mut num = 0;
+    if memorize {
+        num = b.memorized[lv]
+            .iter()
+            .filter(|s| {
+                s.available && s.spell.as_ref().is_some_and(|x| x.blueprint == spell.blueprint)
+            })
+            .count();
+        let mut n = i32::try_from(num).unwrap_or(i32::MAX);
+        let (school, descriptor) = school_and_descriptor(w, spell.blueprint);
+        if b.opposition_schools.contains(&school) {
+            n /= 2;
+        }
+        if b.opposition_descriptors & descriptor != 0 {
+            n /= 2;
+        }
+        num = usize::try_from(n).unwrap_or(0);
+    }
+    let num = i32::try_from(num).unwrap_or(i32::MAX);
+    if spontaneous {
+        if memorize && num <= 0 {
+            return 0;
+        }
+        return b.spontaneous[lv];
+    }
+    num
+}
+
+/// `SpendInternal(spell.Blueprint, spell, doSpend)` (`CanSpend(spell)`, `Spend(spell)`): the
+/// spell's level in range, the casting attribute at 10 + level (a standalone mythic spellbook
+/// skips it), a cantrip always, else a spontaneous slot of the level or the last available
+/// memorized slot holding an equal spell (`Spend` marks it spent). A unit with a spell level
+/// limit (`AddSpellLevelLimit`) is reported.
+pub fn spend_spell(w: &mut World, u: EntityIdx, sb: Guid, spell: &Spell, do_spend: bool) -> bool {
+    let limited = w.entity(u).facts.list.iter().any(|f| {
+        w.fact(*f).components.iter().any(|c| {
+            c.ty().is_some_and(|t| wr_content::schema::ty(t).short == "AddSpellLevelLimit")
+        })
+    });
+    if limited {
+        w.coverage.unsupported("Spellbook.SpendInternal: m_MaxSpellLevel (AddSpellLevelLimit)");
+    }
+    let num = book(w, u, sb).spell_level_of(spell);
+    if num < 0 {
+        return false;
+    }
+    if !book(w, u, sb).is_standalone_mythic() {
+        let stat =
+            bp(w, sb).map_or(StatType::Charisma, |b| StatType(b.view().i32("CastingAttribute")));
+        let value = w.stats(u).get(stat).map_or(0, |s| s.modified_value);
+        if value < arith::add(10, num) {
+            return false;
+        }
+    }
+    if num < 1 {
+        return true;
+    }
+    let Some(lv) = usize::try_from(num).ok().filter(|l| *l < LEVELS) else { return false };
+    if sb_flag(w, sb, "Spontaneous") {
+        let n = book(w, u, sb).spontaneous[lv];
+        if n > 0 {
+            if do_spend {
+                book_mut(w, u, sb).spontaneous[lv] = n - 1;
+            }
+            return true;
+        }
+        return false;
+    }
+    let b = book_mut(w, u, sb);
+    for i in (0..b.memorized[lv].len()).rev() {
+        let slot = &b.memorized[lv][i];
+        if slot.available && slot.spell.as_ref().is_some_and(|s| s.same(spell)) {
+            if do_spend {
+                // `SpellSlot.Spend()`: an opposition slot's linked slots go too.
+                let linked = if slot.is_opposition { slot.linked.clone() } else { None };
+                b.memorized[lv][i].available = false;
+                for key in linked.into_iter().flatten() {
+                    if let Some(s) = b.slot_mut(lv, key) {
+                        s.available = false;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
+
 /// The spellbook's persisted members as the oracle's dump writes them
 /// (`Snap.Persisted` of the spellbook).
 #[must_use]

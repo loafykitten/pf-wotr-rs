@@ -457,6 +457,9 @@ pub enum Phase {
     /// `UnitMoveController`: units move; the current unit's movement spends its turn's budget
     /// (`TurnController.TickMovement`, the oracle's `cd_move`).
     Move,
+    /// `FogOfWarController` and `EntityVisibilityForPlayerController`: entities revealed
+    /// (`IEntityRevealedHandler`, the oracle's `insp_reveal`).
+    Visibility,
     /// `SleepingUnitsController`: the frame's awake units.
     Sleeping,
     /// `UnitMemoryController`: each ready group's memory, then the queued additions (placed by
@@ -484,6 +487,8 @@ pub enum Phase {
     Projectiles,
     /// `FxSpawnController`: queued effects spawn (`DismemberUnitFX.Init`'s `AddBuff`).
     Fx,
+    /// `AbilityExecutionController` (`Game.Instance.AbilityExecutor`): ability processes tick.
+    Abilities,
     /// `UnitLifeController`.
     Life,
     /// `UnitCombatLeaveController.Tick`'s prefix: the oracle's `leave_tick` and `cmds` inputs.
@@ -506,7 +511,7 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 14] = [
+const WORK: [Phase; 15] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
@@ -514,6 +519,7 @@ const WORK: [Phase; 14] = [
     Phase::Sleeping,
     Phase::Cooldowns,
     Phase::Buffs,
+    Phase::Abilities,
     Phase::Life,
     Phase::Leave,
     Phase::Conscious,
@@ -533,8 +539,13 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
     }
     Some(match p {
         Phase::Prefix | Phase::Post | Phase::GameLog => true,
-        Phase::Sleeping | Phase::Helpless => true,
-        Phase::Time | Phase::Commands | Phase::Projectiles | Phase::Fx | Phase::Life => m != PAUSE,
+        Phase::Sleeping | Phase::Helpless | Phase::Visibility => true,
+        Phase::Time
+        | Phase::Commands
+        | Phase::Projectiles
+        | Phase::Fx
+        | Phase::Abilities
+        | Phase::Life => m != PAUSE,
         Phase::Join | Phase::Prepare | Phase::LeavePrefix | Phase::Leave => m == DEFAULT,
         Phase::Memory => m == DEFAULT,
         Phase::Conscious => m == DEFAULT || m == DIALOG || m == CUTSCENE,
@@ -1936,6 +1947,11 @@ impl Driver<'_> {
                     }
                 }
                 Phase::Buffs => super::life::buffs_tick(w),
+                Phase::Abilities => {
+                    if super::spells::tick(w) > 0 {
+                        w.combat.spells.ran_at = Some(self.tick);
+                    }
+                }
                 Phase::Life => super::life::life_tick(w),
                 Phase::Helpless => super::life::helpless_tick(w),
                 Phase::Inspect => super::inspect::tick(w),
@@ -3121,7 +3137,7 @@ impl Driver<'_> {
             Some("input") => {
                 self.place(w, Phase::Post, "an input");
                 match r["step"].as_str() {
-                    Some("tbattack" | "move") => self.tgt_driver_input(w, i),
+                    Some("tbattack" | "tbcast" | "move") => self.tgt_driver_input(w, i),
                     Some(x) if x.starts_with("attack:") => self.tgt_driver_input(w, i),
                     Some("tbm:on") => {
                         w.combat.tb_mode_on = true;
@@ -3223,6 +3239,7 @@ impl Driver<'_> {
         let trace = self.trace;
         let r = &trace.records[i];
         match r["ev"].as_str() {
+            Some("insp_reveal") => self.inspect_reveal(w, i),
             Some("u") => {
                 if let (Some(u), Some(row)) =
                     (r["u"].as_str(), r["s"].as_str().and_then(Row::parse))
@@ -3862,6 +3879,10 @@ impl Driver<'_> {
             *self.out.by_origin.entry(c.label()).or_default() += 1;
             self.drive_root(w, i, end);
             return end + 1;
+        }
+        // A cast's rules (`combat::spells`).
+        if let Some(next) = self.spell_root(w, i, end, &class) {
+            return next;
         }
         if recs[i..=end].iter().any(|x| x["k"] == "obs" && x["ev"] == "join_combat") {
             w.coverage.unsupported("driven replay: a combat join inside a rule is not modelled");
@@ -4555,6 +4576,7 @@ mod commands;
 mod engage;
 mod impatience;
 mod memory;
+mod spells;
 mod targets;
 
 #[cfg(test)]

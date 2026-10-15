@@ -14,9 +14,15 @@ use crate::stats::types::{ModifierDescriptor as D, StatType};
 use crate::world::{CompRef, World};
 
 pub fn register(r: &mut Registry) {
-    use Hook::{Activate, PostLoad, PreSave, TurnOff, TurnOn};
+    use Hook::{Activate, Deactivate, PostLoad, PreSave, TurnOff, TurnOn};
     let ports: Vec<Port> = vec![
         Port::new("AddStatBonus", bits(&[Activate, TurnOn, TurnOff]), add_stat_bonus),
+        Port::new("ChangeUnitSize", bits(&[Activate, Deactivate]), change_unit_size),
+        Port::new(
+            "AddGenericStatBonus",
+            bits(&[Activate, TurnOn, TurnOff]),
+            add_generic_stat_bonus,
+        ),
         Port::new(
             "AddContextStatBonus",
             bits(&[Activate, TurnOn, TurnOff]),
@@ -165,12 +171,43 @@ fn powerful_change_bonus(w: &mut World, c: CompRef, num: i32) -> i32 {
     }
 }
 
-/// `AddStatBonus.CalculatePowerfulChangeBonus`: non-zero only for an arcanist's
-/// transmutation spell (an ability execution context), which the sim can't evaluate yet.
-fn powerful_change_on_activate(w: &mut World, c: CompRef, stat: StatType) {
-    let ability = w.fact(c.fact).context.as_ref().is_some_and(|x| x.has_ability_context);
-    if stat.is_attribute() && ability {
+/// `AddStatBonus.CalculatePowerfulChangeBonus` in `OnActivate` (`Data.PowerfulChangeBonus` set
+/// when positive): non-zero only for an arcanist's transmutation spell, with the caster's
+/// `PowerfulChange` and `ImprovedPowerfulChange` features. A loaded context under an ability
+/// (its root's ability not hydrated) is reported.
+pub(crate) fn powerful_change_on_activate(w: &mut World, c: CompRef, stat: StatType) {
+    let Some(ctx) = w.fact(c.fact).context.clone() else { return };
+    let caster = ctx.caster.as_ref().and_then(|id| w.by_id.get(id).copied());
+    let Some(caster) = caster else {
+        w.log("error", "Caster is missing");
+        return;
+    };
+    if !stat.is_attribute() || !ctx.has_ability_context {
+        return;
+    }
+    let Some(src) = ctx.source_ability else {
         w.coverage.unsupported("AddStatBonus.CalculatePowerfulChangeBonus (ability context)");
+        return;
+    };
+    // `abilityData?.Spellbook != null && Blueprint.IsSpell && Spellbook.Blueprint.IsArcanist &&
+    // SpellSchool == Transmutation` (8).
+    // (`IsSpell`: `Type` Spell 0 or SpellLike 1.)
+    let is_spell =
+        w.content.get(src.blueprint).is_some_and(|b| matches!(b.view().int("Type"), 0 | 1));
+    let arcanist =
+        src.spellbook.and_then(|g| w.content.get(g)).is_some_and(|b| b.view().bool("IsArcanist"));
+    if !(is_spell && arcanist && src.school == 8) {
+        return;
+    }
+    let mut num = 0;
+    for f in ["PowerfulChange", "ImprovedPowerfulChange"] {
+        if crate::components::state::has_mechanics_feature(w, caster, &[f]) {
+            num += 2;
+        }
+    }
+    if num > 0 {
+        let d = w.component_mut(c).data.get_or_insert_with(|| serde_json::json!({}));
+        d["PowerfulChangeBonus"] = num.into();
     }
 }
 
@@ -200,6 +237,64 @@ fn add_stat_bonus(w: &mut World, c: CompRef, h: Hook) {
             }
         }
         Hook::TurnOff if stat_exists(w, u, stat) => ops::remove_modifiers_from(w, u, stat, c),
+        _ => {}
+    }
+}
+
+/// `AddGenericStatBonus` (`Kingmaker.UnitLogic.Buffs.Components/AddGenericStatBonus.cs`, a buff's):
+/// `OnActivate` as `AddStatBonus`'s; `OnTurnOn` `Value` (not scaled by rank) with the arcanist's
+/// bonus, `AddModifierUnique` on the stat when it has one; `OnTurnOff` the runtime's modifiers off.
+fn add_generic_stat_bonus(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    let Some((stat, value, desc)) =
+        with_settings(w, c, |v| (StatType(v.i32("Stat")), v.i32("Value"), D(v.i32("Descriptor"))))
+    else {
+        return;
+    };
+    match h {
+        Hook::Activate => powerful_change_on_activate(w, c, stat),
+        Hook::TurnOn => {
+            let num = powerful_change_bonus(w, c, value);
+            if stat_exists(w, u, stat) {
+                ops::add_modifier_unique(w, u, stat, num, c, desc);
+            }
+        }
+        // `GetStat(Stat)?.RemoveModifiersFrom(Runtime)`.
+        Hook::TurnOff if stat_exists(w, u, stat) => ops::remove_modifiers_from(w, u, stat, c),
+        _ => {}
+    }
+}
+
+/// `ChangeUnitSize` (`Kingmaker.Designers.Mechanics.Buffs/ChangeUnitSize.cs`): `OnActivate`
+/// `Owner.Ensure<UnitPartSizeModifier>().Add(Fact)`, `OnDeactivate` its `Remove(Fact)`; each
+/// updates the unit's size (`spawn::update_size_part`).
+fn change_unit_size(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    match h {
+        Hook::Activate => {
+            // A loaded part keeps facts the sim doesn't hydrate.
+            if w.unit(u).is_some_and(|x| x.size_part_from_save) {
+                w.coverage.unsupported("UnitPartSizeModifier from a save (not hydrated)");
+            }
+            if !w.entity(u).parts.iter().any(|p| p.clr == "UnitPartSizeModifier") {
+                w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartSizeModifier" });
+            }
+            if let Some(x) = w.unit_mut(u) {
+                x.size_change_facts.push(c.fact);
+            }
+            crate::spawn::update_size_part(w, u);
+        }
+        Hook::Deactivate => {
+            if let Some(x) = w.unit_mut(u)
+                && let Some(i) = x.size_change_facts.iter().position(|f| *f == c.fact)
+            {
+                x.size_change_facts.remove(i);
+            }
+            if !w.entity(u).parts.iter().any(|p| p.clr == "UnitPartSizeModifier") {
+                w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartSizeModifier" });
+            }
+            crate::spawn::update_size_part(w, u);
+        }
         _ => {}
     }
 }

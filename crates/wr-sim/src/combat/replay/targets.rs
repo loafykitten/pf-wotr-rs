@@ -213,9 +213,25 @@ pub(super) struct TgtClick {
 /// the target).
 #[derive(Debug, Clone)]
 pub(super) enum DriverInput {
-    Click { unit: String, target: String },
-    Move { to: [f32; 3] },
-    Attack { target: String },
+    Click {
+        unit: String,
+        target: String,
+    },
+    /// `tbcast`: the driver's cast of a memorized spell (`UnitUseAbility.CreateCastCommand`,
+    /// `Run`) by `unit` on `target`, the spell its slot holds.
+    Cast {
+        unit: String,
+        target: String,
+        ability: wr_content::Guid,
+        spellbook: wr_content::Guid,
+        level: i32,
+    },
+    Move {
+        to: [f32; 3],
+    },
+    Attack {
+        target: String,
+    },
 }
 
 impl Driver<'_> {
@@ -578,6 +594,46 @@ impl Driver<'_> {
                 })
                 .map(|(unit, target)| DriverInput::Click { unit, target }),
             "move" => point().filter(|_| has(&["to"])).map(|to| DriverInput::Move { to }),
+            // The cast's `at`: the click's, with the pointer's mode.
+            "tbcast" => unit("unit")
+                .zip(unit("target"))
+                .zip(r["ability"].as_str().and_then(wr_content::Guid::parse))
+                .zip(r["spellbook"].as_str().and_then(wr_content::Guid::parse))
+                .zip(r["level"].as_i64().and_then(|l| i32::try_from(l).ok()))
+                .filter(|_| {
+                    let at = &r["at"];
+                    let mut click = at.clone();
+                    let mode = click.as_object_mut().and_then(|o| o.remove("pointer_mode"));
+                    has(&[
+                        "unit",
+                        "target",
+                        "ability",
+                        "slot",
+                        "level",
+                        "spellbook",
+                        "policy",
+                        "round",
+                        "turn_index",
+                        "command",
+                        "type",
+                        "at",
+                    ]) && r["command"] == "UnitUseAbility"
+                        && r["slot"] == "memorized"
+                        && r["type"].as_u64()
+                            == Some(u64::from(crate::combat::commands::ty::STANDARD))
+                        && r["policy"].is_string()
+                        && r["turn_index"].as_u64() == Some(turns as u64)
+                        && r["round"].as_i64() == Some(i64::from(w.combat.turns.round))
+                        && mode.is_some_and(|m| m.is_string())
+                        && click_at(&click)
+                })
+                .map(|((((unit, target), ability), spellbook), level)| DriverInput::Cast {
+                    unit,
+                    target,
+                    ability,
+                    spellbook,
+                    level,
+                }),
             // `Driver.Attack`: the target is a unit of the step's blueprint.
             _ => step
                 .strip_prefix("attack:")
@@ -626,7 +682,9 @@ impl Driver<'_> {
             return None;
         };
         let unit_ok = match &pending.input {
-            DriverInput::Click { unit, .. } => r["u"].as_str() == Some(unit.as_str()),
+            DriverInput::Click { unit, .. } | DriverInput::Cast { unit, .. } => {
+                r["u"].as_str() == Some(unit.as_str())
+            }
             DriverInput::Move { .. } | DriverInput::Attack { .. } => true,
         };
         // Right after the input: its new command's first sight (`uc_new`), then the `Run`.
@@ -721,6 +779,13 @@ impl Driver<'_> {
             DriverInput::Move { to } => {
                 x.is(class::MOVE_TO)
                     && matches!(x.s.target, Target::Point(p) if p.map(f32::to_bits) == to.map(f32::to_bits))
+            }
+            // `CreateCastCommand`: a plain `UnitUseAbility` of the spell's runtime action type.
+            DriverInput::Cast { target, .. } => {
+                x.class == class::USE_ABILITY
+                    && x.s.ty == crate::combat::commands::ty::STANDARD
+                    && x.s.target.unit() == Some(target.as_str())
+                    && x.ability.is_some()
             }
         };
         if !ok {

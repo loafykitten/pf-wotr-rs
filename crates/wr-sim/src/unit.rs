@@ -161,6 +161,15 @@ pub struct Unit {
     /// faction's plus the unit's overrides) and changes at runtime.
     pub attack_factions: Vec<Guid>,
     pub original_size: Option<Size>,
+    /// `UnitState.m_Size` (not saved: `Size` reads `OriginalSize` until it's set).
+    pub state_size: Option<Size>,
+    /// `UnitState.m_SizeBeforeDeath`.
+    pub size_before_death: Option<Size>,
+    /// `UnitPartSizeModifier.m_SizeChangeFacts` (the part exists while it holds any).
+    pub size_change_facts: Vec<FactIdx>,
+    /// The save had a `UnitPartSizeModifier` (its `m_SizeChangeFacts` and `OnPostLoad` aren't
+    /// hydrated: the unit's size is reported wherever it's read).
+    pub size_part_from_save: bool,
     pub main_fact: Option<FactIdx>,
     pub descriptor_turned_on: bool,
     pub is_main_character: bool,

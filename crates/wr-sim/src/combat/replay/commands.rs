@@ -160,6 +160,7 @@ pub(super) fn phase_of(origin: &str) -> Option<Phase> {
         "CombatController" => Phase::Turn,
         "UnitFollowUnitController" => Phase::Follow,
         "UnitMoveController" => Phase::Move,
+        "FogOfWarController" | "EntityVisibilityForPlayerController" => Phase::Visibility,
         "UnitCombatJoinController" => Phase::Join,
         "UnitCombatPrepareController" => Phase::Prepare,
         "UnitImpatienceController" => Phase::Impatience,
@@ -865,6 +866,33 @@ impl Driver<'_> {
                         )));
                     }
                     self.out.commands_run += 1;
+                    // The driver's cast: its command's ability is the input's spell.
+                    if let Some(super::targets::DriverInput::Cast {
+                        unit,
+                        ability,
+                        spellbook,
+                        level,
+                        ..
+                    }) = &click
+                    {
+                        let caster = w.by_id.get(unit.as_str()).copied();
+                        let a = caster
+                            .ok_or_else(|| "the caster is unknown".to_owned())
+                            .and_then(|u| {
+                                crate::combat::spells::Ability::memorized(
+                                    w, u, *spellbook, *ability, *level,
+                                )
+                            })
+                            .map_err(|e| Desync(format!("the driver's cast's spell: {e}")))?;
+                        match w.combat.commands.cmds.get_mut(&c) {
+                            Some(x) => x.ability = Some(a),
+                            None => {
+                                return Err(Desync(format!(
+                                    "the driver's command {c} isn't described"
+                                )));
+                            }
+                        }
+                    }
                     self.tgt_run_push(i);
                     uc::run(w, self, s, c, fq, ncq)?;
                     self.tgt_run_pop();
@@ -1457,6 +1485,56 @@ impl Inputs for Driver<'_> {
         Ok(())
     }
 
+    fn class_running_call(&mut self, w: &mut World, c: u32, before: usize) -> R<()> {
+        let at = self.uc_pull(w, &format!("the running list's remove of command {c}"), |r| {
+            obs(r, "uc_rc").is_some() && r["ctx"] == "other"
+        })?;
+        let r = &self.trace.records[at];
+        let len = w.combat.commands.running.len();
+        if id(&r["c"]) != Some(c)
+            || r["op"] != "remove"
+            || r["current"] != true
+            || r["b"].as_u64().and_then(|b| usize::try_from(b).ok()) != Some(before)
+            || r["a"].as_u64().and_then(|a| usize::try_from(a).ok()) != Some(len)
+        {
+            let d = describe(r);
+            return self.uc_reject(
+                at,
+                format!("the sim's running list (remove {c}, {len}), the recording has {d}"),
+            );
+        }
+        Ok(())
+    }
+
+    fn class_ended(&mut self, w: &mut World, c: u32, result: u8, raise: bool) -> R<()> {
+        // `UnitCommand.OnEnded < UnitUseAbility.OnEnded < UnitCommand.<the lifecycle's caller>`.
+        const BASE: &str = "Kingmaker.UnitLogic.Commands.Base.UnitCommand.";
+        const CHAIN: &str = "Kingmaker.UnitLogic.Commands.Base.UnitCommand.OnEnded < Kingmaker.UnitLogic.Commands.UnitUseAbility.OnEnded < ";
+        let at = self.uc_pull(w, &format!("the end of command {c}"), |r| {
+            obs(r, "uc_end").is_some() && r["ctx"] == "other"
+        })?;
+        let r = &self.trace.records[at];
+        let chain_ok = opt_str(r, "origin")
+            .flatten()
+            .and_then(|o| o.strip_prefix(CHAIN))
+            .is_some_and(|rest| rest.starts_with(BASE));
+        if id(&r["c"]) != Some(c)
+            || r["res"].as_u64() != Some(u64::from(result))
+            || r["raise"].as_bool() != Some(raise)
+            || !chain_ok
+        {
+            let d = describe(r);
+            return self.uc_reject(
+                at,
+                format!(
+                    "the sim ends command {c} ({result}) through its class, the recording has {d}"
+                ),
+            );
+        }
+        self.out.commands_ends += 1;
+        Ok(())
+    }
+
     fn tick_command(&mut self, w: &mut World, c: u32) -> R<bool> {
         let at = self.uc_pull(w, &format!("TickCommand({c})"), |r| obs(r, "uc_tc").is_some())?;
         let r = &self.trace.records[at];
@@ -2011,6 +2089,15 @@ impl Inputs for Driver<'_> {
         if let Some(env) = super::env_in(trace, at, end, a, t, w) {
             w.combat.env.push(((a, t), env));
         }
+        // The projectiles the weapon launches (`LaunchProjectiles`: one per blueprint), for the
+        // projectile pin's launch records.
+        let projectiles: Vec<String> = wp
+            .projectile_refs()
+            .into_iter()
+            .flatten()
+            .filter(|g| w.content.get(*g).is_some())
+            .map(|g| g.to_string())
+            .collect();
         let mut rule = crate::combat::attack::RuleAttackWithWeapon::new(a, t, wp, spec.penalty);
         rule.is_first_attack = spec.is_first_attack;
         rule.is_full_attack = spec.is_full_attack;
@@ -2026,6 +2113,43 @@ impl Inputs for Driver<'_> {
         let rid = trace.records[at]["id"].as_i64();
         for p in w.combat.pending_resolves.iter_mut().skip(before) {
             p.source_id = rid;
+        }
+        // With the projectile pin's observer (`proj_arrival`), its launches in the span (placed by
+        // `span_ok`) are the sim's, in order (`LaunchProjectile`: one per blueprint, its resolve
+        // the on-hit trigger, no callback): its blueprint and its attack roll's exact
+        // `AttackResult`.
+        if self.trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
+        }) {
+            let launches: Vec<&J> = trace.records[at..=end]
+                .iter()
+                .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
+                .collect();
+            let made: Vec<Option<&str>> = w
+                .combat
+                .pending_resolves
+                .iter()
+                .skip(before)
+                .map(|p| {
+                    usize::try_from(p.attack_result)
+                        .ok()
+                        .and_then(|i| crate::combat::attack::ATTACK_RESULTS.get(i).copied())
+                })
+                .collect();
+            let ok = launches.len() == made.len()
+                && made.len() == projectiles.len()
+                && launches.iter().zip(&made).zip(&projectiles).all(|((l, res), bp)| {
+                    res.is_some()
+                        && l["res"].as_str() == *res
+                        && l["bp"].as_str() == Some(bp.as_str())
+                        && l["trig"] == "RuleAttackWithWeaponResolve"
+                        && l["cb"] == false
+                });
+            if !ok {
+                w.coverage.unsupported(
+                    "driven replay: commands: an attack's projectiles launched differ from the sim's",
+                );
+            }
         }
         // (`AllAttacks[i].Rule.AttackRoll`, for the impatience controller's damage handler.)
         if let Some(seq) = rule.attack_roll_seq

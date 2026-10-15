@@ -392,8 +392,10 @@ pub fn command_started(w: &mut World, c: u32) {
     let target =
         x.s.target.unit().and_then(|t| w.by_id.get(t).copied()).filter(|t| w.unit(*t).is_some());
     let counts = w.combat.combat_active && ty == uc::ty::STANDARD && (attack || ability);
-    if counts && ability {
-        w.coverage.unsupported("impatience: an ability's start (UnitUseAbility)");
+    // An ability on an enemy counts too (its damage is matched by its execution process's
+    // context: not modelled); one on anyone else doesn't.
+    if counts && ability && target.is_some_and(|t| super::units::is_enemy(w, u, t)) {
+        w.coverage.unsupported("impatience: an ability's start on an enemy (UnitUseAbility)");
     }
     let target = match target {
         Some(t) if counts && attack && super::units::is_enemy(w, u, t) => Some(t),

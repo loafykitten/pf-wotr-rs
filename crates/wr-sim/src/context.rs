@@ -36,6 +36,20 @@ pub struct MechanicsContext {
     /// `SpellDescriptor` (saved): the parent's, or'ed with the associated blueprint's
     /// `SpellDescriptorComponent`.
     pub spell_descriptor: i64,
+    /// `SourceAbilityContext.Ability` of a context the sim made under an ability's execution
+    /// context (`None` for a loaded one: its root isn't hydrated).
+    pub source_ability: Option<SourceAbility>,
+}
+
+/// What a context made under an `AbilityExecutionContext` knows of its root's ability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceAbility {
+    /// `Ability.Blueprint`.
+    pub blueprint: Guid,
+    /// `Ability.Spellbook?.Blueprint`.
+    pub spellbook: Option<Guid>,
+    /// `SourceAbilityContext.SpellSchool`.
+    pub school: i64,
 }
 
 impl MechanicsContext {

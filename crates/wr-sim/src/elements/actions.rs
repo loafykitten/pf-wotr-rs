@@ -314,15 +314,10 @@ pub fn run(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
         // A `ContextAction` reads the innermost `MechanicsContext.Data` scope (the fact's
         // context, its current target); the ones with a port are in `run_context_action`.
         other => {
-            let Some((fact, target)) = mechanics_scope(w).filter(|_| a.is("ContextAction")) else {
+            let Some((ctx, target)) = mechanics_scope(w).filter(|_| a.is("ContextAction")) else {
                 return Err(unsupported(w, "action", other));
             };
-            let caster = w
-                .fact(fact)
-                .context
-                .as_ref()
-                .and_then(|x| x.caster.clone())
-                .and_then(|id| w.by_id.get(&id).copied());
+            let caster = super::mech_caster(w, ctx);
             crate::components::mechanics::run_context_action(w, a, target, caster);
             Ok(())
         }
@@ -342,9 +337,9 @@ pub(crate) fn pure_evaluator(v: View<'_>) -> bool {
 /// The innermost `MechanicsContext.Data` scope.
 pub(crate) fn mechanics_scope(
     w: &World,
-) -> Option<(crate::world::FactIdx, Option<crate::world::EntityIdx>)> {
+) -> Option<(super::MechRef, Option<crate::world::EntityIdx>)> {
     w.ctx.iter().rev().find_map(|c| match c {
-        super::Ctx::Mechanics { fact, target } => Some((*fact, *target)),
+        super::Ctx::Mechanics { ctx, target } => Some((*ctx, *target)),
         _ => None,
     })
 }

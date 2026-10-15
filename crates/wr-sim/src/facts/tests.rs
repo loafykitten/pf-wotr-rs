@@ -692,9 +692,9 @@ fn a_buff_applied_without_its_parent_context_is_its_own() {
     assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
 }
 
-/// A duration the action computes from context values isn't modelled: reported, no buff.
+/// An action without its duration value is reported, no buff.
 #[test]
-fn an_apply_buff_with_a_context_duration_is_reported() {
+fn an_apply_buff_without_its_duration_value_is_reported() {
     let (mut w, u) = registry_world();
     insert_bp(&w, 921, BUFF, &[]);
     let timed = Node::Object(Box::new(obj(
@@ -709,6 +709,47 @@ fn an_apply_buff_with_a_context_duration_is_reported() {
         "{:?}",
         w.coverage.unsupported
     );
+}
+
+/// `ContextDurationValue.Calculate`: a duration of rounds from a context value (no dice: a
+/// `RuleRollDice` of zero dice, then the bonus) times the rate's rounds; the buff ends that long
+/// after the start.
+#[test]
+fn an_apply_buff_with_a_context_duration_lasts_its_rounds() {
+    let (mut w, u) = registry_world();
+    insert_bp(&w, 922, BUFF, &[]);
+    let value = |t: i64, v: i64| {
+        Node::Object(Box::new(obj(
+            "Kingmaker.UnitLogic.Mechanics.ContextValue",
+            &[("ValueType", Node::Enum(t)), ("Value", Node::Int(v))],
+        )))
+    };
+    let duration = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Mechanics.ContextDurationValue",
+        &[
+            // `DurationRate.Minutes`: 10 rounds each.
+            ("Rate", Node::Enum(1)),
+            ("DiceType", Node::Enum(0)),
+            ("DiceCountValue", value(0, 0)),
+            ("BonusValue", value(0, 3)),
+            ("m_IsExtendable", Node::Bool(true)),
+        ],
+    )));
+    let timed = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Mechanics.Actions.ContextActionApplyBuff",
+        &[
+            ("name", Node::Str("$A$d".into())),
+            ("m_Buff", Node::BpRef(Guid(922))),
+            ("DurationValue", duration),
+        ],
+    )));
+    let f = feature(&w, 923, vec![context_actions(vec![timed])]);
+    let start = w.clock.game_time.0;
+    crate::unit_facts::add_fact(&mut w, u, &f).expect("feature");
+    let b = find_fact(&w, u, Guid(922)).expect("applied");
+    // 3 minutes: 30 rounds of 6 s.
+    assert_eq!(w.fact(b).buff.as_ref().and_then(|t| t.end_time), Some(start + 180 * 10_000_000));
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
 }
 
 /// `BuffExtraEffects`: the checked buff arriving puts the extra buff on; its leaving (no checked
@@ -898,4 +939,90 @@ fn slot_items_resolve_only_while_registered() {
     assert!(crate::items::slot_item_resolves(&w, e));
     w.by_id.remove("item-1");
     assert!(!crate::items::slot_item_resolves(&w, e), "unregistered");
+}
+
+/// `ContextConditionDifficultyHigherThan` (the giant fly's disease): the checked preset (an asset
+/// index the rules data resolves) against the difficulty setting, for a caster not of the
+/// player's faction; true for one that is (`CheckOnlyForMonster`); an index the rules data
+/// doesn't resolve is reported.
+#[test]
+fn the_difficulty_condition_compares_the_presets_stats_adjustments() {
+    use crate::difficulty::{DifficultyPreset, DifficultyPresetAsset, DifficultyPresetsList};
+    let run = |setting: i32, player: bool, index: i32| -> (bool, bool) {
+        let (mut w, u) = registry_world();
+        let preset = DifficultyPresetAsset {
+            name: "P".into(),
+            path_id: 77,
+            is_custom_mode: false,
+            preset: DifficultyPreset {
+                // Not the stats adjustments: the condition reads `Preset.StatsAdjustments`.
+                game_difficulty: 1,
+                death_door: false,
+                dead_companions_rise_after_combat: false,
+                remove_negative_effects_on_rest: false,
+                remove_annoying_buffs_after_combat: false,
+                damage_to_party: 1.0,
+                enemy_critical_hits: 0,
+                auto_level_up: 0,
+                stats_adjustments: 4,
+                enemy_difficulty: 1,
+                encumbrance_slowdown: false,
+                weather_effects: 0,
+                respec_allowed: false,
+                additional_ai_behaviors: false,
+                combat_encounters_capacity: 0,
+            },
+        };
+        w.settings.difficulty.list = Some(DifficultyPresetsList {
+            path_id: 0,
+            difficulties: vec![preset],
+            core_difficulty: 77,
+            hard_difficulty: 0,
+            unfair_difficulty: 0,
+            stats_adjustment_presets: Vec::new(),
+            mob_experience_coeffs: Vec::new(),
+            preset_asset_indices: [(5, 77)].into_iter().collect(),
+        });
+        w.settings.difficulty.settings.stats_adjustments = Some(setting);
+        w.unit_mut(u).expect("unit").is_player_faction = player;
+        insert_bp(&w, 951, BUFF, &[]);
+        let cond = Node::Object(Box::new(obj(
+            "Kingmaker.UnitLogic.Mechanics.Conditions.ContextConditionDifficultyHigherThan",
+            &[
+                ("name", Node::Str("$C$d".into())),
+                ("CheckOnlyForMonster", Node::Bool(true)),
+                ("m_Difficulty", Node::AssetIndex(index)),
+            ],
+        )));
+        let apply = Node::Object(Box::new(obj(
+            "Kingmaker.UnitLogic.Mechanics.Actions.ContextActionApplyBuff",
+            &[
+                ("name", Node::Str("$A$d".into())),
+                ("m_Buff", Node::BpRef(Guid(951))),
+                ("Permanent", Node::Bool(true)),
+            ],
+        )));
+        let conditional = Node::Object(Box::new(obj(
+            "Kingmaker.Designers.EventConditionActionSystem.Actions.Conditional",
+            &[
+                ("name", Node::Str("$Cond$d".into())),
+                (
+                    "ConditionsChecker",
+                    Node::Object(Box::new(obj(
+                        "Kingmaker.ElementsSystem.ConditionsChecker",
+                        &[("Conditions", Node::Seq(vec![cond]))],
+                    ))),
+                ),
+                ("IfTrue", action_list(vec![apply])),
+                ("IfFalse", action_list(Vec::new())),
+            ],
+        )));
+        let f = feature(&w, 952, vec![context_actions(vec![conditional])]);
+        crate::unit_facts::add_fact(&mut w, u, &f).expect("feature");
+        (find_fact(&w, u, Guid(951)).is_some(), w.coverage.valid())
+    };
+    assert_eq!(run(4, false, 5), (true, true), "the setting at the preset");
+    assert_eq!(run(3, false, 5), (false, true), "below it");
+    assert_eq!(run(3, true, 5), (true, true), "a player-faction caster");
+    assert!(!run(4, false, 6).1, "an index the rules data doesn't resolve");
 }

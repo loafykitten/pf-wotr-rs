@@ -349,13 +349,10 @@ impl Weapon {
     }
 }
 
-/// `UnitState.Size` (the original size: size-changing parts are reported).
+/// `UnitState.Size` (`spawn::state_size`; Medium for a unit with no size).
 #[must_use]
 pub fn unit_size(w: &mut World, u: EntityIdx) -> Size {
-    if w.entity(u).parts.iter().any(|p| p.clr == "UnitPartSizeModifier") {
-        w.coverage.unsupported("UnitPartSizeModifier: unit size changes");
-    }
-    w.unit(u).and_then(|x| x.original_size).unwrap_or(Size::Medium)
+    crate::spawn::state_size(w, u).unwrap_or(Size::Medium)
 }
 
 /// `ItemEntityWeapon.Size`: Medium unwielded; a non-player wielder uses the blueprint's

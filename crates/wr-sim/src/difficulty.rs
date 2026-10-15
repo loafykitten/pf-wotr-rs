@@ -92,9 +92,22 @@ pub struct DifficultyPresetsList {
     pub stats_adjustment_presets: Vec<StatsAdjustmentPreset>,
     /// `MobExperienceCoeffs`.
     pub mob_experience_coeffs: Vec<f32>,
+    /// `BlueprintReferencedAssets.m_Entries` indices that point at one of `m_Difficulties`
+    /// (a blueprint's `DifficultyPresetAsset` field is such an index in the runtime pack): the
+    /// asset's path id. Empty in rules data extracted before it was added.
+    #[serde(default)]
+    pub preset_asset_indices: BTreeMap<i32, i64>,
 }
 
 impl DifficultyPresetsList {
+    /// The `DifficultyPresetAsset` a blueprint's asset index names (`None` when the index isn't
+    /// one of `m_Difficulties`, or the rules data predates the map).
+    #[must_use]
+    pub fn preset_at(&self, asset_index: i32) -> Option<&DifficultyPresetAsset> {
+        let path = self.preset_asset_indices.get(&asset_index)?;
+        self.difficulties.iter().find(|d| d.path_id == *path)
+    }
+
     /// `GetAdjustmentPreset(preset)`: `FirstOrDefault(a => a.Preset == preset)`.
     #[must_use]
     pub fn adjustment_preset(&self, preset: i32) -> Option<&StatsAdjustmentPreset> {
