@@ -186,23 +186,23 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         pending: &mut Vec<K>,
     ) -> Result<Vec<K>, MemError> {
         for (k, info) in self.units.iter() {
-            let remove = match resolve(*k) {
-                Resolved::Missing => true,
-                Resolved::Unit { in_game } => {
-                    info.last_detect_time.checked_add(FORGET_AFTER)? < game_time || !in_game
-                }
-            };
-            if remove {
+            if cleanup_removes(info, resolve(*k), game_time)? {
                 pending.push(*k);
             }
         }
+        Ok(self.cleanup_finish(pending))
+    }
+
+    /// The end of `Cleanup()`: the collected keys (`pending`, `s_UnitsForRemove`) removed from this
+    /// memory where present, in order, and the list cleared. Returns the keys removed.
+    pub fn cleanup_finish(&mut self, pending: &mut Vec<K>) -> Vec<K> {
         let mut gone = Vec::new();
         for k in std::mem::take(pending) {
             if self.units.remove(&k).is_some() {
                 gone.push(k);
             }
         }
-        Ok(gone)
+        gone
     }
 
     /// `UnitsList`: when invalid, rebuilt from the dictionary (the units that resolve and are in the
@@ -288,6 +288,25 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     pub fn enemies_cache(&self) -> Option<&[K]> {
         self.enemies_valid.then_some(self.enemies.as_slice())
     }
+}
+
+/// One entry of `Cleanup()`'s walk: its unit doesn't resolve, or wasn't detected for more than 9 s
+/// (`LastDetectTime + 9 s < GameTime`), or isn't in the game.
+///
+/// # Errors
+///
+/// `LastDetectTime + 9 s` overflowing (`OverflowException`), for a unit that resolves.
+pub fn cleanup_removes(
+    info: &UnitInfo,
+    resolved: Resolved,
+    game_time: TimeSpan,
+) -> Result<bool, MemError> {
+    Ok(match resolved {
+        Resolved::Missing => true,
+        Resolved::Unit { in_game } => {
+            info.last_detect_time.checked_add(FORGET_AFTER)? < game_time || !in_game
+        }
+    })
 }
 
 /// `UnitMemoryController`'s own state: `m_UnitsForAdd`, the (observer, target) pairs queued by its
@@ -455,14 +474,17 @@ where
             }
             update_visibility(w, g, u, now)?;
         }
+        // `Cleanup()`, each entry resolved as the walk reaches it: a failure part way leaves what
+        // was collected in `s_UnitsForRemove`.
         let keys: Vec<K> = w.memory(g).keys().collect();
-        let mut resolved = Vec::with_capacity(keys.len());
         for k in keys {
-            resolved.push((k, w.resolve(k)?));
+            let resolved = w.resolve(k)?;
+            let info = *w.memory(g).find(k).expect("a key of the walk");
+            if cleanup_removes(&info, resolved, now)? {
+                ctl.cleanup_pending.push(k);
+            }
         }
-        let lookup =
-            |k: K| resolved.iter().find(|(x, _)| *x == k).map_or(Resolved::Missing, |r| r.1);
-        w.memory(g).cleanup(now, lookup, &mut ctl.cleanup_pending)?;
+        w.memory(g).cleanup_finish(&mut ctl.cleanup_pending);
     }
     // The queue is cleared after the loop: a failure part way keeps every pair (as the game's
     // exception would).

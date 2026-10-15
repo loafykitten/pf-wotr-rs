@@ -243,6 +243,7 @@ struct Fake {
     /// Reads that fail (the game's exception): the invisibility loop, a unit's `Wake`.
     fail_sees_invisible: bool,
     fail_wake: Option<u32>,
+    fail_resolve: Option<u32>,
 }
 
 impl MemoryWorld<u32, u8> for Fake {
@@ -298,6 +299,9 @@ impl MemoryWorld<u32, u8> for Fake {
         self.mem.entry(g).or_default()
     }
     fn resolve(&mut self, u: u32) -> Result<Resolved, MemError> {
+        if self.fail_resolve == Some(u) {
+            return Err(MemError::NullReference);
+        }
         Ok(self.resolved.get(&u).copied().unwrap_or(IN))
     }
     fn disposed(&mut self, u: u32) -> Result<bool, MemError> {
@@ -1198,4 +1202,23 @@ fn a_cleanup_that_throws_leaves_its_removals_to_the_next_one_of_any_memory() {
     assert_eq!(b.cleanup(T0, |_| IN, &mut pending), Ok(vec![1]));
     assert!(pending.is_empty());
     assert_eq!(keys(&b), [3]);
+}
+
+#[test]
+fn a_tick_whose_cleanup_fails_part_way_keeps_what_it_collected() {
+    let mut f = fight();
+    f.resolved.insert(20, Resolved::Missing);
+    f.fail_resolve = Some(30);
+    let mut c = MemoryController::default();
+    assert_eq!(tick(&mut c, &mut f), Err(MemError::NullReference));
+    // 20 (no unit) was collected before 30's resolution failed; nothing was removed yet.
+    assert_eq!(c.cleanup_pending, [20]);
+    assert_eq!(keys(&f.mem[&1]), [10, 20, 11, 30]);
+    // The next Cleanup, of any memory, removes it.
+    f.fail_resolve = None;
+    f.resolved.clear();
+    f.ready = vec![9];
+    f.mem.entry(9).or_default().add(20, T0);
+    tick(&mut c, &mut f).unwrap();
+    assert!(c.cleanup_pending.is_empty() && !f.mem[&9].contains(20));
 }

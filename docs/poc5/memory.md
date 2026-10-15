@@ -206,7 +206,8 @@ long frame, stealth, invisibility, the fake observer group).
 
 What this doesn't establish: the order of the window's first dictionary (`group_state` has keys only, not freed
 slots: no addition in these fights lands in a freed slot that isn't the last), `LastDetectTime` and `Visible` (not
-recorded: no 9 s expiry happens in these fights, every removal is a unit leaving the game), the caches' staleness
+recorded: whether an entry expired after 9 s isn't checked; every removal here comes a tick after its unit left its
+group, but why it left and whether the 9 s horizon also applied aren't established), the caches' staleness
 (each read equals a fresh fill: the recordings can't tell a cache hit from a refill), and the tick's own reads.
 
 ## Slice H: the memory computed (design)
