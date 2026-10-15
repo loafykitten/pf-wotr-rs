@@ -87,9 +87,9 @@ fn group_id(w: &World, g: GroupIdx) -> String {
 }
 
 /// The sim's changes since the last call, by group id.
-fn sim_changes(w: &mut World) -> Result<Changes, Desync> {
-    let c = sim::take_changes(w).map_err(Desync)?;
-    Ok(c.into_iter().map(|(g, x)| (group_id(w, g), x)).collect())
+fn sim_changes(w: &mut World) -> Changes {
+    let c = sim::take_changes(w);
+    c.into_iter().map(|(g, x)| (group_id(w, g), x)).collect()
 }
 
 /// A memory change record (`mem_add`, `mem_remove`, `mem_clear`) of its writer's shape.
@@ -218,13 +218,7 @@ impl Driver<'_> {
 
     /// The memory's changes between ticks: the recorded ones are the sim's, in order.
     fn mem_between(&mut self, w: &mut World) {
-        let model = match sim_changes(w) {
-            Ok(m) => m,
-            Err(Desync(d)) => {
-                w.coverage.unsupported(format!("driven replay: memory: {d}"));
-                Vec::new()
-            }
-        };
+        let model = sim_changes(w);
         let rec = std::mem::take(&mut self.mem.between);
         self.out.mem_changes += rec.len();
         if rec != model {
@@ -715,7 +709,7 @@ struct MemWorld<'a, 't> {
 impl<'t> MemWorld<'_, 't> {
     /// The recorded changes so far are the sim's, in order.
     fn compare(&mut self) -> Result<(), Desync> {
-        let model = sim_changes(self.w)?;
+        let model = sim_changes(self.w);
         self.model.extend(model);
         if self.changes != self.model {
             return Err(Desync(format!(

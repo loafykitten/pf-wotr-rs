@@ -146,22 +146,16 @@ pub fn logged(mut m: GroupMemory<EntityIdx>) -> GroupMemory<EntityIdx> {
     m
 }
 
-/// Every memory's changes since the last call (disposed groups' too), in the order they were
-/// made when one memory changed; `Err` when several did (their order isn't kept).
-pub fn take_changes(w: &mut World) -> Result<Vec<(GroupIdx, super::Change<EntityIdx>)>, String> {
+/// Every memory's changes since the last call (disposed groups' too), in the order they were made.
+pub fn take_changes(w: &mut World) -> Vec<(GroupIdx, super::Change<EntityIdx>)> {
     let mut changed = Vec::new();
     for (i, grp) in w.combat.groups.arena.iter_mut().enumerate() {
         if let Some(m) = grp.mem.as_mut() {
-            let c = m.take_changes();
-            if !c.is_empty() {
-                changed.push((GroupIdx(i), c));
-            }
+            changed.extend(m.take_ordered_changes().into_iter().map(|(n, c)| (n, GroupIdx(i), c)));
         }
     }
-    if changed.len() > 1 {
-        return Err("the sim changed two memories between two reads".into());
-    }
-    Ok(changed.into_iter().flat_map(|(g, c)| c.into_iter().map(move |x| (g, x))).collect())
+    changed.sort_unstable_by_key(|x| x.0);
+    changed.into_iter().map(|(_, g, c)| (g, c)).collect()
 }
 
 /// The units' ids.

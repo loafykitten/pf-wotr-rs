@@ -1260,6 +1260,39 @@ fn a_clear_during_an_enemies_fill_drops_what_was_filled_before_it() {
 }
 
 #[test]
+fn the_sims_changes_across_memories_come_in_the_order_they_were_made() {
+    // (A destruction removes the unit from every memory; a group tick can dispose several.)
+    let (mut w, u) = crate::stats::tests::world_with_unit();
+    w.combat.groups.memory_computed = true;
+    let a = crate::combat::groups::get_group(&mut w, "a");
+    let b = crate::combat::groups::get_group(&mut w, "b");
+    fn mem(
+        w: &mut crate::world::World,
+        g: crate::combat::groups::GroupIdx,
+    ) -> &mut GroupMemory<crate::world::EntityIdx> {
+        w.combat.groups.get_mut(g).mem.as_mut().unwrap()
+    }
+    mem(&mut w, b).add(u, T0);
+    mem(&mut w, a).add(u, T0);
+    assert!(mem(&mut w, b).remove(u));
+    mem(&mut w, b).add(u, T0);
+    mem(&mut w, a).clear();
+    assert!(mem(&mut w, b).remove(u));
+    assert_eq!(
+        sim::take_changes(&mut w),
+        [
+            (b, Change::Added(u)),
+            (a, Change::Added(u)),
+            (b, Change::Removed(u)),
+            (b, Change::Added(u)),
+            (a, Change::Cleared(1)),
+            (b, Change::Removed(u)),
+        ]
+    );
+    assert!(sim::take_changes(&mut w).is_empty());
+}
+
+#[test]
 fn the_log_has_each_new_key_removal_and_clear_with_its_count() {
     let mut m = GroupMemory::new();
     m.add(1, T0);

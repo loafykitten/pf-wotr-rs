@@ -19,6 +19,7 @@
 //! after a `Cleanup` can still hold the units it removed.
 
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::csharp::arith::CsError;
 use crate::csharp::{CsDict, RawSlot, TimeSpan};
@@ -83,10 +84,15 @@ pub struct GroupMemory<K> {
     /// `m_EnemiesList`, `m_EnemiesListValid`.
     enemies: Vec<K>,
     enemies_valid: bool,
-    /// The keys `Add`, `Remove` and `Cleanup` changed, in order, while logging
-    /// ([`Self::log_changes`]): what WrathOracle's `mem_add` and `mem_remove` record.
-    log: Option<Vec<Change<K>>>,
+    /// The keys `Add`, `Remove` and `Cleanup` changed and `Clear`'s, in order, while logging
+    /// ([`Self::log_changes`]): what WrathOracle's `mem_add`, `mem_remove` and `mem_clear` record.
+    /// Each with its place in the order of every memory's changes ([`LOG_ORDER`]).
+    log: Option<Vec<(u64, Change<K>)>>,
 }
+
+/// The order of the memories' logged changes across memories (one world changes its memories on
+/// one thread, so its changes' numbers increase in the order they were made).
+static LOG_ORDER: AtomicU64 = AtomicU64::new(0);
 
 /// A change `Add` or `Remove` made to a memory's keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +134,19 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
 
     /// The changes logged since the last call.
     pub fn take_changes(&mut self) -> Vec<Change<K>> {
+        self.take_ordered_changes().into_iter().map(|(_, c)| c).collect()
+    }
+
+    /// The changes logged since the last call, each with its place in the order of every memory's
+    /// changes.
+    pub fn take_ordered_changes(&mut self) -> Vec<(u64, Change<K>)> {
         self.log.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    fn note(&mut self, c: Change<K>) {
+        if let Some(log) = self.log.as_mut() {
+            log.push((LOG_ORDER.fetch_add(1, Ordering::Relaxed), c));
+        }
     }
 
     /// A memory holding `keys` in this enumeration order, with no freed slots between them (what a
@@ -148,8 +166,8 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     pub fn add(&mut self, k: K, game_time: TimeSpan) -> &mut UnitInfo {
         self.enemies_valid = false;
         self.units_list_valid = false;
-        if let Some(log) = self.log.as_mut().filter(|_| !self.units.contains_key(&k)) {
-            log.push(Change::Added(k));
+        if !self.units.contains_key(&k) {
+            self.note(Change::Added(k));
         }
         self.units
             .get_or_insert_with(k, || UnitInfo { last_detect_time: game_time, visible: false })
@@ -160,9 +178,7 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         if self.units.remove(&k).is_some() {
             self.enemies_valid = false;
             self.units_list_valid = false;
-            if let Some(log) = self.log.as_mut() {
-                log.push(Change::Removed(k));
-            }
+            self.note(Change::Removed(k));
             true
         } else {
             false
@@ -194,8 +210,8 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     /// `Clear()`.
     pub fn clear(&mut self) {
         let n = self.units.len();
-        if let Some(log) = self.log.as_mut().filter(|_| n > 0) {
-            log.push(Change::Cleared(n));
+        if n > 0 {
+            self.note(Change::Cleared(n));
         }
         self.units_list_valid = false;
         self.clear_enemies();
@@ -242,9 +258,7 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         for k in std::mem::take(pending) {
             if self.units.remove(&k).is_some() {
                 gone.push(k);
-                if let Some(log) = self.log.as_mut() {
-                    log.push(Change::Cleaned(k));
-                }
+                self.note(Change::Cleaned(k));
             }
         }
         gone
