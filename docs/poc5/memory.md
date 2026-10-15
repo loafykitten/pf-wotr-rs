@@ -315,10 +315,10 @@ their hashes, 36 units forgotten, 48 additions recorded and matched, 90 pairs qu
 33,732 changes between ticks adopted. The window's initial memories: 12 groups, no freed slot, the party's enemies
 cache valid. The later captures with the observer check clean too: with `-112` and `-113` (other fights, other
 observers added), 18 runs, 42,306 ticks, 125,982 group passes, 630,204 near units, 130,407 friends' phases, 120
-`Cleanup` removals and 165 additions in order. Damage tests: 43 hand-made cases (a leaf flipped, reordered or of
+`Cleanup` removals and 165 additions in order. Damage tests: 45 hand-made cases (a leaf flipped, reordered or of
 another frame, a hash on its phase, a long frame, a pass's slot, free list or detect time, an addition or removal
 missing, doubled, swapped (two groups' too), moved before the reads (its own read too) or of another kind, a memory cleared in the
-tick, a row twice or unchanged, the queue, a caller missing, `Wake`, the frame, `mem_initq`, a frame without its
+tick, a row twice or unchanged, the queue, a caller missing, a change between ticks of another shape, `Wake`, the frame, `mem_initq`, a frame without its
 tick, the tape), recovery after a desync, and 9 cases on the capture (`a_damaged_capture_is_caught`): each caught.
 Commands: `WR_MEMTICK_CAPTURES=poc5-tb-111,poc5-tb-112,poc5-tb-113 cargo test --release -p wr-sim --lib
 memory::tick_tests -- --ignored --nocapture`.

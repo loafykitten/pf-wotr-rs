@@ -739,8 +739,24 @@ impl Check<'_> {
             "mem_v" | "mem_s" | "mem_tick_end" => {
                 return Err(Desync(format!("{} outside a tick", describe(r))));
             }
-            "mem_add" | "mem_remove" | "mem_clear" if self.started => {
-                // The memory changed outside the tick: the next tick's entry records the state.
+            "mem_add" | "mem_remove" | "mem_clear" => {
+                // The memory changed outside the tick (the next tick's entry records the state):
+                // a record of its writer's shape.
+                let ok = r["group"].is_string()
+                    && match ev {
+                        "mem_add" => has_fields(r, &["group", "u", "by"]) && r["by"].is_string(),
+                        "mem_remove" => {
+                            has_fields(r, &["group", "u", "by"])
+                                && matches!(r["by"].as_str(), Some("Remove" | "Cleanup"))
+                        }
+                        _ => {
+                            has_fields(r, &["group", "n"]) && r["n"].as_u64().is_some_and(|n| n > 0)
+                        }
+                    }
+                    && (ev == "mem_clear" || r["u"].is_string());
+                if !ok {
+                    return Err(Desync(format!("a memory change it can't read ({r})")));
+                }
                 self.count("changes outside the tick", 1);
             }
             _ => {}
@@ -1216,7 +1232,9 @@ fn window() -> Vec<Value> {
         leaf(0, "wake", json!({"u": "f1", "time": "0", "fade": false, "b": "-1", "a": "0"})),
         row(0, Some("end"), "F", json!([["e1", GT, false]])),
         rec(0, "mem_tick_end", json!({"gt": GT, "exc": false})),
-        // Between ticks: an enemy command on f1 queues a pair, a peaceful target doesn't.
+        // Between ticks: a memory change elsewhere (recorded at the next tick's entry if it
+        // matters); an enemy command on f1 queues a pair, a peaceful target doesn't.
+        rec(0, "mem_clear", json!({"group": "X", "n": 1})),
         q("e1", "f1", false, true),
         q("e1", "f1", false, false),
         q("e1", "p1", true, false),
@@ -1428,6 +1446,16 @@ fn a_damaged_window_is_caught() {
             }),
         ),
         ("a mem_q without its callers", Box::new(move |v| v[q]["by"] = json!(null))),
+        (
+            "a clear between ticks of another shape",
+            Box::new(move |v| v.insert(q, rec(0, "mem_clear", json!({"group": null, "n": "2"})))),
+        ),
+        (
+            "an addition between ticks without its unit",
+            Box::new(move |v| {
+                v.insert(q, rec(0, "mem_add", json!({"group": "A", "u": null, "by": "x"})));
+            }),
+        ),
         ("a pre row twice", twice(pre)),
         ("an end row twice", twice(end)),
         (
