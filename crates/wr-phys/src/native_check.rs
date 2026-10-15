@@ -342,11 +342,15 @@ fn raycast_height_field_matches_the_player() {
 fn raycast_box_matches_the_player() {
     let p = Player::load();
     let mut r = Rng(0x2545_f491_4f6c_dd1d);
-    let (mut n, mut hits, mut differ) = (0usize, 0usize, 0usize);
+    let (mut n, mut hits, mut differ, mut missed) = (0usize, 0usize, 0usize, 0usize);
     let mut bad = Vec::new();
     for _ in 0..1_000_000 {
-        let half = Vec3::new(r.range(0.01, 5.0), r.range(0.01, 5.0), r.range(0.01, 5.0));
-        let pose = random_pose(&mut r);
+        let size = if r.below(2) == 0 { 5.0 } else { 50.0 };
+        let half = Vec3::new(r.range(0.01, size), r.range(0.01, size), r.range(0.01, size));
+        let mut pose = random_pose(&mut r);
+        if r.below(2) == 0 {
+            pose.p = pose.p.scale(20.0);
+        }
         // From around the box, often straight down onto its top, sometimes from inside.
         let local = Vec3::new(
             r.range(-1.3, 1.3) * half.x,
@@ -354,20 +358,64 @@ fn raycast_box_matches_the_player() {
             r.range(-1.3, 1.3) * half.z,
         );
         let origin = pose.transform(local);
-        let dir = match r.below(3) {
+        let dir = match r.below(4) {
             0 => Vec3::new(0.0, -1.0, 0.0),
             1 => pose.rotate(Vec3::new(0.0, -1.0, 0.0)),
+            2 => {
+                // Grazing a face.
+                let d = Vec3::new(r.range(-1.0, 1.0), r.range(-0.003, 0.003), r.range(-1.0, 1.0));
+                pose.rotate(d.scale(1.0 / d.magnitude().max(1e-3)))
+            }
             _ => {
                 let d = Vec3::new(r.range(-1.0, 1.0), r.range(-1.0, 1.0), r.range(-1.0, 1.0));
                 let m = d.magnitude();
                 if m < 1e-3 { Vec3::new(0.0, -1.0, 0.0) } else { d.scale(1.0 / m) }
             }
         };
-        let max = if r.below(2) == 0 { 100.0 } else { r.range(0.0, 10.0) };
+        let mut max = if r.below(2) == 0 { 100.0 } else { r.range(0.0, 10.0) };
+        // Often ending exactly at the hit (the conservative test's end of the ray).
+        if r.below(2) == 0
+            && let Some((d, _)) = p.raycast_box(half, pose, origin, dir, max)
+        {
+            max = d;
+        }
         let want = p.raycast_box(half, pose, origin, dir, max);
         let got = crate::boxes::raycast_box(half, pose, origin, dir, max)
             .map(|h| (h.distance, h.position.to_array()));
         let key = |x: Option<(f32, [f32; 3])>| x.map(|(d, pt)| (d.to_bits(), pt.map(f32::to_bits)));
+        // The conservative test (the queries' fail-closed path) must count every hit the player
+        // reports, for the box under the same pose as a matrix.
+        if want.is_some() {
+            let q = pose.q;
+            let (x, y, z, w) = (f64::from(q.x), f64::from(q.y), f64::from(q.z), f64::from(q.w));
+            let m = crate::conservative::M4([
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y + z * w),
+                2.0 * (x * z - y * w),
+                0.0,
+                2.0 * (x * y - z * w),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z + x * w),
+                0.0,
+                2.0 * (x * z + y * w),
+                2.0 * (y * z - x * w),
+                1.0 - 2.0 * (x * x + y * y),
+                0.0,
+                f64::from(pose.p.x),
+                f64::from(pose.p.y),
+                f64::from(pose.p.z),
+                1.0,
+            ]);
+            let o = origin.to_array().map(f64::from);
+            let d = dir.to_array().map(f64::from);
+            let h = half.to_array().map(f64::from);
+            if !crate::conservative::ray_hits_box(o, d, f64::from(max), &m, [0.0; 3], h) {
+                missed += 1;
+                if bad.len() < 20 {
+                    bad.push(format!("conservative miss: half {half:?} pose {pose:?} from {origin:?} dir {dir:?} max {max}: player {want:?}"));
+                }
+            }
+        }
         n += 1;
         hits += usize::from(want.is_some());
         if key(want) != key(got) {
@@ -377,9 +425,9 @@ fn raycast_box_matches_the_player() {
             }
         }
     }
-    eprintln!("{n} rays ({hits} hits), {differ} differ");
+    eprintln!("{n} rays ({hits} hits), {differ} differ, {missed} missed by the conservative test");
     for b in &bad {
         eprintln!("  {b}");
     }
-    assert_eq!(differ, 0);
+    assert_eq!((differ, missed), (0, 0));
 }

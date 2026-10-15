@@ -185,13 +185,14 @@ pub fn ray_hits_triangle(
         let hi = [0, 1, 2].map(|k| a[k].max(b[k]).max(c[k]));
         return ray_hits_aabb(o, d, max, lo, hi, triangle_grow(tri, bary_eps));
     }
-    let s = slack(o, max);
+    // PhysX's crossing point carries an error of order 1e-7 of the triangle's size, which the
+    // ray's angle amplifies by 1 / sin, along the ray and across it alike.
+    let margin = slack(o, max) + (2.0 * bary_eps + 1e-5 / sin) * edges;
     let t = dot(sub(a, o), n) / dot(d, n);
-    if t < -s || t > max + s {
+    if t < -margin || t > max + margin {
         return false;
     }
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
-    let margin = s + (2.0 * bary_eps + 1e-5 / sin) * edges;
     point_triangle_distance(p, a, b, c) <= margin
 }
 
@@ -317,5 +318,24 @@ mod tests {
         // f32 rounding at large magnitudes: a box 1 cm beyond a 1,000 km ray counts.
         assert!(ray_hits_box([0.0, 1e6, 0.0], DOWN, 1e6, &ID, [0.0, -1.01, 0.0], [1.0; 3]));
         assert!(!ray_hits_box([0.0, 5.0, 0.0], DOWN, 10.0, &ID, [5.0, 0.0, 0.0], h));
+    }
+
+    #[test]
+    fn grazing_box_faces_count_near_the_end_of_the_ray() {
+        // The player's raycast_box hits at max (12.556856) where the f64 face lies 1.6 mm beyond.
+        let (x, y, z, w) = (0.0f64, 0.0, 0.0020574492, 0.99999785);
+        let r = [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w)],
+            [2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w)],
+            [2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ];
+        let p = [69.62317, 550.3618, -138.25153];
+        let m = M4([
+            r[0][0], r[0][1], r[0][2], 0.0, r[1][0], r[1][1], r[1][2], 0.0, r[2][0], r[2][1],
+            r[2][2], 0.0, p[0], p[1], p[2], 1.0,
+        ]);
+        let half = [39.840836, 26.181278, 38.494053];
+        let o = [109.452255, 565.85754, -115.38968];
+        assert!(ray_hits_box(o, DOWN, 12.556856, &m, [0.0; 3], half));
     }
 }
