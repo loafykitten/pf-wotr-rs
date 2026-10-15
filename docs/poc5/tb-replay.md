@@ -414,8 +414,9 @@ distance and the wall flag as the arrival leaves them; the flight itself (positi
   key's contents are what the launch had). The fields are read, not resolved through getters that cache
   (`UnitRef.Id`, not `UnitRef.Entity`).
 - **Replay**: a launch must be the recording's: same key and the same contents, within `Sched.Tol` of the
-  recorded tick plus the offset so far. Its hit is due the recorded number of ticks after this replay's own
-  launch (as `PathSync` dates deliveries from requests). Before then a hit the native flight makes is taken
+  recorded tick plus the offset so far. Its hit is due on the recording's hit tick (plus the offset so far, 0 in a
+  tick-exact replay), whatever this launch's own tick within that tolerance, so the hit and what it triggers
+  follow the recording; a launch at or after that tick is invalid. Before then a hit the native flight makes is taken
   back right after `Projectile.Tick`, before anything reads it: `IsHit`, `IsHitWall` if that tick set it, and
   `PassedDistance` back from the range it was clamped to to the sum `Tick` made (the same float expression), so
   a line ability's sweep sees the recording's distance every tick. On the due tick `IsHit` is set if the flight
@@ -431,7 +432,8 @@ distance and the wall flag as the arrival leaves them; the flight itself (positi
   the hit; a projectile launched before the window hitting inside it (`proj_untracked`, unpinned: in a replay at
   once, and a recording that has one gives its replays nothing to follow); a recording without `proj_arrival` in
   its observers, or whose launch and hit records lack or mistype a field (a hit's `fl` must be its ticks since
-  the launch), or with an `OnHit` that threw.
+  the launch; ticks from 0), or with an `OnHit` or a `Projectile.Tick` that threw (`proj_tick_exc`: the
+  controller clears that projectile; a replay's own is invalid too).
 - End record (turn-based windows): `projectiles_tracked`, `projectile_hits_held`, `projectile_hits_forced`.
 
 Why this pin and not another [I]: taping the target point per flight tick would keep the native arithmetic but

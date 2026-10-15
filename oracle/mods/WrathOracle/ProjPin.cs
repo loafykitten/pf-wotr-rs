@@ -30,7 +30,7 @@ namespace WrathOracle;
 // "pres", never pinned. Every other projectile is pinned, an ability's too (AbilityDeliverProjectile, Touch,
 // Chain, Ricochet... poll IsHit, and set the attack roll and range after the launch).
 // Replay: a launch must be the recording's (same key and contents, within the scheduler's tolerance of
-// the recorded tick); its hit is due the recorded number of ticks after this replay's own launch. Before
+// the recorded tick); its hit is due on the recording's hit tick (plus the replay's offset, 0 when tick-exact). Before
 // then a hit the native flight makes is taken back right after Projectile.Tick, before anything reads it
 // (IsHit; IsHitWall if that tick set it; PassedDistance, which the hit clamps to MaxRange and line and cone
 // deliveries read, back to Tick's own sum); on the due tick IsHit is set if the flight hasn't got there
@@ -101,11 +101,18 @@ internal static class ProjPin
             Sched.Invalidate("the recording has an OnHit that threw (proj_onhit_exc)");
             return;
         }
+        if (ev == "proj_tick_exc")
+        {
+            // The recording's Projectile.Tick threw (the controller cleared that projectile): not followable.
+            Sched.Invalidate("the recording has a projectile whose Tick threw (proj_tick_exc)");
+            return;
+        }
         if (ev != "proj_launch" && ev != "proj_hit") return;
         if (o["pres"]?.Type == JTokenType.Boolean && (bool)o["pres"]) return;
         var k = o["p"]?.Type == JTokenType.String ? (string)o["p"] : null;
         var t = o["t"]?.Type == JTokenType.Integer ? (int)o["t"] : (int?)null;
-        if (k == null || t == null) { Sched.Invalidate($"recording's {ev} record without its projectile or tick"); return; }
+        // Launches and hits happen inside game ticks (0 on).
+        if (k == null || t == null || t.Value < 0) { Sched.Invalidate($"recording's {ev} record without its projectile or a tick"); return; }
         if (ev == "proj_launch")
         {
             int? I(string f) => o[f]?.Type == JTokenType.Integer ? (int)o[f] : (int?)null;
@@ -205,8 +212,13 @@ internal static class ProjPin
                 rec.Matched = true;
                 if (rec.Hit >= 0)
                 {
-                    t.Due = now + (rec.Hit - rec.Launch);
-                    Pending.Add(t);
+                    // The recording's hit tick (moved by the replay's offset, as its inputs are: 0 when it is
+                    // tick-exact), whatever this launch's own tick within the tolerance: the hit and what it
+                    // triggers follow the recording, not the launch.
+                    t.Due = rec.Hit + Sched.Offset;
+                    if (t.Due <= now)
+                        Sched.Invalidate($"projectile {k} launched at tick {now}, at or after its recorded hit (tick {rec.Hit}, offset {Sched.Offset})");
+                    else Pending.Add(t);
                 }
             }
         }
@@ -303,6 +315,23 @@ internal static class ProjPin
         catch (Exception e) { Trace.HookFailed("projectile arrival", e); }
     }
 
+    // A Tick that threw: ProjectileController catches it and clears the projectile (no hit, ever). Noted; a
+    // replay is invalid (and a recording with one has nothing its replays could follow: TapeRecord).
+    public static Exception TickFinalizer(Projectile __instance, Exception __exception)
+    {
+        if (__exception == null || !On) return __exception;
+        try
+        {
+            string k = null;
+            if (__instance != null && Tracks.TryGetValue(__instance, out var t)) k = t.K;
+            var what = __exception.GetType().Name;
+            Sched.Obs("proj_tick_exc", j => { j.Prop("p", k); j.Prop("exc", what); });
+            if (Sched.Replay) Sched.Invalidate($"projectile {k ?? "(untracked)"}: Tick threw {what} at tick {Trace.Tick}");
+        }
+        catch (Exception e) { Trace.HookFailed("projectile tick end", e); }
+        return __exception;
+    }
+
     // ---- Projectile.OnHit (prefix and finalizer): on its hit's tick, completed ----
 
     public static void OnHitPrefix(Projectile __instance)
@@ -397,7 +426,8 @@ internal static class ProjPin
             h.Patch(AccessTools.Method(typeof(ProjectileController), "AddProjectile", new[] { typeof(Projectile) }) ?? throw new MissingMethodException("ProjectileController.AddProjectile"),
                 postfix: new HarmonyMethod(typeof(ProjPin), nameof(AddPostfix)));
             h.Patch(AccessTools.Method(typeof(Projectile), nameof(Projectile.Tick)),
-                prefix: new HarmonyMethod(typeof(ProjPin), nameof(TickPrefix)), postfix: new HarmonyMethod(typeof(ProjPin), nameof(TickPostfix)));
+                prefix: new HarmonyMethod(typeof(ProjPin), nameof(TickPrefix)), postfix: new HarmonyMethod(typeof(ProjPin), nameof(TickPostfix)),
+                finalizer: new HarmonyMethod(typeof(ProjPin), nameof(TickFinalizer)));
             h.Patch(AccessTools.Method(typeof(Projectile), nameof(Projectile.OnHit)), prefix: new HarmonyMethod(typeof(ProjPin), nameof(OnHitPrefix)),
                 finalizer: new HarmonyMethod(typeof(ProjPin), nameof(OnHitFinalizer)));
             h.Patch(AccessTools.Method(typeof(ProjectileHitController), nameof(ProjectileHitController.Tick)), finalizer: new HarmonyMethod(typeof(ProjPin), nameof(HitTickFinalizer)));
