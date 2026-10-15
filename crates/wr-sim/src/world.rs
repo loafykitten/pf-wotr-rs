@@ -231,6 +231,8 @@ pub struct BuffTimes {
     pub next_tick_time: i64,
     pub round_number: i64,
     pub is_from_spell: bool,
+    /// `SourceAreaEffectId` (saved), when not empty.
+    pub source_area_effect: Option<String>,
 }
 
 impl BuffTimes {
@@ -345,6 +347,10 @@ pub enum BeforeTick {
     Action(ScheduledAction),
     StartMode(&'static str),
     StopMode(&'static str),
+    /// `CutsceneLock.SetCutsceneLock`'s scheduled `UpdateModeForCutsceneLock(wasLocked)`.
+    CutsceneLockMode {
+        was_locked: bool,
+    },
 }
 
 /// Settings that rules read (`SettingsRoot`, difficulty).

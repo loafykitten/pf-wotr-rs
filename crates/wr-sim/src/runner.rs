@@ -9,7 +9,9 @@
 //! 1. `Game.ExecuteBeforeTickActions`: `ScheduleAction`, `StartMode` and `StopMode` tasks
 //!    queued since the last tick, in one FIFO (the dialogue's start, then its mode; the
 //!    dialogue controller's `Start`/`Stop` run here);
-//! 2. `TimeController.Tick` (a fixed 1/60 s frame, as WrathOracle's fixture mode feeds it);
+//! 2. `TimeController.Tick` (a fixed 1/60 s frame, as WrathOracle's fixture mode feeds it),
+//!    then the cutscene controller's recorded progress, `UnitActivatableAbilitiesController`
+//!    and, outside Cutscene mode, `UnitBuffsController`;
 //! 3. in Default mode, the step's script-zone input (`ScriptZoneController`'s position);
 //! 4. in Dialog mode, `DialogController.Tick` (plays the scheduled cue);
 //! 5. `EtudeSystemController.Tick` (`UpdateEtudes` when conditions are dirty).
@@ -194,21 +196,50 @@ pub fn execute_before_tick(w: &mut World) {
     while i < w.before_tick.len() {
         match w.before_tick[i] {
             BeforeTick::Action(a) => crate::dialog::run_scheduled_action(w, a),
+            // `DoStartMode`: pushes the mode unless it is the current one. Pause starts only
+            // over Default and outside turn-based combat; Default, Dialog, Cutscene and Rest
+            // stop a Pause on top first.
             BeforeTick::StartMode(name) => {
-                w.player.mode = name;
-                w.clock.activate();
-                if name == "Dialog" {
-                    crate::dialog::controller_start(w);
+                if w.player.mode == name {
+                    w.log("info", format!("Game mode with type {name} already active"));
+                } else if name == "Pause" && (w.combat.turn_based || w.player.mode != "Default") {
+                    w.log("info", format!("Preventing starting Pause over {}", w.player.mode));
+                } else {
+                    if matches!(name, "Default" | "Dialog" | "Cutscene" | "Rest") {
+                        while w.player.mode == "Pause" {
+                            w.player.mode = w.player.modes_below.pop().unwrap_or_else(|| {
+                                w.coverage
+                                    .unsupported("Game.DoStopMode: the last mode on the stack");
+                                "Default"
+                            });
+                            activate_mode(w);
+                        }
+                    }
+                    let below = std::mem::replace(&mut w.player.mode, name);
+                    w.player.modes_below.push(below);
+                    activate_mode(w);
+                    if name == "Dialog" {
+                        crate::dialog::controller_start(w);
+                    }
                 }
             }
+            // `DoStopMode`: pops the mode if it is the current one.
             BeforeTick::StopMode(name) => {
                 if w.player.mode == name {
-                    w.player.mode = "Default";
+                    w.player.mode = w.player.modes_below.pop().unwrap_or_else(|| {
+                        w.coverage.unsupported("Game.DoStopMode: the last mode on the stack");
+                        "Default"
+                    });
+                    activate_mode(w);
+                    if name == "Dialog" {
+                        crate::dialog::controller_stop(w);
+                    }
+                } else {
+                    w.log("warning", format!("Cannot stop game mode {name}"));
                 }
-                w.clock.activate();
-                if name == "Dialog" {
-                    crate::dialog::controller_stop(w);
-                }
+            }
+            BeforeTick::CutsceneLockMode { was_locked } => {
+                update_mode_for_cutscene_lock(w, was_locked)
             }
         }
         i += 1;
@@ -216,12 +247,85 @@ pub fn execute_before_tick(w: &mut World) {
     w.before_tick.clear();
 }
 
+/// `GameMode.OnActivate` of the new current mode: its controllers' `Activate` (the time
+/// controller's; `UnitBuffsController`'s in the modes that have it).
+fn activate_mode(w: &mut World) {
+    w.clock.activate();
+    if matches!(w.player.mode, "Default" | "Dialog" | "Rest" | "GlobalMap") {
+        crate::combat::life::buffs_controller_activate(w);
+    }
+}
+
+/// `Game.StartMode(type)`: the request, refused when the mode is current and stays so after
+/// the queue's starts and stops of it (the queue still holds this pass's run tasks).
+pub fn start_mode(w: &mut World, name: &'static str) {
+    if w.player.mode == name {
+        let count = |t: BeforeTick| w.before_tick.iter().filter(|x| **x == t).count();
+        if 1 + count(BeforeTick::StartMode(name)) > count(BeforeTick::StopMode(name)) {
+            w.log("error", format!("Game mode with type {name} already active"));
+            return;
+        }
+    }
+    w.before_tick.push(BeforeTick::StartMode(name));
+}
+
+/// `CutsceneLock.SetCutsceneLock(lock, player)`: the guard's count, and the mode update
+/// scheduled once until it runs.
+pub fn set_cutscene_lock(w: &mut World, lock: bool) {
+    let (count, scheduled) = w.player.cutscene_lock;
+    let was_locked = count > 0;
+    let count = if lock {
+        count + 1
+    } else if count <= 0 {
+        // `CountingGuard`: an error, the count stays.
+        w.log("error", "CountingGuard went negative: 0".to_owned());
+        count
+    } else {
+        count - 1
+    };
+    w.player.cutscene_lock = (count, true);
+    if !scheduled {
+        w.before_tick.push(BeforeTick::CutsceneLockMode { was_locked });
+    }
+}
+
+/// `CutsceneLock.UpdateModeForCutsceneLock(wasLocked)`: Cutscene mode starts or stops when
+/// the lock changed since the request. (Rest and the global map's cutscene mode are reported.)
+fn update_mode_for_cutscene_lock(w: &mut World, was_locked: bool) {
+    let locked = w.player.cutscene_lock.0 > 0;
+    if was_locked != locked {
+        if matches!(w.player.mode, "Rest" | "GlobalMap")
+            || w.player.modes_below.contains(&"GlobalMap")
+        {
+            w.coverage.unsupported("CutsceneLock: a lock in Rest or GlobalMap mode");
+        }
+        if locked {
+            start_mode(w, "Cutscene");
+        } else {
+            w.before_tick.push(BeforeTick::StopMode("Cutscene"));
+        }
+    }
+    w.player.cutscene_lock.1 = false;
+}
+
 /// One `Game.Tick` (see the module note); `zone` is a script-zone input for this tick. The
 /// before-tick tasks run before the tick count advances, as in the oracle's records.
 pub fn tick(w: &mut World, zone: Option<Guid>) {
-    // 1. Before-tick tasks: scheduled actions and mode changes, in request order.
+    // 1. Before-tick tasks: scheduled actions and mode changes, in request order (a recorded
+    // pause, a UI request, last).
+    crate::elements::cutscene::recorded_pause(w, w.events.tick);
     execute_before_tick(w);
     w.events.tick += 1;
+    // Pause mode has none of the controllers below (not even the clock).
+    if w.player.mode == "Pause" {
+        let t = w.events.tick - 1;
+        crate::elements::cutscene::check_recorded_mode(w, t);
+        crate::elements::cutscene::recorded_paused_tick(w, t);
+        if zone.is_some() {
+            w.coverage.unsupported("ScriptZoneController: a zone input in Pause mode");
+        }
+        return;
+    }
     // 2. TimeController.
     let frame = crate::time::Frame {
         delta_time: FIXED_DELTA,
@@ -236,6 +340,7 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
     let dialog_or_cutscene = matches!(w.player.mode, "Dialog" | "Cutscene");
     // (The sim's ticks count from 1, the oracle's from 0.)
     let t = w.events.tick - 1;
+    crate::elements::cutscene::check_recorded_mode(w, t);
     // 2a. CutsceneController (registered before the units' controllers): the recorded progress.
     crate::elements::cutscene::recorded_tick(w, t);
     crate::spawn::recorded_awake_for_tick(w, t);
@@ -243,8 +348,17 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
     if let Some(r) = w.recorded_awake.as_mut() {
         r.now = None;
     }
-    // 3. ScriptZoneController (Default mode).
+    // 2c. UnitBuffsController (Default, Dialog, Rest, GlobalMap; not in a cutscene). Its
+    // `IsSuspended` stays false: `CommandSuspendBuffs`, which retains it, isn't a command the
+    // cutscene classification accepts.
+    if matches!(w.player.mode, "Default" | "Dialog" | "Rest" | "GlobalMap") {
+        crate::combat::life::buffs_tick(w);
+    }
+    // 3. ScriptZoneController (Default and Cutscene modes).
     if let Some(z) = zone {
+        if !matches!(w.player.mode, "Default" | "Cutscene") {
+            w.coverage.unsupported("ScriptZoneController: a zone input outside its modes");
+        }
         enter_script_zone(w, z);
     }
     // 4. DialogController (Dialog mode).
@@ -324,6 +438,32 @@ fn align_input(w: &mut World, step: &str) {
     }
 }
 
+/// Before a `zone:` step, with recorded zone entries: the recording's next entry must be the
+/// main character's into that zone's blueprint, and the sim ticks up to the tick before it (the
+/// step's own tick then enters at the script zones' place). An entry the sim reaches later, or
+/// a different one, is reported.
+fn align_zone(w: &mut World, zone: Guid) {
+    let Some(next) = w.recorded_cs.as_mut().and_then(|r| r.zones.as_mut()).map(|z| z.pop_front())
+    else {
+        return;
+    };
+    let Some(e) = next else {
+        w.coverage.unsupported("dialogue replay: a zone entry the recording doesn't have");
+        return;
+    };
+    if e.zone != Some(zone) || !e.main {
+        w.coverage.unsupported("dialogue replay: a zone entry unlike the recording's");
+        return;
+    }
+    // The step's tick is the sim's `t + 1`.
+    while w.events.tick < e.tick {
+        tick(w, None);
+    }
+    if w.events.tick > e.tick {
+        w.coverage.unsupported("dialogue replay: a zone entry later than the recording's");
+    }
+}
+
 fn answer(w: &mut World, a: Guid, n: usize, out: &mut RunOutcome) {
     align_input(w, &format!("answer:{n}"));
     let of = w.dialog.answers.len();
@@ -384,6 +524,7 @@ fn run_step(
         }
         "zone" => {
             let z = guid(arg.context("zone needs a script zone blueprint")?)?;
+            align_zone(w, z);
             w.events.push("input", json!({ "step": "zone", "zone": z.to_string() }));
             tick(w, Some(z));
         }
@@ -1081,6 +1222,8 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
         None => Vec::new(),
     };
     let recorded_cutscenes = crate::elements::cutscene::RecordedCutscene::present(&records);
+    let recorded_locks =
+        recorded_cutscenes && crate::elements::cutscene::RecordedCutscene::has_locks(&records);
     let path = wr_save::report::find_save(&save)?;
     let s = crate::hydrate::Save::read(&path)?;
     let content = Rc::new(crate::content::Content::open_default()?);
@@ -1092,6 +1235,7 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
         &crate::hydrate::Options {
             ability_params_empty: o.ability_params_empty,
             recorded_cutscenes,
+            recorded_locks,
             ..crate::hydrate::Options::default()
         },
     )?;

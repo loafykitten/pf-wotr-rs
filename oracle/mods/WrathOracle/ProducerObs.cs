@@ -4,9 +4,13 @@ using System.Linq;
 using HarmonyLib;
 using Kingmaker;
 using Kingmaker.AreaLogic.Cutscenes;
+using Kingmaker.AreaLogic.Cutscenes.Commands;
 using Kingmaker.Blueprints;
+using Kingmaker.Controllers;
 using Kingmaker.Controllers.Units;
+using Kingmaker.EntitySystem.Entities;
 using Kingmaker.UnitLogic.Parts;
+using Kingmaker.View.MapObjects.SriptZones;
 using Kingmaker.View.Roaming;
 
 namespace WrathOracle;
@@ -21,6 +25,12 @@ namespace WrathOracle;
 //   roam_roll   UnitRoamingController.RollNextPoint: the unit and its roaming settings' idle cutscenes
 // And when a cutscene's CommandAction runs (cs_action: the command and its player's cutscene), whose
 // timing the sim can't compute (delays, animations): a replay runs a cutscene's T0 actions then.
+// And (InstallLocks) when a CommandLockControls starts or stops (cs_lock), which ticks or postpones
+// every unit's buffs (UnitBuffsController.TickAll/PostponeAll) and locks the game into Cutscene
+// mode, with where it ran: inside a player's Start (start: that player's cutscene; StopCopies stops
+// a copy there) and whether inside CutsceneController.Tick (controller).
+// And (InstallZones) each ScriptZone.TryAddUnit (zone_enter: the zone's blueprint, the unit, whether
+// it is the main character), whose tick follows from movement (T1): a replay enters zones then.
 // Fields only (the references' GUIDs, not their blueprints); nothing here draws or changes state.
 internal static class ProducerObs
 {
@@ -44,6 +54,26 @@ internal static class ProducerObs
         {
             Health.Failed("patch CutscenePlayerData.Start", e);
         }
+    }
+
+    public static void InstallLocks(Harmony h)
+    {
+        Patch(h, typeof(CommandLockControls), "OnRun", nameof(LockRunPrefix), new[] { typeof(CutscenePlayerData), typeof(bool) });
+        Patch(h, typeof(CommandLockControls), "OnStop", nameof(LockStopPrefix), new[] { typeof(CutscenePlayerData) });
+        try
+        {
+            var tick = AccessTools.Method(typeof(CutsceneController), nameof(CutsceneController.Tick)) ?? throw new MissingMethodException("CutsceneController.Tick");
+            h.Patch(tick, prefix: new HarmonyMethod(typeof(ProducerObs), nameof(ControllerPrefix)), finalizer: new HarmonyMethod(typeof(ProducerObs), nameof(ControllerFinalizer)));
+        }
+        catch (Exception e)
+        {
+            Health.Failed("patch CutsceneController.Tick", e);
+        }
+    }
+
+    public static void InstallZones(Harmony h)
+    {
+        Patch(h, typeof(ScriptZone), "TryAddUnit", nameof(ZonePrefix), new[] { typeof(UnitEntityData) });
     }
 
     private static void Patch(Harmony h, Type t, string method, string prefix, Type[] args = null)
@@ -141,6 +171,67 @@ internal static class ProducerObs
             });
         }
         catch (Exception e) { Trace.HookFailed("cs_action", e); }
+    }
+
+    // CutsceneController.Tick's nesting (it doesn't nest; a counter in case).
+    private static int _inController;
+
+    public static void ControllerPrefix() => _inController++;
+
+    public static Exception ControllerFinalizer(Exception __exception)
+    {
+        _inController--;
+        return __exception;
+    }
+
+    private static void Lock(CommandLockControls command, CutscenePlayerData player, bool on, bool skipping)
+    {
+        if (!Trace.Active || !Trace.OnMainThread) return;
+        try
+        {
+            var guid = command.AssetGuid.ToString();
+            var cutscene = player?.Cutscene;
+            var start = _starting == null ? null : _starting.Cutscene == null ? "" : _starting.Cutscene.AssetGuid.ToString();
+            var controller = _inController > 0;
+            Trace.Emit("obs", j =>
+            {
+                j.Prop("ev", "cs_lock");
+                j.Prop("on", on);
+                j.Prop("command", guid);
+                j.Prop("cutscene", cutscene == null ? null : cutscene.AssetGuid.ToString());
+                j.Prop("start", start);
+                j.Prop("controller", controller);
+                j.Prop("skipping", skipping);
+            });
+        }
+        catch (Exception e) { Trace.HookFailed("cs_lock", e); }
+    }
+
+    public static void LockRunPrefix(CommandLockControls __instance, CutscenePlayerData player, bool skipping) => Lock(__instance, player, true, skipping);
+    public static void LockStopPrefix(CommandLockControls __instance, CutscenePlayerData player) => Lock(__instance, player, false, false);
+
+    private static readonly AccessTools.FieldRef<ScriptZone, BlueprintScriptZoneReference> ZoneBlueprint =
+        AccessTools.FieldRefAccess<ScriptZone, BlueprintScriptZoneReference>("m_Blueprint");
+
+    public static void ZonePrefix(ScriptZone __instance, UnitEntityData unit)
+    {
+        if (!Trace.Active || !Trace.OnMainThread) return;
+        try
+        {
+            // The reference's GUID and the units' ids: fields, nothing resolved.
+            var bp = ZoneBlueprint(__instance);
+            var zone = bp == null || bp.Guid == BlueprintGuid.Empty ? null : bp.Guid.ToString();
+            var id = unit?.UniqueId;
+            var main = id != null && id == Game.Instance.Player?.MainCharacter.UniqueId;
+            Trace.Emit("obs", j =>
+            {
+                j.Prop("ev", "zone_enter");
+                j.Prop("zone", zone);
+                j.Prop("unit", id);
+                j.Prop("main", main);
+            });
+        }
+        catch (Exception e) { Trace.HookFailed("zone_enter", e); }
     }
 
     public static void RollPrefix(UnitPartRoaming roaming)

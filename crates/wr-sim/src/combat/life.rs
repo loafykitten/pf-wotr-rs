@@ -550,14 +550,19 @@ fn update_helpless(w: &mut World, u: EntityIdx, apply: bool) {
     }
 }
 
-/// `UnitBuffsController.Tick` (`TickSleeping`): `BuffCollection.Tick` on every unit of the
-/// entity pool that is in the game (suppressed entities, which the pool also drops, are not
-/// modelled): `UpdateOnDeadOwner`, then the buff with the earliest event, if it is due.
+/// `UnitBuffsController.Tick` (`TickSleeping`): `BuffCollection.Tick` on every unit the
+/// entity pool enumerates (in the game; suppression is reported where it can arise):
+/// `UpdateOnDeadOwner`, then the buff with the earliest event, if it is due. A dual
+/// companion's inactive pair would be ticked too (`UnitPartDualCompanion`): reported.
 pub fn buffs_tick(w: &mut World) {
-    for u in all_units(w) {
-        if w.entity(u).is_in_game {
-            buff_collection_tick(w, u);
+    for u in crate::scene::units_pool(w) {
+        if !crate::scene::enumerated_by_pool(w, u) {
+            continue;
         }
+        if has_part(w, u, "UnitPartDualCompanion") {
+            w.coverage.unsupported("UnitBuffsController: a dual companion's pair");
+        }
+        buff_collection_tick(w, u);
     }
 }
 
@@ -696,11 +701,109 @@ pub fn buff_collection_tick(w: &mut World, u: EntityIdx) {
         }
         time = w.combat.turn_start_time.0;
     }
+    // (`m_NextEvent` is cached in the original and only `UpdateNextEvent` refreshes it; every
+    // change to a buff's times that it misses, `Postpone`, shifts every finite time alike, so
+    // recomputing it picks the same buff.)
     while let Some(b) = next_event(w, u) {
         if next_event_time(w, b) > time {
-            break;
+            // `m_PreviousTime`: set only by a tick that reaches its end (no early return:
+            // no buff left, the turn-based gate).
+            if let Some(x) = w.unit_mut(u) {
+                x.buffs_previous_time = time;
+            }
+            return;
         }
         tick_buff(w, u, b, time);
+    }
+}
+
+/// `UnitBuffsController.TickAll` (`CommandLockControls.OnRun`): `BuffCollection.Tick` on every
+/// unit of the pool's list (`Units.All`: in the game or not), in the pool's order.
+pub fn buffs_tick_all(w: &mut World) {
+    for u in crate::scene::units_pool(w) {
+        buff_collection_tick(w, u);
+    }
+}
+
+/// `UnitBuffsController.PostponeAll` (`CommandLockControls.OnStop`): `BuffCollection.Postpone`
+/// on every unit of `Units.All`.
+pub fn buffs_postpone_all(w: &mut World) {
+    for u in crate::scene::units_pool(w) {
+        buff_collection_postpone(w, u);
+    }
+}
+
+/// `UnitBuffsController.Activate` (each activation of a mode that has it): every pooled buff
+/// with time left (`TimeLeft > 0`) ends now (`RemoveAfterDelay`) when its source area effect is
+/// gone or its parent context's activatable ability is no longer the owner's.
+pub fn buffs_controller_activate(w: &mut World) {
+    let now = w.clock.game_time.0;
+    for f in buffs_invalid_on_activate(w) {
+        w.log("error", format!("Remove buff after delay: {}", w.fact(f).unique_id));
+        if let Some(b) = &mut w.fact_mut(f).buff {
+            b.end_time = Some(now);
+        }
+    }
+}
+
+/// The buffs `UnitBuffsController.Activate` would end (`Buff.RemoveAfterDelayIfInvalid`), in
+/// the pool's order.
+pub fn buffs_invalid_on_activate(w: &World) -> Vec<crate::world::FactIdx> {
+    let now = w.clock.game_time.0;
+    let mut out = Vec::new();
+    for u in crate::scene::units_pool(w) {
+        for f in buff_facts(w, u) {
+            let Some(b) = w.fact(f).buff.as_ref() else { continue };
+            // `TimeLeft`: permanent, or what is left of a later end.
+            if !(b.is_permanent() || b.end_time.is_some_and(|e| e > now)) {
+                continue;
+            }
+            let area_gone = b.source_area_effect.as_ref().is_some_and(|id| {
+                !w.by_id.get(id).is_some_and(|e| w.entity(*e).clr == "AreaEffectEntityData")
+            });
+            // `MaybeContext?.ParentContext?.AssociatedBlueprint as BlueprintActivatableAbility`.
+            let ability =
+                w.fact(f).context.as_ref().and_then(|c| c.parent_associated_blueprint).filter(
+                    |g| {
+                        w.content.get(*g).is_some_and(|b| {
+                            crate::content::is_a(b.obj.ty, "BlueprintActivatableAbility")
+                        })
+                    },
+                );
+            let ability_gone = ability.is_some_and(|g| {
+                !w.entity(u).facts.list.iter().any(|x| w.fact(*x).blueprint == Some(g))
+            });
+            if area_gone || ability_gone {
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// `BuffCollection.Postpone()`: every buff's next tick and end move by the time since
+/// `m_PreviousTime` (the last tick that ran to its end; none since the load counts as now).
+pub fn buff_collection_postpone(w: &mut World, u: EntityIdx) {
+    update_on_dead_owner(w, u);
+    let now = w.clock.game_time.0;
+    let Some(x) = w.unit_mut(u) else { return };
+    if x.buffs_previous_time == 0 {
+        x.buffs_previous_time = now;
+    }
+    let by = now - x.buffs_previous_time;
+    x.buffs_previous_time = now;
+    for f in buff_facts(w, u) {
+        if let Some(b) = &mut w.fact_mut(f).buff {
+            // `Buff.Postpone`: times at `TimeSpan.MaxValue` stay.
+            if b.next_tick_time < i64::MAX {
+                b.next_tick_time += by;
+            }
+            if let Some(e) = b.end_time.as_mut()
+                && *e < i64::MAX
+            {
+                *e += by;
+            }
+        }
     }
 }
 
@@ -892,6 +995,13 @@ mod tests {
     use crate::facts::tests::obj;
     use crate::stats::tests::world_with_unit;
 
+    /// A world whose unit joined the area's state (`Units.All`, which the buffs controller sweeps).
+    fn pooled_world() -> (World, EntityIdx) {
+        let (mut w, u) = world_with_unit();
+        w.player.area_units.push(u);
+        (w, u)
+    }
+
     fn buff_bp(w: &World, g: u128) -> Rc<Blueprint> {
         let o = obj(
             "Kingmaker.UnitLogic.Buffs.Blueprints.BlueprintBuff",
@@ -920,7 +1030,7 @@ mod tests {
     /// An ordinary buff leaves when its end time passes (`BuffCollection.Tick` / `TickBuff`).
     #[test]
     fn a_buff_expires_when_game_time_passes_its_end() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         w.clock.game_time = TimeSpan(1_000);
         let f = add_timed(&mut w, u, 900, 6);
         w.clock.game_time = TimeSpan(1_000 + 59_999_999);
@@ -935,7 +1045,7 @@ mod tests {
     /// start time, not on game time.
     #[test]
     fn turn_based_buff_ticks_follow_the_current_unit_and_turn_start_time() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         w.combat.turn_based = true;
         w.clock.game_time = TimeSpan(0);
         w.combat.turn_start_time = TimeSpan(0);
@@ -955,7 +1065,7 @@ mod tests {
     /// A buff whose owner died is removed at the next buff tick unless it stays on death.
     #[test]
     fn a_dead_owners_buffs_go_at_the_next_buff_tick() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         let f = add_timed(&mut w, u, 902, 600);
         w.unit_mut(u).expect("unit").life_state = state::DEAD;
         buffs_tick(&mut w);
@@ -965,7 +1075,7 @@ mod tests {
     /// The companion test uses the blueprints' factions, not the units' current ones.
     #[test]
     fn death_checks_the_blueprint_faction_not_the_current_one() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         let player = Guid::parse(units::PLAYER_FACTION).expect("guid");
         let mk = |w: &World, g: u128, faction: Option<Guid>| {
             let mut set = Vec::new();
@@ -998,7 +1108,7 @@ mod tests {
     /// extra unit depends on the camera; a party member is awake; anyone else is unknown.
     #[test]
     fn awake_state_follows_the_sleeping_controllers_order() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         let party = [u];
         assert_eq!(awake_state(&w, u, &[]), Awake::Unknown);
         assert_eq!(awake_state(&w, u, &party), Awake::Yes);
@@ -1031,14 +1141,14 @@ mod tests {
     /// forced kill raises the damage; a conscious unit with nothing pending is inert.
     #[test]
     fn force_tick_is_not_inert_for_an_unchanged_life_state() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         assert!(!life_tick_would_change(&mut w, u), "conscious, nothing pending");
         w.unit_mut(u).expect("unit").damage = 1_000;
         w.unit_mut(u).expect("unit").life_state = state::DEAD;
         assert!(life_tick_would_change(&mut w, u), "dead but not finally dead");
         w.unit_mut(u).expect("unit").finally_dead = true;
         assert!(!life_tick_would_change(&mut w, u), "finally dead: SetLifeState returns early");
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         w.unit_mut(u).expect("unit").force_kill = true;
         assert!(life_tick_would_change(&mut w, u), "a forced kill");
     }
@@ -1046,7 +1156,7 @@ mod tests {
     /// A mounted unit's `IsCurrentUnit` also accepts the mount: reported, not guessed.
     #[test]
     fn mounted_units_are_reported_by_is_current_unit() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         assert_eq!(is_current_unit(&mut w, u), Some(false));
         assert!(w.coverage.unsupported.is_empty());
         w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartRider" });
@@ -1060,7 +1170,7 @@ mod tests {
     /// no answer. Another unit is not current either way.
     #[test]
     fn an_ended_turns_rider_is_neither_current_nor_not() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         w.combat.turn_based = true;
         w.combat.turn_start_time = TimeSpan(0);
         let f = add_timed(&mut w, u, 905, 6);
@@ -1083,7 +1193,7 @@ mod tests {
     /// owner's buffs would go even when none is due and it isn't anyone's turn.
     #[test]
     fn the_sweep_reports_a_dead_unknown_units_buff_cleanup() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         w.combat.turn_based = true;
         let _ = add_timed(&mut w, u, 906, 600);
         w.combat.awake_unknown = vec![u];
@@ -1141,7 +1251,7 @@ mod tests {
     /// one the lowest index the collection leaves free; nothing is reported.
     #[test]
     fn a_dying_units_items_get_their_slot_indices_recomputed() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         let loot = add_item(&mut w, u, "i1", false, Some(3));
         let natural = add_item(&mut w, u, "i2", true, Some(5));
         let other = add_item(&mut w, u, "i3", false, Some(0));
@@ -1162,7 +1272,7 @@ mod tests {
     /// others' indices aren't computed from it.
     #[test]
     fn an_unknown_slot_index_is_reported_not_guessed() {
-        let (mut w, u) = world_with_unit();
+        let (mut w, u) = pooled_world();
         let a = add_item(&mut w, u, "i1", false, None);
         let _ = add_item(&mut w, u, "i2", false, Some(2));
         assert_eq!(crate::items::update_slot_index(&mut w, a, false), None);

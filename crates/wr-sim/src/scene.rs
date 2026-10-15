@@ -469,6 +469,9 @@ pub struct SceneState {
     pub cutscene_pending: Vec<crate::elements::cutscene::Pending>,
     /// The run takes cutscene progress from a recording (set before the load).
     pub recorded_cutscenes: bool,
+    /// The run also takes the cutscene lock's starts and stops from the recording
+    /// (`CommandLockControls`: `UnitBuffsController.TickAll`/`PostponeAll`, Cutscene mode).
+    pub recorded_locks: bool,
     /// Random gates accepted for recorded draws: (the player's cutscene, the gate).
     pub random_gates_t1: std::collections::HashSet<(Guid, Guid)>,
     /// Cutscenes the sim classified (started, restored, or in their closures): a recorded
@@ -604,12 +607,19 @@ pub fn cutscene_post_load(w: &mut World, e: EntityIdx) {
         for t in &cls.t1_actions {
             w.coverage.stub(format!("cutscene action {t} (T1: positions, cutscene control)"));
         }
-        crate::elements::cutscene::settle_random_gates(w, &cls);
+        crate::elements::cutscene::settle_recorded(w, &cls);
         for u in &cls.unsupported {
             w.coverage.unsupported(format!("cutscene: {u}"));
         }
         if !cls.dialogs.is_empty() {
             w.coverage.unsupported("cutscene: CommandStartDialog in a running background cutscene");
+        }
+        // `Restore` runs each started track's current command again: a lock there would lock
+        // and tick the buffs at load, and the saved positions aren't read.
+        if cls.t1_commands.contains(&"CommandLockControls") {
+            w.coverage.unsupported(
+                "CutscenePlayerData.Restore: a running cutscene with CommandLockControls",
+            );
         }
         // `Restore` resumes each started track at its saved `CommandIndex`; the saved track
         // positions aren't read, so T0 actions still ahead of them can't be run in place.

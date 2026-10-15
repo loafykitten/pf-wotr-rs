@@ -1178,7 +1178,7 @@ fn recorded_cutscene_progress_draws_and_runs_steps() {
         &[("m_ActivationMode", Node::Enum(2))],
     );
     let cls = crate::elements::cutscene::classify(&w, c);
-    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    crate::elements::cutscene::settle_recorded(&mut w, &cls);
     assert!(
         w.coverage.unsupported.keys().any(|k| k.contains("RandomTrack")),
         "no recording: reported"
@@ -1194,8 +1194,9 @@ fn recorded_cutscene_progress_draws_and_runs_steps() {
         &[("m_ActivationMode", Node::Enum(2))],
     );
     w.scene.recorded_cutscenes = true;
+    w.scene.recorded_locks = true;
     let cls = crate::elements::cutscene::classify(&w, c);
-    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    crate::elements::cutscene::settle_recorded(&mut w, &cls);
     assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
     // A random gate the sim didn't accept (nothing classified it).
     gate(
@@ -1250,6 +1251,7 @@ fn a_started_cutscene_takes_its_root_draw_and_t0_commands_need_steps() {
     );
     let hide = command_action(&w, 0xE3, vec![action("HideUnit")]);
     w.scene.recorded_cutscenes = true;
+    w.scene.recorded_locks = true;
     w.scene.classified_cutscenes.insert(Guid(0xEE));
     let mut rec = RecordedCutscene::default();
     rec.ticks.insert(
@@ -1267,7 +1269,7 @@ fn a_started_cutscene_takes_its_root_draw_and_t0_commands_need_steps() {
     // `PlayCutscene` (classified and settled) takes the draw, then the queue goes on: the
     // `HideUnit` command has no pending step.
     let cls = crate::elements::cutscene::classify(&w, c);
-    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    crate::elements::cutscene::settle_recorded(&mut w, &cls);
     crate::elements::cutscene::recorded_start(&mut w, c);
     assert_eq!(w.rng.log().len(), 1);
     assert!(w.coverage.unsupported.keys().any(|k| k.contains("no pending step")));
@@ -1350,6 +1352,7 @@ fn reactivations_and_starts_by_recorded_commands_take_their_draws() {
     )));
     let starter = command_action(&w, 0xA3, vec![play]);
     w.scene.recorded_cutscenes = true;
+    w.scene.recorded_locks = true;
     w.scene.classified_cutscenes.insert(Guid(0xA0));
     let mut rec = RecordedCutscene::default();
     rec.ticks.insert(
@@ -1388,8 +1391,9 @@ fn a_start_covers_its_chain_and_marking_can_revive() {
         &[("m_ActivationMode", Node::Enum(2))],
     );
     w.scene.recorded_cutscenes = true;
+    w.scene.recorded_locks = true;
     let cls = crate::elements::cutscene::classify(&w, c);
-    crate::elements::cutscene::settle_random_gates(&mut w, &cls);
+    crate::elements::cutscene::settle_recorded(&mut w, &cls);
     w.scene.random_gates_t1.insert((c, Guid(0xB3)));
     gate(
         &w,
@@ -1463,4 +1467,127 @@ fn commands_of_unclassified_cutscenes_are_reported() {
     w.recorded_cs = Some(Box::new(rec));
     crate::elements::cutscene::recorded_tick(&mut w, 1);
     assert!(w.coverage.unsupported.keys().any(|k| k.contains("didn't classify")));
+}
+
+/// A recorded lock: its start ticks every unit's buffs and locks the game into Cutscene mode
+/// from the next before-tick pass; its stop postpones the buffs by the time since and leaves
+/// the mode. Each tick's mode must be the recording's; a lock outside the controller and a
+/// start is reported, as is a lock without recorded locks.
+#[test]
+fn recorded_locks_tick_postpone_and_switch_the_mode() {
+    use crate::csharp::TimeSpan;
+    use crate::elements::cutscene::{
+        CutsceneEvent, RecordedCutscene, check_recorded_mode, recorded_tick,
+    };
+    let (mut w, u) = world();
+    insert(&w, 0xF8, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandLockControls", &[]);
+    let c = gate(&w, 0xF9, "Cutscene", vec![track(&[Guid(0xF8)], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, c);
+    crate::elements::cutscene::settle_recorded(&mut w, &cls);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("without recorded locks")));
+
+    let (mut w, u2) = world();
+    let _ = u;
+    let u = u2;
+    insert(&w, 0xF8, "Kingmaker.AreaLogic.Cutscenes.Commands.CommandLockControls", &[]);
+    let c = gate(&w, 0xF9, "Cutscene", vec![track(&[Guid(0xF8)], None)], &[]);
+    w.scene.recorded_cutscenes = true;
+    w.scene.recorded_locks = true;
+    // `Units.All` is the pool: a unit that hasn't joined a state isn't swept.
+    w.player.area_units.push(u);
+    let cls = crate::elements::cutscene::classify(&w, c);
+    crate::elements::cutscene::settle_recorded(&mut w, &cls);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    let bp = insert(
+        &w,
+        0xFA,
+        "Kingmaker.UnitLogic.Buffs.Blueprints.BlueprintBuff",
+        &[("Components", Node::Seq(Vec::new()))],
+    );
+    const S: i64 = 10_000_000;
+    w.clock.game_time = TimeSpan(100 * S);
+    let ctx = crate::unit_facts::context(&w, Some(u), Some(u), &bp);
+    let f = crate::unit_facts::add_buff(&mut w, u, &bp, ctx, Some(TimeSpan(30 * S))).expect("buff");
+    let lock = |on| CutsceneEvent::Lock {
+        cutscene: c,
+        command: Guid(0xF8),
+        on,
+        start: None,
+        controller: true,
+    };
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(1, vec![lock(true)]);
+    rec.ticks.insert(3, vec![lock(false)]);
+    rec.ticks.insert(
+        4,
+        vec![CutsceneEvent::Lock {
+            cutscene: c,
+            command: Guid(0xF8),
+            on: true,
+            start: None,
+            controller: false,
+        }],
+    );
+    rec.modes = [(1, 1), (2, 7), (3, 7), (4, 1)].into_iter().collect();
+    w.recorded_cs = Some(Box::new(rec));
+
+    w.clock.game_time = TimeSpan(102 * S);
+    check_recorded_mode(&mut w, 1);
+    recorded_tick(&mut w, 1);
+    assert_eq!(w.unit(u).expect("unit").buffs_previous_time, 102 * S, "TickAll ran");
+    assert_eq!(w.player.mode, "Default", "the mode changes at the next tick");
+    crate::runner::execute_before_tick(&mut w);
+    assert_eq!(w.player.mode, "Cutscene");
+    check_recorded_mode(&mut w, 2);
+    recorded_tick(&mut w, 2);
+    crate::runner::execute_before_tick(&mut w);
+    w.clock.game_time = TimeSpan(110 * S);
+    check_recorded_mode(&mut w, 3);
+    recorded_tick(&mut w, 3);
+    assert_eq!(
+        w.fact(f).buff.as_ref().and_then(|b| b.end_time),
+        Some(138 * S),
+        "postponed by the 8 s since the lock"
+    );
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    crate::runner::execute_before_tick(&mut w);
+    assert_eq!(w.player.mode, "Default");
+    check_recorded_mode(&mut w, 4);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    recorded_tick(&mut w, 4);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("outside the cutscene controller")));
+    // The sim's mode unlike the recording's.
+    check_recorded_mode(&mut w, 2);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("unlike the recording's")));
+}
+
+/// A recorded Pause is a request like the UI's: `DoStartMode` refuses it over any mode but
+/// Default (the mode check then reports the recording's Pause), and a Dialog start stops a
+/// Pause on top first.
+#[test]
+fn a_recorded_pause_follows_the_games_admission_rules() {
+    use crate::elements::cutscene::{RecordedCutscene, check_recorded_mode, recorded_pause};
+    let (mut w, _) = world();
+    w.scene.recorded_locks = true;
+    let rec = RecordedCutscene {
+        modes: [(0, 4), (1, 4)].into_iter().collect(),
+        ..RecordedCutscene::default()
+    };
+    w.recorded_cs = Some(Box::new(rec));
+    w.player.mode = "Cutscene";
+    w.player.modes_below = vec!["Default"];
+    recorded_pause(&mut w, 0);
+    crate::runner::execute_before_tick(&mut w);
+    assert_eq!(w.player.mode, "Cutscene", "no Pause over Cutscene");
+    check_recorded_mode(&mut w, 0);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("unlike the recording's")));
+
+    let (mut w, _) = world();
+    w.player.modes_below = Vec::new();
+    w.before_tick.push(crate::world::BeforeTick::StartMode("Pause"));
+    crate::runner::execute_before_tick(&mut w);
+    assert_eq!(w.player.mode, "Pause");
+    w.before_tick.push(crate::world::BeforeTick::StartMode("Dialog"));
+    crate::runner::execute_before_tick(&mut w);
+    assert_eq!((w.player.mode, w.player.modes_below.clone()), ("Dialog", vec!["Default"]));
 }

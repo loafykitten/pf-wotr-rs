@@ -312,6 +312,12 @@ internal static class Fidelity
         ProducerObs.Install(h);
         if (Health.FailedCount == failed) Observers.Add("cutscene_progress");
         failed = Health.FailedCount;
+        ProducerObs.InstallLocks(h);
+        if (Health.FailedCount == failed) Observers.Add("cutscene_lock");
+        failed = Health.FailedCount;
+        ProducerObs.InstallZones(h);
+        if (Health.FailedCount == failed) Observers.Add("zone_enter");
+        failed = Health.FailedCount;
         AwakeObs.Install(h);
         if (Health.FailedCount == failed) Observers.Add("aa_awake");
         OracleTime.Install(h);

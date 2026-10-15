@@ -296,7 +296,7 @@ fn start_scheduled_dialog_immediately(w: &mut World) {
     if !w.dialog.headless {
         // `Game.Instance.StartMode(Dialog)`: a before-tick action; the mode (and the
         // controller's `Start`) begins at the next tick.
-        w.before_tick.push(crate::world::BeforeTick::StartMode("Dialog"));
+        crate::runner::start_mode(w, "Dialog");
         w.coverage.stub("DialogController: UI and camera on dialogue start");
     }
     schedule_cue(w, first);

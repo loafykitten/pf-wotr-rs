@@ -7,10 +7,18 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-14, end of the seventeenth session): start here
+## Where things stand (2026-10-14, end of the eighteenth session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-4 round 9 (eighteenth session, `docs/poc4/dialogue.md`): 18 of 24 dialogue runs valid with every input recorded.**
+  `CommandLockControls`' buff tick and postpone are modelled (`UnitBuffsController` in dialogue runs, `m_PreviousTime`,
+  `TickAll`/`PostponeAll` over `Units.All`, the controller's `Activate` at each mode activation), with the game-mode
+  stack and `CutsceneLock`'s Cutscene mode; WrathOracle records each lock (`cs_lock`) and each script-zone entry
+  (`zone_enter`), and the runner checks every tick's mode against the recording (Pause, a UI request, taken from it).
+  The zone step now enters at the recorded tick (it was 115 ticks early). On the new captures `poc4-seelah-4`,
+  `cert-22` and `poc4-horgus-8`: all 15 Seelah and 3 `dialog-checks` runs valid; the 6 Horgus runs T0-equal, end
+  state 1.0000, invalid only on group membership and roaming's two draws. Older captures report the lock.
 - **POC-5: three recorded fights with different choices, every run valid (seventeenth session).** The third fight,
   `poc5-tb-96/tb-hold` (the focus reversed, the archer ending its turns), replays valid on its record and both replays
   with every slice computed, like `-95`'s `tb-nearest` and `tb-focus` (`docs/poc5/commands.md`, "A third fight"). That
@@ -187,12 +195,10 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
    choices are recorded and valid: `-95`'s two and `-96`).
-2. Horgus (`docs/poc4/dialogue.md`, rounds 6 to 8): on `poc4-horgus-6` every run's T0 stream is equal (gate draws
-   included) and the end state 1.0000, with awake states, cutscene progress and dialogue input ticks as recorded
-   inputs. Left: `CommandLockControls`' buff tick and postpone and the dialogue runner's missing `UnitBuffsController`
-   (a gap found in review that every dialogue fixture has; round 8's notes give the plan), roaming's two draws as
-   recorded inputs (WrathOracle records their producers) and `OnIsInGameChanged`'s group membership (run the groups
-   model in dialogue runs); then each save's load tail (`coverage.json`).
+2. Horgus (`docs/poc4/dialogue.md`, rounds 6 to 9): on `poc4-horgus-8` every run's T0 stream is equal (gate draws
+   and the closing cutscene's lock included) and the end state 1.0000. Left: roaming's two draws as recorded inputs
+   (WrathOracle records their producers, `roam_point`/`roam_roll`) and `OnIsInGameChanged`'s group membership (run
+   the groups model in dialogue runs); then each save's load tail (`coverage.json`).
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
    features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them). They also offset every
    later fact id: `manual10-ids-1/ids-load.json` names each allocation the sim misses (working notes).
@@ -202,6 +208,12 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
+- **Eighteenth session (2026-10-14):** captures `poc4-seelah-4`, `poc4-horgus-8`, `cert-22` (every dialogue observer);
+  `poc4-seelah-3`, `poc4-horgus-7`, `cert-21` are superseded (no `zone_enter`; prune with Ember's say-so). The POC-4
+  suite and `scripts/regress.sh` use the new ones; the regression baseline is `cache/regress/out-lockmodel`. The
+  certification's real-time `attack` replay is one tick late in `cert-22` (as in `cert-16` and `-18`, not in `-21`):
+  the known real-time frontier (no phase pin), not the new hooks. The combat replay still reports any game-mode change
+  (its controllers' `Activate`), and the dialogue runner models only Default, Dialog, Cutscene and recorded Pause.
 - **Seventeenth session (2026-10-14):** `poc5-tb-96` recorded and in the suite; `-93`/`-94` deleted (Ember's say-so).
   Ember agrees with the assumption that non-extra units spawned at load are awake, but Manual_10 shows its limit: about
   15 vendors and officers there sleep in the game (`SleepingUnitsController.ShouldBeSleeping`: in fog of war with no
@@ -258,8 +270,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - Scene caches for POC-4: `scripts/scene-cache.sh <area> <guid>` (schema v2 since 2026-10-14, with roaming waypoints;
   rebuild both areas' caches after pulling).
 - The oracle regression: `scripts/regress.sh <label> <bindir>` then `scripts/regress-diff.sh <new> <base>`
-  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-cs4` (release build; the Horgus fixtures now from
-  `poc4-horgus-6`, with recorded awake states and cutscene progress; before it `out-mythic2`: the mythic levels and three components, only
+  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-lockmodel` (release build; the dialogue fixtures from
+  `poc4-seelah-4`, `poc4-horgus-8` and `cert-22`; before it `out-cs4`, the Horgus fixtures from `poc4-horgus-6`; before it `out-mythic2`: the mythic levels and three components, only
   Manual_10 changed; before it `out-awake-start`, the fact pairing's `out-fact-pairing`,
   `out-slice-g`); pass the outputs' full paths to `regress-diff.sh`). Run parallel ones with a
   private `WR_CACHE` (symlink every `cache/*` entry except `sim` and `poc5`, which are copied).

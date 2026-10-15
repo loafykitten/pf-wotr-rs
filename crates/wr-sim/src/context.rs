@@ -10,6 +10,8 @@ use crate::world::{EntityIdx, FactIdx, World};
 #[derive(Debug, Clone, Default)]
 pub struct MechanicsContext {
     pub associated_blueprint: Option<Guid>,
+    /// `ParentContext?.AssociatedBlueprint`.
+    pub parent_associated_blueprint: Option<Guid>,
     /// `m_OwnerRef` (unit `UniqueId`).
     pub owner: Option<String>,
     /// `m_CasterRef`; the `[OnDeserialized]` hook sets it to the owner when the save left

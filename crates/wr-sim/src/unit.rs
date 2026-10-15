@@ -221,6 +221,9 @@ pub struct Unit {
     pub damage_grace: Option<Vec<i64>>,
     /// `BuffCollection.m_IsOwnerAlive` is false (`UpdateOnDeadOwner` has seen the owner dead).
     pub buffs_owner_dead_seen: bool,
+    /// `BuffCollection.m_PreviousTime` (100 ns ticks): the time of the last `Tick` that ran to
+    /// its end, or of the last `Postpone`. Not saved: zero (`TimeSpan.Zero`) after a load.
+    pub buffs_previous_time: i64,
     /// `State.DeathTime` (game time of the last death, 100 ns ticks).
     pub death_time: i64,
     /// `Descriptor.CustomPrefabGuid` (saved), when set.

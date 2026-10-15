@@ -196,6 +196,10 @@ impl Loader<'_> {
                 next_tick_time: o.timespan("NextTickTime").unwrap_or(0),
                 round_number: o.int("RoundNumber").unwrap_or(0),
                 is_from_spell: o.bool_or("IsFromSpell", false),
+                source_area_effect: o
+                    .str("SourceAreaEffectId")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
             });
         }
         let f = self.w.add_fact(fact);
@@ -340,6 +344,9 @@ impl Loader<'_> {
             o.obj("ParentContext").and_then(|p| p.str("m_SourceItemRef")).map(str::to_owned);
         crate::context::MechanicsContext {
             associated_blueprint: o.guid("AssociatedBlueprint"),
+            parent_associated_blueprint: o
+                .obj("ParentContext")
+                .and_then(|p| p.guid("AssociatedBlueprint")),
             owner,
             caster,
             ranks: ints("m_Ranks"),
@@ -1002,6 +1009,9 @@ pub struct Options {
     /// The run will take cutscene progress from a recording (random gates are accepted for
     /// recorded draws instead of reported: `elements::cutscene`).
     pub recorded_cutscenes: bool,
+    /// The recording also has the cutscene locks (`CommandLockControls` is accepted with its
+    /// buff tick and postpone replayed instead of reported).
+    pub recorded_locks: bool,
 }
 
 /// `AbilityParams.Empty`'s starting value from a command-line argument: an object
@@ -1062,6 +1072,13 @@ pub fn area_activated(w: &mut World, created: Option<&[EntityIdx]>) {
     raise_global_call(w, "IAreaLoadingStagesHandler", "OnAreaScenesLoaded", None);
     if w.player.mode.is_empty() {
         w.player.mode = "Default";
+    }
+    // The mode's activation (`StartMode` is a before-tick task: the first tick after the load)
+    // runs `UnitBuffsController.Activate`; a buff it would end is reported.
+    if !crate::combat::life::buffs_invalid_on_activate(w).is_empty() {
+        w.coverage.unsupported(
+            "load: UnitBuffsController.Activate ends a buff (RemoveAfterDelayIfInvalid) at the first tick",
+        );
     }
     raise_global_call(w, "IAreaHandler", "OnAreaDidLoad", None);
     // The scene views' `OnAreaDidLoad` (`MapObjectView` is a global `IAreaHandler`
@@ -1145,6 +1162,7 @@ pub fn hydrate(
 
     let mut w = World::new(content.clone(), registry);
     w.scene.recorded_cutscenes = opts.recorded_cutscenes;
+    w.scene.recorded_locks = opts.recorded_locks;
     if let Some((cl, rb)) = opts.ability_params_empty {
         w.empty_params = crate::world::EmptyAbilityParams::supplied(cl, rb);
     }

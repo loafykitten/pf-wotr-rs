@@ -165,6 +165,10 @@ pub struct Player {
     pub placeholders: HashMap<String, Placeholder>,
     /// `Player.GameTime` is on the clock; this is `Game.Instance.CurrentMode` as a name.
     pub mode: &'static str,
+    /// The modes under the current one on `Game.m_GameModes`' stack, bottom first.
+    pub modes_below: Vec<&'static str>,
+    /// `Game.CutsceneLock`: `m_Lock`'s count (a `CountingGuard`) and `m_LockChangeScheduled`.
+    pub cutscene_lock: (i32, bool),
     /// `CountableFlag`s that etude brackets and the like retain, by owner and name
     /// (`unit:<id>.Passive`, `area.Peaceful`, `player.CraftManager.Disabled`,
     /// `tutorial:<guid>.EnabledByEtude`…). Most aren't saved: brackets re-retain them on

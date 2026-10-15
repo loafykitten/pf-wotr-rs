@@ -1,7 +1,7 @@
 //! POC-4 against WrathOracle recordings (local captures, gitignored): the certification
 //! fixture `dialog-checks` (Seelah/Anevia meeting, Athletics check) recorded, replayed,
 //! and replayed with the check's d20 perturbed (success branch). Ignored by default: it
-//! needs the game's blueprint pack, Manual_13 and `fixtures/captures/oracle/cert-9`.
+//! needs the game's blueprint pack, Manual_13 and `fixtures/captures/oracle/cert-22`.
 //! `cargo nextest run -p wr-sim --run-ignored only`.
 
 use std::path::PathBuf;
@@ -52,10 +52,10 @@ fn check_units(f: &wr_sim::runner::FixtureRun, what: &str) {
 }
 
 #[test]
-#[ignore = "needs the game's blueprint pack, Manual_13 and the cert-9 capture"]
+#[ignore = "needs the game's blueprint pack, Manual_13 and the cert-22 capture"]
 fn dialog_checks_matches_the_oracle_on_both_branches() {
     for r in ["record", "replay-1", "replay-2-perturbed"] {
-        let f = run("dialog-checks", "cert-9/fixtures/dialog-checks", r);
+        let f = run("dialog-checks", "cert-22/fixtures/dialog-checks", r);
         assert!(f.outcome.failure.is_none(), "{r}: {:?}", f.outcome.failure);
         // Preconditions: the start state equals the oracle's (but for ToyBox's etude), and
         // loading reports exactly the documented gaps.
@@ -136,13 +136,13 @@ fn poc4_recordings_match_the_dialogue_and_draws() {
     let runs: &[(&str, &str, &[&str])] = &[
         (
             "seelah-a",
-            "poc4-seelah-1/fixtures/seelah-a",
+            "poc4-seelah-4/fixtures/seelah-a",
             &["record", "replay-1", "replay-2-perturbed"],
         ),
-        ("seelah-b", "poc4-seelah-1/fixtures/seelah-b", &["record", "replay-2-perturbed"]),
-        ("seelah-c", "poc4-seelah-1/fixtures/seelah-c", &["record", "replay-2-perturbed"]),
-        ("horgus-check", "poc4-horgus-1/fixtures/horgus-check", &["record", "replay-2-perturbed"]),
-        ("horgus-alt", "poc4-horgus-1/fixtures/horgus-alt", &["record"]),
+        ("seelah-b", "poc4-seelah-4/fixtures/seelah-b", &["record", "replay-2-perturbed"]),
+        ("seelah-c", "poc4-seelah-4/fixtures/seelah-c", &["record", "replay-2-perturbed"]),
+        ("horgus-check", "poc4-horgus-8/fixtures/horgus-check", &["record", "replay-2-perturbed"]),
+        ("horgus-alt", "poc4-horgus-8/fixtures/horgus-alt", &["record"]),
     ];
     for (name, dir, rs) in runs {
         for r in *rs {
@@ -181,12 +181,13 @@ fn poc4_recordings_match_the_dialogue_and_draws() {
     }
 }
 
-/// Round 3: the Seelah runs on the clean-build captures (`poc4-seelah-2`) equal the oracle's
-/// ordered T0 stream to the end (the recruited companion's body, its items, the armor rules,
-/// the potion's ability, the late toggle buff, the replaced NPC's disposal), and the end
-/// state of every unit matches the oracle's dump.
+/// Round 3: the Seelah runs equal the oracle's ordered T0 stream to the end (the recruited
+/// companion's body, its items, the armor rules, the potion's ability, the late toggle buff,
+/// the replaced NPC's disposal), and the end state of every unit matches the oracle's dump.
+/// Round 9: on captures with the cutscene locks, the zone entries and the modes
+/// (`poc4-seelah-4`), with the lock's buff tick and postpone, Cutscene and Pause modes.
 #[test]
-#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-2 capture"]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-4 capture"]
 fn seelah_streams_equal_the_oracle_to_the_end() {
     let runs: &[(&str, &[&str])] = &[
         ("seelah-a", &["record", "replay-1", "replay-2-perturbed"]),
@@ -196,7 +197,7 @@ fn seelah_streams_equal_the_oracle_to_the_end() {
     for (name, rs) in runs {
         for r in *rs {
             let spec = root().join("crates/wr-sim/fixtures/poc4.json");
-            let d = root().join("fixtures/captures/oracle/poc4-seelah-2/fixtures").join(name);
+            let d = root().join("fixtures/captures/oracle/poc4-seelah-4/fixtures").join(name);
             let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
                 ability_params_empty: None,
                 spec: &spec,
@@ -236,26 +237,22 @@ fn seelah_streams_equal_the_oracle_to_the_end() {
     }
 }
 
-/// Horgus: the dialogue and the rule draws equal the oracle's, and the run reports what it
-/// doesn't port: the background and played cutscenes' random-track gates (whose draws, with a
-/// roaming waypoint's previous-point choice, are the oracle's only draws the sim misses) and
-/// the awake state of the unit the closing cutscene spawns (`SleepingUnitsController`: fog of
-/// war and the view's wake timers), whose toggle the sim therefore doesn't tick: the ordered T0
-/// stream equals the oracle's up to that unit's first toggle rule.
+/// Horgus (`poc4-horgus-8`: cutscene progress, locks, zone entries, awake states recorded):
+/// every run's ordered T0 stream equals the oracle's, gate draws and the closing cutscene's lock
+/// included, and the end state matches. The runs stay invalid on what isn't ported:
+/// `OnIsInGameChanged`'s group membership and roaming's two draws (`SelectNextPoint`'s
+/// `WeightedRandom`, `SelectPrevPoint`).
 #[test]
-#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-horgus-2 capture"]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-horgus-8 capture"]
 fn horgus_runs_report_what_they_do_not_port() {
-    const RANDOM_TRACK: &str =
-        "cutscene: Gate RandomTrack (SelectTrackToStart draws from the global RNG)";
-    const AWAKE: &str =
-        "UnitActivatableAbilitiesController: area unit with a toggle to tick (AwakeUnits)";
     const GROUP: &str = "UnitEntityData.OnIsInGameChanged: group membership";
-    for (name, rs) in
-        [("horgus-check", &["record", "replay-2-perturbed"][..]), ("horgus-alt", &["record"][..])]
-    {
+    for (name, rs) in [
+        ("horgus-check", &["record", "replay-1", "replay-2-perturbed", "replay-3-perturbed"][..]),
+        ("horgus-alt", &["record", "replay-1"][..]),
+    ] {
         for r in rs {
             let spec = root().join("crates/wr-sim/fixtures/poc4.json");
-            let d = root().join("fixtures/captures/oracle/poc4-horgus-2/fixtures").join(name);
+            let d = root().join("fixtures/captures/oracle/poc4-horgus-8/fixtures").join(name);
             let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
                 ability_params_empty: None,
                 spec: &spec,
@@ -267,33 +264,47 @@ fn horgus_runs_report_what_they_do_not_port() {
             .expect("fixture");
             assert!(f.outcome.failure.is_none(), "{name} {r}: {:?}", f.outcome.failure);
             let td = f.trace_diff.as_ref().expect("trace");
-            assert!(td.dialog.equal, "{name} {r}: {:?}", td.dialog.first_difference);
-            assert!(td.draws.equal, "{name} {r}: {:?}", td.draws.first_difference);
-            // The first difference of the ordered stream is the spawned unit's toggle.
-            let first = td.all.first_difference.as_ref().expect("the spawned unit's toggle");
-            let text = format!("{first:?}");
-            assert!(text.contains("new#"), "{name} {r}: {text}");
+            assert!(td.all.equal, "{name} {r}: {:?}", td.all.first_difference);
             let kinds: Vec<&String> = f.world.coverage.unsupported.keys().collect();
-            // The closing cutscene's HideUnit and Spawn change IsInGame, whose group `Remove`
-            // isn't modelled (entity::set_is_in_game reports it).
-            assert!(
-                kinds.iter().all(|k| *k == RANDOM_TRACK || *k == AWAKE || *k == GROUP),
-                "{name} {r}: {kinds:?}"
-            );
-            assert!(f.load_unsupported.contains_key(RANDOM_TRACK), "{name} {r}");
-            assert!(f.world.coverage.unsupported.contains_key(AWAKE), "{name} {r}");
+            assert!(kinds == [GROUP], "{name} {r}: {kinds:?}");
             assert!(!f.valid(), "{name} {r}");
             let sites: Vec<&String> = td.unmodelled_draws.keys().collect();
             assert!(
-                !sites.is_empty()
+                sites.len() == 2
                     && sites
                         .iter()
-                        .all(|k| k.contains("SelectTrackToStart") || k.contains("SelectPrevPoint")),
+                        .all(|k| k.contains("WeightedRandom") || k.contains("SelectPrevPoint")),
                 "{name} {r}: {sites:?}"
             );
+            let units = f.units_diff.as_ref().expect("units");
+            assert!(units.match_rate > 0.9999, "{name} {r}: units {}", units.match_rate);
             check_units(&f, &format!("{name} {r}"));
         }
     }
+}
+
+/// A recording without the cutscene locks (`poc4-seelah-2`) can't place the closing cutscene's
+/// `CommandLockControls` (its buffs tick and postpone, Cutscene mode): the run reports it.
+#[test]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-2 capture"]
+fn a_recording_without_locks_reports_the_lock() {
+    let spec = root().join("crates/wr-sim/fixtures/poc4.json");
+    let d = root().join("fixtures/captures/oracle/poc4-seelah-2/fixtures/seelah-a");
+    let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
+        ability_params_empty: None,
+        spec: &spec,
+        fixture: "seelah-a",
+        oracle: Some(&d),
+        run: "record",
+        oracle_inputs: false,
+    })
+    .expect("fixture");
+    assert!(!f.valid());
+    assert!(
+        f.world.coverage.unsupported.keys().any(|k| k.contains("CommandLockControls without")),
+        "{:?}",
+        f.world.coverage.unsupported
+    );
 }
 
 /// Every saved `InteractionSkillCheckPart` (`DCOverride` and `SkillOverride`, written by the

@@ -13,7 +13,8 @@ coordinator commits after review). Captures are local and gitignored
 | Seelah/Anevia meeting, paths A, B, C (12 runs: record, replay, perturbed replays); **round 3 below: now the whole stream equal to the end** | **Every run's dialogue stream equal [M]** (71, 81, 76 records per path), every rule draw equal (7, 13, 7), every rule result equal up to the recruitment; the ordered stream equal up to the recruitment (102/354, 130/382, 108/357 records), where the oracle builds the companion's new unit (`ChangeUnitBlueprint`) and applies a buff (`AttachBuff`), both reported unsupported by the sim. Character sheets 100% on every run (3 units, 1,737 fields) |
 | The three reachable Seelah checks on success and failure tapes | **Yes [M]**: Athletics `ded4aae5…`, Knowledge World `d530baf0…`, Diplomacy `d0ef7c0d…`, each recorded failing and passing (perturbed d20), each matched by the sim. The fourth (Oread-only Athletics) is unreachable from Manual_13 (Kitsune PC) |
 | Horgus (Manual_19, Prologue_Neathholm), check path and alternative path (6 runs) | **Dialogue streams equal on every run [M]** (52 and 64 records); the party Diplomacy check (authored DC 16) passing in the record (flag `ddfedbde…` = 2000) and failing in a perturbed replay (= 1000), the alternative path setting 500; all 10 rule records before the closing cutscene equal (roller, stat 8, DC 16, d20, total); character sheets 100% (7 units, 4,269 fields); narrative end state equal except the ToyBox etude. The ordered stream diverges at the closing cutscene (`HideUnit`, `Spawn`: reported unsupported) |
-| POC-4 pass criterion | **Met on 15 of 21 runs (round 5 below, after its review)**: the 12 Seelah and 3 `dialog-checks` runs are valid (nothing unsupported, whole ordered stream equal). The 6 Horgus runs are not valid: they report the cutscenes' random-track gates (the oracle draws there and in roaming, which the sim doesn't run) and the awake state of the unit the closing cutscene spawns, whose toggle the sim therefore doesn't tick (stream 127/130, the 3 records that toggle) |
+| POC-4 pass criterion, round 9 (2026-10-14) | **Met on 18 of 24 runs, on captures with every recorded input (`poc4-seelah-4`, `cert-22`)**: the 15 Seelah and 3 `dialog-checks` runs are valid with the cutscene lock's buff tick and postpone, Cutscene and Pause modes, the zone entry's tick and every tick's mode checked. The 6 Horgus runs (`poc4-horgus-8`) are T0-equal with the end state 1.0000, invalid on group membership and roaming's two draws (round 9 below) |
+| POC-4 pass criterion, round 5 | **Met on 15 of 21 runs (round 5 below, after its review)**: the 12 Seelah and 3 `dialog-checks` runs are valid (nothing unsupported, whole ordered stream equal). The 6 Horgus runs are not valid: they report the cutscenes' random-track gates (the oracle draws there and in roaming, which the sim doesn't run) and the awake state of the unit the closing cutscene spawns, whose toggle the sim therefore doesn't tick (stream 127/130, the 3 records that toggle) |
 | Hydration, sheets after load | Manual_13 2,372/2,372 (100%); **Manual_19 4,269/4,269 (100%, first measurement)**; Manual_10 98.46% (was 97.35%) |
 
 **Found: ToyBox changes the oracle's results [M, via gpt-6.1-sol, verified in the installed
@@ -35,8 +36,10 @@ recorded answers, for fixtures whose optional steps depend on T1 timing):
 2. Replace the RNG with a tape of the oracle run's sim draws at the sites the sim models; set
    the clock to the oracle's window-start game time; compare the narrative state at the
    start.
-3. Run the steps on the sim clock (`runner.rs`): before-tick tasks, `TimeController`,
-   script zone input, `DialogController`, `EtudeSystemController`. Steps are WrathOracle's,
+3. Run the steps on the sim clock (`runner.rs`): before-tick tasks, `TimeController`, the
+   cutscene controller's recorded progress, `UnitActivatableAbilitiesController`,
+   `UnitBuffsController` (not in Cutscene mode), script zone input, `DialogController`,
+   `EtudeSystemController` (nothing in Pause mode). Steps are WrathOracle's,
    with the T1 walk into a trigger replaced by `zone:<script zone>`.
 4. Compare: **one ordered T0 stream** (dialogue records and answers, narrative mutations
    in WrathOracle's postfix/prefix positions, rules and their results per class, draws at
@@ -521,10 +524,68 @@ modes, and replay `TickAll`/`PostponeAll` at the recorded places; then re-record
 captures. Next after that: the roaming draws as recorded inputs tied to their producers (`roam_point`, `roam_roll`),
 and the groups model in dialogue runs.
 
+## Round 9: the cutscene lock, game modes and the zone entry (2026-10-14, eighteenth session) [M]
+
+Round 8's known gap, closed: `CommandLockControls` ticks every unit's buffs at its start and
+postpones them at its stop [C: `CommandLockControls.OnRun`/`OnStop`, `UnitBuffsController.TickAll`/
+`PostponeAll`], and its lock puts the game in Cutscene mode, which has no `UnitBuffsController`.
+
+- **The buffs controller in dialogue runs** (`runner::tick`, `combat::life`): `UnitBuffsController`
+  ticks in Default, Dialog (and Rest, GlobalMap), after the activatable abilities' controller.
+  `BuffCollection.m_PreviousTime` is tracked per unit (`buffs_previous_time`: set by a tick that
+  runs to its end, not saved, zero after a load); `Postpone` moves every finite next tick and end
+  by the time since it (nothing when it's zero). `TickAll`/`PostponeAll` sweep `Units.All`
+  (`scene::units_pool`: NotFake, the states' order, in the game or not); the controller's tick
+  sweeps the pool's enumeration (in the game; suppression reported), and the combat replay's
+  now does too. A dual companion is reported (its inactive pair would be ticked).
+- **Game modes** (`runner::execute_before_tick`): a stack (`Player::modes_below`); `StartMode`'s
+  request check, `DoStartMode`/`DoStopMode` (a stop of a mode that isn't current does nothing);
+  `CutsceneLock` (a counting guard and its scheduled `UpdateModeForCutsceneLock`, which starts or
+  stops Cutscene mode). Each activation of a mode with `UnitBuffsController` runs its `Activate`:
+  `RemoveAfterDelayIfInvalid` ends a buff with time left whose source area effect is gone or
+  whose parent context's activatable ability the owner lacks (`MechanicsContext.
+  parent_associated_blueprint`, `BuffTimes.source_area_effect` are new); at load, where the game
+  activates Default at the first tick, a buff it would end is reported. The combat replay
+  still reports any mode change.
+- **WrathOracle** (`ProducerObs.cs`): `cs_lock` at `CommandLockControls.OnRun`/`OnStop` (on, the
+  command, the player's cutscene, whether inside `CutsceneController.Tick`, the cutscene whose
+  player's `Start` it ran in), declared as `cutscene_lock`; `zone_enter` at `ScriptZone.TryAddUnit`
+  (the zone's blueprint reference GUID, the unit, whether it's the main character), declared as
+  `zone_enter`. Fields only.
+- **Replay** (`elements/cutscene.rs`): a recorded lock runs at its place in the cutscene
+  queue (`TickAll` then the lock, or `PostponeAll` then the release); one inside a start waits
+  for the sim's start of that cutscene; one elsewhere (a `StopCutscene` action, an unload) is
+  reported, as are a lock of an unclassified cutscene, a background cutscene's, and a lock in a
+  restored running cutscene (its `Restore` would rerun it at load). Without recorded locks a
+  closure's `CommandLockControls` is reported. With them, **every tick's mode must be the
+  recording's** (`check_recorded_mode`; `WR_DEBUG_MODES=1` prints each difference), and **Pause
+  is taken from the recording** (a UI request, e.g. the tutorial window after Seelah joins: 181
+  ticks at the end of every Seelah run): requested before the tick's tasks, no controller runs
+  in it, not even the clock.
+- **The zone entry at its tick**: the mode check showed that the `zone:` step entered the zone at
+  tick 1 while the oracle's walk reached it at tick 116 (the dialogue's records were equal in
+  order, but Dialog mode began 115 ticks early). With `zone_enter` recorded, the step is applied
+  at the recorded tick (`align_zone`); a different, late or unmade entry is reported, and a zone
+  input outside Default and Cutscene modes too.
+
+Result (`poc4-seelah-4`, `cert-22`, `poc4-horgus-8`, new captures with all of the above): **every
+Seelah run (15) and every `dialog-checks` run (3) valid**, whole ordered T0 stream equal, end
+state 1.0000. Horgus: every run's stream equal (191 to 197 records) and the end state 1.0000;
+invalid only on `OnIsInGameChanged`'s group membership and roaming's two draws. Older captures
+without `cutscene_lock` now report the lock (test `a_recording_without_locks_reports_the_lock`).
+Reviews: gpt-6.1-sol (high), two rounds (the first found the pool order, the controller's
+`Activate` and the stale tests; the second, that a recorded Pause must follow `DoStartMode`'s
+admission: only over Default and outside turn-based combat, and Default, Dialog, Cutscene and
+Rest stop a Pause first).
+
 ## Recordings (local, gitignored)
 
 | Capture | Fixtures | Runs |
 |---|---|---|
+| `fixtures/captures/oracle/poc4-seelah-4` (Manual_13) | as `poc4-seelah-1`, with `cutscene_progress`, `cutscene_lock`, `zone_enter`, `aa_awake` | record, replay-1, perturbed replays |
+| `fixtures/captures/oracle/poc4-horgus-8` (Manual_19) | as `poc4-horgus-1`, with the same observers | record, replay-1, perturbed |
+| `fixtures/captures/oracle/cert-22` (Manual_13, the certification plan) | `dialog-checks`, `dice`, `attack` | record, replay-1, perturbed |
+| `poc4-seelah-3`, `poc4-horgus-7`, `cert-21` | the same, without `zone_enter` (superseded; prune with Ember's say-so) | |
 | `fixtures/captures/oracle/poc4-seelah-1` (Manual_13) | `seelah-a` (Athletics, then `1cfe1ed0…`), `seelah-b` (question `7ce19f7c…`, Knowledge World), `seelah-c` (Diplomacy) | record, replay-1, perturbed replays (a: +8 on d20 #7; b: +8/+14 on #13, +8 on #7; c: +8/+14 on #7) |
 | `fixtures/captures/oracle/poc4-horgus-6` (Manual_19) | as `poc4-horgus-1`, with `aa_awake`, `cs_action` and the draw producers | record, replay-1, perturbed (as below) |
 | `fixtures/captures/oracle/poc4-horgus-1` (Manual_19) | `horgus-check` (`905c535d…`, check `3ab56408…`, `d641426b…`, `7a580452…`), `horgus-alt` (`5422edfb…`, `db14014b…`, `905c535d…`, `e497fc46…`, `7a580452…`) | record, replay-1, perturbed (+7/+13 on d20 #3) |

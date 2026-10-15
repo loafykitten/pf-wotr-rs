@@ -26,6 +26,11 @@
 //!   draw at its recorded place, for the gates it accepted only.
 //! - With such a recording, a cutscene's T0 actions run when the recording ran their
 //!   `CommandAction`, at the cutscene controller's place in the tick, and in order.
+//! - `CommandLockControls` ticks every unit's buffs at its start and postpones them at its stop
+//!   (`UnitBuffsController.TickAll`/`PostponeAll`), and its lock puts the game in Cutscene mode
+//!   (no `UnitBuffsController`). When it runs is cutscene timing, so it is reported unless the
+//!   recording also has the locks (WrathOracle's `cs_lock`): then each start and stop runs at
+//!   its recorded place, and every tick's mode is checked against the recording's.
 //! - A cutscene's `OnStopped` actions and a fade's in-fade actions are accepted when they are
 //!   presentation (a cutscene they start is classified in turn); anything else is reported.
 //! - Always reported: a command with an `EntryCondition` (`StartNextCommand` checks it and
@@ -108,7 +113,7 @@ pub struct Classified {
     pub unsupported: Vec<String>,
     pub cutscenes: Vec<Guid>,
     /// `RandomTrack` gates in closures without T0 actions, with the cutscene whose player
-    /// activates them: their draws only pick presentation ([`settle_random_gates`]).
+    /// activates them: their draws only pick presentation ([`settle_recorded`]).
     pub random_gates: Vec<(Guid, Guid)>,
 }
 
@@ -395,9 +400,6 @@ fn command(
         if *t1 == "CommandMoveUnit" && v.bool("RunAway") {
             push_unique(&mut out.unsupported, "CommandMoveUnit with RunAway".into());
         }
-        // (Not checked yet: `CommandLockControls` ticks every unit's buffs at its start and
-        // postpones them at its stop, `UnitBuffsController.TickAll`/`PostponeAll`; with timed
-        // buffs that changes deadlines by the cutscene's duration. PLAN, Horgus.)
         // A command that controls a unit (`GetControlledUnit`) marks it at its start, which
         // revives it in Cutscene mode when it's unconscious or dead but not finally
         // (`CutsceneControlledUnit.ReviveUnsconscious`): with such a unit around, not
@@ -621,10 +623,16 @@ fn side_actions_in(
     }
 }
 
-/// A closure's random gates: accepted when the run takes cutscene progress from a recording
-/// (the recording then makes their draws), else reported.
-pub fn settle_random_gates(w: &mut World, cls: &Classified) {
+/// What a closure needs from a recording: its random gates are accepted when the run takes
+/// cutscene progress from one (the recording then makes their draws), its control locks when
+/// the recording also has the locks; else reported.
+pub fn settle_recorded(w: &mut World, cls: &Classified) {
     w.scene.classified_cutscenes.extend(cls.cutscenes.iter().copied());
+    if cls.t1_commands.contains(&"CommandLockControls") && !w.scene.recorded_locks {
+        w.coverage.unsupported(
+            "cutscene: CommandLockControls without recorded locks (its buffs tick and postpone, Cutscene mode)",
+        );
+    }
     for &(c, g) in &cls.random_gates {
         if w.scene.recorded_cutscenes {
             w.scene.random_gates_t1.insert((c, g));
@@ -645,6 +653,10 @@ pub enum CutsceneEvent {
     Gate { cutscene: Guid, gate: Guid, started: i64, start: bool },
     /// `CommandAction.OnRun`: the player's cutscene and the command.
     Action { cutscene: Guid, command: Guid },
+    /// `CommandLockControls.OnRun` (`on`) or `OnStop`: the player's cutscene and the command;
+    /// `start` is the cutscene whose player's `Start` it ran inside (`StopCopies`), if any;
+    /// `controller` whether it ran inside `CutsceneController.Tick`.
+    Lock { cutscene: Guid, command: Guid, on: bool, start: Option<Guid>, controller: bool },
 }
 
 /// A cutscene's progress as a recording observed it, per oracle tick, in order.
@@ -655,8 +667,22 @@ pub struct RecordedCutscene {
     /// take waits for a later one in the tick (a cutscene's start activates its root gate at
     /// once: `CutscenePlayerData.Start`).
     pub queue: std::collections::VecDeque<CutsceneEvent>,
-    /// Cutscenes started (`PlayCutscene`) whose root gate's draw hasn't been taken yet.
+    /// Cutscenes started (`PlayCutscene`) in the current tick.
     pub started: Vec<Guid>,
+    /// Each oracle tick's game mode (`GameModeType`), when the recording has the locks.
+    pub modes: std::collections::BTreeMap<i64, i64>,
+    /// `ScriptZone.TryAddUnit`'s calls in order, when the recording has them (`zone_enter`):
+    /// the units' entries (movement is T1).
+    pub zones: Option<std::collections::VecDeque<ZoneEntry>>,
+}
+
+/// A recorded `ScriptZone.TryAddUnit`: the oracle tick, the zone's blueprint, and whether the
+/// unit is the main character.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneEntry {
+    pub tick: i64,
+    pub zone: Option<Guid>,
+    pub main: bool,
 }
 
 impl RecordedCutscene {
@@ -669,6 +695,14 @@ impl RecordedCutscene {
         })
     }
 
+    /// Whether the recording also has the cutscene locks (`cutscene_lock`).
+    #[must_use]
+    pub fn has_locks(records: &[serde_json::Value]) -> bool {
+        records.iter().find(|r| r["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "cutscene_lock"))
+        })
+    }
+
     /// # Errors
     ///
     /// A malformed record, or one before any tick.
@@ -677,10 +711,24 @@ impl RecordedCutscene {
             r[f].as_str().and_then(Guid::parse).ok_or_else(|| format!("{}: {f} {}", r["ev"], r[f]))
         };
         let mut out = Self::default();
+        let locks = Self::has_locks(records);
+        let zones = records.iter().find(|r| r["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "zone_enter"))
+        });
+        if zones {
+            out.zones = Some(std::collections::VecDeque::new());
+        }
         let mut tick = None;
         for r in records {
             if r["k"] == "tick" {
-                tick = Some(r["t"].as_i64().ok_or("a tick record without t")?);
+                let t = r["t"].as_i64().ok_or("a tick record without t")?;
+                tick = Some(t);
+                if locks {
+                    let mode = r["mode"].as_i64().ok_or("a tick record without mode")?;
+                    if out.modes.insert(t, mode).is_some() {
+                        return Err(format!("two tick records for tick {t}"));
+                    }
+                }
                 continue;
             }
             if r["k"] != "obs" {
@@ -702,6 +750,35 @@ impl RecordedCutscene {
                     started: r["started"].as_i64().ok_or("gate_track: started")?,
                     start: r["start"].as_bool().ok_or("gate_track: start")?,
                 },
+                Some("cs_lock") if locks => {
+                    if r["skipping"] != false {
+                        return Err(format!("cs_lock: skipping {}", r["skipping"]));
+                    }
+                    CutsceneEvent::Lock {
+                        cutscene: guid(r, "cutscene")?,
+                        command: guid(r, "command")?,
+                        on: r["on"].as_bool().ok_or("cs_lock: on")?,
+                        start: match &r["start"] {
+                            serde_json::Value::Null => None,
+                            _ => Some(guid(r, "start")?),
+                        },
+                        controller: r["controller"].as_bool().ok_or("cs_lock: controller")?,
+                    }
+                }
+                Some("cs_lock") => return Err("cs_lock without the cutscene_lock observer".into()),
+                Some("zone_enter") => {
+                    let t = tick.ok_or("a zone record before any tick")?;
+                    let zone = match &r["zone"] {
+                        serde_json::Value::Null => None,
+                        _ => Some(guid(r, "zone")?),
+                    };
+                    let main = r["main"].as_bool().ok_or("zone_enter: main")?;
+                    out.zones
+                        .as_mut()
+                        .ok_or("zone_enter without the zone_enter observer")?
+                        .push_back(ZoneEntry { tick: t, zone, main });
+                    continue;
+                }
                 _ => continue,
             };
             let t = tick.ok_or("a cutscene record before any tick")?;
@@ -762,7 +839,100 @@ fn drain_queue(w: &mut World) {
                 pop_queue(w);
                 recorded_action(w, cutscene, command);
             }
+            CutsceneEvent::Lock { cutscene, command, on, start, controller } => {
+                // Inside a player's `Start` (`StopCopies` stopping a copy): at the sim's start
+                // of that cutscene. Inside the controller's tick: here. Elsewhere (a
+                // `StopCutscene` action, an area's unload): not placed, reported.
+                if let Some(s) = start {
+                    if !w.recorded_cs.as_ref().is_some_and(|r| r.started.contains(&s)) {
+                        return;
+                    }
+                } else if !controller {
+                    pop_queue(w);
+                    w.coverage.unsupported(
+                        "cutscene: a recorded lock outside the cutscene controller and a start",
+                    );
+                    continue;
+                }
+                pop_queue(w);
+                recorded_lock(w, cutscene, command, on);
+            }
         }
+    }
+}
+
+/// `CommandLockControls.OnRun` (`on`: `TickAll`, then the lock) or `OnStop` (`PostponeAll`, then
+/// the release). (`OnRun`'s scheduled `InterruptAll` of the party's non-cutscene commands has
+/// nothing to interrupt in a dialogue run: no unit commands run there.) The command must be a
+/// lock of a cutscene the sim classified, and not a background one (`OnRun` would clear the
+/// blueprint's `IsBackground`).
+fn recorded_lock(w: &mut World, cutscene: Guid, command: Guid, on: bool) {
+    if !w.scene.classified_cutscenes.contains(&cutscene) {
+        w.coverage.unsupported("cutscene: a recorded lock of a cutscene the sim didn't classify");
+        return;
+    }
+    let lock = w.content.get(command);
+    if !lock.as_ref().is_some_and(|b| crate::content::is_a(b.obj.ty, "CommandLockControls")) {
+        w.coverage.unsupported("cutscene: a recorded lock that isn't a CommandLockControls");
+        return;
+    }
+    if on && w.content.get(cutscene).is_some_and(|b| b.view().bool("IsBackground")) {
+        w.coverage
+            .unsupported("CommandLockControls in a background cutscene (IsBackground cleared)");
+    }
+    if on {
+        crate::combat::life::buffs_tick_all(w);
+    } else {
+        crate::combat::life::buffs_postpone_all(w);
+    }
+    crate::runner::set_cutscene_lock(w, on);
+}
+
+/// With recorded locks, Pause mode (a UI request: a tutorial window, the pause key) is taken from
+/// the recording: before the oracle tick `tick`'s tasks run, the sim requests Pause when the
+/// recording ticks in it and the sim isn't, and stops it when the recording has left it.
+pub fn recorded_pause(w: &mut World, tick: i64) {
+    if !w.scene.recorded_locks {
+        return;
+    }
+    let Some(rec) = w.recorded_cs.as_ref() else { return };
+    let paused = rec.modes.get(&tick) == Some(&4);
+    if paused && w.player.mode != "Pause" {
+        crate::runner::start_mode(w, "Pause");
+    } else if !paused && w.player.mode == "Pause" {
+        w.before_tick.push(crate::world::BeforeTick::StopMode("Pause"));
+    }
+}
+
+/// A tick in Pause mode (no cutscene controller): the previous tick's events are settled, and a
+/// recorded event of this tick is reported.
+pub fn recorded_paused_tick(w: &mut World, tick: i64) {
+    recorded_tick_end(w);
+    if w.recorded_cs.as_ref().is_some_and(|r| r.ticks.get(&tick).is_some_and(|e| !e.is_empty())) {
+        w.coverage.unsupported("cutscene: a recorded cutscene event in Pause mode");
+    }
+}
+
+/// With recorded locks: the game mode the sim ticks in must be the recording's in each tick.
+pub fn check_recorded_mode(w: &mut World, tick: i64) {
+    if !w.scene.recorded_locks {
+        return;
+    }
+    let Some(rec) = w.recorded_cs.as_ref() else { return };
+    let recorded = match rec.modes.get(&tick) {
+        Some(1) => Some("Default"),
+        Some(3) => Some("Dialog"),
+        Some(4) => Some("Pause"),
+        Some(7) => Some("Cutscene"),
+        _ => None,
+    };
+    if recorded.is_none() {
+        w.coverage.unsupported("dialogue replay: a tick without a recorded mode the sim models");
+    } else if recorded != Some(w.player.mode) {
+        if std::env::var_os("WR_DEBUG_MODES").is_some() {
+            eprintln!("DEBUG mode tick {tick}: sim {} recorded {recorded:?}", w.player.mode);
+        }
+        w.coverage.unsupported("dialogue replay: a game mode unlike the recording's");
     }
 }
 
@@ -834,12 +1004,11 @@ fn recorded_action(w: &mut World, cutscene: Guid, command: Guid) {
                     .unsupported("cutscene: a recorded T0 command the sim has no pending step for");
                 return;
             }
-            settle_random_gates(w, &out);
+            settle_recorded(w, &out);
             for a in actions {
                 let av = View(a);
                 if av.type_name() == "PlayCutscene"
                     && let Some(c) = av.guid("m_Cutscene")
-                    && w.scene.random_gates_t1.iter().any(|(x, _)| *x == c)
                     && let Some(r) = w.recorded_cs.as_mut()
                 {
                     r.started.push(c);
@@ -854,11 +1023,8 @@ fn recorded_action(w: &mut World, cutscene: Guid, command: Guid) {
 /// is made here; then the queue goes on.
 pub fn recorded_start(w: &mut World, cutscene: Guid) {
     let Some(rec) = w.recorded_cs.as_mut() else { return };
-    // Only a cutscene with a random gate the sim accepted can draw inside its start (its root,
-    // or a gate a skipped track signals).
-    if !w.scene.random_gates_t1.iter().any(|(c, _)| *c == cutscene) {
-        return;
-    }
+    // (Only a cutscene with a random gate the sim accepted draws inside its start: its root,
+    // or a gate a skipped track signals; a lock stops inside it when it stops a copy.)
     rec.started.push(cutscene);
     drain_queue(w);
 }
@@ -877,6 +1043,9 @@ pub fn recorded_tick_end(w: &mut World) {
 /// The end of the run: recorded events of ticks the sim didn't run are reported.
 pub fn recorded_finish(w: &mut World, last_tick: i64) {
     recorded_tick_end(w);
+    if w.recorded_cs.as_ref().and_then(|r| r.zones.as_ref()).is_some_and(|z| !z.is_empty()) {
+        w.coverage.unsupported("dialogue replay: a recorded zone entry the sim didn't make");
+    }
     if w.recorded_cs.as_ref().is_some_and(|r| r.ticks.range(last_tick + 1..).next().is_some()) {
         w.coverage.unsupported("cutscene: recorded cutscene events after the run's last tick");
     }
@@ -931,7 +1100,7 @@ pub fn play(w: &mut World, _owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
     for t in &cls.t1_actions {
         w.coverage.stub(format!("cutscene action {t} (T1: positions, cutscene control)"));
     }
-    settle_random_gates(w, &cls);
+    settle_recorded(w, &cls);
     recorded_start(w, c);
     for u in &cls.unsupported {
         w.coverage.unsupported(format!("cutscene: {u}"));

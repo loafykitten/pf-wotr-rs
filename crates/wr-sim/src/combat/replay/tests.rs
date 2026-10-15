@@ -1190,3 +1190,81 @@ fn a_call_site_root_holds_nothing_but_itself() {
         "initiator": {"$unit": "a"}, "target": null, "depth": 0});
     assert!(!origin_span_is_inert(&count, &[env("a", "b")]));
 }
+
+/// `BuffCollection.Postpone` moves every finite buff time by the time since the last tick that
+/// ran to its end (`m_PreviousTime`); with none since the load it moves nothing. A tick that
+/// returns early (no buff left) leaves `m_PreviousTime` alone.
+#[test]
+fn postponing_moves_buffs_by_the_time_since_the_last_full_tick() {
+    use crate::combat::life::{buff_collection_postpone, buff_collection_tick};
+    let (mut w, u) = world_in_area();
+    w.clock.game_time = TimeSpan(100 * S);
+    let f = timed_buff(&mut w, u, 952, 110 * S);
+    let end = |w: &World| w.fact(f).buff.as_ref().and_then(|b| b.end_time);
+    let next_tick = |w: &World| w.fact(f).buff.as_ref().map(|b| b.next_tick_time);
+    let tick0 = next_tick(&w);
+    buff_collection_postpone(&mut w, u);
+    assert_eq!(end(&w), Some(110 * S), "no tick since the load: nothing moves");
+    w.clock.game_time = TimeSpan(103 * S);
+    buff_collection_tick(&mut w, u);
+    assert_eq!(w.unit(u).expect("unit").buffs_previous_time, 103 * S);
+    w.clock.game_time = TimeSpan(107 * S);
+    buff_collection_postpone(&mut w, u);
+    assert_eq!(end(&w), Some(114 * S), "moved by 4 s");
+    assert_eq!(next_tick(&w), tick0, "a time at TimeSpan.MaxValue stays");
+    assert_eq!(w.unit(u).expect("unit").buffs_previous_time, 107 * S);
+    // The buff ends: the tick that removes it returns early and keeps 107 s.
+    w.clock.game_time = TimeSpan(120 * S);
+    buff_collection_tick(&mut w, u);
+    assert!(!alive(&w, u, f));
+    assert_eq!(w.unit(u).expect("unit").buffs_previous_time, 107 * S);
+}
+
+/// `UnitBuffsController.Activate` runs when a mode that has it becomes current again (Cutscene
+/// mode popped): a buff whose parent context's activatable ability the owner no longer has
+/// ends now (`RemoveAfterDelayIfInvalid`); one with an ability the owner has stays. Units
+/// outside the pool (`Units.All`) aren't swept.
+#[test]
+fn resuming_a_mode_with_the_buffs_controller_ends_orphaned_toggle_buffs() {
+    use crate::facts::tests::obj;
+    use wr_content::node::Node;
+    let (mut w, u) = world_in_area();
+    w.clock.game_time = TimeSpan(100 * S);
+    let ability = wr_content::Guid(960);
+    w.content.insert(crate::content::Blueprint {
+        guid: ability,
+        name: "Toggle".into(),
+        obj: obj("Kingmaker.UnitLogic.ActivatableAbilities.BlueprintActivatableAbility", &[]),
+        source: crate::content::Source::Bbp,
+    });
+    let f = timed_buff(&mut w, u, 953, 200 * S);
+    let g = timed_buff(&mut w, u, 954, 200 * S);
+    for x in [f, g] {
+        if let Some(c) = w.fact_mut(x).context.as_mut() {
+            c.parent_associated_blueprint = Some(ability);
+        }
+    }
+    // The owner has the ability only while `g` is checked: give it a fact of that blueprint
+    // and check that nothing ends.
+    let held = crate::world::Fact {
+        blueprint: Some(ability),
+        ..crate::world::Fact::blank(crate::world::FactKind::Feature, "ActivatableAbility")
+    };
+    let h = w.add_fact(held);
+    w.entity_mut(u).facts.list.push(h);
+    assert!(crate::combat::life::buffs_invalid_on_activate(&w).is_empty());
+    w.entity_mut(u).facts.list.retain(|x| *x != h);
+    w.player.mode = "Cutscene";
+    w.player.modes_below = vec!["Default"];
+    w.before_tick.push(crate::world::BeforeTick::StopMode("Cutscene"));
+    crate::runner::execute_before_tick(&mut w);
+    assert_eq!(w.player.mode, "Default");
+    let end = |x| w.fact(x).buff.as_ref().and_then(|b| b.end_time);
+    assert_eq!(end(f), Some(100 * S), "ends now");
+    assert_eq!(end(g), Some(100 * S));
+    let _ = Node::Null;
+    // Out of the pool: not swept by `TickAll`.
+    w.player.area_units.clear();
+    crate::combat::life::buffs_tick_all(&mut w);
+    assert_eq!(w.unit(u).expect("unit").buffs_previous_time, 0);
+}

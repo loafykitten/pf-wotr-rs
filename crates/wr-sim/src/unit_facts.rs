@@ -118,6 +118,7 @@ pub fn clone_for(
 ) -> MechanicsContext {
     MechanicsContext {
         associated_blueprint: Some(bp.guid),
+        parent_associated_blueprint: p.associated_blueprint,
         owner: Some(unit_id(w, owner)),
         caster: p.caster.clone(),
         // The constructor copies shared values and properties, not ranks.
