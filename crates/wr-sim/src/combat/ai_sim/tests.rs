@@ -812,7 +812,7 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
             if let Some(s) = &scope {
                 audit_scope(name, recs, s, i, t);
             }
-            scope = match (find.clone(), pts) {
+            scope = match (find.take(), pts) {
                 (Some((unit, dest, radius, maxover, c, speed)), Some(path)) => Some(Scope {
                     // `MaxSpeedOverride ?? CurrentSpeedMps` [C]; else the unit's last read [I].
                     max_speed: maxover
@@ -920,6 +920,10 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
             }
             t.note(at, got, &inp, why);
         }
+    }
+    // A `ScorePath` the trace ends in.
+    if let Some(s) = &scope {
+        audit_scope(name, recs, s, recs.len(), t);
     }
 }
 
@@ -1171,7 +1175,21 @@ fn the_checker_reads_older_captures() {
             let x = r[18].clone();
             r.insert(23, x);
         }),
+        // A query after the last step in a trace that ends inside `ScorePath`.
+        Box::new(|r| {
+            let x = r[18].clone();
+            r[23] = x;
+        }),
     ];
+    // A second `ScorePath` without its own FindPath request: the first's isn't reused.
+    let mut recs = older_score_path();
+    let mut second: Vec<Value> = recs[3..].to_vec();
+    second.retain(|x| !is(x, "ag_req") && !is(x, "ag_req_end"));
+    recs.extend(second);
+    let mut t = Tally::default();
+    check_older("made", &recs, &mut t);
+    assert_eq!(t.inferred, 1);
+    assert!(!t.failures.is_empty() || !t.unset.is_empty());
     for (i, d) in damage.iter().enumerate() {
         let mut recs = older_score_path();
         d(&mut recs);
