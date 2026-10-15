@@ -119,6 +119,32 @@ All on `Manual_18_WR_FirstBattle` (party: the PC, Seelah 558A, Camelia 5671; Ane
 - **An ally dying, deterministically:** a fight against enemies that out-damage a weak party member who ends his turns;
   `tb-lizard` may drop the PC by chance.
 
-## Results
+## Results [M]
 
-Pending the captures.
+Driven replay (`wr-combat replay <fixture> --run record|replay-1|replay-2`, release build of this branch); "new" kinds are
+those no run of `-115` (`tb-focus`, `tb-nearest`), `-116` (`tb-hold`) or `-117` (`tb-solo`) reports, after normalizing
+command numbers, unit ids and numbers. Those captures carry the `combat_log` observer too, whose `clog_q` records inside
+rule spans set off the commands and impatience cascades that make every one of them invalid until stream I's fix
+lands (the shared kinds below: `UnitAttack` state rows, attack lists, animations, afin/style/nequip reads, impatience
+not established, `HandleUnitDeath` records, `Commands.Empty`, running commands); they are not new.
+
+### `poc5-tb-118/tb-chain`
+
+Tick-exact in the game (5,239 ticks, 413 rules). Every run: 61 unsupported kinds, end state 1.0000 (21 units), all 413
+rules, 354 results, 48 draws, 36 mutations equal, turn order checks 13/13. Two combats in the window (t=170 to 1872,
+centipedes; t=2434 to 5179, the fly 527A with the PC, Seelah and Camelia), both replayed without a kind of their own:
+the second combat start, its sort and its end raise nothing.
+
+New kinds, by area:
+- **Rule handlers (the fly's facts, not ported):** `AddInitiatorAttackWithWeaponTrigger` on `RuleAttackWithWeapon`
+  (`GiantFly_Feature_Disease`, `1fa6430e6064d5f4f8553c67257a1878`) and `AttackBonusConditional` on `RuleAttackRoll` and
+  `RuleCalculateAttackBonus` (`Airborne`, `70cffb448c132fa409e49156d013b175`), about and did, at the fly's bite on the PC
+  (t=4668).
+- **Commands (`UnitAttack.UpdateTarget`):** "command N's new target after OnTick has a wrapper seen before" (53 per
+  run): the PC's full attack retargets with a target wrapper the sim saw before; it may be downstream of the
+  combat-log cascade [I], to be rechecked once stream I's fix lands.
+
+Also exercised for the first time [M]: the AI's `ScorePath` five-foot-step branch (the fly, t=4728: an `ag_sim` with
+`max` 2.286, the five-foot step's range, score 1.1 for a full-round action), a flying unit's simulation steps
+(`ag_sim` of 527A), a crit threat against a flying target (t=4085). Not reached: an AI simulation of more than one step,
+a hard target (`cnt` at most 1).
