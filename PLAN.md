@@ -13,9 +13,11 @@ Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through rou
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
 - **Parallel streams (twenty-second session, Opus 5.5 (high) agents in git worktrees, `scripts/worktree-setup.sh`;
   only the main session builds WrathOracle and records).** Merged, each reviewed by gpt-6.1-sol (high) to no findings:
-  - *The agent in the driven replay* (`combat/replay/agent.rs`): `poc5-tb-109` valid on all six runs with the agent
-    computed. A2 (hardening per `docs/poc5/movement-review-integration.md`, observer `agent_sync`: `ag_sync`, `ag_pos`,
-    captured in `poc5-tb-113`) is still running: `-113` is invalid only by its 22 `ag_sync` kinds until A2 lands.
+  - *The agent in the driven replay* (`combat/replay/agent.rs`; hardening A2 per
+    `docs/poc5/movement-review-integration.md`, all 18 findings fixed): agents taken where real time ends (observer
+    `agent_sync`: `ag_sync`, `ag_pos`); the commands' MoveTo/Follow/Stop run the sim's agent. `poc5-tb-113` valid on
+    all six runs with the agent driven; older captures replay with the agent's records taken. `poc5_agent.rs` damages
+    `-113` 69 ways. Open: one report on `-114` ("UnitMoveController's tick of a unit the recording doesn't have"), A2.
   - *Orientation* (`combat/orientation.rs`, `docs/poc5/orientation.md`): `LookRotation`/`ToEulerRad` native ports;
     `LookAt`/`ForceLookAt` not ported (an `ag_look` observer proposed).
   - *The AI's movement simulation* (`combat/ai_sim.rs`, `docs/poc5/ai-movement.md`): records `ag_sim`; the AI should
@@ -34,9 +36,10 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     The nav file is format 2. The UI's path visualizer (the party's follows) isn't ported.
   - *Manual_10's facts* (`docs/poc3/manual10-facts.md`): one-sided facts 35 -> 17, match rate 0.9987.
   - Fixes: `Vector3 ==` stores its sum before comparing; the oracle's tape reader takes a gate only from a boolean `g`.
-  - Paused at the usage limit (resume each with its context): A2, and I (the combat log's text: its observer
-    `combat_log` is merged and builds, 17966f7, but not recorded yet: record `poc5-tb.plan.json`, then `-tb3`/`-tb4`).
-  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`). Sim regression unchanged (`cache/regress/out-post-d`).
+  - Running: A2 (the `-114` report) and I (the combat log's text: observer `combat_log`, captures `poc5-tb-115`,
+    `-116` tb-hold, `-117` tb-solo; its `clog_q` records inside rule spans make the driven replay of those invalid
+    until I's fix lands, as `mem_q` did before H's).
+  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`), `-115` to `-117` (+ `combat_log`). Sim regression unchanged (`cache/regress/out-post-d`).
 - **The movement agent (twenty-second session, `docs/poc5/movement.md`): `TickMovement` exact against the game.**
   WrathOracle's new observer `agent` (`CommandObsAgent.cs`, three gpt-6.1-sol review rounds) records the agent's state,
   leaves, physics queries, path requests and completions; `poc5-tb-100` to `-103` (Manual_18, both fights) are clean.
