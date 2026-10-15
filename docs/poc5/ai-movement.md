@@ -5,7 +5,10 @@ Status (2026-10-15, stream G): `AiAction.ScorePath`'s movement simulation is por
 as they establish its inputs. They establish little: the captures hold 21 steps, all one kind, and
 none records the step's own reads (`MaxSpeed`, `FlyHeight`, the grid lookup, line of sight) or the
 simulator's start. The observer change below records them; it is written, not built or recorded.
-Not yet driven: `combat/ai.rs` still takes each step's result from the `msim` leaf. Tags as
+Not yet driven: `combat/ai.rs` still takes each step's result from the `msim` leaf. Since stream M
+(`docs/poc5/movement.md`, "Physics and paths computed") the driven replay runs every recorded step
+(`ag_sim`, recorded since `poc5-tb-113`) from its recorded simulator with the sim's physics and grid
+and checks it against `ag_sim_end`. Tags as
 elsewhere: [M] measured, [I] inferred, [C] from the decompiled code.
 
 ## The code [C]

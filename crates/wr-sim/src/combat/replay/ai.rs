@@ -421,6 +421,8 @@ impl AiInputs for Driver<'_> {
                     && (!fake || (state == 2 && points.len() == 2))
                     && (fake || points.len() > 2 || kept_two_points(&points)) =>
             {
+                // The sim's path of its FindPath, when it computes the paths.
+                self.nav_ai_path(fake, error, state, &points)?;
                 Ok(Path { error, state, points })
             }
             _ => self.uc_reject(at, "a path it can't read"),

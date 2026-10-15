@@ -169,6 +169,9 @@ pub struct CombatWorld {
     /// The group memory's controller and reads, when modelled ([`memory::sim::MemoryRun::on`];
     /// each group's memory is on its `groups::Group`).
     pub memory: memory::sim::MemoryRun,
+    /// The turn-based grid (`CombatController`'s graph updates), when the paths are computed
+    /// ([`paths::NavRun::on`]).
+    pub nav: paths::NavRun,
     /// `Game.Instance.IsPaused` (the pause mode), for the commands' lifecycle.
     pub commands_paused: bool,
     /// Spellcasting: the abilities' execution contexts and `AbilityExecutionController`.

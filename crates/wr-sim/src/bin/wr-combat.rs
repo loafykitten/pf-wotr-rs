@@ -309,6 +309,27 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.ag_rows,
         out.ag_inputs
     );
+    let n = &out.nav;
+    println!(
+        "physics and paths: physics queries computed {} (agent {}, movement simulation {}, spans taken from the recording {}; taken {}), simulation steps {} (grid reads checked {}, taken {}); paths computed {} (line-of-sight answers taken {}), deliveries checked {}, paths the agent took from the sim {}; graph events matched {}, turn starts {}, removals {}, tag refreshes {} (taken from a replay {})",
+        n.phys_tick + n.phys_sim + n.phys_span,
+        n.phys_tick,
+        n.phys_sim,
+        n.phys_span,
+        n.phys_taken,
+        n.sim_steps,
+        n.sim_grid_checked,
+        n.sim_grid_taken,
+        n.paths,
+        n.los_answers,
+        n.deliveries,
+        n.delivered_to_agent,
+        n.graph_events,
+        n.turn_starts,
+        n.removals,
+        n.refreshes,
+        n.refreshes_taken
+    );
     if let Some(c) = &out.clog {
         println!(
             "combat log [oracle, sim]: queued {:?}, ticks {:?}, messages {:?}; messages equal {}, tooltips equal {}, tooltips not made {}, inputs {:?}, differences {}",

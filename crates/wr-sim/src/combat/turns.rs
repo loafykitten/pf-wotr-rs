@@ -339,6 +339,8 @@ pub fn remove_unit(w: &mut World, u: EntityIdx) {
     if index_of(w, u).is_none() {
         return;
     }
+    // `RevertNavmeshForUnit`, `UpdateNavigationGridTags` (when the sim computes the paths).
+    super::paths::remove_unit(w, u);
     if w.combat.current_unit == Some(u) || w.combat.turns.next == Some(u) {
         choose_next_unit(w);
         if let Some(c) = w.combat.current_unit.take() {

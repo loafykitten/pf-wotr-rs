@@ -601,48 +601,392 @@ fn missing_or_wrong_agent_records_are_reported() {
 }
 
 /// The captures with `agent_sync`: every run of every fight valid with the agent driven, its
-/// entries run, its states and getters checked, one synchronization per run. `poc5-tb-114` ends
-/// its fight while the UI guard is up: the guard drops inside the party's combat-state change,
-/// after `UnitMoveController` (which ticks no unit that frame).
+/// entries run, its states and getters checked, one synchronization per run, every physics query
+/// the sim's and each movement simulation step run. `poc5-tb-114` ends its fight while the UI
+/// guard is up: the guard drops inside the party's combat-state change, after
+/// `UnitMoveController` (which ticks no unit that frame). With WrathOracle's `paths`
+/// (`poc5-tb-114` onward) the grid's graph updates and the turn-based paths are the sim's too.
 #[test]
-#[ignore = "needs the game's blueprint pack, Manual_18, the caves' nav file and the poc5-tb-113 and -114 captures"]
+#[ignore = "needs the game's blueprint pack, Manual_18, the caves' nav and physics files and the poc5-tb-113 to -117 captures"]
 fn driven_agent_replays_are_valid() {
     let mut runs = Vec::new();
-    for capture in ["poc5-tb-113", "poc5-tb-114"] {
-        for fight in ["tb-nearest", "tb-focus"] {
-            let Some(dir) = fixture_in(capture, fight) else {
-                eprintln!("{capture}/{fight} not present: skipped");
-                continue;
-            };
-            for run in ["record", "replay-1", "replay-2"] {
-                runs.push((format!("{capture}/{fight} {run}"), dir.clone(), run));
-            }
+    for (capture, fight) in [
+        ("poc5-tb-113", "tb-nearest"),
+        ("poc5-tb-113", "tb-focus"),
+        ("poc5-tb-114", "tb-nearest"),
+        ("poc5-tb-114", "tb-focus"),
+        ("poc5-tb-115", "tb-nearest"),
+        ("poc5-tb-115", "tb-focus"),
+        ("poc5-tb-116", "tb-hold"),
+        ("poc5-tb-117", "tb-solo"),
+    ] {
+        let Some(dir) = fixture_in(capture, fight) else {
+            eprintln!("{capture}/{fight} not present: skipped");
+            continue;
+        };
+        for run in ["record", "replay-1", "replay-2"] {
+            runs.push((
+                format!("{capture}/{fight} {run}"),
+                dir.clone(),
+                run,
+                capture != "poc5-tb-113",
+            ));
         }
     }
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let failed = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|s| {
-        for (name, dir, run) in &runs {
-            let failed = &failed;
-            s.spawn(move || {
-                let (out, w) = replay::run_fixture(SAVE, dir, run).expect("replay");
-                let ok = w.valid()
-                    && out.diff.equal
-                    && out.ag_entries > 10_000
-                    && out.ag_ticks > 5_000
-                    && out.ag_states > 10_000
-                    && out.ag_command_calls > 100
-                    && out.ag_reads > 1_000
-                    && out.ag_syncs == 1;
-                if !ok {
-                    failed.lock().unwrap().push(format!(
-                        "{name}: valid {}, {:?}",
-                        w.valid(),
-                        w.coverage.unsupported.keys().collect::<Vec<_>>()
-                    ));
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((name, dir, run, paths)) = runs.get(i) else { break };
+                    let (out, w) = replay::run_fixture(SAVE, dir, run).expect("replay");
+                    let n = &out.nav;
+                    let ok = w.valid()
+                        && out.diff.equal
+                        && out.ag_entries > 10_000
+                        && out.ag_ticks > 5_000
+                        && out.ag_states > 10_000
+                        && out.ag_command_calls > 100
+                        && out.ag_reads > 1_000
+                        && out.ag_syncs == 1
+                        && n.phys_tick > 400
+                        && n.phys_span > 300
+                        && n.phys_taken == 0
+                        && n.sim_steps > 40
+                        && !out.ag_inputs.contains_key("physics")
+                        && (!paths
+                            || (n.paths >= 19
+                                && n.los_answers > 10
+                                && n.deliveries > 60
+                                && n.delivered_to_agent >= 2
+                                && n.graph_events > 100
+                                && n.turn_starts >= 7
+                                && n.removals >= 6
+                                && n.sim_grid_checked > 90
+                                && n.sim_grid_taken == 0
+                                && !out.ag_inputs.contains_key("path contents")));
+                    if !ok {
+                        failed.lock().unwrap().push(format!(
+                            "{name}: valid {}, {n:?}, {:?}",
+                            w.valid(),
+                            w.coverage.unsupported.keys().collect::<Vec<_>>()
+                        ));
+                    }
                 }
             });
         }
     });
     let failed = failed.into_inner().unwrap();
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The capture with WrathOracle's `paths` the physics and path records are damaged in.
+const PATHS: (&str, &str) = ("poc5-tb-114", "tb-nearest");
+
+type Change = fn(&mut Vec<V>);
+
+/// Runs each damaged copy of `dir`'s record run; every case must make the run invalid with a new
+/// report containing its text.
+fn damage_cases(dir: &std::path::Path, cases: &[(&str, Change)]) {
+    let base = {
+        let (mut w, trace) = replay::prepare_world(SAVE, dir, "record").expect("prepare");
+        let _ = replay::run_with_tape(&mut w, &trace, &trace);
+        assert!(w.valid(), "the undamaged run: {:?}", w.coverage.unsupported.keys());
+        w.coverage.unsupported.keys().cloned().collect::<Vec<_>>()
+    };
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let missed = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((want, change)) = cases.get(i) else { break };
+                    let (mut w, trace) =
+                        replay::prepare_world(SAVE, dir, "record").expect("prepare");
+                    let mut changed =
+                        Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+                    change(&mut changed.records);
+                    let _ = replay::run_with_tape(&mut w, &changed, &trace);
+                    let new: Vec<&String> =
+                        w.coverage.unsupported.keys().filter(|k| !base.contains(k)).collect();
+                    if w.valid() || !new.iter().any(|k| k.contains(want)) {
+                        missed.lock().unwrap().push(format!("case {i}: {want}: {new:?}"));
+                    }
+                }
+            });
+        }
+    });
+    let missed = missed.into_inner().unwrap();
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// A turn-based record matching `f` (after the synchronization).
+fn tb(recs: &[V], f: impl Fn(&V) -> bool) -> usize {
+    after(recs, f)
+}
+
+/// The turn-based `path_fin` of a request the sim makes whose search asked line of sight.
+fn fin_with_los(recs: &[V]) -> usize {
+    tb(recs, |r| {
+        ev(r, "path_fin")
+            && r["los"].as_array().is_some_and(|a| !a.is_empty())
+            && r["searched"].as_i64() > Some(0)
+    })
+}
+
+/// The `path_fin` of the path delivered to the agent (`ag_done`) after the synchronization.
+fn fin_of_done(recs: &[V]) -> usize {
+    let done =
+        tb(recs, |r| ev(r, "ag_done") && r["path"].as_str().is_some_and(|p| !p.starts_with('?')));
+    let key = recs[done]["path"].clone();
+    (0..done).rev().find(|j| ev(&recs[*j], "path_fin") && recs[*j]["path"] == key).unwrap()
+}
+
+/// The path's records `ev` after its `path_fin` at `fin`.
+fn of_path(recs: &[V], fin: usize, e: &str) -> usize {
+    let key = recs[fin]["path"].clone();
+    fin + recs[fin..].iter().position(|r| ev(r, e) && r["path"] == key).unwrap()
+}
+
+/// A movement simulation step's records (`ag_sim` .. `ag_sim_end`) a while into the fight.
+fn sim_step(recs: &[V]) -> (usize, usize) {
+    let at = later(recs, |r| ev(r, "ag_sim"));
+    (at, span_end(recs, at, "ag_sim_end"))
+}
+
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18, the caves' nav and physics files and the poc5-tb-114 capture"]
+fn missing_or_wrong_physics_and_path_records_are_reported() {
+    let Some(dir) = fixture_in(PATHS.0, PATHS.1) else {
+        eprintln!("{PATHS:?} not present: skipped");
+        return;
+    };
+    let cases: Vec<(&str, Change)> = vec![
+        // Physics: the agent's queries, the simulation's, those of spans taken.
+        ("driven replay: agent: a ray query from", |recs| {
+            let at = later(recs, |r| ev(r, "ag_phys") && r["ctx"] == "tick");
+            recs[at]["dist"] = json!(recs[at]["dist"].as_f64().unwrap() + 0.001);
+        }),
+        ("driven replay: agent: a ray query from", |recs| {
+            let at = later(recs, |r| ev(r, "ag_phys") && r["ctx"] == "tick");
+            recs[at]["pt"][1] = json!(recs[at]["pt"][1].as_f64().unwrap() + 0.001);
+        }),
+        ("driven replay: agent: a ray query from", |recs| {
+            let at = later(recs, |r| ev(r, "ag_phys") && r["ctx"] == "tick");
+            recs[at]["col"]["path"] = json!("Cube");
+        }),
+        ("driven replay: agent: a ray query from", |recs| {
+            let at = later(recs, |r| ev(r, "ag_phys") && r["ctx"] == "tick");
+            recs[at]["hit"] = json!(false);
+        }),
+        ("driven replay: physics: a ray query from", |recs| {
+            // A query of a span taken from the recording (the walk-up in real time).
+            let at = pos(recs, |r| ev(r, "ag_phys") && r["ctx"] == "tick");
+            recs[at]["dist"] = json!(recs[at]["dist"].as_f64().unwrap() + 0.001);
+        }),
+        ("driven replay: agent: a ray query from", |recs| {
+            let (at, end) = sim_step(recs);
+            let q = at + recs[at..end].iter().position(|r| ev(r, "ag_phys")).unwrap();
+            recs[q]["dist"] = json!(recs[q]["dist"].as_f64().unwrap() + 0.001);
+        }),
+        // The movement simulation's steps.
+        ("driven replay: agent: the simulation step returned", |recs| {
+            let (_, end) = sim_step(recs);
+            recs[end]["sim"]["p"][0] = json!(recs[end]["sim"]["p"][0].as_f64().unwrap() + 0.001);
+        }),
+        ("driven replay: agent: the simulation step returned", |recs| {
+            let (_, end) = sim_step(recs);
+            recs[end]["ret"] = json!(!recs[end]["ret"].as_bool().unwrap());
+        }),
+        ("driven replay: agent: the simulation step returned", |recs| {
+            let (_, end) = sim_step(recs);
+            recs[end]["sim"]["len"] = json!(9.0);
+        }),
+        ("the simulation's AllyBlocked under", |recs| {
+            let (at, end) = sim_step(recs);
+            let q = at + recs[at..end].iter().position(|r| leaf(r, "near")).unwrap();
+            recs[q]["v"] = json!(1);
+        }),
+        ("driven replay: agent: the simulation's maxspeed", |recs| {
+            let (at, _) = sim_step(recs);
+            recs.remove(at + 1);
+            renumber(recs);
+        }),
+        ("the simulation step's end", |recs| {
+            let (_, end) = sim_step(recs);
+            recs.remove(end);
+            renumber(recs);
+        }),
+        ("a movement simulation record outside its step", |recs| {
+            let (at, end) = sim_step(recs);
+            let q = at + recs[at..end].iter().position(|r| leaf(r, "near")).unwrap();
+            let r = recs[q].clone();
+            recs.insert(end + 1, r);
+            renumber(recs);
+        }),
+        ("the simulation's HasObstacle", |recs| {
+            let q = tb(recs, |r| leaf(r, "los") && r["ctx"] == "sim");
+            recs[q]["r"] = json!(0.5);
+        }),
+        // Paths: the search, its line of sight, the modifiers, the deliveries.
+        ("driven replay: paths: ", |recs| {
+            let at = fin_with_los(recs);
+            let n = recs[at]["raw"].as_array().unwrap().len();
+            recs[at]["raw"][n - 1][0] = json!(recs[at]["raw"][n - 1][0].as_f64().unwrap() + 0.5);
+        }),
+        ("the sim's path (error", |recs| {
+            let at = fin_with_los(recs);
+            recs[at]["searched"] = json!(recs[at]["searched"].as_i64().unwrap() + 1);
+        }),
+        ("the sim's path (error", |recs| {
+            let at = fin_of_done(recs);
+            recs[at]["cs"] = json!(3);
+        }),
+        ("driven replay: paths: ", |recs| {
+            // The line-of-sight answer the other way.
+            let at = fin_with_los(recs);
+            let b = recs[at]["los"][0][3].as_bool().unwrap();
+            recs[at]["los"][0][3] = json!(!b);
+        }),
+        ("the game asked", |recs| {
+            let at = fin_with_los(recs);
+            recs[at]["los"][0][2] = json!(0.25);
+        }),
+        ("line of sight asked past the recorded answers", |recs| {
+            let at = fin_with_los(recs);
+            recs[at]["los"] = json!([]);
+        }),
+        ("isn't [from, to, fudge, result]", |recs| {
+            let at = fin_with_los(recs);
+            recs[at]["los"][0][3] = json!(null);
+        }),
+        ("delivered before its return (path_fin)", |recs| {
+            let at = fin_of_done(recs);
+            recs.remove(at);
+            renumber(recs);
+        }),
+        ("the seeker's modifiers", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "path_mod");
+            recs[at]["v"][1][2] = json!(recs[at]["v"][1][2].as_f64().unwrap() + 0.5);
+        }),
+        ("delivered before its modifiers (path_mod)", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "path_mod");
+            recs.remove(at);
+            renumber(recs);
+        }),
+        ("a callback the seeker doesn't make", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "path_seek");
+            recs[at]["cb"] = json!(false);
+        }),
+        ("the seeker's modifiers (not expected)", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "path_seek");
+            recs[at]["mods"] = json!(false);
+        }),
+        ("the delivered path differs from the sim's", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "ag_done");
+            recs[at]["v"][1][0] = json!(recs[at]["v"][1][0].as_f64().unwrap() + 0.5);
+        }),
+        ("a definition before its return differs from the sim's", |recs| {
+            let fin = fin_of_done(recs);
+            let key = recs[fin]["path"].clone();
+            let at = tb(recs, |r| ev(r, "ag_pathdef") && r["path"] == key && r["pending"] != true);
+            recs[at]["v"][0][0] = json!(recs[at]["v"][0][0].as_f64().unwrap() + 0.5);
+        }),
+        ("ScorePath's path", |recs| {
+            let at = tb(recs, |r| {
+                ev(r, "uc_v")
+                    && r["f"] == "path"
+                    && r["fake"] == false
+                    && r["v"].as_array().is_some_and(|a| a.len() > 2)
+            });
+            recs[at]["v"][1][0] = json!(recs[at]["v"][1][0].as_f64().unwrap() + 0.5);
+        }),
+        // The grid: the turn controller's graph updates and the navigation timer.
+        ("a graph event differs from the sim's", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_guo"));
+            recs[at]["e"][0] = json!(recs[at]["e"][0].as_f64().unwrap() + 0.25);
+        }),
+        ("a graph event differs from the sim's", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_guo"));
+            recs[at]["c"][2] = json!(recs[at]["c"][2].as_f64().unwrap() + 0.25);
+        }),
+        ("a graph event differs from the sim's", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_guo"));
+            recs[at]["f"] = json!("010000110");
+        }),
+        ("a graph event differs from the sim's", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_update"));
+            recs[at]["erosion"] = json!(2);
+        }),
+        ("a graph event differs from the sim's", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_tags") && r["erode"] == 1);
+            recs[at]["hash"] = json!("0000000000000000");
+        }),
+        ("driven replay: paths: ", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_guo"));
+            recs.remove(at);
+            renumber(recs);
+        }),
+        ("driven replay: paths: ", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_tags"));
+            let r = recs[at].clone();
+            recs.insert(at + 1, r);
+            renumber(recs);
+        }),
+        ("the recording has no read", |recs| {
+            recs.retain(|r| !ev(r, "nav_clock"));
+            renumber(recs);
+        }),
+        ("a navigation clock read the sim's UpdateNavigationGrid doesn't make", |recs| {
+            let b = pos(recs, |r| r["k"] == "begin");
+            recs[b]["nav_timer0"] = json!(-1.0);
+        }),
+        ("driven replay: paths: ", |recs| {
+            // A clock read that leaves the timer positive: no refresh, the recorded one left.
+            let at = pos(recs, |r| ev(r, "nav_clock"));
+            recs[at]["v"] = json!(-1.0);
+        }),
+        ("driven replay: paths: observer paths' records without its declaration", |recs| {
+            let b = pos(recs, |r| r["k"] == "begin");
+            let obs: Vec<V> = recs[b]["observers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|x| *x != "paths")
+                .cloned()
+                .collect();
+            recs[b]["observers"] = json!(obs);
+        }),
+        ("corpulence changes in the window", |recs| {
+            let at = tb(recs, |r| ev(r, "uc_v") && r["f"] == "corp");
+            recs[at]["v"] = json!("0.75");
+        }),
+        ("a turn-based path the sim didn't request", |recs| {
+            let at = fin_of_done(recs);
+            recs[at]["path"] = json!("5198#99");
+        }),
+        ("the query settings (ph_settings) aren't wr-phys's", |recs| {
+            let at = pos(recs, |r| ev(r, "ph_settings"));
+            recs[at]["hit_backfaces"] = json!(true);
+        }),
+        ("a return (path_fin) without its delivery (path_ret)", |recs| {
+            // A path_fin of a request moved before its request: the request is a second.
+            let fin = fin_of_done(recs);
+            let key = recs[fin]["path"].clone();
+            let req = (0..fin)
+                .rev()
+                .find(|j| ev(&recs[*j], "ag_req_end") && recs[*j]["rq"]["path"] == key)
+                .unwrap();
+            let r = recs[fin].clone();
+            recs.remove(fin);
+            recs.insert(req, r);
+            renumber(recs);
+        }),
+    ];
+    damage_cases(&dir, &cases);
 }

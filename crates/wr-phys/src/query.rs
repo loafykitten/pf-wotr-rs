@@ -11,6 +11,7 @@
 //! with more it may (a shrunk distance changes a height field's trace), so that case fails
 //! closed, as does any query that may touch a collider kind not verified yet.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use crate::conservative::{self, M4};
@@ -72,9 +73,10 @@ enum Prepared {
     },
 }
 
-/// A world ready for queries (unverified shapes moved to world space once).
+/// A world ready for queries (unverified shapes moved to world space once), borrowing its
+/// world ([`Scene::new`]) or owning it ([`Scene::owned`], for a simulation that keeps it).
 pub struct Scene<'w> {
-    world: &'w World,
+    world: Cow<'w, World>,
     prepared: Vec<Prepared>,
 }
 
@@ -91,7 +93,19 @@ fn f64x3(a: [f32; 3]) -> [f64; 3] {
 impl<'w> Scene<'w> {
     #[must_use]
     pub fn new(world: &'w World) -> Self {
-        let prepared = world
+        let prepared = Self::prepare(world);
+        Self { world: Cow::Borrowed(world), prepared }
+    }
+
+    /// A scene that owns its world.
+    #[must_use]
+    pub fn owned(world: World) -> Scene<'static> {
+        let prepared = Self::prepare(&world);
+        Scene { world: Cow::Owned(world), prepared }
+    }
+
+    fn prepare(world: &World) -> Vec<Prepared> {
+        world
             .shapes
             .iter()
             .map(|s| match &s.kind {
@@ -150,13 +164,12 @@ impl<'w> Scene<'w> {
                     Prepared::Other { lo: f64x3(*min), hi: f64x3(*max) }
                 }
             })
-            .collect();
-        Self { world, prepared }
+            .collect()
     }
 
     #[must_use]
     pub fn world(&self) -> &World {
-        self.world
+        &self.world
     }
 
     /// `Physics.Raycast(origin, Vector3.down, out hit, max, mask)`: the closest hit.

@@ -191,7 +191,8 @@ progress, its recorded path equal to the computed one, and the step before the f
 ## Next
 
 - The path visualizer's replacement path, if the sim is to drive the party through the UI's paths.
-- The integration (movement.md step 2): `PathTo`/`FindPath` build `AgentRequest`s from the sim's state and deliver
-  `turn_based_path` at the recorded `PathSync` place; `CombatController`'s turn starts and removals drive `CombatNav`.
+- The integration: **done** (stream M, `docs/poc5/movement.md`, "Physics and paths computed"): in the driven replay
+  the sim's turn controller drives the grid (`NavRun`) and every path the sim's agent requests is computed at its
+  recorded return and checked; captures with `paths` replay valid with them.
 - `LineOfSightGeometry` (the `FogOfWarBlocker`s imported with the scene), to take line of sight off the inputs.
 - Real-time paths (navmesh, `XPath` with `LosPathCondition`, `RemoveExcessPoints`) stay with movement.md step 5.

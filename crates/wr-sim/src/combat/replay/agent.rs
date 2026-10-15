@@ -30,17 +30,17 @@ use crate::combat::movement::{self, MoveInputs};
 use crate::combat::orientation;
 use crate::world::{EntityIdx, World};
 
-fn f(v: &J) -> Option<f32> {
+pub(super) fn f(v: &J) -> Option<f32> {
     #[allow(clippy::cast_possible_truncation)]
     v.as_f64().map(|x| x as f32)
 }
 
-fn v3(v: &J) -> Option<V3> {
+pub(super) fn v3(v: &J) -> Option<V3> {
     let a = v.as_array().filter(|a| a.len() == 3)?;
     Some([f(&a[0])?, f(&a[1])?, f(&a[2])?])
 }
 
-fn v2(v: &J) -> Option<V2> {
+pub(super) fn v2(v: &J) -> Option<V2> {
     let a = v.as_array().filter(|a| a.len() == 2)?;
     Some([f(&a[0])?, f(&a[1])?])
 }
@@ -53,12 +53,12 @@ fn opt_f(v: &J) -> Option<Option<f32>> {
     if v.is_null() { Some(None) } else { f(v).map(Some) }
 }
 
-fn bits3(v: V3) -> [u32; 3] {
+pub(super) fn bits3(v: V3) -> [u32; 3] {
     v.map(f32::to_bits)
 }
 
 /// The record has exactly `keys` besides the trace's own (`seq`, `k`, `t`, `ev`).
-fn fields(r: &J, keys: &[&str]) -> bool {
+pub(super) fn fields(r: &J, keys: &[&str]) -> bool {
     const BASE: [&str; 4] = ["seq", "k", "t", "ev"];
     r.as_object().is_some_and(|o| {
         o.len() == BASE.len() + keys.len() && BASE.iter().chain(keys).all(|k| o.contains_key(*k))
@@ -114,7 +114,7 @@ fn critter_phys(r: &J) -> bool {
 }
 
 /// A required boolean (a missing, null or mistyped value isn't `false`).
-fn boolean(r: &J, k: &str, what: &str) -> R<bool> {
+pub(super) fn boolean(r: &J, k: &str, what: &str) -> R<bool> {
     r[k].as_bool().ok_or_else(|| Desync(format!("{what} without a boolean {k} ({})", describe(r))))
 }
 
@@ -385,6 +385,8 @@ pub(super) struct AgDriver {
     pub rows_checked: Option<i64>,
     /// The recording ended (its last frame's controllers may not have run).
     pub ending: bool,
+    /// The physics and paths the sim computes (`replay/nav.rs`).
+    pub nav: super::nav::NavDriver,
 }
 
 impl Default for AgDriver {
@@ -423,12 +425,13 @@ impl Default for AgDriver {
             rows: (-1, HashSet::new()),
             rows_checked: None,
             ending: false,
+            nav: super::nav::NavDriver::default(),
         }
     }
 }
 
 impl Driver<'_> {
-    fn ag_input(&mut self, what: impl Into<String>) {
+    pub(super) fn ag_input(&mut self, what: impl Into<String>) {
         *self.out.ag_inputs.entry(what.into()).or_default() += 1;
     }
 
@@ -463,6 +466,10 @@ impl Driver<'_> {
     /// A stop record skipped (an input's span, a desynced entry): a `SlowDown` draw takes the
     /// tape's to keep its site in step, a request start counts for its requester.
     fn ag_skip_stop(&mut self, w: &mut World, r: &J) {
+        // A physics query of the span: the sim's answer to its recorded arguments, checked.
+        if r["k"] == "obs" && r["ev"] == "ag_phys" {
+            self.nav_phys_alone(w, r, super::nav::PhysCtx::Span);
+        }
         if self.ag_slow_draw(r) {
             let _ = w.rng.range_float(crate::rng::sites::AGENT_SLOW_DOWN, 0.2, 0.3);
         }
@@ -515,7 +522,12 @@ impl Driver<'_> {
 
     /// Records up to the next one `want` takes (returned); everything before it is processed as
     /// usual, but an agent record the sim didn't ask for stops the pull.
-    fn ag_pull(&mut self, w: &mut World, what: &str, want: impl Fn(&J) -> bool) -> R<usize> {
+    pub(super) fn ag_pull(
+        &mut self,
+        w: &mut World,
+        what: &str,
+        want: impl Fn(&J) -> bool,
+    ) -> R<usize> {
         let trace = self.trace;
         loop {
             let Some(r) = trace.records.get(self.i) else {
@@ -699,12 +711,29 @@ impl Driver<'_> {
                     self.ag_input("isdone (read outside the sim's agent code)");
                 }
             }
-            "ag_phys" if r["ctx"] == "sim" => self.ag_input("physics (the AI's simulation)"),
-            // A critter's ground ray (`CritterMoveAgent.TickMovement`, the static `Move`; WrathOracle names
-            // the critter): presentation, no unit's.
-            "ag_phys" if critter_phys(r) => self.ag_input("a critter's ground ray (presentation)"),
-            "ag_sim" | "ag_sim_end" => self.ag_input("the AI's simulation steps"),
-            "ag_v" if r["ctx"] == "sim" => self.ag_input("the AI's simulation reads"),
+            // A critter's ground ray (`CritterMoveAgent.TickMovement`, the static `Move`; WrathOracle
+            // names the critter): presentation, no unit's; the sim's answer checked when it has one.
+            "ag_phys" if critter_phys(r) => {
+                self.nav_phys_alone(w, r, super::nav::PhysCtx::Other);
+            }
+            // The movement simulation (`SimulateTickMovementForTurnBased`: the AI's `ScorePath`,
+            // the path visualizer): each step the sim's from its recorded simulator
+            // (`replay/nav.rs`); in real time its physics the sim's, its reads inputs.
+            "ag_sim" => return self.nav_sim_step(w, i),
+            "ag_phys" if r["ctx"] == "sim" && !w.combat.turn_based => {
+                self.nav_phys_alone(w, r, super::nav::PhysCtx::Span);
+            }
+            "ag_sim_end" | "ag_v"
+                if !w.combat.turn_based && (ev == "ag_sim_end" || r["ctx"] == "sim") =>
+            {
+                self.ag_input("the AI's simulation (real time)");
+            }
+            "ag_phys" | "ag_sim_end" | "ag_v" if ev == "ag_sim_end" || r["ctx"] == "sim" => {
+                Self::ag_unsupported(
+                    w,
+                    format!("a movement simulation record outside its step ({})", describe(r)),
+                );
+            }
             _ => Self::ag_unsupported(
                 w,
                 format!("a record outside the sim's agent entries ({})", describe(r)),
@@ -724,6 +753,8 @@ impl Driver<'_> {
         let pts: Option<Vec<V3>> = r["v"].as_array().and_then(|v| v.iter().map(v3).collect());
         match (pts, r["err"].as_bool(), r["cs"].as_i64(), r["kind"].as_str(), r["pid"].as_i64()) {
             (Some(p), Some(err), Some(cs), Some(kind), Some(pid)) => {
+                // A path the sim computes: the definition is a check.
+                self.nav_def(w, k, &p, err, cs);
                 self.ags.paths.insert(k.to_owned(), p);
                 self.ags.defs.insert(k.to_owned(), (err, cs, kind.to_owned(), pid));
             }
@@ -777,6 +808,10 @@ impl Driver<'_> {
             return;
         };
         let requested = self.ags.finding.remove(path);
+        // The callback the seeker makes for a path the sim computed.
+        if let Err(d) = self.nav_delivered(path, None) {
+            Self::ag_unsupported(w, format!("FindPath's callback: {}", d.0));
+        }
         if self.ags.strict && !(self.ag_deliver(path) && requested) {
             Self::ag_unsupported(
                 w,
@@ -1058,6 +1093,7 @@ impl Driver<'_> {
         self.ag_frame_end(w);
         self.ag_block_close(w);
         self.ag_batch_close(w);
+        self.nav_finish(w);
     }
 
     /// An entry: the sim's code runs, pulling its records; on a desync the entry's remaining
@@ -1246,6 +1282,7 @@ impl Driver<'_> {
             return Err(Desync(format!("a FindPath record it can't read ({})", describe(r))));
         };
         self.ag_input("FindPath's arguments (the AI's ScorePath)");
+        self.nav_find_start();
         self.ags.req_want = Some(vec![("fn", Want::S(Some("find".into())))]);
         ag::find_path(w, u, p, approach, los, ibr, self)?;
         Ok(())
@@ -1271,8 +1308,19 @@ impl Driver<'_> {
         if r["forced"] != false {
             return Err(Desync("a delivered path completed as forced".into()));
         }
+        // The sim's path when it computes it (the recorded one a check), else the recording's.
+        let cs = r["cs"].as_i64().ok_or_else(|| Desync("OnPathComplete: no state".into()))?;
+        let pts = match self.nav_delivered(&key, Some((&pts, err, cs)))? {
+            Some(v) => {
+                self.out.nav.delivered_to_agent += 1;
+                v
+            }
+            None => {
+                self.ag_input("path contents");
+                pts
+            }
+        };
         self.ags.paths.insert(key.clone(), pts.clone());
-        self.ag_input("path contents");
         let p = AgentPath { forced: key.starts_with("?ForcedPath"), key, points: pts };
         ag::on_path_complete(w, u, &p, err, false, self)
     }
@@ -1857,6 +1905,8 @@ impl Driver<'_> {
     /// synthesizes the synchronization from each agent's last recorded state (reported: such a
     /// run is never valid).
     pub(super) fn ag_combat_start(&mut self, w: &mut World) {
+        // `HandleCombatStart`'s graph part (`Clear`), before `m_Units` is filled (paths computed).
+        crate::combat::paths::combat_start(w);
         if self.ag && self.ags.strict {
             // The observer writes its snapshot right after: until then the agents aren't the
             // sim's.
@@ -2236,6 +2286,7 @@ impl AgentInputs for Driver<'_> {
                 if start["fn"] == "find" {
                     self.ags.finding.insert(q.key.clone());
                 }
+                self.nav_request(w, q, start["fn"] == "find");
                 let rq = &r["rq"];
                 let ending = match q.approach {
                     Some(a) => {
@@ -2392,7 +2443,12 @@ impl AgentInputs for Driver<'_> {
             .and_then(|x| i32::try_from(x).ok())
             .ok_or_else(|| Desync("cells without a value".into()))
     }
-    fn grid_erosion(&mut self, _: &mut World) -> R<Option<(i32, i32)>> {
+    fn grid_erosion(&mut self, w: &mut World) -> R<Option<(i32, i32)>> {
+        // The grid's current settings when the sim keeps it (combat changes `erodeIterations`),
+        // else the area's nav file's.
+        if let Some(e) = self.nav_erosion(w) {
+            return Ok(e);
+        }
         self.ags.erosion.clone().map_err(Desync)
     }
     fn fudge_radius(&mut self, w: &mut World, u: EntityIdx, command: Option<u32>) -> R<f32> {
@@ -2543,7 +2599,8 @@ impl Driver<'_> {
         let id = self.ag_unit_id(w, u);
         let at = self
             .ag_pull(w, &format!("a {kind} query"), |r| r["k"] == "obs" && r["ev"] == "ag_phys")?;
-        let r = &self.trace.records[at];
+        let trace = self.trace;
+        let r = &trace.records[at];
         let recorded: Option<Vec<f32>> = if kind == "ray" {
             v3(&r["d"]).map(|d| d.to_vec())
         } else {
@@ -2564,14 +2621,8 @@ impl Driver<'_> {
                 describe(r)
             )));
         }
-        let hit = r["hit"].as_bool().ok_or_else(|| Desync("a query without its hit".into()))?;
-        let dist = if hit {
-            Some(f(&r["dist"]).ok_or_else(|| Desync("a hit without its distance".into()))?)
-        } else {
-            None
-        };
-        *self.out.ag_inputs.entry("physics".into()).or_default() += 1;
-        Ok(dist)
+        // The sim's answer (`wr-phys`), the recorded one its check.
+        self.nav_phys(w, r, kind, o, shape, max, mask, super::nav::PhysCtx::Agent)
     }
 
     /// A call into the view (`OnMovementInterrupted`, `OnMovementComplete`,
