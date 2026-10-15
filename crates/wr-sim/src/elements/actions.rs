@@ -163,10 +163,28 @@ pub fn run(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
                     ));
                 }
                 if let Some(d) = dialog {
-                    crate::dialog::start_dialog(w, d, None, Some(u));
+                    // `StartDialogWithUnit`: no speaker name (`"<null>"`).
+                    crate::dialog::start_dialog(w, d, None, Some(u), Ok("<null>".to_owned()))
+                        .map_err(|e| ElementError::Other(e.to_string()))?;
                 }
             } else if let Some(d) = dialog {
-                crate::dialog::start_dialog(w, d, None, None);
+                // `StartDialogWithoutTarget(dialog, SpeakerName)`: the name becomes a string
+                // as the start data is built (after the request), so the game's exception
+                // there stops the start.
+                let name = crate::text::localized_field(w, a, "SpeakerName");
+                match crate::dialog::start_dialog(w, d, None, None, name) {
+                    Ok(()) => {}
+                    Err(wr_text::TextError::Throws(e)) => {
+                        return Err(ElementError::Other(format!("StartDialog: speaker name: {e}")));
+                    }
+                    Err(e) => {
+                        return Err(unsupported(
+                            w,
+                            "action",
+                            &format!("StartDialog (speaker name: {e})"),
+                        ));
+                    }
+                }
             }
             Ok(())
         }

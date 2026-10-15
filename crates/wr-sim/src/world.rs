@@ -387,6 +387,9 @@ pub type SpellCache = std::cell::RefCell<HashMap<(Guid, i32), Rc<Vec<Guid>>>>;
 /// The whole simulation state.
 pub struct World {
     pub content: Rc<Content>,
+    /// The localization pack text is shown from (`LocalizationManager.CurrentPack`), when
+    /// loaded.
+    pub text: Option<Rc<crate::text::TextData>>,
     pub registry: Rc<Registry>,
     pub entities: Vec<Entity>,
     pub facts: Vec<Fact>,
@@ -531,6 +534,7 @@ impl World {
     pub fn new(content: Rc<Content>, registry: Rc<Registry>) -> Self {
         Self {
             content,
+            text: None,
             registry,
             entities: Vec::new(),
             facts: Vec::new(),

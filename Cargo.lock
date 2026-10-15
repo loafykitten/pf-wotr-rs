@@ -4884,6 +4884,18 @@ dependencies = [
  "wr-content",
  "wr-paths",
  "wr-save",
+ "wr-text",
+]
+
+[[package]]
+name = "wr-text"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "memmap2",
+ "serde_json",
+ "wr-paths",
 ]
 
 [[package]]

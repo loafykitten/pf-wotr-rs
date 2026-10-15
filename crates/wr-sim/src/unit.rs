@@ -204,6 +204,10 @@ pub struct Unit {
     pub bracket_marks: Vec<(FactIdx, &'static str)>,
     /// `Descriptor.CustomGender` (`Gender`: 0 Male, 1 Female), if set.
     pub custom_gender: Option<i64>,
+    /// `Descriptor.CustomName` (saved; "" when unset).
+    pub custom_name: String,
+    /// `Descriptor.ReplaceBlueprintForInspection` (saved).
+    pub replace_blueprint_for_inspection: Option<Guid>,
     /// `State.IsFinallyDead` (saved).
     pub finally_dead: bool,
     /// `State.MarkedForDeath`, `State.ForceKill` (saved).

@@ -7,10 +7,22 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-14, end of the eighteenth session): start here
+## Where things stand (2026-10-14, end of the nineteenth session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-4 round 11 (nineteenth session, `docs/poc4/text.md`): text.** `crates/wr-text` ports the localization packs
+  (read once from the install's JSON into our own memory-mapped format, `cache/text/<locale>.wrtext`: opens in 1.9 ms,
+  the JSON takes 66 ms) and `TextTemplateEngine` (the scan equal to the decompiled loop run on Mono on 335,690 strings;
+  `ToLowerInvariant` is Mono's table, from the game's `mscorlib`); templates read game state through an `Env` that fails
+  closed. The sim makes the dialogue's text (`crates/wr-sim/src/text.rs`: `mf`, `name`, `race`, the UI colours, unit names
+  through the shared strings `tools/wr-rules-data` now extracts from `blueprint.assets` into `cache/sim/shared-strings.json`,
+  the speaker's name and colour, `DialogFormats`), and WrathOracle records the game's (`TextObs.cs`, declared
+  `dialog_text`: each history line, each transition's cue and answer text and speaker, the controller's custom speaker
+  fields at window start). On `poc4-seelah-7`, `poc4-horgus-11` and `cert-24` **all 21 dialogue runs are valid with every
+  text record equal**. Camelia's meeting is recorded for the first time (`poc4-camelia-1`; her trigger is the zone
+  `CameliaDialogueTrigger`), but the sim can't run it yet: the dialogue starts from a foreground cutscene's
+  `CommandStartDialog` (`docs/poc4/dialogue.md`, round 11).
 - **POC-4 round 10 (eighteenth session, `docs/poc4/dialogue.md`): every dialogue run valid** (`poc4-seelah-5`'s 12,
   `poc4-horgus-9`'s 6, `cert-22`'s 3). The Horgus runs too: roaming's two draws are tied to their recorded producers (WrathOracle's `roam_point` now names
   the caller and the unit; a draw counts as T1 only right after its producer, by `UnitRoamingController`, and
@@ -203,8 +215,11 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
    choices are recorded and valid: `-95`'s two and `-96`).
-2. POC-4 (`docs/poc4/dialogue.md`): every dialogue run is valid (round 10). Left: each save's load tail
-   (`coverage.json`), Camelia's meeting (needs her trigger zone), `crates/wr-text`.
+2. POC-4 (`docs/poc4/dialogue.md`): every dialogue run is valid, its text included (round 11). Left: Camelia's
+   meeting (`poc4-camelia-1` recorded: the sim must start a dialogue from a foreground cutscene's `CommandStartDialog`
+   and classify that cutscene's commands and locks), the combat log's and UI's templates. The fixture saves' load tail
+   is closed (Manual_13 and Manual_18 load with nothing unsupported; Manual_19 reports only the `RandomTrack` gate, a
+   recorded input in its runs); Manual_10's 224 kinds are item 3's.
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
    features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them). They also offset every
    later fact id: `manual10-ids-1/ids-load.json` names each allocation the sim misses (working notes).
@@ -214,6 +229,13 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
+- **Nineteenth session (2026-10-14):** captures `poc4-seelah-7`, `poc4-horgus-11`, `cert-24` (with `dialog_text`) and
+  `poc4-camelia-1`; `poc4-seelah-5`/`-6`, `poc4-horgus-9`/`-10`, `cert-22`/`-23` superseded (archived). The POC-4 suite
+  and `scripts/regress.sh` use the new ones; the regression baseline is `cache/regress/out-text2` (only the dialogue
+  logs differ from `out-round10`: the text records). Run `wr-rules-data` once to write `cache/sim/shared-strings.json`
+  (the runner loads it with the English pack; a recording with `dialog_text` reports their absence). `wr-text build`
+  builds the pack (also on first use). A .NET harness running the decompiled `Process` loop is a useful oracle for the
+  engine, but run it on Mono (`mono`, Homebrew): CoreCLR's casing differs from the game's.
 - **Eighteenth session (2026-10-14):** captures `poc4-seelah-5`, `poc4-horgus-9` (with `roam_producers` and
   `group_ticks`) and `cert-22`; `poc4-seelah-3`/`-4`, `poc4-horgus-7`/`-8`, `cert-21` are superseded (archived on the
   external volume; `cert-22`'s `dialog-checks` has no roaming and runs without the groups model, valid). The POC-4

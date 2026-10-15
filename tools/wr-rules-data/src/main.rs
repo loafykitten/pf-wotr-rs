@@ -7,6 +7,11 @@
 //! `BlueprintRoot.m_DifficultyList` (read from `blueprints-pack.bbp` with `wr-content`)
 //! is an index into `BlueprintReferencedAssets.m_Entries`, whose entry points at the
 //! object. Unity objects are decoded with `wr-import`'s type-tree reader.
+//!
+//! Also `cache/sim/shared-strings.json` ([`SharedStrings`]): the runtime pack holds a
+//! `SharedStringAsset` field as its index into the same list, so for every entry that is a
+//! `SharedStringAsset`, the key its string resolves to (`LocalizedString.GetActualKey`:
+//! `m_Key`, or the end of its `Shared` chain).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,6 +26,7 @@ use wr_sim::difficulty::{
     DifficultyPreset, DifficultyPresetAsset, DifficultyPresetsList, RULES_DATA_SCHEMA, RulesData,
     StatsAdjustmentPreset,
 };
+use wr_sim::text::{SHARED_STRINGS_SCHEMA, SharedStrings};
 
 #[derive(Parser, Debug)]
 #[command(about = "Extract rules data kept outside blueprints (DifficultyPresetsList)")]
@@ -28,6 +34,9 @@ struct Cli {
     /// Output (default `cache/sim/rules-data.json`).
     #[arg(long)]
     out: Option<PathBuf>,
+    /// The shared strings' output (default `cache/sim/shared-strings.json`).
+    #[arg(long)]
+    shared_strings_out: Option<PathBuf>,
 }
 
 /// `BlueprintRoot`.
@@ -66,6 +75,7 @@ fn main() -> Result<()> {
     let assets = bundles.join("blueprint.assets");
     let bundle = Bundle::open(&assets)?;
     let mut found: Option<(String, DifficultyPresetsList, i64)> = None;
+    let mut shared: Option<SharedStrings> = None;
     for node in &bundle.header.nodes {
         if node.path.ends_with(".resS") || node.path.ends_with(".resource") {
             continue;
@@ -92,6 +102,7 @@ fn main() -> Result<()> {
         }
         let Some(refs) = referenced else { continue };
         let entries = refs.get("m_Entries").and_then(Value::as_array).context("m_Entries")?;
+        shared = Some(shared_strings(&f, entries, &node.path, &script)?);
         let idx = usize::try_from(asset_index)?;
         let entry = entries.get(idx).context("asset index out of range")?;
         let p = entry.get("Asset").and_then(Value::as_pptr).context("entry Asset")?;
@@ -116,6 +127,18 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(d)?;
     }
     std::fs::write(&path, serde_json::to_string_pretty(&out)?)?;
+    let shared = shared.context("no shared strings")?;
+    let spath = cli.shared_strings_out.unwrap_or_else(SharedStrings::default_path);
+    if let Some(d) = spath.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&spath, serde_json::to_string_pretty(&shared)?)?;
+    eprintln!(
+        "shared strings: {} of {} referenced assets -> {}",
+        shared.keys.len(),
+        entries_count(&shared),
+        spath.display()
+    );
     eprintln!(
         "DifficultyPresetsList: {} presets, {} stats-adjustment presets -> {}",
         out.difficulty_presets_list.difficulties.len(),
@@ -123,6 +146,74 @@ fn main() -> Result<()> {
         path.display()
     );
     Ok(())
+}
+
+fn entries_count(s: &SharedStrings) -> u64 {
+    s.source.get("entries").and_then(serde_json::Value::as_u64).unwrap_or(0)
+}
+
+/// A `SharedStringAsset` (its `MonoScript` is usually in another file, so also by shape: a
+/// `MonoBehaviour` whose only own field is the `LocalizedString` `String`).
+fn is_shared_string_asset(v: &Value, script: &dyn Fn(&Value) -> Option<String>) -> bool {
+    if let Some(s) = script(v) {
+        return s == "SharedStringAsset";
+    }
+    let Value::Object(m) = v else { return false };
+    let own: Vec<&str> = m
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .filter(|k| !matches!(*k, "m_GameObject" | "m_Enabled" | "m_Script" | "m_Name"))
+        .collect();
+    own == ["String"] && v.get("String").and_then(|s| s.get("m_Key")).is_some()
+}
+
+/// Every `BlueprintReferencedAssets` entry that is a `SharedStringAsset` in this file, with
+/// its string's actual key: `m_Key`, or, while the string has a `Shared` asset, that
+/// asset's string's (at most 50 steps, as `GetActualKey`).
+fn shared_strings(
+    f: &SerializedFile<'_>,
+    entries: &[Value],
+    file: &str,
+    script: &dyn Fn(&Value) -> Option<String>,
+) -> Result<SharedStrings> {
+    let mut keys = BTreeMap::new();
+    let mut elsewhere = 0u64;
+    for (i, e) in entries.iter().enumerate() {
+        let Some(p) = e.get("Asset").and_then(Value::as_pptr) else { continue };
+        if p.path_id == 0 {
+            continue;
+        }
+        if p.file_id != 0 {
+            elsewhere += 1;
+            continue;
+        }
+        let Some(o) = f.object(p.path_id) else { continue };
+        if o.class_id != class_id::MONO_BEHAVIOUR {
+            continue;
+        }
+        let v = f.read(o)?;
+        if !is_shared_string_asset(&v, script) {
+            continue;
+        }
+        let mut s = v.get("String").context("SharedStringAsset.String")?.clone();
+        let mut steps = 0;
+        loop {
+            let next = s.get("Shared").and_then(Value::as_pptr).filter(|q| q.path_id != 0);
+            let Some(q) = next.filter(|_| steps < 50) else { break };
+            ensure!(q.file_id == 0, "entry {i}: a shared string in another file");
+            let o = f.object(q.path_id).with_context(|| format!("entry {i}: shared asset"))?;
+            s = f.read(o)?.get("String").context("SharedStringAsset.String")?.clone();
+            steps += 1;
+        }
+        let key = s.str_at("m_Key").unwrap_or_default().to_owned();
+        keys.insert(i32::try_from(i)?, key);
+    }
+    let mut source = BTreeMap::new();
+    source.insert("bundle".into(), serde_json::json!("Bundles/blueprint.assets"));
+    source.insert("serialized_file".into(), serde_json::json!(file));
+    source.insert("entries".into(), serde_json::json!(entries.len()));
+    source.insert("entries_in_other_files".into(), serde_json::json!(elsewhere));
+    Ok(SharedStrings { schema: SHARED_STRINGS_SCHEMA.into(), source, keys })
 }
 
 fn int(v: &Value, k: &str) -> Result<i64> {

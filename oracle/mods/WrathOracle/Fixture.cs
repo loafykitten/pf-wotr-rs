@@ -93,6 +93,8 @@ internal static class Fixture
             j.Prop("turn_based_window", Sched.Window);
             // The observation families installed: a replay requires each one's records.
             j.Arr("observers"); foreach (var o in Fidelity.Observers) j.W.WriteValue(o); j.EndArr();
+            // The dialogue controller's custom speaker fields, which live as long as the game process.
+            if (TextObs.Installed) { j.Key("dialog_speaker"); TextObs.WriteSpeakerState(j); }
             j.Prop("input_pin", InputPin.Describe());
             j.Arr("camera"); if (camera != null) foreach (var v in camera) j.W.WriteValue(v); j.EndArr();
             // The physics clock at window open: whether colliders sync to queries without a step, and the
@@ -328,6 +330,9 @@ internal static class Fidelity
         failed = Health.FailedCount;
         GroupObs.InstallTicks(h);
         if (Health.FailedCount == failed) Observers.Add("group_ticks");
+        // The dialogue's history lines and display text (dlg_history, dlg_text).
+        try { TextObs.Install(h); Observers.Add("dialog_text"); }
+        catch (Exception e) { Health.Failed("patch the dialogue text (dlg_history, dlg_text)", e); }
         OracleTime.Install(h);
         InstallSeconds = sw.Elapsed.TotalSeconds;
         Notes.Add($"install total {InstallSeconds:0.00} s");

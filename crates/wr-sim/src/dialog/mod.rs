@@ -89,6 +89,14 @@ pub struct DialogController {
     pub headless: bool,
     /// UI evaluations of `SkillChecksDC` per skill-check answer per cue shown.
     pub ui_preview_calls: u32,
+    /// `m_CustomSpeakerName`: the scheduled dialogue's `CustomSpeakerName` (`None`: null).
+    pub custom_speaker_name: Option<String>,
+    /// `m_CustomSpeakerColor`, which `Clear` keeps: `None` while it's still the value from
+    /// before the run (unknown), else the colour (`None` inside: null).
+    pub custom_speaker_color: Option<Option<String>>,
+    /// Write the dialogue's text records (`dlg_history`, `dlg_text`; the recording declares
+    /// `dialog_text`).
+    pub text_records: bool,
 }
 
 impl Default for DialogController {
@@ -120,6 +128,9 @@ impl Default for DialogController {
             old_player_alignment: 4,
             headless: false,
             ui_preview_calls: 2,
+            custom_speaker_name: None,
+            custom_speaker_color: None,
+            text_records: false,
         }
     }
 }
@@ -149,10 +160,6 @@ fn system_answers(w: &World) -> [Option<Guid>; 4] {
         })
     });
     d.unwrap_or([None; 4])
-}
-
-fn dialog_type(w: &World) -> i64 {
-    w.dialog.dialog.and_then(|d| bp(w, d)).map_or(0, |b| b.view().int("Type"))
 }
 
 /// `Dialog.GetContinueAnswer()`.
@@ -190,7 +197,8 @@ pub fn start_dialog(
     dialog: Guid,
     initiator: Option<EntityIdx>,
     unit: Option<EntityIdx>,
-) {
+    custom_speaker_name: Result<String, wr_text::TextError>,
+) -> Result<(), wr_text::TextError> {
     w.events.push(
         "dlg_request",
         json!({ "dialog": g(dialog), "initiator": uid(w, initiator), "unit": uid(w, unit) }),
@@ -198,10 +206,14 @@ pub fn start_dialog(
     if w.player.dialog.scheduled.is_some() {
         w.log("error", "Another dialog already scheduled!");
     }
+    // The speaker name becomes a string as the start data is built: an exception there (or
+    // a name the sim can't make) ends the call before anything is scheduled.
+    let custom_speaker_name = custom_speaker_name?;
     w.player.dialog.scheduled =
-        Some(ScheduledDialog { dialog, initiator, unit, is_scheduled: false });
+        Some(ScheduledDialog { dialog, initiator, unit, custom_speaker_name, is_scheduled: false });
     // `PreventDialogStart`: Rest mode active or about to be (not in these runs).
     start_scheduled_dialog(w);
+    Ok(())
 }
 
 /// `StartScheduledDialog()`: marks it scheduled and starts it now (headless) or through
@@ -257,6 +269,12 @@ fn start_scheduled_dialog_immediately(w: &mut World) {
     w.dialog.initiator = s.initiator;
     w.dialog.first_speaker = s.unit;
     w.dialog.current_speaker = s.unit;
+    w.dialog.custom_speaker_name = Some(s.custom_speaker_name.clone());
+    // `m_CustomSpeakerColor = CurrentSpeakerColor` (no current cue now): the speaker's
+    // blueprint's colour, else the field keeps its value.
+    if let Some(b) = current_speaker_blueprint(w) {
+        w.dialog.custom_speaker_color = crate::text::blueprint_color_html(w, b).ok().map(Some);
+    }
     let Some(db) = bp(w, s.dialog) else {
         w.coverage.unsupported("StartDialog: dialog blueprint missing");
         return;
@@ -340,6 +358,9 @@ fn clear(w: &mut World) {
         headless,
         ui_preview_calls: preview,
         dialog_stop_scheduled: stop_scheduled,
+        custom_speaker_name: w.dialog.custom_speaker_name.take(),
+        custom_speaker_color: w.dialog.custom_speaker_color.take(),
+        text_records: w.dialog.text_records,
         initiator: w.dialog.initiator,
         first_speaker: w.dialog.first_speaker,
         current_speaker: w.dialog.current_speaker,
@@ -444,7 +465,9 @@ pub fn select_answer(w: &mut World, answer: Guid, manual: Option<EntityIdx>) {
         "dlg_answer",
         json!({ "answer": g(answer), "index": index, "cue": g(cur), "manual_unit": uid(w, manual) }),
     );
-    // History entries (`IDialogHandler.HandleOnDialogHistory`) are UI text.
+    if w.dialog.text_records {
+        history_entries(w, cur, answer, &ab);
+    }
     let first_time = !w.dialog.local_selected_answers.contains_key(&answer);
     if !w.player.dialog.selected_answers.contains_key(&answer) {
         w.player.dialog.selected_answers.insert(answer, ());
@@ -1127,4 +1150,151 @@ fn transition_record(w: &mut World) {
         "alignment": crate::narrative::alignment::enum_value(player_alignment(w)),
     });
     w.events.push("dlg_transition", rec);
+    if w.dialog.text_records {
+        text_record(w);
+    }
+}
+
+// ---- text ---------------------------------------------------------------------------
+
+fn dialog_type(w: &World) -> i64 {
+    w.dialog.dialog.and_then(|d| bp(w, d)).map_or(0, |b| b.view().int("Type"))
+}
+
+/// Whether the current dialogue is a book event (`DialogType.Book`).
+#[must_use]
+pub fn current_dialog_is_book(w: &World) -> bool {
+    dialog_type(w) == 1
+}
+
+/// The current cue's `Speaker.SpeakerPortrait`.
+fn speaker_portrait(w: &World) -> Option<Guid> {
+    let c = bp(w, w.dialog.current_cue?)?;
+    c.view().obj("Speaker")?.guid("m_SpeakerPortrait")
+}
+
+/// `CurrentSpeakerBlueprint`: the current cue's speaker portrait, else the current
+/// speaker's blueprint.
+fn current_speaker_blueprint(w: &World) -> Option<Guid> {
+    speaker_portrait(w).or_else(|| w.dialog.current_speaker.and_then(|u| w.unit(u)?.blueprint))
+}
+
+/// `CurrentSpeakerName`.
+fn current_speaker_name(w: &World) -> Result<String, wr_text::TextError> {
+    if let Some(p) = speaker_portrait(w) {
+        return crate::text::blueprint_character_name(w, p);
+    }
+    if let Some(u) = w.dialog.current_speaker {
+        return crate::text::character_name(w, u);
+    }
+    match &w.dialog.custom_speaker_name {
+        Some(n) if !n.is_empty() && n != "<null>" => Ok(n.clone()),
+        _ => Ok(String::new()),
+    }
+}
+
+/// `CurrentSpeakerColor` (`None`: null).
+fn current_speaker_color(w: &World) -> Result<Option<String>, wr_text::TextError> {
+    match current_speaker_blueprint(w) {
+        Some(b) => crate::text::blueprint_color_html(w, b).map(Some),
+        None => w.dialog.custom_speaker_color.clone().ok_or_else(|| {
+            wr_text::TextError::Unsupported(
+                "CurrentSpeakerColor: the custom speaker colour from before the run".into(),
+            )
+        }),
+    }
+}
+
+/// A cue's or an answer's `DisplayText` (its `Text`).
+fn display_text(w: &World, g: Guid) -> Result<String, wr_text::TextError> {
+    let b = bp(w, g).ok_or_else(|| wr_text::TextError::Unsupported(format!("{g} missing")))?;
+    crate::text::localized_field(w, b.view(), "Text")
+}
+
+/// A text value for a record: the text, or null with the reason reported.
+fn text_value(w: &mut World, r: Result<String, wr_text::TextError>) -> Value {
+    match r {
+        Ok(s) => json!(s),
+        Err(e) => {
+            w.coverage.unsupported(format!("dialogue text: {e}"));
+            Value::Null
+        }
+    }
+}
+
+/// `SelectAnswer`'s `AddHistoryEntry(CurrentCue, CurrentSpeakerName, CurrentSpeakerColor)`
+/// and `AddHistoryEntry(answer)` (WrathOracle's `dlg_history`: the lines they raise).
+fn history_entries(w: &mut World, cue: Guid, answer: Guid, ab: &Rc<Blueprint>) {
+    let line = (|| {
+        let name = current_speaker_name(w)?;
+        let text = display_text(w, cue)?;
+        Ok(if name.is_empty() {
+            // `NarratorsTextFormat`: `{0}` (the colour, an argument too, isn't used).
+            text
+        } else {
+            let color = current_speaker_color(w)?;
+            let narrator = crate::text::narrator_html(w)?;
+            match color.filter(|c| !c.is_empty()) {
+                Some(c) => {
+                    crate::text::formats::speaker_with_color_name("", &c, &name, &text, &narrator)
+                }
+                None => crate::text::formats::speaker_with_name("", &name, &text, &narrator),
+            }
+        })
+    })();
+    let line = text_value(w, line);
+    w.events.push("dlg_history", json!({ "kind": "cue", "of": g(cue), "line": line }));
+    if !ab.view().bool("AddToHistory") {
+        return;
+    }
+    let line = (|| {
+        let text = display_text(w, answer)?;
+        if dialog_type(w) != 0 {
+            // `AnswerFormatWithoutName`: `{0}`.
+            return Ok(text);
+        }
+        let pc = w
+            .main_character
+            .ok_or_else(|| wr_text::TextError::Throws("history: no player character".into()))?;
+        let name = crate::text::character_name(w, pc)?;
+        let bp = w.unit(pc).and_then(|u| u.blueprint).ok_or_else(|| {
+            wr_text::TextError::Unsupported("player character's blueprint".into())
+        })?;
+        let color = crate::text::blueprint_color_html(w, bp)?;
+        Ok(crate::text::formats::answer_with_color_name(&color, &name, &text))
+    })();
+    let line = text_value(w, line);
+    w.events.push("dlg_history", json!({ "kind": "answer", "of": g(answer), "line": line }));
+}
+
+/// WrathOracle's `dlg_text`, after a transition: the current cue's and the shown answers'
+/// display text and the current speaker's name and colour.
+fn text_record(w: &mut World) {
+    let cue = w.dialog.current_cue;
+    let cue_text = match cue {
+        Some(c) => {
+            let r = display_text(w, c);
+            text_value(w, r)
+        }
+        None => Value::Null,
+    };
+    let mut answers = Vec::new();
+    for a in w.dialog.answers.clone() {
+        let r = display_text(w, a);
+        let t = text_value(w, r);
+        answers.push(json!({ "answer": g(a), "text": t }));
+    }
+    let name = current_speaker_name(w);
+    let name = text_value(w, name);
+    let color = match current_speaker_color(w) {
+        Ok(c) => json!(c),
+        Err(e) => {
+            w.coverage.unsupported(format!("dialogue text: {e}"));
+            Value::Null
+        }
+    };
+    w.events.push(
+        "dlg_text",
+        json!({ "cue": cue.map(g), "cue_text": cue_text, "answers": answers, "speaker_name": name, "speaker_color": color }),
+    );
 }

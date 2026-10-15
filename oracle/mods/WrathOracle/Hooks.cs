@@ -276,6 +276,7 @@ internal static class Hooks
             j.Prop("global_shown_dialogs", d.ShownDialogs.Count);
             j.Prop("alignment", (int)Game.Instance.Player.Alignment);
         });
+        TextObs.WriteText(__instance);
     }
 
     public static void StopDialogPrefix(DialogController __instance)

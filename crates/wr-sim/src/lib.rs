@@ -48,6 +48,7 @@ pub mod sheet;
 pub mod spawn;
 pub mod spellbook;
 pub mod stats;
+pub mod text;
 pub mod time;
 pub mod unit;
 pub mod unit_facts;

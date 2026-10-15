@@ -83,6 +83,9 @@ pub struct ScheduledDialog {
     pub dialog: Guid,
     pub initiator: Option<EntityIdx>,
     pub unit: Option<EntityIdx>,
+    /// `CustomSpeakerName`: the `LocalizedString` the start passed, as a string (`"<null>"`
+    /// for none).
+    pub custom_speaker_name: String,
     pub is_scheduled: bool,
 }
 

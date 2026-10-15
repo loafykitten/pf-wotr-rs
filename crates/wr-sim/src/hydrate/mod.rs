@@ -760,6 +760,8 @@ impl Loader<'_> {
             level_up_plan_providers: Vec::new(),
             resources,
             custom_gender: d.int("CustomGender"),
+            custom_name: d.str("CustomName").unwrap_or_default().to_owned(),
+            replace_blueprint_for_inspection: d.guid("ReplaceBlueprintForInspection"),
             damage_reduction,
             brain: d.obj("Brain").map(|b| crate::combat::ai::Brain {
                 blueprint: b.guid("Blueprint"),

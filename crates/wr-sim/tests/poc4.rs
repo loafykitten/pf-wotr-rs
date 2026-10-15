@@ -1,7 +1,7 @@
 //! POC-4 against WrathOracle recordings (local captures, gitignored): the certification
 //! fixture `dialog-checks` (Seelah/Anevia meeting, Athletics check) recorded, replayed,
 //! and replayed with the check's d20 perturbed (success branch). Ignored by default: it
-//! needs the game's blueprint pack, Manual_13 and `fixtures/captures/oracle/cert-22`.
+//! needs the game's blueprint pack, Manual_13 and `fixtures/captures/oracle/cert-24`.
 //! `cargo nextest run -p wr-sim --run-ignored only`.
 
 use std::path::PathBuf;
@@ -28,6 +28,22 @@ fn run(name: &str, oracle: &str, run: &str) -> wr_sim::runner::FixtureRun {
     .expect("fixture")
 }
 
+/// The run compared the dialogue's text: the recording declares it, and the sim wrote a history
+/// line for every answered cue and a text record for every transition, none of them null.
+fn assert_text_compared(f: &wr_sim::runner::FixtureRun, what: &str) {
+    assert!(f.world.dialog.text_records, "{what}: no text records");
+    let recs = &f.world.events.records;
+    let texts = recs.iter().filter(|e| e.k == "dlg_text").count();
+    let lines = recs.iter().filter(|e| e.k == "dlg_history").count();
+    assert!(texts > 0 && lines > 0, "{what}: {texts} texts, {lines} history lines");
+    for e in recs.iter().filter(|e| e.k == "dlg_history" || e.k == "dlg_text") {
+        let null = e.fields.get("line").is_some_and(serde_json::Value::is_null)
+            || e.fields.get("cue_text").is_some_and(serde_json::Value::is_null)
+            || e.fields.get("speaker_name").is_some_and(serde_json::Value::is_null);
+        assert!(!null, "{what}: {} {:?}", e.k, e.fields);
+    }
+}
+
 /// The character sheets against the oracle's end state: a unit matches exactly unless
 /// unsupported behaviour was reported for it while it was built (`Coverage::unsupported_by_unit`)
 /// or, for a unit the run created, in the run: no difference is left without a reported cause.
@@ -52,10 +68,10 @@ fn check_units(f: &wr_sim::runner::FixtureRun, what: &str) {
 }
 
 #[test]
-#[ignore = "needs the game's blueprint pack, Manual_13 and the cert-22 capture"]
+#[ignore = "needs the game's blueprint pack, Manual_13 and the cert-24 capture"]
 fn dialog_checks_matches_the_oracle_on_both_branches() {
     for r in ["record", "replay-1", "replay-2-perturbed"] {
-        let f = run("dialog-checks", "cert-22/fixtures/dialog-checks", r);
+        let f = run("dialog-checks", "cert-24/fixtures/dialog-checks", r);
         assert!(f.outcome.failure.is_none(), "{r}: {:?}", f.outcome.failure);
         // Preconditions: the start state equals the oracle's (but for ToyBox's etude), and
         // loading reports exactly the documented gaps.
@@ -111,6 +127,7 @@ fn dialog_checks_matches_the_oracle_on_both_branches() {
         // settings come from the scene cache, `scripts/scene-cache.sh`); the run reports
         // nothing unsupported, and the load only its documented gaps.
         assert!(f.run_unsupported().is_empty(), "{r}: {:?}", f.run_unsupported());
+        assert_text_compared(&f, r);
         check_units(&f, r);
         let nd = f.end_diff.as_ref().expect("narrative");
         for (k, c) in &nd.categories {
@@ -136,13 +153,13 @@ fn poc4_recordings_match_the_dialogue_and_draws() {
     let runs: &[(&str, &str, &[&str])] = &[
         (
             "seelah-a",
-            "poc4-seelah-5/fixtures/seelah-a",
+            "poc4-seelah-7/fixtures/seelah-a",
             &["record", "replay-1", "replay-2-perturbed"],
         ),
-        ("seelah-b", "poc4-seelah-5/fixtures/seelah-b", &["record", "replay-2-perturbed"]),
-        ("seelah-c", "poc4-seelah-5/fixtures/seelah-c", &["record", "replay-2-perturbed"]),
-        ("horgus-check", "poc4-horgus-9/fixtures/horgus-check", &["record", "replay-2-perturbed"]),
-        ("horgus-alt", "poc4-horgus-9/fixtures/horgus-alt", &["record"]),
+        ("seelah-b", "poc4-seelah-7/fixtures/seelah-b", &["record", "replay-2-perturbed"]),
+        ("seelah-c", "poc4-seelah-7/fixtures/seelah-c", &["record", "replay-2-perturbed"]),
+        ("horgus-check", "poc4-horgus-11/fixtures/horgus-check", &["record", "replay-2-perturbed"]),
+        ("horgus-alt", "poc4-horgus-11/fixtures/horgus-alt", &["record"]),
     ];
     for (name, dir, rs) in runs {
         for r in *rs {
@@ -187,9 +204,10 @@ fn poc4_recordings_match_the_dialogue_and_draws() {
 /// Round 9: on captures with the cutscene locks, the zone entries and the modes, with the
 /// lock's buff tick and postpone, Cutscene and Pause modes. Round 10 (`poc4-seelah-5`): the unit
 /// groups modelled and equal to every recorded group state (the recruited companion's new unit
-/// joins the pool last).
+/// joins the pool last). Round 11 (`poc4-seelah-7`): the dialogue's text (history lines, cue
+/// and answer text, speaker names and colours) equal the game's.
 #[test]
-#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-5 capture"]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-7 capture"]
 fn seelah_streams_equal_the_oracle_to_the_end() {
     let runs: &[(&str, &[&str])] = &[
         ("seelah-a", &["record", "replay-1", "replay-2-perturbed"]),
@@ -208,7 +226,7 @@ fn seelah_streams_equal_the_oracle_to_the_end() {
     for (name, rs) in runs {
         for r in *rs {
             let spec = root().join("crates/wr-sim/fixtures/poc4.json");
-            let d = root().join("fixtures/captures/oracle/poc4-seelah-5/fixtures").join(name);
+            let d = root().join("fixtures/captures/oracle/poc4-seelah-7/fixtures").join(name);
             let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
                 ability_params_empty: None,
                 spec: &spec,
@@ -225,6 +243,7 @@ fn seelah_streams_equal_the_oracle_to_the_end() {
             // script zone and `ActivateTrigger` included).
             assert!(f.valid(), "{name} {r}: {:?}", f.world.coverage.unsupported);
             assert!(f.world.combat.groups.on && f.world.recorded_groups.is_some(), "{name} {r}");
+            assert_text_compared(&f, &format!("{name} {r}"));
             let units = f.units_diff.as_ref().expect("units");
             assert!(
                 units.match_rate > 0.9999,
@@ -249,13 +268,13 @@ fn seelah_streams_equal_the_oracle_to_the_end() {
     }
 }
 
-/// Horgus (`poc4-horgus-9`: cutscene progress, locks, zone entries, awake states, roaming's
+/// Horgus (`poc4-horgus-11`: cutscene progress, locks, zone entries, awake states, roaming's
 /// producers and the unit groups recorded): every run is valid. The ordered T0 stream equals the
 /// oracle's (gate draws and the closing cutscene's lock included), the end state matches, the
 /// groups model runs and equals every recorded group state, and roaming's two draws are tied to
 /// their recorded producers (the roaming controller choosing a waypoint: movement, T1).
 #[test]
-#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-horgus-9 capture"]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-horgus-11 capture"]
 fn horgus_runs_are_valid() {
     for (name, rs) in [
         ("horgus-check", &["record", "replay-1", "replay-2-perturbed", "replay-3-perturbed"][..]),
@@ -263,7 +282,7 @@ fn horgus_runs_are_valid() {
     ] {
         for r in rs {
             let spec = root().join("crates/wr-sim/fixtures/poc4.json");
-            let d = root().join("fixtures/captures/oracle/poc4-horgus-9/fixtures").join(name);
+            let d = root().join("fixtures/captures/oracle/poc4-horgus-11/fixtures").join(name);
             let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
                 ability_params_empty: None,
                 spec: &spec,
@@ -285,6 +304,7 @@ fn horgus_runs_are_valid() {
                 .map(|(_, n)| n)
                 .sum();
             assert_eq!(roaming, 2, "{name} {r}: {:?}", td.t1_excluded);
+            assert_text_compared(&f, &format!("{name} {r}"));
             let units = f.units_diff.as_ref().expect("units");
             assert!(units.match_rate > 0.9999, "{name} {r}: units {}", units.match_rate);
             check_units(&f, &format!("{name} {r}"));
@@ -383,4 +403,220 @@ fn skill_checks_recompute_the_saved_dc_and_skill() {
         assert!(reported.is_empty(), "{save}: {reported:?}");
     }
     assert_eq!(checked, 9, "the parts of both saves' main states");
+}
+
+/// A copy of an oracle fixture directory with its `record` trace changed by `change`.
+fn damaged_copy(
+    src: &std::path::Path,
+    tag: &str,
+    change: &dyn Fn(&mut Vec<serde_json::Value>),
+) -> PathBuf {
+    use std::io::Write as _;
+    let dst = std::env::temp_dir().join(format!("wr-poc4-text-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dst);
+    std::fs::create_dir_all(&dst).expect("temp dir");
+    for e in std::fs::read_dir(src).expect("fixture dir").flatten() {
+        let name = e.file_name();
+        if name.to_string_lossy().ends_with(".trace.jsonl.gz") {
+            continue;
+        }
+        std::fs::copy(e.path(), dst.join(&name)).expect("copy");
+    }
+    let mut records =
+        wr_sim::runner::read_trace(&src.join("record.trace.jsonl.gz")).expect("trace");
+    change(&mut records);
+    let f = std::fs::File::create(dst.join("record.trace.jsonl.gz")).expect("create");
+    let mut gz = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+    for r in &records {
+        writeln!(gz, "{r}").expect("write");
+    }
+    gz.finish().expect("gz");
+    dst
+}
+
+/// The dialogue's text records damaged (`poc4-seelah-7/seelah-a`): a changed history line, cue
+/// text, answer text or speaker name, a dropped record, or the declaration dropped while the
+/// records stay make the run unequal; without the window's speaker state the colour of the
+/// cue with no speaker is reported. The undamaged copy stays valid.
+#[test]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-7 capture"]
+fn damaged_text_records_are_caught() {
+    use serde_json::{Value, json};
+    let src = root().join("fixtures/captures/oracle/poc4-seelah-7/fixtures/seelah-a");
+    let nth = |rs: &mut Vec<Value>, k: &str, n: usize| -> usize {
+        rs.iter().enumerate().filter(|(_, r)| r["k"] == k).nth(n).expect("record").0
+    };
+    type Change = Box<dyn Fn(&mut Vec<Value>)>;
+    let cases: Vec<(&str, bool, Change)> = vec![
+        ("undamaged", true, Box::new(|_| {})),
+        (
+            "history line",
+            false,
+            Box::new(move |rs| {
+                let i = nth(rs, "dlg_history", 0);
+                rs[i]["line"] = json!(format!("{}x", rs[i]["line"].as_str().unwrap_or("")));
+            }),
+        ),
+        (
+            "answer history",
+            false,
+            Box::new(move |rs| {
+                let i = rs
+                    .iter()
+                    .position(|r| r["k"] == "dlg_history" && r["kind"] == "answer")
+                    .expect("answer");
+                rs[i]["line"] = json!("Continue.");
+            }),
+        ),
+        (
+            "cue text",
+            false,
+            Box::new(move |rs| {
+                let i = nth(rs, "dlg_text", 2);
+                rs[i]["cue_text"] = json!("<color=#000000>x</color>");
+            }),
+        ),
+        (
+            "answer text",
+            false,
+            Box::new(move |rs| {
+                let i = nth(rs, "dlg_text", 0);
+                rs[i]["answers"][0]["text"] = json!("Go on");
+            }),
+        ),
+        (
+            "speaker name",
+            false,
+            Box::new(move |rs| {
+                let i = nth(rs, "dlg_text", 1);
+                rs[i]["speaker_name"] = json!("Sela");
+            }),
+        ),
+        (
+            "speaker colour",
+            false,
+            Box::new(move |rs| {
+                let i = nth(rs, "dlg_text", 1);
+                rs[i]["speaker_color"] = json!("38527F");
+            }),
+        ),
+        (
+            "dropped record",
+            false,
+            Box::new(move |rs| {
+                let i = nth(rs, "dlg_history", 1);
+                rs.remove(i);
+            }),
+        ),
+        (
+            "undeclared",
+            false,
+            Box::new(move |rs| {
+                let i = nth(rs, "begin", 0);
+                if let Some(a) = rs[i]["observers"].as_array_mut() {
+                    a.retain(|o| o != "dialog_text");
+                }
+            }),
+        ),
+    ];
+    let spec = root().join("crates/wr-sim/fixtures/poc4.json");
+    let mut runs = Vec::new();
+    for (tag, valid, change) in &cases {
+        let dir = damaged_copy(&src, &tag.replace(' ', "-"), change.as_ref());
+        let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
+            ability_params_empty: None,
+            spec: &spec,
+            fixture: "seelah-a",
+            oracle: Some(&dir),
+            run: "record",
+            oracle_inputs: false,
+        })
+        .expect("fixture");
+        let equal = f.trace_diff.as_ref().is_some_and(wr_sim::runner::TraceDiff::equal);
+        assert_eq!(equal && f.valid(), *valid, "{tag}: equal {equal}, valid {}", f.valid());
+        runs.push(dir);
+    }
+    // Without the speaker state the window opened with, the cue without a speaker reads a
+    // colour from before the window: reported.
+    let dir = damaged_copy(&src, "no-speaker-state", &|rs| {
+        if let Some(b) = rs.iter_mut().find(|r| r["k"] == "begin") {
+            b.as_object_mut().expect("begin").remove("dialog_speaker");
+        }
+    });
+    let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
+        ability_params_empty: None,
+        spec: &spec,
+        fixture: "seelah-a",
+        oracle: Some(&dir),
+        run: "record",
+        oracle_inputs: false,
+    })
+    .expect("fixture");
+    assert!(!f.valid());
+    assert!(
+        f.world.coverage.unsupported.keys().any(|k| k.contains("custom speaker colour")),
+        "{:?}",
+        f.world.coverage.unsupported
+    );
+    runs.push(dir);
+    // The speaker state's fields missing or mistyped: reported, not taken as null.
+    for (tag, value) in [
+        ("color-missing", None),
+        ("color-number", Some(json!(123))),
+        ("name-number", Some(json!(7))),
+    ] {
+        let dir = damaged_copy(&src, tag, &move |rs| {
+            if let Some(b) = rs.iter_mut().find(|r| r["k"] == "begin") {
+                let s = b["dialog_speaker"].as_object_mut().expect("dialog_speaker");
+                let k = if tag.starts_with("name") { "custom_name" } else { "custom_color" };
+                match &value {
+                    Some(v) => {
+                        s.insert(k.into(), v.clone());
+                    }
+                    None => {
+                        s.remove(k);
+                    }
+                }
+            }
+        });
+        let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
+            ability_params_empty: None,
+            spec: &spec,
+            fixture: "seelah-a",
+            oracle: Some(&dir),
+            run: "record",
+            oracle_inputs: false,
+        })
+        .expect("fixture");
+        assert!(!f.valid(), "{tag}");
+        assert!(
+            f.world.coverage.unsupported.keys().any(|k| k.contains("malformed dialog_speaker")),
+            "{tag}: {:?}",
+            f.world.coverage.unsupported
+        );
+        runs.push(dir);
+    }
+    for d in runs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// A run without a recording loads the text too (a dialogue's start makes its speaker name),
+/// and writes no text records (nothing to compare them with).
+#[test]
+#[ignore = "needs the game's blueprint pack, the localization pack and Manual_13"]
+fn a_run_without_a_recording_loads_the_text() {
+    let spec = root().join("crates/wr-sim/fixtures/poc4.json");
+    let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
+        ability_params_empty: None,
+        spec: &spec,
+        fixture: "seelah-a",
+        oracle: None,
+        run: "record",
+        oracle_inputs: false,
+    })
+    .expect("fixture");
+    assert!(f.world.text.is_some());
+    assert!(!f.world.dialog.text_records);
+    assert!(!f.world.events.records.iter().any(|e| e.k == "dlg_history" || e.k == "dlg_text"));
 }

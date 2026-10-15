@@ -11,6 +11,7 @@ description = "The game simulation: entities, facts, stats, rulebook, RNG, sim c
 wr-paths.workspace = true
 wr-content.workspace = true
 wr-save.workspace = true
+wr-text.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

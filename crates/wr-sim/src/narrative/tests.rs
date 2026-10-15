@@ -403,3 +403,61 @@ fn initialized_alignment_sets_vector_and_history() {
     assert_eq!((h[1].position, h[1].direction), (a.vector, 0));
     assert_eq!(UnitAlignment::initialized(4).value(), 4);
 }
+
+/// A test pack and an empty shared-strings table on the world.
+fn with_text(w: &mut World, strings: &[(&str, &str)]) {
+    let map: std::collections::BTreeMap<String, String> =
+        strings.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+    let path = std::env::temp_dir().join(format!(
+        "wr-sim-text-{}-{}.wrtext",
+        std::process::id(),
+        strings.len()
+    ));
+    wr_text::pack::write(&map, (0, 0), &path).expect("pack");
+    // SAFETY: a file this test alone writes.
+    let pack = unsafe { wr_text::Pack::open(&path, wr_text::Locale::EnGb) }.expect("open");
+    w.text = Some(Rc::new(crate::text::TextData {
+        pack,
+        shared: crate::text::SharedStrings::default(),
+    }));
+}
+
+/// `StartDialog` without a target turns its `SpeakerName` into the start data's string: a
+/// name the game throws on (`{date}` without its parameter) stops the start, one the sim can't
+/// make (the narrator colour without `BlueprintRoot`) is reported and stops it too, a plain one
+/// is scheduled with the dialogue.
+#[test]
+fn start_dialog_speaker_names() {
+    for (key, scheduled, reported) in [
+        ("sp-ok", Some("A Voice"), false),
+        ("sp-throw", None, false),
+        ("sp-uns", None, true),
+        ("", Some(""), false),
+    ] {
+        let (mut w, _) = world();
+        with_text(&mut w, &[("sp-ok", "A Voice"), ("sp-throw", "{date}"), ("sp-uns", "{n}x{/n}")]);
+        let name = node(obj(
+            "Kingmaker.Localization.LocalizedString",
+            &[("m_Key", Node::Str(key.into()))],
+        ));
+        let start = node(obj(
+            "Kingmaker.Designers.EventConditionActionSystem.Actions.StartDialog",
+            &[("m_Dialogue", Node::BpRef(Guid(0xd1a1))), ("SpeakerName", name)],
+        ));
+        let owner = insert(
+            &w,
+            0xd1a0,
+            "Kingmaker.DialogSystem.Blueprints.BlueprintDialog",
+            &[("StartActions", actions(vec![start]))],
+        );
+        crate::elements::run_actions(&mut w, &owner, owner.view().obj("StartActions"));
+        let got = w.player.dialog.scheduled.as_ref().map(|s| s.custom_speaker_name.as_str());
+        assert_eq!(got, scheduled, "{key}");
+        let rep = w.coverage.unsupported.keys().any(|k| k.contains("StartDialog (speaker name"));
+        assert_eq!(rep, reported, "{key}: {:?}", w.coverage.unsupported);
+        // The request is recorded before the name is made (WrathOracle's prefix), whatever
+        // follows.
+        let requests = w.events.records.iter().filter(|e| e.k == "dlg_request").count();
+        assert_eq!(requests, 1, "{key}");
+    }
+}

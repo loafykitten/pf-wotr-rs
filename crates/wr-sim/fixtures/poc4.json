@@ -36,6 +36,18 @@
    "steps": ["wait:30", "dialog:7c26eaf59be4e5848927d73526e20748", "waitdialog",
              "dialogrun:5422edfb2195fbb4d94c4c4773f9fe27,db14014b10293e04fb0fec66652e5fb3,905c535dfde1fd448a75a1e1ba423283,e497fc464b56df946bb85afb0ef920fe,7a580452d0019f2428e86e0ad2aa83dc",
              "wait:120", "dialogrun", "wait:60"]
+  },
+  "camelia-a": {
+   "save": "Manual_13",
+   "steps": ["zone:d34daae626f91364ca0775f047057508", "waitdialog",
+             "dialogrun:691061ff298ee00459d486d5784d3d7f",
+             "wait:120"]
+  },
+  "camelia-b": {
+   "save": "Manual_13",
+   "steps": ["zone:d34daae626f91364ca0775f047057508", "waitdialog",
+             "dialogrun:35d480d928e845a40a0661de241ceb79,712417ce7cc82544b8902dc52e097651,691061ff298ee00459d486d5784d3d7f",
+             "wait:120"]
   }
  }
 }

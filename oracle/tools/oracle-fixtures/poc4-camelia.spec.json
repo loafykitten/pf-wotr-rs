@@ -1,0 +1,15 @@
+{
+ "plan": {"fixedDelta": 0.016666668, "seed": 20261011},
+ "fixtures": [
+  {"name": "camelia-a",
+   "steps": ["move:73.06,36.43,154.3", "waitdialog",
+             "dialogrun:691061ff298ee00459d486d5784d3d7f",
+             "wait:120"],
+   "replays": 1},
+  {"name": "camelia-b",
+   "steps": ["move:73.06,36.43,154.3", "waitdialog",
+             "dialogrun:35d480d928e845a40a0661de241ceb79,712417ce7cc82544b8902dc52e097651,691061ff298ee00459d486d5784d3d7f",
+             "wait:120"],
+   "replays": 1}
+ ]
+}

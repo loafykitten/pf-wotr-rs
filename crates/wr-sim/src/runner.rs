@@ -550,7 +550,8 @@ fn run_step(
             w.events.push("input", json!({ "step": format!("dialog:{arg}") }));
             // `StartDialogWithoutTarget(dialog, null, Main_)`.
             let mc = w.main_character;
-            crate::dialog::start_dialog(w, d, mc, None);
+            crate::dialog::start_dialog(w, d, mc, None, Ok("<null>".to_owned()))
+                .map_err(|e| anyhow::anyhow!("dialog step: {e}"))?;
             tick(w, None);
         }
         "waitdialog" => {
@@ -693,6 +694,14 @@ pub struct Stream {
     pub health_problems: Vec<String>,
 }
 
+/// Whether the recording's `begin` record declares the observation family `name`.
+fn declares(records: &[Value], name: &str) -> bool {
+    records
+        .iter()
+        .find(|r| r["k"] == "begin")
+        .is_some_and(|b| b["observers"].as_array().is_some_and(|a| a.iter().any(|o| o == name)))
+}
+
 fn pick(r: &Value, fields: &[&str]) -> Value {
     let mut m = serde_json::Map::new();
     m.insert("k".into(), r["k"].clone());
@@ -814,6 +823,8 @@ fn normalize(r: &Value) -> Option<Value> {
             ],
         ),
         "dlg_stop" => pick(r, &["dialog"]),
+        "dlg_history" => pick(r, &["kind", "of", "line"]),
+        "dlg_text" => pick(r, &["cue", "cue_text", "answers", "speaker_name", "speaker_color"]),
         "input" if r["step"].as_str().is_some_and(|s| s.starts_with("answer")) => {
             pick(r, &["answer"])
         }
@@ -1444,6 +1455,16 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
             ..crate::hydrate::Options::default()
         },
     )?;
+    // Text from the English pack (the oracle build's locale), loaded for every run, with or
+    // without a recording (a dialogue's start makes its speaker name); a recording with the
+    // dialogue's text (`dlg_history`, `dlg_text`) needs it.
+    let text_error = match crate::text::TextData::load_default() {
+        Ok(t) => {
+            w.text = Some(Rc::new(t));
+            None
+        }
+        Err(e) => Some(e),
+    };
     let first_runtime_id = w.player.max_unique_id;
     let runtime_ids = RuntimeIds::of(&w);
     let load_unsupported = w.coverage.unsupported.clone();
@@ -1493,6 +1514,42 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
             Err(e) => w
                 .coverage
                 .unsupported(format!("dialogue replay: a malformed unit group record ({e})")),
+        }
+        if let Some(e) = &text_error
+            && declares(&records, "dialog_text")
+        {
+            w.coverage.unsupported(format!("dialogue text: no localization pack ({e:#})"));
+        }
+        if declares(&records, "dialog_text") {
+            w.dialog.text_records = true;
+            // The controller's custom speaker fields when the window opened (they outlive
+            // dialogues and loads).
+            let b = records.iter().find(|r| r["k"] == "begin").map(|b| &b["dialog_speaker"]);
+            // Each field present, a string or null; anything else leaves the state unknown
+            // (reported where it's read) and is reported here.
+            let field = |s: &Value, k: &str| match s.get(k) {
+                Some(Value::Null) => Some(None),
+                Some(Value::String(v)) => Some(Some(v.clone())),
+                _ => None,
+            };
+            match b {
+                Some(s) if s["controller"] == true => {
+                    match (field(s, "custom_color"), field(s, "custom_name")) {
+                        (Some(color), Some(name)) => {
+                            w.dialog.custom_speaker_color = Some(color);
+                            w.dialog.custom_speaker_name = name;
+                        }
+                        _ => w
+                            .coverage
+                            .unsupported("dialogue text: a malformed dialog_speaker record"),
+                    }
+                }
+                Some(s) if s["controller"] == false => {}
+                Some(Value::Null) | None => {}
+                Some(_) => {
+                    w.coverage.unsupported("dialogue text: a malformed dialog_speaker record")
+                }
+            }
         }
         // The window starts after the oracle's settle ticks: its clock.
         let start = read_json(&dir.join(format!("state-start-{}.json", o.run)))?;
