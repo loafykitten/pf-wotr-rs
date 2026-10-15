@@ -130,7 +130,10 @@ fn phases_follow_the_game_modes_registrations() {
     assert_eq!(f.to(LeavePrefix), Err(Misplaced::NotRegistered));
     assert_eq!(
         f.finish(),
-        vec![Groups, Turn, TurnChoose, Move, Sleeping, Life, Conscious, Helpless, Inspect, GameLog, Post]
+        vec![
+            Groups, Turn, TurnChoose, Move, Sleeping, Life, Conscious, Helpless, Inspect, GameLog,
+            Post
+        ]
     );
     f.start(mode::DIALOG);
     assert_eq!(
