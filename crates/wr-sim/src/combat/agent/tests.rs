@@ -266,6 +266,15 @@ impl Recorded<'_> {
         None
     }
 
+    /// The next input record, which must be an `ev` record.
+    fn take_ev(&mut self, ev: &str) -> R<Value> {
+        match self.next_input() {
+            Some(r) if r["ev"] == ev => Ok(r.clone()),
+            Some(r) => Err(Desync(format!("wanted {ev}, the recording has {r}"))),
+            None => Err(Desync(format!("wanted {ev}, the records ended"))),
+        }
+    }
+
     /// The next record that must be the agent leaf `f`.
     fn take_leaf(&mut self, f: &str) -> R<&Value> {
         match self.next_input() {
@@ -463,6 +472,39 @@ impl AgentInputs for Recorded<'_> {
             self.errors.push(format!("at {f}'s end: {d}"));
         }
         Ok(())
+    }
+    fn tick_start(&mut self, _: &mut World, _: EntityIdx, dt: f32) -> R<()> {
+        let r = self.take_ev("ag_tick")?;
+        if bits(&f(&r["dt"])) != bits(&dt) {
+            return Err(Desync(format!("TickMovement({dt}): the recording's is {}", r["dt"])));
+        }
+        Ok(())
+    }
+    fn tick_end(&mut self, _: &mut World, _: EntityIdx, ret: V3) -> R<()> {
+        let r = self.take_ev("ag_tick_end")?;
+        if bits(&v3(&r["ret"])) != bits(&ret) {
+            self.errors
+                .push(format!("TickMovement returned {ret:?}, the game {:?}", v3(&r["ret"])));
+        }
+        Ok(())
+    }
+    fn done_start(&mut self, _: &mut World, _: EntityIdx, path: &str, forced: bool) -> R<()> {
+        let r = self.take_ev("ag_done")?;
+        if r["path"].as_str() != Some(path) || r["forced"].as_bool() != Some(forced) {
+            return Err(Desync(format!(
+                "OnPathComplete({path}, {forced}): the recording's is {r}"
+            )));
+        }
+        Ok(())
+    }
+    fn done_end(&mut self, _: &mut World, _: EntityIdx) -> R<()> {
+        self.take_ev("ag_done_end").map(|_| ())
+    }
+    fn req_start(&mut self, _: &mut World, _: EntityIdx) -> R<()> {
+        self.take_ev("ag_req").map(|_| ())
+    }
+    fn req_end(&mut self, _: &mut World, _: EntityIdx, _: Option<&PathRequest>) -> R<()> {
+        self.take_ev("ag_req_end").map(|_| ())
     }
     fn group_memory(&mut self, _: &mut World, _: EntityIdx) -> R<bool> {
         // Since `poc5-tb-103` the evaluation `ConnectToGroups` makes (the `Group` getter resolves the
@@ -665,6 +707,12 @@ fn inside(r: &Value, u: &str) -> bool {
     }
     let ev = r["ev"].as_str().unwrap_or("");
     (ev == "ag_v"
+        || ev == "ag_tick"
+        || ev == "ag_tick_end"
+        || ev == "ag_done"
+        || ev == "ag_done_end"
+        || ev == "ag_req"
+        || ev == "ag_req_end"
         || ev == "ag_phys"
         || ev == "ag_call"
         || ev == "ag_call_end"
@@ -726,7 +774,7 @@ fn every_recorded_tick_reruns_bit_for_bit() {
                 failures.push(format!("{}: tick {i} of {u} has no end", path.display()));
                 break;
             };
-            let inner: Vec<&Value> = recs[i + 1..end].iter().filter(|x| inside(x, &u)).collect();
+            let inner: Vec<&Value> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
             for x in &inner {
                 paths.note(x);
             }
@@ -900,8 +948,7 @@ fn every_recorded_path_completion_reruns_bit_for_bit() {
                     i = end + 1;
                     continue;
                 }
-                let inner: Vec<&Value> =
-                    recs[i + 1..end].iter().filter(|x| inside(x, &u)).collect();
+                let inner: Vec<&Value> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
                 let mut w = world();
                 let unit_ix = unit(&mut w, &u, None, 10);
                 w.combat.turn_based = true;
@@ -1049,8 +1096,7 @@ fn every_recorded_path_to_reruns_bit_for_bit() {
                     paths.note(x);
                 }
                 let e = &recs[end];
-                let inner: Vec<&Value> =
-                    recs[i + 1..end].iter().filter(|x| inside(x, &u)).collect();
+                let inner: Vec<&Value> = recs[i..=end].iter().filter(|x| inside(x, &u)).collect();
                 let mut w = world();
                 let unit_ix = unit(&mut w, &u, None, 10);
                 w.combat.turn_based = true;

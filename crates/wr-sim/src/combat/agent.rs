@@ -184,6 +184,16 @@ pub trait AgentInputs {
     fn call(&mut self, w: &mut World, u: EntityIdx, f: &'static str, index: Option<i32>) -> R<()>;
     /// The agent's own method `f` returned: the recording's end of that call (its state after).
     fn call_end(&mut self, w: &mut World, u: EntityIdx, f: &'static str) -> R<()>;
+    /// `TickMovement(deltaTime)` starts (the recording's `ag_tick`: its delta and the state
+    /// before) and returns `ret` (`ag_tick_end`).
+    fn tick_start(&mut self, w: &mut World, u: EntityIdx, dt: f32) -> R<()>;
+    fn tick_end(&mut self, w: &mut World, u: EntityIdx, ret: V3) -> R<()>;
+    /// `OnPathComplete(p, forcedPath)` starts (`ag_done`) and returns (`ag_done_end`).
+    fn done_start(&mut self, w: &mut World, u: EntityIdx, path: &str, forced: bool) -> R<()>;
+    fn done_end(&mut self, w: &mut World, u: EntityIdx) -> R<()>;
+    /// `PathTo` starts (`ag_req`) and returns (`ag_req_end`, with the request it made).
+    fn req_start(&mut self, w: &mut World, u: EntityIdx) -> R<()>;
+    fn req_end(&mut self, w: &mut World, u: EntityIdx, request: Option<&PathRequest>) -> R<()>;
     /// `unit.EntityData.Group?.Memory != null` (`ConnectToGroups` returns before marking the
     /// agents without it).
     fn group_memory(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
@@ -710,6 +720,13 @@ fn move_unit(w: &mut World, u: EntityIdx, p: V3, shift: V3, inp: &mut dyn AgentI
 /// `TickMovement(deltaTime)` in turn-based combat: the agent's new position (the caller stores
 /// it in the view and the unit).
 pub fn tick_movement(w: &mut World, u: EntityIdx, dt: f32, inp: &mut dyn AgentInputs) -> R<V3> {
+    inp.tick_start(w, u, dt)?;
+    let ret = tick_movement_body(w, u, dt, inp)?;
+    inp.tick_end(w, u, ret)?;
+    Ok(ret)
+}
+
+fn tick_movement_body(w: &mut World, u: EntityIdx, dt: f32, inp: &mut dyn AgentInputs) -> R<V3> {
     if !w.combat.turn_based {
         return bad("TickMovement outside turn-based combat (real time isn't ported)");
     }
@@ -959,6 +976,36 @@ pub fn path_to(
     dest_is_self: bool,
     inp: &mut dyn AgentInputs,
 ) -> R<Option<PathRequest>> {
+    inp.req_start(w, u)?;
+    let req = path_to_body(
+        w,
+        u,
+        command,
+        destination,
+        approach,
+        max_approach,
+        distance_xz,
+        dest_agent,
+        dest_is_self,
+        inp,
+    )?;
+    inp.req_end(w, u, req.as_ref())?;
+    Ok(req)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn path_to_body(
+    w: &mut World,
+    u: EntityIdx,
+    command: Option<u32>,
+    destination: V3,
+    approach: f32,
+    max_approach: f32,
+    distance_xz: bool,
+    dest_agent: Option<DestAgent>,
+    dest_is_self: bool,
+    inp: &mut dyn AgentInputs,
+) -> R<Option<PathRequest>> {
     if !w.combat.turn_based {
         return bad("PathTo outside turn-based combat (real time isn't ported)");
     }
@@ -1070,6 +1117,19 @@ pub fn on_path_complete(
     forced: bool,
     inp: &mut dyn AgentInputs,
 ) -> R<()> {
+    inp.done_start(w, u, &p.key, forced)?;
+    on_path_complete_body(w, u, p, error, forced, inp)?;
+    inp.done_end(w, u)
+}
+
+fn on_path_complete_body(
+    w: &mut World,
+    u: EntityIdx,
+    p: &AgentPath,
+    error: bool,
+    forced: bool,
+    inp: &mut dyn AgentInputs,
+) -> R<()> {
     if !w.combat.turn_based {
         return bad("OnPathComplete outside turn-based combat (real time isn't ported)");
     }
@@ -1130,6 +1190,7 @@ pub fn follow_precomputed_path(
     max_approach: f32,
     inp: &mut dyn AgentInputs,
 ) -> R<()> {
+    inp.call(w, u, "FollowPrecomputedPath", None)?;
     let Some(&last) = p.points.last() else {
         return bad("FollowPrecomputedPath: an empty path (the game throws)");
     };
@@ -1141,7 +1202,7 @@ pub fn follow_precomputed_path(
     a.dest = Some(last);
     on_path_complete(w, u, p, error, forced, inp)?;
     agent_mut(w, u)?.follow = true;
-    Ok(())
+    inp.call_end(w, u, "FollowPrecomputedPath")
 }
 
 /// `ForcePath(p, disableApproachRadius)`.
@@ -1153,6 +1214,7 @@ pub fn force_path(
     disable_approach: bool,
     inp: &mut dyn AgentInputs,
 ) -> R<()> {
+    inp.call(w, u, "ForcePath", None)?;
     let Some(&last) = p.points.last() else {
         return bad("ForcePath: an empty path (the game throws)");
     };
@@ -1162,7 +1224,8 @@ pub fn force_path(
     a.requested = Some(p.clone());
     a.requested_new = true;
     a.dest = Some(last);
-    on_path_complete(w, u, p, error, true, inp)
+    on_path_complete(w, u, p, error, true, inp)?;
+    inp.call_end(w, u, "ForcePath")
 }
 
 /// `UpdateVelocity()`: the next velocity while really moving or warming up, else zero.

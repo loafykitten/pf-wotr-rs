@@ -25,6 +25,7 @@ pub mod initiative;
 pub mod inspect;
 pub mod life;
 pub mod loot;
+pub mod movement;
 pub mod oracle;
 pub mod order;
 pub mod orientation;
@@ -70,6 +71,10 @@ pub struct UnitCombat {
     pub imp: impatience::UnitImpatience,
     /// The view's movement agent (`UnitMovementAgent`).
     pub agent: agent::Agent,
+    /// `UnitEntityData.PreviousPosition` (`UnitMoveController.TickUnit` sets it).
+    pub prev_position: [f32; 3],
+    /// `UnitEntityData.DesiredOrientation` (`m_Orientation` is the unit's `orientation`).
+    pub desired_orientation: f32,
 }
 
 /// A timer (UniRx `Observable.Timer`) that removes a buff when it fires
