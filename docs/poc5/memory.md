@@ -7,9 +7,11 @@ membership read recorded in `poc5-tb-103` (59,991 `Memory.Enemies` reads, 369 fl
 (`ContainsVisible`: the impatience controller's `ivis` and `imp_s` `vis`, 16 a record run) aren't checked: `Visible`
 isn't recorded. **H1 (stream H, same day): the controller's tick computed** against WrathOracle's new `memory`
 observer: on `poc5-tb-111`, `-112` and `-113` every recorded `UnitMemoryController.Tick` (42,306 over 18 runs) reruns from the recorded
-state to the recorded memory, slot for slot ("H1: result"). Not wired into the driven replay yet (wiring notes
-there); the replay matches the memory controller's `AddToMemory` calls in offensive actions and commands' acts. Tags as elsewhere: [M]
-measured, [C] from the decompiled code, [I] inferred.
+state to the recorded memory, slot for slot ("H1: result"). **Then wired (the slice the main session assigned as
+H2): the memory is computed in the driven replay** with the `memory` observer: `poc5-tb-111` to `-114` valid on all
+24 runs, 58,923 ticks run, 5,478,537 of their reads checked and the other models' 317,352 reads of the memory checks
+("H2: the memory in the driven replay"). Tags as elsewhere: [M] measured, [C] from the decompiled code, [I]
+inferred.
 
 Group memory and visibility are among the biggest inputs the POC-5 replay still takes from the recording: the AI's,
 the engagement controller's and `UnitAttack`'s `enemies` reads, the engagement's `los`, the commands' `stealth`, the
@@ -350,7 +352,7 @@ record, outside the span, another unit, out of the handler, an act's calls moved
 producer), each reported. The handler's other effects (`LastSurpriseActionTime`, a neutral target's
 `AttackFactions`) aren't modelled, as before.
 
-### Wiring notes (for the main session)
+### Wiring notes (for the main session; done in "H2: the memory in the driven replay")
 
 1. State: put a `GroupMemory<EntityIdx>` on `groups::Group` (replacing `groups::Memory`), loaded from `mem_init`
    (`GroupMemory::from_layout`; report a `~fake:` memory), and a `MemoryController` on `w.combat` from `mem_initq`.
@@ -373,6 +375,61 @@ producer), each reported. The handler's other effects (`LastSurpriseActionTime`,
    flat-footed `target_remembers_initiator` (`contains`), `memc`, `hpcm`, `ivis` and `imp_s` `vis`
    (`contains_visible`), the `leave_tick` memory rows, `stealth`. `tests.rs`' bookkeeping check can take `in_game`
    for a unit leaving its group (today counted apart).
+
+## H2: the memory in the driven replay [M]
+
+The slice the main session assigned after H1 (the design's H2 below, line of sight, keeps its name). With WrathOracle's
+`memory` observer (and the impatience, command and turn records it requires) the group memory is the sim's; older
+captures replay as before (`-109`, `-95`, `-96` unchanged).
+
+- **State.** Each `groups::Group` carries a `GroupMemory<EntityIdx>` (`mem`), loaded from `mem_init` (a fake group's
+  memory with entries, or a live group without one, reported); `w.combat.memory` holds the controller's queue and
+  `s_UnitsForRemove` (from `mem_initq`). A group the sim makes gets an empty memory; `UnitGroup.Dispose` clears it,
+  `UpdateAttackFactionsCache` (a member added or removed, a spawn, a destruction) clears its enemy list,
+  `HandleUnitDestroyed` removes the unit from every memory.
+- **The tick** (`replay/memory.rs`): `mem_tick` places `Phase::Memory` (between `Sleeping` and `Join`, Default mode
+  only; a Default frame without its tick, or with two, is reported) and runs `memory::tick` on the sim's memories.
+  The reads the sim makes itself are checked against their `mem_v` leaves, the sim's value used: `peace` (the
+  faction), `grp` (`Group`, its `UpdateGroup`), `getgrp`, `enemy` (`groups::is_enemy` over the members' factions),
+  `gdt` (the clock), `unit` and `ingame` (the entities), `disp`, `inv` (conditions), `wake`'s arithmetic; the frame
+  (the `tick` record's, plus the replay's shift: the record run's begin frame when given, else the replay's first
+  tick, then checked on every tick), GameTime, the queue and `s_UnitsForRemove` at the entry. Taken from their
+  leaves: `apeace`, `ready` (fog of war), `near` (vision range, in the set's order), `pass`, `los`, `stl`, `seen`
+  (the invisibility loop), the identity hashes (the run's `hash` records). Each `pass` row, each `end` row and every
+  memory at the tick's entry and end is compared slot for slot with the sim's, and the memory's own `mem_add` /
+  `mem_remove` records with the sim's changes, in order, at every read. A difference is reported and the recorded
+  state taken.
+- **Between ticks** the memory changes as the sim changes it: the readers' cache fills, `Remove` at a destruction,
+  the cache clears. Each `pre` row is checked: the dictionary must be the sim's. The fog of war's read is modelled
+  (`FogOfWarController`, before the sleeping units: in combat, `Player.Group.Memory.Enemies`). A cache filled by a
+  reader the sim doesn't run (the AI's ally lists `FillGroupFromMemory`, the agent's obstacles, the UI) is taken
+  when it equals the sim's own fill now ("verified", 23,295 over the 24 runs), or, failing that, when it can be a fill
+  at another moment: the memory's keys in their order, each an enemy for `Enemies` ("taken", 24: one a run, a stale
+  party list after a unit left the game). Anything else is reported.
+- **The readers' reads are checks** (`memory::sim::check`: the sim's value used, the recorded one compared, a
+  difference reported): the engagement's `Enemies` (313,953 over the 24 runs), the AI's `Enemies` (1,671) and
+  `HasPlayerCharacterInMemory` (none in these fights), `UnitAttack`'s `Enemies` (42), the attack of opportunity's
+  `target.Memory.Contains` (12), the flat-footed check's `Target.Memory.Contains(Initiator)` (1,401), the impatience
+  controller's `ContainsVisible` (273: its tick, `SetupPriorityTarget`, `TryAddBotherUnit`'s `vis`). The leave
+  controller reads the sim's memory (`Contains`, `UnitsList`, which it fills), its `leave_tick` rows checked against
+  it (a list a reader the sim doesn't run filled taken as above).
+- **The queue.** `AddToMemory` from offensive actions and commands' acts runs on the sim's controller: each `mem_q`'s
+  `queued` is checked (`mem_queued_checked`).
+
+Counters: `wr-combat replay` prints `memory computed: ticks …, reads checked …, inputs …, states checked …, fills by
+unmodelled readers … (verified) … (taken), changes matched …; readers' reads checked {…}`. On every run of
+`poc5-tb-111`, `-112`, `-113` and `-114` the replay is valid (equal T0 stream, nothing reported); per record run: ticks
+2,484 / 2,713, 3,007 / 1,992, 2,033 / 1,873, 2,883 / 2,656 (focus / nearest), 164,786 to 290,262 tick reads checked.
+`computed_memory_replays_are_valid_and_damage_is_reported` (`tests/poc5.rs`) replays `-111` and `-114`'s 12 runs and
+damages `-111` 16 ways (an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
+fill that can't be one, the frame, a hash, `queued`, a reader's `Enemies`, a flat-footed `Contains`, a leave row):
+each reported. The POC-5 suite and the agent's stay as they were.
+
+Still inputs (the design's later steps): the ready groups and `IsInFogOfWar` (fog of war), the near units (vision
+range), line of sight, stealth and the invisibility loop, `Passive`, `AwakeTimer` (not tracked), the area's
+`Peaceful`, and the caches a reader the sim doesn't run fills. Not modelled, as before: the offensive action's
+`LastSurpriseActionTime` and a neutral target's `AttackFactions`, `UnitGroupsController`'s deferred faction updates
+(a faction change: its enemy list clear would show as a cache difference, reported).
 
 ## Observer changes requested
 
