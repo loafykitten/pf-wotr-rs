@@ -322,7 +322,8 @@ waypoint advances and the path's end.
   raised by cutscene moves, `UnitMoveAlongPath`, riders and a few abilities, isn't modelled). Every object the sim
   queues (`nav_guo`: centre, extents, mask, flags, tag), applies (`nav_update`: its erosion) and every refresh
   (`nav_tags`: `erodeIterations`, the tag, the grid's hash, the blocked and ally-blocked counts) is paired in order
-  with the recording's, so the corpulences and flags used are checked where they're used. `ConstructTags` reads the
+  with the recording's (each record's id an integer, mapped one to one onto the sim's objects), and every frame's
+  events are paired by the frame's end, so the corpulences and flags used are checked where they're used. `ConstructTags` reads the
   grid's current `erodeIterations` (it was the nav file's).
 
 **The paths.** Each `ABPathWithClearance` the sim's agent requests (`PathTo` from the commands, `FindPath` from the
@@ -343,7 +344,7 @@ every delivery: `OnPathComplete` (`ag_done`) **runs on the sim's path** (the rec
 when `FixPathIfTooShort` made a fake path, the sim's path must be one it replaces (fewer than two points, or two
 within 0.1 m in x and z; the fake path's points are an input). Every `nav_*`/`path_*` record must be of its frame,
 and a `path_fin`, `path_seek` or `path_mod` of a path no request started is reported. Captures without `paths` (up to `-113`) take the
-recorded paths as before (A2).
+recorded paths as before (A2); `paths` declared without the driven agent's chain is reported.
 
 **Still inputs:** when a path is delivered (`PathSync`), line of sight (search and simulation), the units'
 corpulences, `MaxSpeed`/`FlyHeight` in the simulation, the Unity clock the navigation timer reads (a replay's are
@@ -376,7 +377,7 @@ the combat log).
 The coverage line (`wr-combat replay`): `physics and paths: physics queries computed ... simulation steps ... paths
 computed ... deliveries checked ... graph events matched ...`.
 
-`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 51
+`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 55
 ways (and its first replay once: the timer's refresh removed), each reported: the agent's, a simulation step's and a
 span's query (distance, point, collider and its sibling path, hit); a step's
 end (position, result, length), a grid read, a missing read or end, a stray simulation read, a line-of-sight
@@ -385,8 +386,9 @@ changed, the transcript empty or unreadable, its return missing, moved before it
 a path no request started, its end node, its modifiers changed or missing, the seeker's decision (not taken, no
 modifiers, no callback), a stray `path_seek`, the delivered path, a definition, the AI's read, a fake path where
 `FixPathIfTooShort` keeps the path; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
-missing, a refresh repeated, the clock read missing or another, the timer negative, the observer undeclared, a
-corpulence that changes, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
+missing, a refresh repeated, the clock read missing or another, the timer negative, the observer undeclared or declared
+without `agent_sync`, a refresh moved into the next frame, a graph update's id unreadable, a definition of another
+kind of path, a corpulence that changes, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
 and checks the counts.
 
 **Edits outside the agent's and paths' files** (kept small for the other streams): `combat/replay.rs` (the module,

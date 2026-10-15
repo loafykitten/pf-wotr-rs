@@ -711,8 +711,7 @@ fn damage_cases_of(dir: &std::path::Path, run: &str, cases: &[(&str, Change)]) {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some((want, change)) = cases.get(i) else { break };
-                    let (mut w, trace) =
-                        replay::prepare_world(SAVE, dir, run).expect("prepare");
+                    let (mut w, trace) = replay::prepare_world(SAVE, dir, run).expect("prepare");
                     let mut changed =
                         Trace { records: trace.records.clone(), sites: trace.sites.clone() };
                     change(&mut changed.records);
@@ -1013,6 +1012,49 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
         ("driven replay: agent: a ray query from", |recs| {
             let at = later(recs, |r| ev(r, "ag_phys") && r["ctx"] == "tick");
             recs[at]["col"]["sib"] = json!([999]);
+        }),
+        ("observer paths without the driven agent", |recs| {
+            let b = pos(recs, |r| r["k"] == "begin");
+            let obs: Vec<V> = recs[b]["observers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|x| *x != "agent_sync")
+                .cloned()
+                .collect();
+            recs[b]["observers"] = json!(obs);
+        }),
+        ("graph events left at a frame's end", |recs| {
+            // A removal's refresh moved into the next frame.
+            let s = sync(recs);
+            let at = (s..recs.len())
+                .find(|j| {
+                    ev(&recs[*j], "nav_tags")
+                        && ev(&recs[*j - 1], "nav_update")
+                        && recs[*j]["erode"].as_i64().is_some_and(|e| e > 0)
+                })
+                .unwrap();
+            let t = recs[at]["t"].as_i64().unwrap();
+            let mut r = recs.remove(at);
+            r["t"] = json!(t + 1);
+            let next = at + recs[at..].iter().position(|x| x["k"] == "tick").unwrap();
+            recs.insert(next + 1, r);
+            renumber(recs);
+        }),
+        ("a definition of a XPath path", |recs| {
+            let fin = fin_of_done(recs);
+            let key = recs[fin]["path"].clone();
+            let at = tb(recs, |r| ev(r, "ag_pathdef") && r["path"] == key && r["pending"] != true);
+            recs[at]["kind"] = json!("XPath");
+        }),
+        ("a graph update without its id", |recs| {
+            let at = tb(recs, |r| ev(r, "nav_guo"));
+            let id = recs[at]["id"].clone();
+            for r in recs.iter_mut() {
+                if (ev(r, "nav_guo") || ev(r, "nav_update")) && r["id"] == id {
+                    r["id"] = json!(null);
+                }
+            }
         }),
         ("a path no request started", |recs| {
             let at = fin_of_done(recs);

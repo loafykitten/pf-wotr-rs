@@ -1457,6 +1457,12 @@ impl<'t> Driver<'t> {
             };
             d.nav_start(w);
         }
+        // The paths' records need the driven agent (`agent_sync` and its chain).
+        if !d.ag && declared.contains(&"paths") {
+            w.coverage.unsupported(
+                "driven replay: paths: observer paths without the driven agent (agent_sync and the impatience, targets, engage, ai, command and turn records)",
+            );
+        }
         d.imp_sites = trace
             .sites
             .iter()
@@ -3037,6 +3043,9 @@ impl Driver<'_> {
                 self.run_phases(w, &rest);
                 self.draining = None;
                 self.mem_frame_done(w);
+                if self.ag {
+                    self.nav_frame_done(w);
+                }
                 if self.tt {
                     self.tt_close(w);
                 }

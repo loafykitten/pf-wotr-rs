@@ -387,7 +387,7 @@ impl Driver<'_> {
             let r = &trace.records[j];
             let why = match (r["ev"].as_str().unwrap_or(""), &ev) {
                 ("nav_guo", NavEvent::Queued { id, update: o }) => {
-                    let mut why = self.nav_same_guo(r["id"].as_i64().unwrap_or(-1), *id);
+                    let mut why = self.nav_same_guo(r["id"].as_i64(), *id);
                     let flags: String = [
                         o.update_physics,
                         o.update_erosion,
@@ -419,7 +419,7 @@ impl Driver<'_> {
                     why
                 }
                 ("nav_update", NavEvent::Applied { id, erosion }) => {
-                    let mut why = self.nav_same_guo(r["id"].as_i64().unwrap_or(-1), *id);
+                    let mut why = self.nav_same_guo(r["id"].as_i64(), *id);
                     if r["erosion"].as_i64() != Some(i64::from(*erosion))
                         || !fields(r, &["id", "erosion"])
                     {
@@ -453,7 +453,8 @@ impl Driver<'_> {
     }
 
     /// Recorded object ids map one to one onto the sim's.
-    fn nav_same_guo(&mut self, theirs: i64, ours: u32) -> Option<String> {
+    fn nav_same_guo(&mut self, theirs: Option<i64>, ours: u32) -> Option<String> {
+        let Some(theirs) = theirs else { return Some("a graph update without its id".into()) };
         let ids = &mut self.ags.nav.guo_ids;
         match ids.get(&theirs) {
             Some(&o) if o == ours => None,
@@ -883,10 +884,17 @@ impl Driver<'_> {
         &mut self,
         w: &mut World,
         key: &str,
+        kind: &str,
         v: &[V3],
         err: bool,
         cs: i64,
     ) -> bool {
+        // The sim's requests are `ABPathWithClearance`s.
+        let ours =
+            self.ags.nav.pending.contains_key(key) || self.ags.nav.computed.contains_key(key);
+        if ours && kind != "ABPathWithClearance" {
+            Self::nav_unsupported(w, format!("{key}: a definition of a {kind} path"));
+        }
         if let Some(p) = self.ags.nav.pending.get_mut(key) {
             p.defs.push((v.to_vec(), err, cs));
             return true;
@@ -1245,6 +1253,26 @@ impl Driver<'_> {
             )));
         }
         Ok(r)
+    }
+
+    /// A frame's controllers have all run: the grid's events of the frame are the recording's,
+    /// all paired.
+    pub(super) fn nav_frame_done(&mut self, w: &mut World) {
+        if !self.ags.nav.paths || w.combat.nav.broken {
+            return;
+        }
+        if !self.nav_in_step(w) {
+            let ours = w.combat.nav.nav.as_ref().map_or(0, |n| n.log.len());
+            Self::nav_unsupported(
+                w,
+                format!(
+                    "graph events left at a frame's end: {} recorded, {} the sim's",
+                    self.ags.nav.rec_nav.len(),
+                    ours - self.ags.nav.log_at.min(ours)
+                ),
+            );
+            // (Paired from here on as they come.)
+        }
     }
 
     pub(super) fn nav_finish(&mut self, w: &mut World) {

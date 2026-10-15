@@ -755,7 +755,7 @@ impl Driver<'_> {
         match (pts, r["err"].as_bool(), r["cs"].as_i64(), r["kind"].as_str(), r["pid"].as_i64()) {
             (Some(p), Some(err), Some(cs), Some(kind), Some(pid)) => {
                 // A path the sim computes: the definition is a check.
-                self.nav_def(w, k, &p, err, cs);
+                self.nav_def(w, k, kind, &p, err, cs);
                 self.ags.paths.insert(k.to_owned(), p);
                 self.ags.defs.insert(k.to_owned(), (err, cs, kind.to_owned(), pid));
             }
