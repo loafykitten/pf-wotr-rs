@@ -2695,6 +2695,36 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 }
                 ok
             }
+            // A ranged attack's projectile launched (`proj_launch`, WrathOracle's projectile pin):
+            // in `RuleAttackWithWeapon`'s `OnTrigger`, outside any handler, right after its own
+            // attack roll's end; its rule, roll and target this attack's, nothing else. Its flight
+            // and arrival (`proj_hit`) are the pin's, outside rule spans.
+            Some("obs") if x["ev"] == "proj_launch" => {
+                let shape = x.as_object().is_some_and(|o| {
+                    let mut k: Vec<&str> = o.keys().map(String::as_str).collect();
+                    k.sort_unstable();
+                    k == ["bp", "cb", "ev", "k", "p", "res", "roll", "rule", "seq", "t", "tgt", "trig"]
+                });
+                let roll = x["roll"].as_i64();
+                let roll_ended = roll.is_some()
+                    && span[n - 1]["k"] == "rule_end"
+                    && span[n - 1]["id"].as_i64() == roll
+                    && span[..n].iter().any(|r| {
+                        r["k"] == "rule"
+                            && r["id"].as_i64() == roll
+                            && r["parent"].as_i64() == Some(rule)
+                            && r["class"].as_str().is_some_and(|c| short_class(c) == "RuleAttackRoll")
+                    });
+                shape
+                    && !own_handler
+                    && stage == 2
+                    && short_class(&top.class) == "RuleAttackWithWeapon"
+                    && x["rule"].as_i64() == Some(rule)
+                    && roll_ended
+                    && x["p"].as_str().is_some_and(|p| !p.is_empty())
+                    && x["tgt"].as_str().is_some()
+                    && x["tgt"].as_str() == top.target["$unit"].as_str()
+            }
             Some("obs") if x["ev"] == "eng_prov" => {
                 // Called by the handler of this very rule (its subscribers list's type argument).
                 let list = format!(
