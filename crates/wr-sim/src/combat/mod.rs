@@ -164,6 +164,9 @@ pub struct CombatWorld {
     pub targets: targets::Targets,
     /// The impatience controller, when modelled ([`impatience::Impatience::on`]).
     pub impatience: impatience::Impatience,
+    /// The group memory's controller and reads, when modelled ([`memory::sim::MemoryRun::on`];
+    /// each group's memory is on its `groups::Group`).
+    pub memory: memory::sim::MemoryRun,
     /// `Game.Instance.IsPaused` (the pause mode), for the commands' lifecycle.
     pub commands_paused: bool,
 }

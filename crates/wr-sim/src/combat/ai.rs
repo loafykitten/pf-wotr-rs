@@ -693,6 +693,14 @@ fn ctx_unit(w: &World) -> R<EntityIdx> {
 }
 
 /// `DecisionContext.Enemies` (`CalculateEnemies(forDead: false, ...)`).
+/// `unit.Group.Memory.HasPlayerCharacterInMemory()` (the remembered enemy's group's memory).
+fn hpcm<I: AiInputs>(w: &mut World, inp: &mut I, u: EntityIdx) -> R<bool> {
+    let recorded = inp.ai_bool(w, "hpcm", None)?;
+    Ok(crate::combat::memory::sim::check(w, "AI's HasPlayerCharacterInMemory", recorded, |w| {
+        crate::combat::memory::sim::has_player_character(w, u).and_then(Result::ok)
+    }))
+}
+
 fn enemies<I: AiInputs>(w: &mut World, inp: &mut I) -> R<()> {
     let me = ctx_unit(w)?;
     let me_id = uid(w, me);
@@ -702,7 +710,12 @@ fn enemies<I: AiInputs>(w: &mut World, inp: &mut I) -> R<()> {
         }
         let mut list = Vec::new();
         let pf = is_player_faction(w, me);
-        let memory = inp.ai_enemies(w)?;
+        // `Unit.Group.Memory.Enemies`: the sim's memory, while it's the sim's.
+        let recorded = inp.ai_enemies(w)?;
+        let memory = crate::combat::memory::sim::check(w, "AI's Enemies", recorded, |w| {
+            crate::combat::memory::sim::enemies(w, me)
+                .map(|v| crate::combat::memory::sim::ids(w, &v))
+        });
         ctx(w).memory_enemies = Some(memory.len());
         for id in memory {
             let u = unit_of(w, &id)?;
@@ -711,7 +724,7 @@ fn enemies<I: AiInputs>(w: &mut World, inp: &mut I) -> R<()> {
             }
             if super::units::is_dead(w, u)
                 || inp.leaf(w, "untgt", Of::Pair(Some(me_id.clone()), Some(id.clone())))?
-                || (pf && super::units::is_conscious(w, u) && !inp.ai_bool(w, "hpcm", None)?)
+                || (pf && super::units::is_conscious(w, u) && !hpcm(w, inp, u)?)
             {
                 continue;
             }

@@ -1240,3 +1240,69 @@ fn a_tick_whose_cleanup_fails_part_way_keeps_what_it_collected() {
     tick(&mut c, &mut f).unwrap();
     assert!(c.cleanup_pending.is_empty() && !f.mem[&9].contains(20));
 }
+
+#[test]
+fn a_clear_during_an_enemies_fill_drops_what_was_filled_before_it() {
+    // `Enemies` fills in place: a key's `Group` read runs `UpdateGroup`, whose `Add` clears the list
+    // part way (`ClearEnemies`); the fill goes on from there and the list is valid at its end.
+    let mut m = GroupMemory::from_entries(
+        [1, 2, 3].map(|k| (k, UnitInfo { last_detect_time: T0, visible: false })),
+    );
+    let keys = m.begin_enemies_fill().expect("invalid");
+    assert_eq!(keys, [1, 2, 3]);
+    m.push_enemy(1);
+    m.clear_enemies();
+    m.push_enemy(2);
+    m.push_enemy(3);
+    assert_eq!(m.end_enemies_fill(), [2, 3]);
+    assert_eq!(m.begin_enemies_fill(), None);
+    assert_eq!(m.enemies_cache(), Some(&[2, 3][..]));
+}
+
+#[test]
+fn the_sims_changes_across_memories_come_in_the_order_they_were_made() {
+    // (A destruction removes the unit from every memory; a group tick can dispose several.)
+    let (mut w, u) = crate::stats::tests::world_with_unit();
+    w.combat.groups.memory_computed = true;
+    let a = crate::combat::groups::get_group(&mut w, "a");
+    let b = crate::combat::groups::get_group(&mut w, "b");
+    fn mem(
+        w: &mut crate::world::World,
+        g: crate::combat::groups::GroupIdx,
+    ) -> &mut GroupMemory<crate::world::EntityIdx> {
+        w.combat.groups.get_mut(g).mem.as_mut().unwrap()
+    }
+    mem(&mut w, b).add(u, T0);
+    mem(&mut w, a).add(u, T0);
+    assert!(mem(&mut w, b).remove(u));
+    mem(&mut w, b).add(u, T0);
+    mem(&mut w, a).clear();
+    assert!(mem(&mut w, b).remove(u));
+    assert_eq!(
+        sim::take_changes(&mut w),
+        [
+            (b, Change::Added(u)),
+            (a, Change::Added(u)),
+            (b, Change::Removed(u)),
+            (b, Change::Added(u)),
+            (a, Change::Cleared(1)),
+            (b, Change::Removed(u)),
+        ]
+    );
+    assert!(sim::take_changes(&mut w).is_empty());
+}
+
+#[test]
+fn the_log_has_each_new_key_removal_and_clear_with_its_count() {
+    let mut m = GroupMemory::new();
+    m.add(1, T0);
+    m.log_changes();
+    m.add(1, T0);
+    m.add(2, T0);
+    assert!(m.remove(1));
+    assert!(!m.remove(1));
+    m.clear();
+    m.clear();
+    assert_eq!(m.take_changes(), [Change::Added(2), Change::Removed(1), Change::Cleared(1)]);
+    assert!(m.take_changes().is_empty());
+}

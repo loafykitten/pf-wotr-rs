@@ -19,6 +19,7 @@
 //! after a `Cleanup` can still hold the units it removed.
 
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::csharp::arith::CsError;
 use crate::csharp::{CsDict, RawSlot, TimeSpan};
@@ -83,10 +84,15 @@ pub struct GroupMemory<K> {
     /// `m_EnemiesList`, `m_EnemiesListValid`.
     enemies: Vec<K>,
     enemies_valid: bool,
-    /// The keys `Add`, `Remove` and `Cleanup` changed, in order, while logging
-    /// ([`Self::log_changes`]): what WrathOracle's `mem_add` and `mem_remove` record.
-    log: Option<Vec<Change<K>>>,
+    /// The keys `Add`, `Remove` and `Cleanup` changed and `Clear`'s, in order, while logging
+    /// ([`Self::log_changes`]): what WrathOracle's `mem_add`, `mem_remove` and `mem_clear` record.
+    /// Each with its place in the order of every memory's changes ([`LOG_ORDER`]).
+    log: Option<Vec<(u64, Change<K>)>>,
 }
+
+/// The order of the memories' logged changes across memories (one world changes its memories on
+/// one thread, so its changes' numbers increase in the order they were made).
+static LOG_ORDER: AtomicU64 = AtomicU64::new(0);
 
 /// A change `Add` or `Remove` made to a memory's keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +103,8 @@ pub enum Change<K> {
     Removed(K),
     /// `Cleanup` removed it (WrathOracle's `mem_remove` by `Cleanup`).
     Cleaned(K),
+    /// `Clear()` of a memory holding this many keys (WrathOracle's `mem_clear`, when not empty).
+    Cleared(usize),
 }
 
 impl<K: Copy + Eq + Hash> Default for GroupMemory<K> {
@@ -126,7 +134,19 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
 
     /// The changes logged since the last call.
     pub fn take_changes(&mut self) -> Vec<Change<K>> {
+        self.take_ordered_changes().into_iter().map(|(_, c)| c).collect()
+    }
+
+    /// The changes logged since the last call, each with its place in the order of every memory's
+    /// changes.
+    pub fn take_ordered_changes(&mut self) -> Vec<(u64, Change<K>)> {
         self.log.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    fn note(&mut self, c: Change<K>) {
+        if let Some(log) = self.log.as_mut() {
+            log.push((LOG_ORDER.fetch_add(1, Ordering::Relaxed), c));
+        }
     }
 
     /// A memory holding `keys` in this enumeration order, with no freed slots between them (what a
@@ -146,8 +166,8 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     pub fn add(&mut self, k: K, game_time: TimeSpan) -> &mut UnitInfo {
         self.enemies_valid = false;
         self.units_list_valid = false;
-        if let Some(log) = self.log.as_mut().filter(|_| !self.units.contains_key(&k)) {
-            log.push(Change::Added(k));
+        if !self.units.contains_key(&k) {
+            self.note(Change::Added(k));
         }
         self.units
             .get_or_insert_with(k, || UnitInfo { last_detect_time: game_time, visible: false })
@@ -158,9 +178,7 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         if self.units.remove(&k).is_some() {
             self.enemies_valid = false;
             self.units_list_valid = false;
-            if let Some(log) = self.log.as_mut() {
-                log.push(Change::Removed(k));
-            }
+            self.note(Change::Removed(k));
             true
         } else {
             false
@@ -191,6 +209,10 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
 
     /// `Clear()`.
     pub fn clear(&mut self) {
+        let n = self.units.len();
+        if n > 0 {
+            self.note(Change::Cleared(n));
+        }
         self.units_list_valid = false;
         self.clear_enemies();
         self.units_list.clear();
@@ -236,9 +258,7 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         for k in std::mem::take(pending) {
             if self.units.remove(&k).is_some() {
                 gone.push(k);
-                if let Some(log) = self.log.as_mut() {
-                    log.push(Change::Cleaned(k));
-                }
+                self.note(Change::Cleaned(k));
             }
         }
         gone
@@ -247,10 +267,16 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     /// `UnitsList`: when invalid, rebuilt from the dictionary (the units that resolve and are in the
     /// game, in enumeration order); else the cached list.
     pub fn units_list(&mut self, mut resolve: impl FnMut(K) -> Resolved) -> &[K] {
+        self.units_list_by(|k| resolve(k).in_game())
+    }
+
+    /// `UnitsList`, its fill asking `keep` of each key in enumeration order (`unit != null &&
+    /// unit.IsInGame`).
+    pub fn units_list_by(&mut self, mut keep: impl FnMut(K) -> bool) -> &[K] {
         if !self.units_list_valid {
             self.units_list.clear();
             for k in self.units.keys() {
-                if resolve(k).in_game() {
+                if keep(k) {
                     self.units_list.push(k);
                 }
             }
@@ -266,15 +292,45 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         mut resolve: impl FnMut(K) -> Resolved,
         mut is_enemy: impl FnMut(K) -> bool,
     ) -> &[K] {
+        self.enemies_by(|k| resolve(k).in_game() && is_enemy(k))
+    }
+
+    /// `Enemies`, its fill asking `keep` of each key in enumeration order (`unit != null &&
+    /// unit.IsInGame && Group.IsEnemy(unit)`).
+    pub fn enemies_by(&mut self, mut keep: impl FnMut(K) -> bool) -> &[K] {
         if !self.enemies_valid {
             self.enemies.clear();
             for k in self.units.keys() {
-                if resolve(k).in_game() && is_enemy(k) {
+                if keep(k) {
                     self.enemies.push(k);
                 }
             }
             self.enemies_valid = true;
         }
+        &self.enemies
+    }
+
+    /// `Enemies`' fill done step by step by a caller whose reads can change this memory while it
+    /// fills (a `Group` read runs `UpdateGroup`, whose `Add` clears the enemy list being filled):
+    /// `None` while the cache is valid (the list as cached); else the keys to walk, the list
+    /// cleared. The caller pushes each key it keeps ([`Self::push_enemy`]) and ends the fill
+    /// ([`Self::end_enemies_fill`]).
+    pub fn begin_enemies_fill(&mut self) -> Option<Vec<K>> {
+        if self.enemies_valid {
+            return None;
+        }
+        self.enemies.clear();
+        Some(self.units.keys().collect())
+    }
+
+    /// `m_EnemiesList.Add(value)` during a fill.
+    pub fn push_enemy(&mut self, k: K) {
+        self.enemies.push(k);
+    }
+
+    /// `m_EnemiesListValid = true`: the fill's end; the list as filled.
+    pub fn end_enemies_fill(&mut self) -> &[K] {
+        self.enemies_valid = true;
         &self.enemies
     }
 
@@ -396,12 +452,18 @@ pub fn cleanup_removes(
 /// `UnitMemoryController`'s own state: `m_UnitsForAdd`, the (observer, target) pairs queued by its
 /// handlers (and by `StartCombat`, random encounters, dungeons) for the next tick. `m_NearUnits` is
 /// cleared before each use, so it isn't state between ticks.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MemoryController<K> {
     pub units_for_add: Vec<(K, K)>,
     /// `UnitGroupMemory.s_UnitsForRemove` (static, shared by every memory's `Cleanup`): empty
     /// unless a `Cleanup` threw part way.
     pub cleanup_pending: Vec<K>,
+}
+
+impl<K> Default for MemoryController<K> {
+    fn default() -> Self {
+        Self { units_for_add: Vec::new(), cleanup_pending: Vec::new() }
+    }
 }
 
 /// What `HandleUnitCommandDidAct` reads of the command that acted.
@@ -676,3 +738,5 @@ mod tests;
 
 #[cfg(test)]
 mod tick_tests;
+
+pub mod sim;

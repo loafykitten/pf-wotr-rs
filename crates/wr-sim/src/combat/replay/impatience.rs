@@ -19,6 +19,17 @@ const MEM_Q_OFFENSIVE: &str = "UnitMemoryController.AddToMemory<UnitMemoryContro
 /// event bus' dispatch.
 const MEM_Q_ACT: &str = "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitCommandDidAct<UnitCommand.<Tick>b__230_0<SubscriptionManager`1.ExecuteActionInternal";
 
+/// A `mem_q` is the sim's call `want`: its observer and target, and (while the memory is the
+/// sim's) the target's `Peaceful` it read and whether the queue took the pair.
+fn is_call(w: &World, r: &J, want: Option<imp::MemoryCall>) -> bool {
+    want.is_some_and(|c| {
+        r["o"].as_str() == Some(w.entity(c.observer).unique_id.as_str())
+            && r["tgt"].as_str() == Some(w.entity(c.target).unique_id.as_str())
+            && c.peaceful.is_none_or(|p| r["peaceful"].as_bool() == Some(p))
+            && c.queued.is_none_or(|q| r["queued"].as_bool() == Some(q))
+    })
+}
+
 /// A `mem_q` of its writer's shape, of frame `tick`, from `callers`, that didn't throw.
 fn mem_q_shape(r: &J, tick: i64, callers: &str) -> bool {
     fields(r, &["o", "tgt", "peaceful", "queued", "exc", "by"])
@@ -412,14 +423,11 @@ impl Driver<'_> {
     /// offensive action's outside its rule, `StartCombat`, a random encounter, a dungeon) is
     /// reported.
     pub(super) fn mem_q_outside(&mut self, w: &mut World, r: &J) {
-        let pair = (r["o"].clone(), r["tgt"].clone());
         let want = w.combat.impatience.memory_acts.as_mut().and_then(VecDeque::pop_front);
-        let sim = want.map(|(o, t)| {
-            (J::from(w.entity(o).unique_id.clone()), J::from(w.entity(t).unique_id.clone()))
-        });
-        let ok = mem_q_shape(r, self.tick, MEM_Q_ACT) && sim.as_ref() == Some(&pair);
+        let ok = mem_q_shape(r, self.tick, MEM_Q_ACT) && is_call(w, r, want);
         if ok {
             self.out.mem_act_adds += 1;
+            self.out.mem_queued_checked += usize::from(want.is_some_and(|c| c.queued.is_some()));
         } else {
             w.coverage.unsupported(format!(
                 "driven replay: memory: an AddToMemory outside a rule that isn't the sim's command act's ({})",
@@ -512,14 +520,10 @@ impl Driver<'_> {
                     });
                     let want =
                         w.combat.impatience.memory_adds.as_mut().and_then(VecDeque::pop_front);
-                    let sim = want.map(|(o, t)| {
-                        (
-                            J::from(w.entity(o).unique_id.clone()),
-                            J::from(w.entity(t).unique_id.clone()),
-                        )
-                    });
-                    if shape && placed && sim.as_ref() == Some(&pair) {
+                    if shape && placed && is_call(w, r, want) {
                         self.out.mem_adds += 1;
+                        self.out.mem_queued_checked +=
+                            usize::from(want.is_some_and(|c| c.queued.is_some()));
                     } else {
                         w.coverage.unsupported(format!(
                             "driven replay: memory: an AddToMemory the sim didn't make, or out of its handler ({})",

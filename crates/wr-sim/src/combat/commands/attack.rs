@@ -856,7 +856,11 @@ fn update_target<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<bool> {
     let u = executor(w, c)?;
     // `Executor.Group.Memory.Enemies.Select(Unit).NotNull().Where(!Sleeping).Where(five).ToList()`,
     // sorted by distance (the recorded order).
-    let enemies = inp.leaf_ids(w, "enemies", c)?;
+    let recorded = inp.leaf_ids(w, "enemies", c)?;
+    let enemies = crate::combat::memory::sim::check(w, "UnitAttack's Enemies", recorded, |w| {
+        crate::combat::memory::sim::enemies(w, u)
+            .map(|v| crate::combat::memory::sim::ids(w, &v).into_iter().map(Some).collect())
+    });
     // (The memory keys its units by id: each once.)
     let mut ids: Vec<&Option<String>> = enemies.iter().collect();
     ids.sort();

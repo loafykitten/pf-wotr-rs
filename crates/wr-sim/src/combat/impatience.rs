@@ -90,10 +90,46 @@ pub struct Impatience {
     /// (`UnitMemoryController.HandleUnitMakeOffensiveAction`, the other subscriber of the event),
     /// not yet matched with their `mem_q` records; `None` without WrathOracle's `memory` observer
     /// (docs/poc5/memory.md).
-    pub memory_adds: Option<VecDeque<(EntityIdx, EntityIdx)>>,
+    pub memory_adds: Option<VecDeque<MemoryCall>>,
     /// Its `AddToMemory` calls at a command's act (`HandleUnitCommandDidAct`), not yet matched;
     /// `None` as `memory_adds`.
-    pub memory_acts: Option<VecDeque<(EntityIdx, EntityIdx)>>,
+    pub memory_acts: Option<VecDeque<MemoryCall>>,
+}
+
+/// An `AddToMemory(observer, target)` call the sim made, the target's `Faction.Peaceful` it read
+/// and whether the memory's queue took the pair (both `None` while the memory isn't the sim's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryCall {
+    pub observer: EntityIdx,
+    pub target: EntityIdx,
+    pub peaceful: Option<bool>,
+    pub queued: Option<bool>,
+}
+
+/// `UnitMemoryController.AddToMemory(observer, target)` on the sim's controller (the target's
+/// `Faction.Peaceful`, then the queue's dedup), when the memory is the sim's.
+fn add_to_memory(w: &mut World, observer: EntityIdx, target: EntityIdx) -> MemoryCall {
+    let none = MemoryCall { observer, target, peaceful: None, queued: None };
+    if !w.combat.memory.on {
+        return none;
+    }
+    let Some(peaceful) = super::units::faction_peaceful(w, target) else {
+        w.coverage.unsupported("memory: AddToMemory of a target without a faction");
+        return none;
+    };
+    let q = &mut w.combat.memory.ctl;
+    let before = q.units_for_add.len();
+    q.add_to_memory(observer, target, peaceful);
+    MemoryCall { peaceful: Some(peaceful), queued: Some(q.units_for_add.len() > before), ..none }
+}
+
+/// `unit.Memory.ContainsVisible(o)` (the impatience controller's): the sim's memory, while it's
+/// the sim's.
+fn visible<I: ImpInputs>(w: &mut World, inp: &mut I, u: EntityIdx, o: EntityIdx) -> R<bool> {
+    let recorded = inp.imp_visible(w, o)?;
+    Ok(crate::combat::memory::sim::check(w, "impatience's ContainsVisible", recorded, |w| {
+        crate::combat::memory::sim::contains(w, u, o, true)
+    }))
 }
 
 /// `UnitMemoryController.HandleUnitCommandDidAct(command)`'s `AddToMemory` calls, as the command
@@ -120,9 +156,9 @@ pub fn memory_command_did_act(w: &mut World, executor: Option<EntityIdx>, target
         w.coverage.unsupported("memory: a command acting on an invisible target");
         return;
     }
+    let calls = [add_to_memory(w, e, t), add_to_memory(w, t, e)];
     if let Some(q) = w.combat.impatience.memory_acts.as_mut() {
-        q.push_back((e, t));
-        q.push_back((t, e));
+        q.extend(calls);
     }
 }
 
@@ -144,9 +180,9 @@ fn memory_offensive_action(w: &mut World, unit: EntityIdx, target: EntityIdx) {
         w.coverage.unsupported("memory: an offensive action on an invisible target");
         return;
     }
+    let calls = [add_to_memory(w, unit, target), add_to_memory(w, target, unit)];
     if let Some(q) = w.combat.impatience.memory_adds.as_mut() {
-        q.push_back((unit, target));
-        q.push_back((target, unit));
+        q.extend(calls);
     }
 }
 
@@ -244,7 +280,7 @@ pub fn tick<I: ImpInputs + uc::Inputs>(w: &mut World, inp: &mut I, awake: &[Enti
         inp.imp_nested_end(w)?;
         let p = state(w, u)?.priority;
         if let Some(p) = p
-            && (!super::units::is_conscious(w, p) || !inp.imp_visible(w, p)?)
+            && (!super::units::is_conscious(w, p) || !visible(w, inp, u, p)?)
         {
             setup_priority_target(w, inp, u)?;
         }
@@ -320,7 +356,7 @@ pub fn setup_priority_target<I: ImpInputs + uc::Inputs>(
         let Some(b) = b else {
             return unsupported(w, "a null bother unit (State.IsConscious throws)");
         };
-        if !super::units::is_conscious(w, b) || !inp.imp_visible(w, b)? {
+        if !super::units::is_conscious(w, b) || !visible(w, inp, u, b)? {
             continue;
         }
         let weight = store_f32(1.0 / f64::from(inp.imp_distance(w, u, b)?));
@@ -492,6 +528,12 @@ pub fn apply(w: &mut World, op: &Op, vis: Option<bool>) -> R<bool> {
         }
         Op::DamageEnd { .. } | Op::DeathCheck { .. } => {}
         Op::Bother { u, b, cond, .. } => {
+            // `unit.Memory.ContainsVisible(botherUnit)`, read when `cond` holds.
+            let vis = vis.map(|v| {
+                crate::combat::memory::sim::check(w, "impatience's ContainsVisible", v, |w| {
+                    crate::combat::memory::sim::contains(w, *u, *b, true)
+                })
+            });
             if *cond && vis == Some(true) {
                 return Ok(state_mut(w, *u)?.bother.add(Some(*b)));
             }

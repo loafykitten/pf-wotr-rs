@@ -425,6 +425,7 @@ fn check_changes(c: &mut Check<'_>, recorded: &Changes, model: &Changes) {
                     Change::Added(k) => format!("{}+{}", c.name(g), c.name(k)),
                     Change::Removed(k) => format!("{}-{}", c.name(g), c.name(k)),
                     Change::Cleaned(k) => format!("{}~{}", c.name(g), c.name(k)),
+                    Change::Cleared(n) => format!("{}x{n}", c.name(g)),
                 })
                 .collect()
         };
