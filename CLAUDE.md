@@ -38,9 +38,10 @@ survey and notes on other rewrites.
 
   **The oracle lives in this repo** (`oracle/`, see `oracle/README.md`) and runs on
   `builds/arm64-oracle` (gitignored APFS clone; no ToyBox or BuffIt2TheLimit). Ember wants both
-  mods recreated in our version later (PLAN, After the POC, item 4). Implementation subagents run on **Sonnet** (Opus only
-  when Sonnet falls short), at most 3 at once, and every brief says "don't spawn
-  sub-agents". Game and GPU share one lock, `builds/.oracle-run.lock`; match
+  mods recreated in our version later (PLAN, After the POC, item 4). Implementation subagents run on **Opus 5.5 at high
+  effort** (Ember, 2026-10-15; was Sonnet), at most 5 at once (Ember, 2026-10-15; was 3), and every brief says "don't
+  spawn sub-agents". Parallel streams work in git worktrees prepared by `scripts/worktree-setup.sh NAME` (linked inputs,
+  their own target and cache dirs); only the main session builds and installs WrathOracle and records. Game and GPU share one lock, `builds/.oracle-run.lock`; match
   the game with `pgrep -x 'Pathfinder Wrath Of The Righteous'`, never `-f`.
 - **Toolchain:** Rust via Homebrew `rustup` (keg-only; PATH set in `~/.zshenv`; a shell
   started before that may need `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`).
@@ -60,8 +61,8 @@ survey and notes on other rewrites.
   (`loafykitten/pf-wotr-rs`) is public (since 2026-10-14) with a fresh history (the old one is on the
   local, never-pushed branch `archive/private-history`): keep tracked files free of machine-specific paths
   (scripts find the repo from their own location) and of personal details.
-- **Model routing:** Claude implements (here, or through **Sonnet** subagents; Ember,
-  2026-10-11: escalate to Opus only when Sonnet's work is bad or it can't solve the task). **gpt-6.1-sol (high)** reviews every implementation (`codex-review` skill, Codex Fast mode); **GPT 6 Astra (high)** instead when Sol misses things or the work is particularly complex or touchy (Ember, 2026-10-12: Astra is slow even in Fast mode). Use
+- **Model routing:** Claude implements (here, or through **Opus 5.5 (high)** subagents; Ember, 2026-10-15, replacing
+  the Sonnet-first rule of 2026-10-11). **gpt-6.1-sol (high)** reviews every implementation (`codex-review` skill, Codex Fast mode); **GPT 6 Astra (high)** instead when Sol misses things or the work is particularly complex or touchy (Ember, 2026-10-12: Astra is slow even in Fast mode). Use
   **gpt-6.1-sol**, not gpt-5.6-sol, for Codex bulk investigation and computer use
   (`codex exec -m gpt-6.1-sol`); Ember said 2026-10-10 that it supersedes 5.6, and it
   overrides the global CLAUDE.md and any skill that names 5.6.
