@@ -34,6 +34,8 @@ namespace WrathOracle;
 //    CompleteState) and the state after;
 //  - ag_call / ag_call_end: Stop, CompleteMovement, InterruptMovement, SetWaypoint, ForcePath and
 //    FollowPrecomputedPath, with the caller chain (origin) and the state after;
+//  - ag_init: at the window's first tick, every agent of UnitMovementAgentBase.AllAgents in order, with its state,
+//    the unit's position and m_Orientation (paths it holds are defined first, ag_pathdef);
 //  - ag_ctl / ag_ctl_end: UnitMoveController.TickUnit, the unit's position before; its position and orientation after;
 //  - ag_v corp, cells, fudge, speedmps, navnode, move: PathTo's, FindPath's and ConstructTags' reads (corpulence, size in
 //    cells, the command's LOS fudge radius, CurrentSpeedMps, the nearest navmesh node, the move command's delay and roaming);
@@ -277,6 +279,42 @@ internal static partial class CommandObs
     }
 
     private static bool AgObserved() => On && AgOn;
+
+    // ---- the initial state: every agent of UnitMovementAgentBase.AllAgents (the enabled ones), in its order ----
+
+    private static readonly AccessTools.FieldRef<List<UnitMovementAgentBase>> AllAgentsField =
+        AccessTools.StaticFieldRefAccess<List<UnitMovementAgentBase>>(AccessTools.Field(typeof(UnitMovementAgentBase), "AllAgents"));
+
+    private static void AgInit()
+    {
+        try
+        {
+            var all = AllAgentsField().ToList();
+            var index = 0;
+            foreach (var b in all)
+            {
+                var i = index++;
+                if (!(b is UnitMovementAgent a))
+                {
+                    var kind = b != null ? b.GetType().Name : "null";
+                    Sched.Obs("ag_init", j => { j.Prop("i", i); j.Prop("kind", kind); });
+                    continue;
+                }
+                var u = UnitOfAgent(a);
+                var view = a.Unit != null ? a.Unit.UniqueId : null;
+                var data = a.Unit != null ? a.Unit.EntityData : null;
+                Vector3? pos = data != null ? data.Position : (Vector3?)null;
+                float? orient = data != null ? OrientationField(data) : (float?)null;
+                var s = Snap(a);
+                Sched.Obs("ag_init", j =>
+                {
+                    j.Prop("i", i); j.Prop("kind", "UnitMovementAgent"); j.Prop("u", u); j.Prop("view", view);
+                    NullableVec(j, "upos", pos); NullableFloat(j, "orient", orient); WriteState(j, s);
+                });
+            }
+        }
+        catch (Exception e) { Trace.HookFailed("observe ag_init", e); }
+    }
 
     // ---- TickMovement ----
 
@@ -752,10 +790,14 @@ internal static partial class CommandObs
                     j.Arr("args"); foreach (var a in rest) j.W.WriteValue(a); j.EndArr();
                 };
             }
+            // The state at a FollowPrecomputedPath's or ForcePath's start (the AI's FindPath callback can change it
+            // unobserved before).
+            var st = path != null ? Snap(__instance) : null;
             Sched.Obs("ag_call", j =>
             {
                 j.Prop("fn", fn); j.Prop("u", u); j.Prop("origin", origin); j.Prop("i", index);
                 path?.Invoke(j);
+                if (st != null) WriteState(j, st);
             });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_call", e); }
