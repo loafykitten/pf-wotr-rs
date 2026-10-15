@@ -352,7 +352,7 @@ impl World {
         let n1 = self.grid_nearest(g.transform(a)).node.map(|n| (n - g.first) as usize);
         let n2 = self.grid_nearest(g.transform(b)).node.map(|n| (n - g.first) as usize);
         let (Some(n1), Some(n2)) = (n1, n2) else { return true };
-        if g.flags[n1] & 1 == 0 {
+        if !g.walkable(n1) {
             return true;
         }
         let v = [a[0] - 0.5, a[2] - 0.5];

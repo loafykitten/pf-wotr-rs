@@ -95,10 +95,27 @@ pub struct Grid {
     pub neighbour_x: [i32; 8],
     pub neighbour_z: [i32; 8],
     pub eight_neighbours: bool,
+    /// `GridGraph.erodeIterations`: the serialized value; turn-based combat rewrites it
+    /// (`CombatController.UpdateNavigationGridTags`).
     pub erode_iterations: i32,
     pub erosion_first_tag: i32,
-    /// `GraphCollision.up`.
+    pub erosion_use_tags: bool,
+    /// `GridGraph.erosionOnlyAroundCellsWithTag` (Owlcat's; 0: around every cell).
+    pub erosion_only_around_cells_with_tag: u32,
+    pub cut_corners: bool,
+    /// `GridGraph.maxClimb` (`IsValidConnection`; `collision.use2D` is false).
+    pub max_climb: f32,
+    /// `GraphCollision.up`: `(Transform(up) - Transform(zero)).normalized` (`GetPortal`).
     pub up: V3,
+    /// `GraphTransform.up`: `matrix.MultiplyVector(Vector3.up).normalized`
+    /// (`WorldUpAtGraphPosition`, `IsValidConnection`).
+    pub transform_up: V3,
+    /// `GraphNode.DynamicBlocked` per cell (runtime only; empty: all zero).
+    #[serde(skip)]
+    pub dynamic_blocked: Vec<i8>,
+    /// `GraphNode.AllyBlocked` per cell (runtime only; empty: all zero).
+    #[serde(skip)]
+    pub ally_blocked: Vec<i8>,
 }
 
 impl Grid {
@@ -125,6 +142,28 @@ impl Grid {
     #[must_use]
     pub fn has_connection(&self, cell: usize, dir: usize) -> bool {
         (self.grid_flags[cell] >> dir) & 1 != 0
+    }
+
+    #[must_use]
+    pub fn dynamic_blocked(&self, cell: usize) -> i8 {
+        self.dynamic_blocked.get(cell).copied().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn ally_blocked(&self, cell: usize) -> i8 {
+        self.ally_blocked.get(cell).copied().unwrap_or(0)
+    }
+
+    /// `GraphNode.StaticWalkable`.
+    #[must_use]
+    pub fn static_walkable(&self, cell: usize) -> bool {
+        self.flags[cell] & FLAG_WALKABLE != 0
+    }
+
+    /// `GraphNode.Walkable`: the walkable flag and no dynamic blocker.
+    #[must_use]
+    pub fn walkable(&self, cell: usize) -> bool {
+        self.static_walkable(cell) && self.dynamic_blocked(cell) == 0
     }
 }
 
@@ -177,10 +216,29 @@ impl World {
         }
     }
 
-    /// `GraphNode.Walkable` (no dynamic blocking in a static snapshot).
+    /// `GraphNode.Walkable`: the walkable flag, and for grid cells no dynamic blocker
+    /// (`DynamicBlocked == 0`, Owlcat's addition; navmesh nodes are never blocked so).
     #[must_use]
     pub fn walkable(&self, n: NodeId) -> bool {
+        match self.kind(n) {
+            Kind::Tri(i) => self.tris[i].flags & FLAG_WALKABLE != 0,
+            Kind::Cell(c) => self.grid.as_ref().is_some_and(|g| g.walkable(c)),
+        }
+    }
+
+    /// `GraphNode.StaticWalkable`.
+    #[must_use]
+    pub fn static_walkable(&self, n: NodeId) -> bool {
         self.flags(n) & FLAG_WALKABLE != 0
+    }
+
+    /// `GraphNode.AllyBlocked`.
+    #[must_use]
+    pub fn ally_blocked(&self, n: NodeId) -> i8 {
+        match self.kind(n) {
+            Kind::Tri(_) => 0,
+            Kind::Cell(c) => self.grid.as_ref().map_or(0, |g| g.ally_blocked(c)),
+        }
     }
 
     #[must_use]

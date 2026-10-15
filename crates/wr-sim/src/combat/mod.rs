@@ -31,6 +31,7 @@ pub mod movement;
 pub mod oracle;
 pub mod order;
 pub mod orientation;
+pub mod paths;
 pub mod project;
 pub mod replay;
 pub mod rules;

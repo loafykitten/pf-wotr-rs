@@ -27,6 +27,7 @@ pub mod modifiers;
 mod native_check;
 pub mod nearest;
 pub mod query;
+pub mod update;
 pub mod world;
 
 /// Integer coordinates in millimetres (`Int3`, precision 1000).
@@ -43,7 +44,7 @@ pub const FLAG_GRAPH_SHIFT: u32 = 24;
 /// File magic: `WRNAV`, then NULs and the format generation.
 pub const MAGIC: [u8; 8] = *b"WRNAV\0\0\x01";
 /// Bumped whenever [`NavFile`] or anything it holds changes incompatibly.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const HEADER_LEN: usize = 32;
 
 /// Where the graph came from.
@@ -236,7 +237,7 @@ mod tests {
         magic[0] ^= 1;
         cases.push(("magic", magic));
         let mut version = good.clone();
-        version[8] = 2;
+        version[8] = 9;
         cases.push(("version", version));
         let mut flipped = good.clone();
         *flipped.last_mut().unwrap() ^= 0x40;

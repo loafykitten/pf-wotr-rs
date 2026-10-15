@@ -315,6 +315,7 @@ internal static class Fidelity
         if (CommandObs.AgSyncOn) Observers.Add("agent_sync");
         if (CommandObs.MemOn) Observers.Add("memory");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
+        if (CommandObs.PathsOn) Observers.Add("paths");
         // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
         // units outside turn-based windows (aa_awake): declared when their patches installed.
         var failed = Health.FailedCount;

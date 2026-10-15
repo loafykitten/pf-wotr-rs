@@ -171,7 +171,23 @@ fn build_grid(gidx: u32, first: NodeId, gg: &GridGraph) -> Result<Grid> {
     } else {
         round_to_int_u32(cs::r(f64::from(ns) * f64::from(2f32.sqrt())) * 1000.0)
     };
-    let neighbours = s.get("neighbours").and_then(serde_json::Value::as_i64).unwrap_or(1);
+    // `NumNeighbours`, written by name (TinyJson) or, in older caches, by value.
+    let neighbours = match s.get("neighbours") {
+        None => 1,
+        Some(serde_json::Value::String(n)) => match n.as_str() {
+            "Four" => 0,
+            "Eight" => 1,
+            "Six" => 2,
+            other => bail!("grid neighbours {other:?}"),
+        },
+        Some(v) => v.as_i64().context("grid neighbours")?,
+    };
+    ensure!(neighbours == 1, "only eight-neighbour grids are supported (neighbours {neighbours})");
+    let use_2d =
+        s.pointer("/collision/use2D").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    ensure!(!use_2d, "2D grid collision is not supported");
+    // GraphCollision.Initialize: `up = (transform.Transform(Vector3.up) -
+    // transform.Transform(Vector3.zero)).normalized` (the funnel's portals).
     let up = {
         let a = if only_translational {
             cs::add([0.0, 1.0, 0.0], translation)
@@ -181,6 +197,8 @@ fn build_grid(gidx: u32, first: NodeId, gg: &GridGraph) -> Result<Grid> {
         let b = if only_translational { translation } else { cs::mul_point3x4(&matrix, [0.0; 3]) };
         cs::normalize(cs::sub(a, b))
     };
+    // GraphTransform: `up = matrix.MultiplyVector(Vector3.up).normalized` (IsValidConnection).
+    let transform_up = cs::normalize(cs::mul_vector(&matrix, [0.0, 1.0, 0.0]));
     Ok(Grid {
         graph_index: gidx,
         first,
@@ -203,7 +221,20 @@ fn build_grid(gidx: u32, first: NodeId, gg: &GridGraph) -> Result<Grid> {
             as i32,
         erosion_first_tag: s.get("erosionFirstTag").and_then(serde_json::Value::as_i64).unwrap_or(1)
             as i32,
+        erosion_use_tags: s
+            .get("erosionUseTags")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        erosion_only_around_cells_with_tag: s
+            .get("erosionOnlyAroundCellsWithTag")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(Ok(0), u32::try_from)?,
+        cut_corners: s.get("cutCorners").and_then(serde_json::Value::as_bool).unwrap_or(true),
+        max_climb: f32_at(s, "maxClimb").unwrap_or(0.4),
         up,
+        transform_up,
+        dynamic_blocked: Vec::new(),
+        ally_blocked: Vec::new(),
     })
 }
 

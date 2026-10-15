@@ -68,6 +68,20 @@ pub fn distance(a: V3, b: V3) -> f32 {
     magnitude(sub(a, b))
 }
 
+/// `GeometryUtils.SqrMechanicsDistance(a, b)` (Owlcat): `(a - b).To2D().sqrMagnitude`, or
+/// `Mathf.Max` of it and `num * num / 4f` when the height difference `num` exceeds 1.5.
+#[must_use]
+pub fn sqr_mechanics_distance(a: V3, b: V3) -> f32 {
+    let num = (a[1] - b[1]).abs();
+    let v = sub(a, b);
+    let sq = r(d(v[0]) * d(v[0]) + d(v[2]) * d(v[2]));
+    if num <= 1.5 {
+        return sq;
+    }
+    let other = r(d(num) * d(num) / 4.0);
+    if sq > other { sq } else { other }
+}
+
 /// `Vector3.Normalize`.
 #[must_use]
 pub fn normalize(a: V3) -> V3 {
