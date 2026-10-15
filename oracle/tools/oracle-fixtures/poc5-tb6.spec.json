@@ -1,0 +1,32 @@
+{
+ "plan": {
+  "fixedDelta": 0.016666668,
+  "seed": 20261011
+ },
+ "fixtures": [
+  {
+   "name": "tb-lizard",
+   "steps": [
+    "tbm:on",
+    "wait:5",
+    "move:57,34.5,155.5",
+    "tbwaitcombat:3600",
+    "tbfight:default=nearest:30000",
+    "wait:60",
+    "move:46.2,34.4,137",
+    "tbwaitcombat:3600",
+    "tbfight:default=nearest:30000",
+    "wait:60",
+    "move:65,40.8,120",
+    "tbwaitcombat:3600",
+    "tbfight:default=nearest:30000",
+    "wait:60",
+    "move:80,44.1,115",
+    "tbwaitcombat:3600",
+    "tbfight:default=nearest:30000",
+    "wait:60"
+   ],
+   "replays": 2
+  }
+ ]
+}

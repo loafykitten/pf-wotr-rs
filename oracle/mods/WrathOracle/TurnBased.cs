@@ -7,13 +7,20 @@ using System.Reflection;
 using HarmonyLib;
 using Kingmaker;
 using Kingmaker.AI;
+using Kingmaker.Blueprints;
+using Kingmaker.Controllers.Clicks;
 using Kingmaker.Controllers.Clicks.Handlers;
 using Kingmaker.EntitySystem.Entities;
 using Kingmaker.PubSubSystem;
 using Kingmaker.Settings;
 using Kingmaker.TurnBasedMode;
+using Kingmaker.UI.UnitSettings;
 using Kingmaker.UnitLogic;
+using Kingmaker.UnitLogic.Abilities;
+using Kingmaker.UnitLogic.Abilities.Blueprints;
+using Kingmaker.UnitLogic.Abilities.Components;
 using Kingmaker.UnitLogic.Commands;
+using Kingmaker.Utility;
 using Kingmaker.UnitLogic.Commands.Base;
 using TurnBased.Controllers;
 using UnityEngine;
@@ -36,7 +43,10 @@ namespace WrathOracle;
 //                           POLICY = entry(,entry)*;  entry = WHO=WHAT
 //                           WHO    = default | <unit UniqueId>
 //                           WHAT   = nearest | end | focus/<id>/<id>/... (first living in the list,
-//                                    else nearest)
+//                                    else nearest) | cast/<ability guid>/<unit UniqueId> (that
+//                                    spell from the unit's action bar on that unit, ally or
+//                                    enemy; when the bar or the target doesn't allow it, an
+//                                    attack on the nearest enemy instead)
 //                         An attack is issued as a click on the enemy: the target is hovered
 //                         (TurnController.HandlePortraitHover, which computes the turn-based
 //                         prediction and path), the click handler's command is created
@@ -44,6 +54,13 @@ namespace WrathOracle;
 //                         path, run, and the hover released. When the unit's command has ended
 //                         and its turn is still waiting, the turn is ended as the UI's end-turn
 //                         button does (TurnController.ForceToEnd).
+//                         A cast is a click on the action bar's slot of the spell (the game's own
+//                         MechanicActionBarSlot*: the ability's prediction, SetAbility, pointer
+//                         mode Ability) and a click on the target: hovered as for an attack, the
+//                         command ClickWithSelectedAbilityHandler makes for a spellbook spell
+//                         (UnitUseAbility.CreateCastCommand, OnCastRequested) run with the
+//                         predicted path, the pointer mode cleared. Only unit-targeted spells whose
+//                         cast command is a plain UnitUseAbility (no touch spells).
 //   tbend                 end the current turn (ForceToEnd), if it is a controllable unit's
 internal static class TurnBased
 {
@@ -160,7 +177,11 @@ internal static class TurnBased
                 var kv = e.Split('=');
                 if (kv.Length != 2) throw new ArgumentException("tbfight policy entry must be WHO=WHAT: " + e);
                 var what = kv[1];
-                if (what != "nearest" && what != "end" && !what.StartsWith("focus/", StringComparison.Ordinal))
+                if (what.StartsWith("cast/", StringComparison.Ordinal))
+                {
+                    if (!ParseCast(what, out _, out _)) throw new ArgumentException("tbfight: cast/ takes an ability GUID (32 lower-case hex digits) and a unit UniqueId: cast/<guid>/<unit>, not " + what);
+                }
+                else if (what != "nearest" && what != "end" && !what.StartsWith("focus/", StringComparison.Ordinal))
                     throw new ArgumentException("tbfight: unknown action " + what);
                 p.Rules[kv[0]] = what;
             }
@@ -169,6 +190,55 @@ internal static class TurnBased
         }
 
         public string For(UnitEntityData u) => Rules.TryGetValue(u.UniqueId, out var w) ? w : Rules["default"];
+    }
+
+    // A blueprint GUID as Snap.Guid writes it: 32 lower-case hex digits.
+    private static bool IsGuid(string g)
+    {
+        if (g == null || g.Length != 32) return false;
+        foreach (var c in g)
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        return true;
+    }
+
+    // cast/<ability guid>/<target UniqueId>: false for anything else.
+    private static bool ParseCast(string what, out string guid, out string target)
+    {
+        guid = target = null;
+        if (what == null || !what.StartsWith("cast/", StringComparison.Ordinal)) return false;
+        var p = what.Split('/');
+        if (p.Length != 3 || !IsGuid(p[1]) || p[2].Length == 0) return false;
+        guid = p[1];
+        target = p[2];
+        return true;
+    }
+
+    // A record's string field, null when missing or not a string.
+    private static string Str(Newtonsoft.Json.Linq.JToken t) =>
+        t is Newtonsoft.Json.Linq.JValue v && v.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string)v : null;
+
+    // A record's spell level: an integer 0 to 10, else null (never narrowed).
+    private static int? Level(Newtonsoft.Json.Linq.JToken t)
+    {
+        if (!(t is Newtonsoft.Json.Linq.JValue v) || v.Type != Newtonsoft.Json.Linq.JTokenType.Integer || !(v.Value is long l)) return null;
+        return l >= 0 && l <= 10 ? (int?)l : null;
+    }
+
+    // A record's unit reference written by Snap.UnitRef, {"$unit": "<non-empty string>"}, else null (no coercion).
+    private static string StrictRefId(Newtonsoft.Json.Linq.JToken t) =>
+        t is Newtonsoft.Json.Linq.JObject o && o["$unit"] is Newtonsoft.Json.Linq.JValue v &&
+        v.Type == Newtonsoft.Json.Linq.JTokenType.String && !string.IsNullOrEmpty((string)v) ? (string)v : null;
+
+    // A record's spellbook field: present, and an explicit null or a GUID; `ok` false otherwise.
+    private static string SpellbookField(Newtonsoft.Json.Linq.JObject rec, out bool ok)
+    {
+        var t = rec["spellbook"];
+        ok = false;
+        if (t == null) return null;
+        if (t.Type == Newtonsoft.Json.Linq.JTokenType.Null) { ok = true; return null; }
+        var g = Str(t);
+        ok = IsGuid(g);
+        return g;
     }
 
     private static bool Alive(UnitEntityData u) => u != null && u.IsInGame && !u.State.IsDead && u.IsInCombat;
@@ -252,16 +322,19 @@ internal static class TurnBased
                         issued = null;
                         idleFrames = 0;
                         var what = policy.For(unit);
-                        var target = what == "end" ? null : ChooseTarget(unit, what);
-                        if (target == null)
+                        var impossible = false;
+                        if (ParseCast(what, out var spellGuid, out var castTarget))
                         {
-                            EndTurn(turn);
+                            // The spell when the action bar and the target allow it, else (its slot spent, say)
+                            // an attack on the nearest enemy, as the policy's fallback.
+                            issued = IssueCast(turn, unit, FindUnit(castTarget), spellGuid, what, null, out impossible);
                         }
-                        else
+                        if (issued == null && (impossible || what == "nearest" || what.StartsWith("focus/", StringComparison.Ordinal)))
                         {
-                            issued = IssueAttack(turn, unit, target, what);
-                            if (issued == null) EndTurn(turn);
+                            var target = ChooseTarget(unit, impossible ? "nearest" : what);
+                            if (target != null) issued = IssueAttack(turn, unit, target, what);
                         }
+                        if (issued == null) EndTurn(turn);
                     }
                 }
                 else if (turn.Status == TurnController.TurnStatus.Acting && Idle(turn, unit) && (issued == null || issued.IsFinished))
@@ -313,9 +386,16 @@ internal static class TurnBased
                 }
                 var turn = Cc.CurrentTurn;
                 var unit = turn?.Rider;
-                var wantUnit = RefId(rec["unit"]);
                 var attack = step == "tbattack" || step == "tbattack_impossible" || step == "tbattack_rejected";
-                if (!attack && step != "tbend") break; // an input of some other step: not ours to make
+                var cast = step == "tbcast" || step == "tbcast_impossible" || step == "tbcast_rejected";
+                if (!attack && !cast && step != "tbend") break; // an input of some other step: not ours to make
+                // A cast's caster is read strictly, before any coercing read.
+                var wantUnit = cast ? StrictRefId(rec["unit"]) : RefId(rec["unit"]);
+                if (cast && wantUnit == null)
+                {
+                    Sched.Invalidate($"recorded {step} at tick {tick} has a malformed caster");
+                    yield break;
+                }
                 // Not there yet: another unit's turn would be a different fight; no turn yet, or a
                 // turn still scrolling or preparing, is the same fight a few ticks later.
                 string why = null;
@@ -325,7 +405,36 @@ internal static class TurnBased
                 else if (turn.Status != TurnController.TurnStatus.Preparing && turn.Status != TurnController.TurnStatus.Acting) why = "turn status " + turn.Status;
                 else if (!Idle(turn, unit)) why = "unit not idle";
                 UnitEntityData target = null;
-                if (why == null && attack)
+                if (why == null && step == "tbcast_impossible")
+                {
+                    // The recording found the cast impossible, its target perhaps gone: the replay decides again
+                    // with the same target (or none) and must reach the same input for the same reason (IssueCast
+                    // checks the recorded `why`). The target field must be there: a unit reference or null.
+                    var t = rec["target"];
+                    var id = StrictRefId(t);
+                    if (t == null || (t.Type != Newtonsoft.Json.Linq.JTokenType.Null && id == null))
+                    {
+                        Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} has a malformed target");
+                        yield break;
+                    }
+                    target = id != null ? FindUnit(id) : null;
+                    if (id != null && target == null)
+                    {
+                        // The recording writes a target it couldn't find as null; a reference is a unit it found.
+                        Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} names target {id}, which doesn't exist");
+                        yield break;
+                    }
+                }
+                else if (why == null && cast)
+                {
+                    // A cast's target needn't be in combat (an ally out of it): in the game, as the spell allows.
+                    var id = StrictRefId(rec["target"]);
+                    if (id == null) { Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} has a malformed target"); yield break; }
+                    target = FindUnit(id);
+                    if (target == null) why = "target not found";
+                    else if (!CastTargetPresent(target)) why = "target not in the game";
+                }
+                else if (why == null && attack)
                 {
                     target = FindUnit(RefId(rec["target"]));
                     if (target == null) why = "target not found";
@@ -343,6 +452,14 @@ internal static class TurnBased
                     // The outcome (a command, or the unit can't) is the recorded one if the next
                     // recorded input was this attempt; the input check has verified that.
                     if (cmd == null && step == "tbattack") { Sched.Invalidate($"recorded attack by {wantUnit} could not be issued at tick {Trace.Tick}"); yield break; }
+                }
+                else if (cast)
+                {
+                    // The same spell as recorded; its outcome is checked as an attack's is.
+                    var guid = Str(rec["ability"]);
+                    if (!IsGuid(guid)) { Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} has no valid ability"); yield break; }
+                    var cmd = IssueCast(turn, unit, target, guid, Str(rec["policy"]) ?? "replay", rec, out _);
+                    if (cmd == null && step == "tbcast") { Sched.Invalidate($"recorded cast by {wantUnit} could not be issued at tick {Trace.Tick}"); yield break; }
                 }
                 else EndTurn(turn);
             }
@@ -430,6 +547,215 @@ internal static class TurnBased
         }
         unit.Commands.Run(cmd);
         CommandObs.DriverSetManualTarget(unit, target);
+        return cmd;
+    }
+
+    // The action bar's spell slots, as ActionBarGroupElement builds them for the Spell slot type [decompiled
+    // Kingmaker.UI.ActionBar/ActionBarGroupElement.cs, case ActionBarSlotType.Spell]: the unit's visible cantrip
+    // abilities, then per spellbook its memorized slots (a memorizing book) or its special, known and custom
+    // spells (a spontaneous one), each spell once (AbilityData equality, as the bar's list). The cast/<guid> action
+    // takes the first slot of that spell, in this order; one the bar doesn't show is a fixture error.
+    private sealed class SpellSlotRef
+    {
+        public MechanicActionBarSlot Slot;
+        public AbilityData Spell;
+        public string Kind;
+        public int Level;
+    }
+
+    private static SpellSlotRef FindSlot(UnitEntityData unit, string guid)
+    {
+        var seen = new List<AbilityData>();
+        foreach (var item in unit.Abilities.Visible)
+        {
+            if (!item.Blueprint.IsCantrip) continue;
+            var data = item.Data;
+            if (seen.Contains(data)) continue;
+            seen.Add(data);
+            if (Snap.Guid(data.Blueprint) == guid)
+                return new SpellSlotRef { Slot = new MechanicActionBarSlotAbility { Ability = data, Unit = unit }, Spell = data, Kind = "ability", Level = 0 };
+        }
+        foreach (var book in unit.Descriptor.Spellbooks)
+        {
+            if (book.Blueprint.MemorizeSpells)
+            {
+                for (var i = 0; i <= book.MaxSpellLevel; i++)
+                {
+                    foreach (var slot in book.GetMemorizedSpells(i))
+                    {
+                        if (seen.Contains(slot.SpellShell)) continue;
+                        seen.Add(slot.SpellShell);
+                        if (Snap.Guid(slot.SpellShell.Blueprint) == guid)
+                            return new SpellSlotRef { Slot = new MechanicActionBarSlotMemorizedSpell(slot) { Unit = unit }, Spell = slot.SpellShell, Kind = "memorized", Level = i };
+                    }
+                }
+                continue;
+            }
+            for (var j = 1; j <= book.MaxSpellLevel; j++)
+            {
+                var list = book.GetSpecialSpells(j).Concat(book.GetKnownSpells(j)).Distinct().ToList();
+                list.AddRange(book.GetCustomSpells(j).ToList());
+                foreach (var data in list)
+                {
+                    if (seen.Contains(data)) continue;
+                    seen.Add(data);
+                    if (Snap.Guid(data.Blueprint) == guid)
+                        return new SpellSlotRef { Slot = new MechanicActionBarSlotSpontaneousSpell(data) { Unit = unit }, Spell = data, Kind = "spontaneous", Level = j };
+                }
+            }
+        }
+        return null;
+    }
+
+    // A cast's target as the click handler can take it: in the game (CanPoint and the spell's CanTarget decide the
+    // rest: visibility, death, the spell's own restrictions); unlike an attack's, it needn't be in combat.
+    private static bool CastTargetPresent(UnitEntityData u) => u != null && u.IsInGame;
+
+    private static string SpellbookGuid(AbilityData spell) => spell.Spellbook != null ? Snap.Guid(spell.Spellbook.Blueprint) : null;
+
+    // A fixture error: thrown while recording, the fixture left while replaying.
+    private static UnitCommand CastError(string msg)
+    {
+        if (!Sched.Replay) throw new InvalidOperationException(msg);
+        Sched.Invalidate(msg);
+        return null;
+    }
+
+    // cast/<guid>/<target>: the action bar's slot of that spell clicked (MechanicActionBarSlot*.OnClick: the turn's
+    // prediction for the ability, SelectedAbilityHandler.SetAbility, the pointer in ability mode), the pointer over
+    // the target and the turn's predictions computed (HandlePortraitHover), then what
+    // ClickWithSelectedAbilityHandler.OnClick does for a spellbook spell (CreateCastCommand, OnCastRequested, Run),
+    // with the predicted path as the command's forced path as for an attack; the hover, the pointer and the pointer
+    // mode released on every path. `impossible` (and the input tbcast_impossible) when the target is gone or can't
+    // be pointed at, the bar's slot is inactive (IsPossibleActive: spent, the action used, prone...) or the spell
+    // can't take the target (the click handler's refusal): then nothing was selected. In a replay `rec` is the
+    // recorded input, whose spell, slot and spellbook must be the ones found again.
+    private static UnitCommand IssueCast(TurnController turn, UnitEntityData unit, UnitEntityData target, string guid, string what,
+        Newtonsoft.Json.Linq.JObject rec, out bool impossible)
+    {
+        impossible = false;
+        var found = FindSlot(unit, guid);
+        if (found == null) return CastError($"cast/{guid}: no action bar spell slot of {unit.UniqueId} holds it");
+        var spell = found.Spell;
+        var bp = spell.Blueprint;
+        // ClickWithSelectedAbilityHandler.CreateCommand's other branches (custom move or attack, items, service
+        // casters), touch spells (delivered by a second click) and casts on the caster or a point aren't driven.
+        if (bp.GetComponent<AbilityCustomMove>() != null || bp.GetComponent<AbilityCustomAttack>() != null ||
+            bp.StickyTouch != null || bp.CanCastToDeadTarget || spell.SourceItem != null || spell.IsCastByServiceCaster || spell.IsVariable ||
+            spell.TargetAnchor != AbilityTargetAnchor.Unit)
+            return CastError($"cast/{guid}: the driver casts only plain unit-targeted spells from the action bar");
+        string recBook = null;
+        var bookOk = true;
+        if (rec != null) recBook = SpellbookField(rec, out bookOk);
+        if (rec != null && (!bookOk || Str(rec["slot"]) != found.Kind || Level(rec["level"]) != found.Level || recBook != SpellbookGuid(spell)))
+            return CastError($"cast/{guid}: the recorded slot ({Str(rec["slot"])}, level {Level(rec["level"])}, spellbook {(bookOk ? recBook : "malformed")}) " +
+                $"is not the one found ({found.Kind}, level {found.Level}, spellbook {SpellbookGuid(spell)})");
+        var pc = Game.Instance.ClickEventsController;
+        if (pc == null || pc != Game.Instance.DefaultPointerController || pc.Mode != PointerMode.Default)
+            return CastError($"cast/{guid}: the pointer isn't the default one in its default mode");
+        string why = null;
+        if (target == null) why = "target not found";
+        else if (!CastTargetPresent(target)) why = "target not in the game";
+        else if (!InputPin.CanPoint(target)) why = "target can't be pointed at";
+        else if (!found.Slot.IsPossibleActive()) why = "action bar slot inactive";
+        else if (!spell.CanTarget(new TargetWrapper(target))) why = "spell can't target it";
+        if (why != null)
+        {
+            impossible = true;
+            if (rec != null && Str(rec["why"]) != why)
+                return CastError($"cast/{guid}: recorded impossible because {Str(rec["why"]) ?? "(no reason)"}, now because {why}");
+            Input("tbcast_impossible", j =>
+            {
+                j.Key("unit"); Snap.UnitRef(j, unit);
+                j.Key("target"); Snap.UnitRef(j, target);
+                j.Prop("ability", guid); j.Prop("slot", found.Kind); j.Prop("level", found.Level); j.Prop("spellbook", SpellbookGuid(spell));
+                j.Prop("policy", what); j.Prop("why", why);
+            });
+            return null;
+        }
+        try
+        {
+            found.Slot.OnClick();
+            if (pc.Mode != PointerMode.Ability || !ReferenceEquals(Game.Instance.SelectedAbilityHandler.SelectedAbility, spell))
+                return CastError($"cast/{guid}: clicking the slot did not select the spell");
+            var miss = InputPin.PointAt(target);
+            if (miss != null) return CastError($"cast/{guid} on {target.UniqueId} at tick {Trace.Tick}: {miss}");
+            try
+            {
+                turn.HandlePortraitHover(target, true);
+                return IssueHoveredCast(unit, target, found, guid, what, rec);
+            }
+            finally
+            {
+                turn.HandlePortraitHover(target, false);
+            }
+        }
+        finally
+        {
+            InputPin.PointAt(null);
+            if (pc.Mode != PointerMode.Default) pc.ClearPointerMode();
+        }
+    }
+
+    private static UnitCommand IssueHoveredCast(UnitEntityData unit, UnitEntityData target, SpellSlotRef found, string guid, string what,
+        Newtonsoft.Json.Linq.JObject rec)
+    {
+        var spell = found.Spell;
+        var tw = new TargetWrapper(target);
+        var path = PathVisualizer.Instance != null ? PathVisualizer.Instance.CurrentPathForUnit(unit.View) : null;
+        var cmd = UnitUseAbility.CreateCastCommand(spell, tw);
+        if (!(cmd is UnitUseAbility use) || !ReferenceEquals(use.Ability, spell))
+            return CastError($"cast/{guid}: the cast command is {cmd?.GetType().Name ?? "null"}, not a plain UnitUseAbility of the spell");
+        // The action it costs (RuntimeActionType: cooldowns and facts can change it) is the recorded one.
+        if (rec != null && !(rec["type"] is Newtonsoft.Json.Linq.JValue tv && tv.Type == Newtonsoft.Json.Linq.JTokenType.Integer &&
+                             tv.Value is long t && t == (int)cmd.Type))
+            return CastError($"cast/{guid}: the command's type {(int)cmd.Type} is not the recorded {rec["type"]}");
+        // UnitCommands.CanRunCommand drops a command the unit can't run, silently (as for an attack).
+        if ((cmd.Type == UnitCommand.CommandType.Standard && unit.State.HasCondition(UnitCondition.CantUseStandardActions)) ||
+            !unit.Descriptor.State.IsConscious)
+        {
+            Input("tbcast_rejected", j =>
+            {
+                j.Key("unit"); Snap.UnitRef(j, unit); j.Key("target"); Snap.UnitRef(j, target);
+                j.Prop("ability", guid); j.Prop("slot", found.Kind); j.Prop("level", found.Level); j.Prop("spellbook", SpellbookGuid(spell)); j.Prop("policy", what);
+                j.Prop("type", (int)cmd.Type);
+            });
+            return null;
+        }
+        if (path != null && path.vectorPath != null && path.vectorPath.Count > 0) cmd.ForcedPath = path;
+        Input("tbcast", j =>
+        {
+            j.Key("unit"); Snap.UnitRef(j, unit);
+            j.Key("target"); Snap.UnitRef(j, target);
+            j.Prop("ability", guid);
+            j.Prop("slot", found.Kind);
+            j.Prop("level", found.Level);
+            j.Prop("spellbook", SpellbookGuid(spell));
+            j.Prop("policy", what);
+            j.Prop("round", Cc.RoundNumber);
+            j.Prop("turn_index", _turnIndex);
+            j.Prop("command", cmd.GetType().Name);
+            j.Prop("type", (int)cmd.Type);
+            j.Obj("at");
+            j.Prop("from", unit.Position);
+            j.Prop("target_at", target.Position);
+            var pc = Game.Instance.DefaultPointerController;
+            j.Prop("pointer_on", pc.PointerOn != null ? pc.PointerOn.name : null);
+            j.Prop("pointer_mode", pc.Mode.ToString());
+            j.Prop("pointer_handler", Traverse.Create(pc).Field("m_SimulateClickHandler").GetValue()?.GetType().Name);
+            j.Prop("path_points", path?.vectorPath?.Count ?? -1);
+            if (path?.vectorPath != null && path.vectorPath.Count > 0) j.Prop("path_end", path.vectorPath[path.vectorPath.Count - 1]);
+            j.End();
+        });
+        EventBus.RaiseEvent((IClickActionHandler h) => h.OnCastRequested(spell, tw));
+        unit.Commands.Run(cmd);
+        // The rest of ClickWithSelectedAbilityHandler.OnClick, in its order: a line or cone projectile's caster stops
+        // when already close enough, then the pointer mode is cleared, inside the click, before the pointer leaves the
+        // target (whose hover change would otherwise copy the still-selected spell into the turn's CurrentAbility).
+        var deliver = spell.GetDeliverProjectileFromDeliverBlueprint(Kingmaker.Armies.TacticalCombat.TacticalCombatHelper.IsActive);
+        if (deliver != null && deliver.Type != AbilityProjectileType.Simple && cmd.IsUnitCloseEnough())
+            unit.View?.StopMoving();
+        Game.Instance.ClickEventsController.ClearPointerMode();
         return cmd;
     }
 
