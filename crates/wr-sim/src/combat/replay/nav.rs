@@ -24,6 +24,7 @@ use std::collections::{HashMap, VecDeque};
 use serde_json::Value as J;
 use wr_nav::astar::{Ending, LosQuery, State};
 use wr_nav::query::TurnBasedRequest;
+use wr_nav::world::Kind;
 
 use super::agent::{bits3, boolean, f, fields, v2, v3};
 use super::commands::describe;
@@ -60,13 +61,12 @@ pub struct NavCounts {
     pub deliveries: usize,
     pub delivered_to_agent: usize,
     /// The grid: graph events paired with the recording's, turn starts, removals, tag refreshes
-    /// the sim made; refreshes placed by a replay's recorded `nav_tags` (its clock isn't in its
-    /// trace).
+    /// the sim made; the navigation timer's clock reads (a recording's, inputs).
     pub graph_events: usize,
     pub turn_starts: usize,
     pub removals: usize,
     pub refreshes: usize,
-    pub refreshes_taken: usize,
+    pub clock_reads: usize,
 }
 
 /// Where a physics query is made: in the agent's `Move` the sim runs, in a movement simulation
@@ -131,13 +131,45 @@ pub struct NavDriver {
     rec_nav: VecDeque<usize>,
     log_at: usize,
     guo_ids: HashMap<i64, u32>,
-    /// `m_NavmeshUpdateTimer` (a recording's: its begin's `nav_timer0`; a replay's trace doesn't
-    /// give the recording's), the clock read waiting for its use.
+    /// `m_NavmeshUpdateTimer` (the recording's `nav_timer0`), a recording's clock read waiting
+    /// for its use, a replay's tape of its recording's reads (WrathOracle replays them in order).
     timer: Option<f32>,
     clock: Option<f32>,
-    refresh_taken: bool,
+    tape: Option<VecDeque<f32>>,
     /// The last `FindPath` request made (the AI's `ScorePath` reads its path next).
     last_find: Option<String>,
+    /// Each requester's seeker: its current path (`Seeker.path`, the last request it started),
+    /// and the path each request replaced.
+    seeker: HashMap<String, String>,
+    replaced: HashMap<String, String>,
+}
+
+/// A replay's recording's navigation timer and clock reads (`record.trace.jsonl.gz` beside its
+/// trace: the begin record's `nav_timer0`, each `nav_clock`), which WrathOracle replays.
+///
+/// # Errors
+///
+/// The recording or its timer missing.
+pub(crate) fn recording_clock(dir: &std::path::Path) -> Result<(f32, Vec<f32>), String> {
+    use std::io::BufRead as _;
+    let path = dir.join("record.trace.jsonl.gz");
+    let file = std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut timer = None;
+    let mut reads = Vec::new();
+    for (n, line) in std::io::BufReader::new(flate2::read::GzDecoder::new(file)).lines().enumerate()
+    {
+        let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
+        if n > 0 && !line.contains("\"nav_clock\"") {
+            continue;
+        }
+        let r: J = serde_json::from_str(&line).map_err(|e| format!("{}: {e}", path.display()))?;
+        if n == 0 {
+            timer = f(&r["nav_timer0"]);
+        } else if r["k"] == "obs" && r["ev"] == "nav_clock" {
+            reads.push(f(&r["v"]).ok_or("a navigation clock read without its value")?);
+        }
+    }
+    Ok((timer.ok_or("the recording's begin record has no nav_timer0")?, reads))
 }
 
 impl std::fmt::Debug for NavDriver {
@@ -301,20 +333,37 @@ impl Driver<'_> {
         }
         w.combat.nav.corp =
             corp.into_iter().filter_map(|(id, v)| w.by_id.get(&id).map(|u| (*u, v))).collect();
-        self.ags.nav.timer = if self.replay_mode {
-            None
+        // `m_NavmeshUpdateTimer` at the window's start: a recording's begin record's; a replay's is
+        // its recording's (WrathOracle sets it, and replays the recording's clock reads), which
+        // its own trace doesn't hold (`prepare_world` reads them beside it).
+        if self.replay_mode {
+            match w.combat.nav.recording_clock.take() {
+                Some(Ok((t, reads))) => {
+                    self.ags.nav.timer = Some(t);
+                    self.ags.nav.tape = Some(reads.into());
+                }
+                Some(Err(e)) => {
+                    Self::nav_unsupported(w, format!("the recording's navigation clock: {e}"))
+                }
+                None => Self::nav_unsupported(
+                    w,
+                    "a replay without its recording's navigation timer and clock reads",
+                ),
+            }
         } else {
             match begin.and_then(|b| f(&b["nav_timer0"])) {
-                Some(t) => Some(t),
-                None => {
-                    Self::nav_unsupported(
-                        w,
-                        "a recording without its navigation timer (nav_timer0)",
-                    );
-                    None
-                }
+                Some(t) => self.ags.nav.timer = Some(t),
+                None => Self::nav_unsupported(
+                    w,
+                    "a recording without its navigation timer (nav_timer0)",
+                ),
             }
         };
+    }
+
+    /// A path whose request the window started (`path_start`) or carried from real time.
+    fn nav_known(&self, key: &str) -> bool {
+        self.ags.started.contains(key) || self.ags.carried.contains(key)
     }
 
     /// The grid is the sim's from the window's start and can be used.
@@ -435,13 +484,16 @@ impl Driver<'_> {
         if !self.ags.nav.paths {
             return;
         }
+        if r["t"].as_i64() != Some(self.tick) {
+            Self::nav_unsupported(w, format!("a record of another frame ({})", describe(r)));
+            return;
+        }
         match ev {
             "nav_guo" | "nav_update" => {
                 self.ags.nav.rec_nav.push_back(i);
                 self.nav_match(w);
             }
             "nav_tags" => {
-                self.nav_replay_refresh(w, i);
                 self.ags.nav.rec_nav.push_back(i);
                 self.nav_match(w);
             }
@@ -470,7 +522,12 @@ impl Driver<'_> {
         if !runs || t < 0.0 {
             return;
         }
-        let Some(v) = self.ags.nav.clock.take() else {
+        let read = if self.replay_mode {
+            self.ags.nav.tape.as_mut().and_then(VecDeque::pop_front)
+        } else {
+            self.ags.nav.clock.take()
+        };
+        let Some(v) = read else {
             Self::nav_unsupported(
                 w,
                 "UpdateNavigationGrid reads the clock (its timer isn't negative); the recording has no read",
@@ -479,6 +536,7 @@ impl Driver<'_> {
             self.ags.nav.timer = Some(-1.0);
             return;
         };
+        self.out.nav.clock_reads += 1;
         // `m_NavmeshUpdateTimer -= Time.unscaledTime` (a field store: one rounding).
         let t = store_f32(f64::from(t) - f64::from(v));
         self.ags.nav.timer = Some(t);
@@ -507,39 +565,6 @@ impl Driver<'_> {
                 "a navigation clock read the sim's UpdateNavigationGrid doesn't make",
             );
         }
-    }
-
-    /// A replay's trace doesn't give the recording's timer or its clock reads (WrathOracle replays
-    /// them): a refresh is taken where the replay recorded one (a `nav_tags` right after the turn
-    /// controller's prefix, where `UpdateNavigationGrid` runs), once (the timer stays negative
-    /// after it), the sim's grid refreshed there.
-    fn nav_replay_refresh(&mut self, w: &mut World, i: usize) {
-        if self.ags.nav.timer.is_some() || !self.replay_mode {
-            return;
-        }
-        let trace = self.trace;
-        let prev = i.checked_sub(1).map(|j| &trace.records[j]);
-        let at_tick = prev.is_some_and(|p| {
-            p["k"] == "obs" && p["ev"] == "turn_tick" && p["t"] == trace.records[i]["t"]
-        });
-        if !at_tick {
-            return;
-        }
-        self.place(w, Phase::Turn, "the navigation timer's refresh");
-        let m = self.draining.or(self.frame.mode);
-        let runs = self.turn_go_on
-            && m == Some(mode::DEFAULT)
-            && w.combat.combat_active
-            && w.combat.turns.waiting_for_ui == 0;
-        if !runs || std::mem::replace(&mut self.ags.nav.refresh_taken, true) {
-            Self::nav_unsupported(
-                w,
-                "a refresh of the grid's tags where the sim's UpdateNavigationGrid doesn't run, or a second",
-            );
-            return;
-        }
-        paths::refresh_tags(w);
-        self.out.nav.refreshes_taken += 1;
     }
 
     /// The grid's erosion settings `ConstructTags` reads (`erodeIterations`, `erosionFirstTag`)
@@ -581,12 +606,37 @@ impl Driver<'_> {
                 ),
             );
         }
+        // `StartPathInternal` fails the seeker's previous path if it is still in the queue or being
+        // searched: whether a worker had finished it isn't recorded.
+        if let Some(old) = self.ags.nav.replaced.get(&q.key).cloned()
+            && self.ags.nav.pending.contains_key(&old)
+        {
+            Self::nav_unsupported(
+                w,
+                format!(
+                    "{}: requested while the seeker's previous path {old} is in flight (whether it was canceled isn't recorded)",
+                    q.key
+                ),
+            );
+            self.ags.nav.pending.remove(&old);
+            self.ags.nav.failed.insert(old, ());
+        }
         let log_len = w.combat.nav.nav.as_ref().map_or(0, |n| n.log.len());
         let p = Pending { req: tb_request(q), log_len, defs: Vec::new() };
         if self.ags.nav.pending.insert(q.key.clone(), p).is_some()
             || self.ags.nav.computed.contains_key(&q.key)
         {
             Self::nav_unsupported(w, format!("{}: requested twice", q.key));
+        }
+    }
+
+    /// A request started (`PathSync`'s `path_start`, `<requester>#<n>`): the requester's seeker's
+    /// current path from here (`StartPathInternal`'s `path = p`).
+    pub(super) fn nav_seeker_start(&mut self, key: &str) {
+        if let Some((who, _)) = key.rsplit_once('#')
+            && let Some(old) = self.ags.nav.seeker.insert(who.to_owned(), key.to_owned())
+        {
+            self.ags.nav.replaced.insert(key.to_owned(), old);
         }
     }
 
@@ -610,7 +660,9 @@ impl Driver<'_> {
                 return;
             }
             // A request of real time (taken) or of code the sim doesn't run.
-            if r["kind"] == "ABPathWithClearance" && w.combat.turn_based && self.ags.synced {
+            if !self.nav_known(&key) {
+                Self::nav_unsupported(w, format!("{key}: a path no request started"));
+            } else if r["kind"] == "ABPathWithClearance" && w.combat.turn_based && self.ags.synced {
                 Self::nav_unsupported(
                     w,
                     format!("{key}: a turn-based path the sim didn't request"),
@@ -700,6 +752,18 @@ impl Driver<'_> {
         let err = got.search.state == State::Error;
         let cs = complete_state(got.search.state);
         let raw = pts(&r["raw"]).ok_or("path_fin without its raw path")?;
+        // `endNode`'s `NodeInGridIndex` (null without a grid end node).
+        let end = got.search.end_node.and_then(|n| match world.kind(n) {
+            Kind::Cell(c) => i64::try_from(c).ok(),
+            Kind::Tri(_) => None,
+        });
+        let end_same = match end {
+            Some(e) => r["end"].as_i64() == Some(e),
+            None => r["end"].is_null(),
+        };
+        if !end_same {
+            return Err(format!("the end node {end:?}, the game's {}", r["end"]));
+        }
         if !same_pts(&raw, &got.raw)
             || r["err"].as_bool() != Some(err)
             || r["cs"].as_i64() != Some(cs)
@@ -742,12 +806,34 @@ impl Driver<'_> {
             Self::nav_unsupported(w, format!("{key}: path_seek before its return"));
             return;
         }
-        let Some(c) = self.ags.nav.computed.get_mut(key) else { return };
+        // `Seeker.OnPathComplete(Path)`: `OnPathComplete(p, runModifiers: true, sendCallbacks:
+        // true)`; it takes the path if it is the seeker's current one.
+        let current = key
+            .rsplit_once('#')
+            .is_some_and(|(who, _)| self.ags.nav.seeker.get(who).map(String::as_str) == Some(key));
+        let known = self.nav_known(key);
+        let Some(c) = self.ags.nav.computed.get_mut(key) else {
+            if !known {
+                Self::nav_unsupported(
+                    w,
+                    format!("{key}: a path_seek of a path no request started"),
+                );
+            }
+            return;
+        };
         match (r["accepted"].as_bool(), r["mods"].as_bool(), r["cb"].as_bool()) {
             (Some(a), Some(m), Some(cb))
                 if c.seek.is_none() && fields(r, &["path", "accepted", "mods", "cb"]) =>
             {
-                c.seek = Some((a, m, cb));
+                if (a, m, cb) != (current, true, true) {
+                    Self::nav_unsupported(
+                        w,
+                        format!(
+                            "{key}: the seeker's decision ({a}, {m}, {cb}) isn't the sim's ({current}, true, true)"
+                        ),
+                    );
+                }
+                c.seek = Some((current, true, true));
             }
             _ => Self::nav_unsupported(w, format!("{key}: a path_seek it can't read, or a second")),
         }
@@ -763,7 +849,13 @@ impl Driver<'_> {
             Self::nav_unsupported(w, format!("{key}: path_mod before its return"));
             return;
         }
-        let Some(c) = self.ags.nav.computed.get_mut(key) else { return };
+        let known = self.nav_known(key);
+        let Some(c) = self.ags.nav.computed.get_mut(key) else {
+            if !known {
+                Self::nav_unsupported(w, format!("{key}: a path_mod of a path no request started"));
+            }
+            return;
+        };
         let expected = c.seek.is_some_and(|(a, m, _)| a && m && !c.err) && !c.modded;
         let same =
             pts(&r["v"]).is_some_and(|v| same_pts(&v, &c.vector_path)) && fields(r, &["path", "v"]);
@@ -859,10 +951,6 @@ impl Driver<'_> {
         if !self.ags.nav.paths {
             return Ok(());
         }
-        if fake {
-            self.ag_input("ScorePath's path: FixPathIfTooShort's fake path");
-            return Ok(());
-        }
         let Some(key) = self.ags.nav.last_find.clone() else {
             return Err(Desync("ScorePath's path without the sim's FindPath".into()));
         };
@@ -875,6 +963,26 @@ impl Driver<'_> {
         let Some(v) = c.delivered() else {
             return Err(Desync(format!("ScorePath's path {key} before its modifiers")));
         };
+        if fake {
+            // `FixPathIfTooShort` replaces a path of fewer than two points, or of two within
+            // 0.1 m of each other in x and z (`vector.x * vector.x + vector.z * vector.z > 0.01f`
+            // keeps it); its replacement's points are an input.
+            let keeps = match v {
+                [a, b] => {
+                    let (x, z) = (a[0] - b[0], a[2] - b[2]);
+                    f64::from(x) * f64::from(x) + f64::from(z) * f64::from(z) > f64::from(0.01f32)
+                }
+                [] | [_] => false,
+                _ => true,
+            };
+            if keeps {
+                return Err(Desync(format!(
+                    "ScorePath's path {key}: a fake path where FixPathIfTooShort keeps the sim's {v:?}"
+                )));
+            }
+            self.ag_input("ScorePath's path: FixPathIfTooShort's fake path");
+            return Ok(());
+        }
         if !same_pts(points, v) || error != c.err || state != c.cs {
             return Err(Desync(format!(
                 "ScorePath's path {key}: the sim's {v:?} (error {}, state {}), the AI's {points:?}",
@@ -935,7 +1043,13 @@ impl Driver<'_> {
                 }
                 _ => Err(format!("a {kind} query (not modelled)")),
             }
-            .map(|h| h.map(|h| (h, scene.world().shapes[h.shape].name.clone()))),
+            .map(|h| {
+                h.map(|h| {
+                    let name = scene.world().shapes[h.shape].name.clone();
+                    let n = scene.world().shapes.iter().filter(|s| s.name == name).count();
+                    (h, name, n == 1)
+                })
+            }),
         };
         let got = match got {
             Ok(g) => g,
@@ -947,7 +1061,7 @@ impl Driver<'_> {
         };
         let same = match (&got, recorded) {
             (None, None) => true,
-            (Some((h, name)), Some(d)) => {
+            (Some((h, name, unique)), Some(d)) => {
                 let col = &r["col"];
                 let theirs = format!(
                     "{}:{} ({})",
@@ -955,9 +1069,17 @@ impl Driver<'_> {
                     col["path"].as_str().unwrap_or("?"),
                     col["type"].as_str().unwrap_or("?")
                 );
+                // The importer's name (`scene:path (type)`) must be one collider's; the sibling
+                // path (`sib`) has an index per ancestor below the root.
+                let depth = col["path"].as_str().map_or(0, |p| p.split('/').count());
+                let sib_ok = col["sib"].as_array().is_some_and(|a| {
+                    a.len() + 1 == depth && a.iter().all(|x| x.as_u64().is_some())
+                });
                 h.distance.to_bits() == d.to_bits()
                     && v3(&r["pt"]).map(bits3) == Some(bits3(h.point))
                     && *name == theirs
+                    && sib_ok
+                    && *unique
             }
             _ => false,
         };
@@ -972,7 +1094,7 @@ impl Driver<'_> {
             PhysCtx::Simulation => self.out.nav.phys_sim += 1,
             PhysCtx::Span => self.out.nav.phys_span += 1,
         }
-        Ok(got.map(|(h, _)| h.distance))
+        Ok(got.map(|(h, ..)| h.distance))
     }
 
     /// A physics query of the movement simulation outside a step the sim runs: answered by the
@@ -1138,6 +1260,9 @@ impl Driver<'_> {
                 w,
                 format!("graph events left: {left_rec} recorded, {left_ours} the sim's"),
             );
+        }
+        if self.ags.nav.tape.as_ref().is_some_and(|t| !t.is_empty()) {
+            Self::nav_unsupported(w, "the recording's navigation clock reads left unused");
         }
         let n = &w.combat.nav;
         self.out.nav.turn_starts = n.turn_starts;

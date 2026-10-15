@@ -284,7 +284,8 @@ tagged.
 
 **Physics.** Every recorded `ag_phys` is a check of the sim's answer: `Scene::raycast_down` or
 `heuristic_disc_cast_down` on the area's `cache/sim/phys/<guid>.wrphys`, compared with the recorded hit, distance,
-point and collider (`scene:path (type)`, the importer's shape name), bit for bit. Inside `TickMovement`'s `Move` the
+point and collider (`scene:path (type)`, the importer's shape name, which must name one collider of the area; its
+sibling path `sib` must have an index per ancestor: the file keeps no sibling indices), bit for bit. Inside `TickMovement`'s `Move` the
 query's arguments are the sim's (`AgentPhysics` answered by the driver); inside a movement simulation step the sim
 runs (below) likewise; inside a span the driven replay takes from the recording (real time: the walk-up, the agent's
 code isn't run there) the arguments are the recording's and only the answer is checked. A query `wr-phys` answers
@@ -311,11 +312,13 @@ waypoint advances and the path's end.
 - `UpdateNavigationGrid` in `CombatController.Tick` (the turn phase, when the tick goes on in the default mode, in
   combat, not waiting for the UI): no navmesh cut; while `m_NavmeshUpdateTimer` isn't negative it reads
   `Time.unscaledTime` (a recording's `nav_clock`, an input; the timer starts at the begin record's `nav_timer0`) and
-  refreshes the tags once it runs out. A replay's trace has neither the recording's timer nor its reads (WrathOracle
-  replays them): there the refresh is taken where the replay recorded it (a `nav_tags` right after the turn
-  controller's prefix, the sim's tick going on), once.
+  refreshes the tags once it runs out. A replay's trace has neither the recording's timer nor its reads, which
+  WrathOracle replays in order: `prepare_world` reads them from the recording beside it (`record.trace.jsonl.gz`),
+  and the sim's timer takes them in order (one left unused, or one missing, is reported; a replay without its
+  recording is reported).
 - Inputs: each unit's corpulence (its recorded reads, `uc_v corp` and the agent's request reads, all equal in the
-  window, else reported where needed); `AvoidanceDisabled` is the agent's field or the unit not conscious (its counter,
+  window, else reported where needed; every use of it reaches a recorded output: a unit's box, an ally's box grown by
+  the rider's, the rider's size in cells as the refresh's `erodeIterations`); `AvoidanceDisabled` is the agent's field or the unit not conscious (its counter,
   raised by cutscene moves, `UnitMoveAlongPath`, riders and a few abilities, isn't modelled). Every object the sim
   queues (`nav_guo`: centre, extents, mask, flags, tag), applies (`nav_update`: its erosion) and every refresh
   (`nav_tags`: `erodeIterations`, the tag, the grid's hash, the blocked and ally-blocked counts) is paired in order
@@ -326,26 +329,31 @@ waypoint advances and the path's end.
 AI or the path visualizer, its request already checked against `ag_req_end`'s) is searched with
 `World::turn_based_path` when the recording returns it (`path_fin`, right after its `PathSync` delivery `path_ret` in a
 recording), on the grid as it was at the request: a graph event between the two is reported (when the worker
-searched isn't recorded; none occurs in these fights), as are graph events out of step at a request. Line of sight is
+searched isn't recorded; none occurs in these fights), as are graph events out of step at a request and a request
+that replaces its seeker's path still in flight (`StartPathInternal` fails it unless a worker had finished it, which
+isn't recorded). Line of sight is
 answered from `path_fin`'s transcript, each call's arguments checked and every answer used (an input:
 `LineOfSightGeometry` isn't ported); a request with `distanceXZ` must give the same path without it. Checked: the
-traced nodes, `error`, `CompleteState`, `searchedNodes`, each definition (`ag_pathdef`: the traced nodes before the
-seeker's modifiers ran, the delivered path after), the seeker's decision (`path_seek`) and modifiers (`path_mod`), and
+traced nodes, `error`, `CompleteState`, `searchedNodes`, the end node's grid index, each definition (`ag_pathdef`: the traced nodes before the
+seeker's modifiers ran, the delivered path after), the seeker's decision (`path_seek`: `OnPathComplete(Path)` runs the modifiers and calls back,
+taking the path if it is still the seeker's latest request, from the window's `path_start`s) and modifiers
+(`path_mod`), and
 every delivery: `OnPathComplete` (`ag_done`) **runs on the sim's path** (the recorded one a check), FindPath's callback
-(`ag_findclr`) must be one the seeker makes, and the AI's `ScorePath` read (`uc_v path`, unless `FixPathIfTooShort`
-made a fake path) must be the sim's path of the AI's `FindPath`. Captures without `paths` (up to `-113`) take the
+(`ag_findclr`) must be one the seeker makes, and the AI's `ScorePath` read (`uc_v path`) must be the sim's path of the AI's `FindPath`, or,
+when `FixPathIfTooShort` made a fake path, the sim's path must be one it replaces (fewer than two points, or two
+within 0.1 m in x and z; the fake path's points are an input). Every `nav_*`/`path_*` record must be of its frame,
+and a `path_fin`, `path_seek` or `path_mod` of a path no request started is reported. Captures without `paths` (up to `-113`) take the
 recorded paths as before (A2).
 
 **Still inputs:** when a path is delivered (`PathSync`), line of sight (search and simulation), the units'
-corpulences, `MaxSpeed`/`FlyHeight` in the simulation, the Unity clock the navigation timer reads (a replay's refresh
-placement), `FindPath`'s arguments, the path visualizer's replacement paths (the commands' `FollowPrecomputedPath`
+corpulences, `MaxSpeed`/`FlyHeight` in the simulation, the Unity clock the navigation timer reads (a replay's are
+its recording's), `FixPathIfTooShort`'s fake path, `FindPath`'s arguments, the path visualizer's replacement paths (the commands' `FollowPrecomputedPath`
 of the party: the UI), the `AvoidanceDisabled` counter, a path of real time delivered in turn-based combat.
 
 **Result.** On `poc5-tb-114` to `-117` **every run is valid with the physics, the movement simulation's
 steps, the grid and the turn-based paths the sim's**, and `-113` with the physics and the steps (its grid reads stay
 inputs: no `paths`); `-112`, `-111`, `-109`, `-95` and `-96` replay valid as before. Per record run (the replays
-compute the same; the deliveries counted vary by one or two with where a replay's trace writes path definitions, and
-a replay of a fight whose recording refreshed the grid on its timer takes that refresh at its `nav_tags`):
+compute the same; the deliveries counted vary by one or two with where a replay's trace writes path definitions):
 
 | Capture / fight | Physics queries (agent, simulation, spans) | Steps (grid reads) | Paths (LOS answers) | Deliveries checked (to the agent) | Graph events | Turn starts, removals, refreshes |
 |---|---:|---:|---:|---:|---:|---:|
@@ -368,13 +376,15 @@ the combat log).
 The coverage line (`wr-combat replay`): `physics and paths: physics queries computed ... simulation steps ... paths
 computed ... deliveries checked ... graph events matched ...`.
 
-`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 44
-ways, each reported: the agent's, a simulation step's and a span's query (distance, point, collider, hit); a step's
+`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 51
+ways (and its first replay once: the timer's refresh removed), each reported: the agent's, a simulation step's and a
+span's query (distance, point, collider and its sibling path, hit); a step's
 end (position, result, length), a grid read, a missing read or end, a stray simulation read, a line-of-sight
 argument; a path's traced nodes, `searchedNodes`, `CompleteState`, its line-of-sight answer flipped, an argument
-changed, the transcript empty or unreadable, its return missing, moved before its delivery or of another key, its
-modifiers changed, missing or unexpected, a callback the seeker doesn't make, the delivered path, a definition, the
-AI's read; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
+changed, the transcript empty or unreadable, its return missing, moved before its delivery, of another frame or of
+a path no request started, its end node, its modifiers changed or missing, the seeker's decision (not taken, no
+modifiers, no callback), a stray `path_seek`, the delivered path, a definition, the AI's read, a fake path where
+`FixPathIfTooShort` keeps the path; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
 missing, a refresh repeated, the clock read missing or another, the timer negative, the observer undeclared, a
 corpulence that changes, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
 and checks the counts.

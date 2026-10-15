@@ -691,8 +691,13 @@ type Change = fn(&mut Vec<V>);
 /// Runs each damaged copy of `dir`'s record run; every case must make the run invalid with a new
 /// report containing its text.
 fn damage_cases(dir: &std::path::Path, cases: &[(&str, Change)]) {
+    damage_cases_of(dir, "record", cases);
+}
+
+/// [`damage_cases`] on one run's trace.
+fn damage_cases_of(dir: &std::path::Path, run: &str, cases: &[(&str, Change)]) {
     let base = {
-        let (mut w, trace) = replay::prepare_world(SAVE, dir, "record").expect("prepare");
+        let (mut w, trace) = replay::prepare_world(SAVE, dir, run).expect("prepare");
         let _ = replay::run_with_tape(&mut w, &trace, &trace);
         assert!(w.valid(), "the undamaged run: {:?}", w.coverage.unsupported.keys());
         w.coverage.unsupported.keys().cloned().collect::<Vec<_>>()
@@ -707,7 +712,7 @@ fn damage_cases(dir: &std::path::Path, cases: &[(&str, Change)]) {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some((want, change)) = cases.get(i) else { break };
                     let (mut w, trace) =
-                        replay::prepare_world(SAVE, dir, "record").expect("prepare");
+                        replay::prepare_world(SAVE, dir, run).expect("prepare");
                     let mut changed =
                         Trace { records: trace.records.clone(), sites: trace.sites.clone() };
                     change(&mut changed.records);
@@ -879,11 +884,11 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             recs.remove(at);
             renumber(recs);
         }),
-        ("a callback the seeker doesn't make", |recs| {
+        ("the seeker's decision", |recs| {
             let at = of_path(recs, fin_of_done(recs), "path_seek");
             recs[at]["cb"] = json!(false);
         }),
-        ("the seeker's modifiers (not expected)", |recs| {
+        ("the seeker's decision", |recs| {
             let at = of_path(recs, fin_of_done(recs), "path_seek");
             recs[at]["mods"] = json!(false);
         }),
@@ -966,7 +971,50 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             let at = tb(recs, |r| ev(r, "uc_v") && r["f"] == "corp");
             recs[at]["v"] = json!("0.75");
         }),
-        ("a turn-based path the sim didn't request", |recs| {
+        ("the seeker's decision", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "path_seek");
+            recs[at]["accepted"] = json!(false);
+        }),
+        ("the seeker's decision", |recs| {
+            // A FindPath's (the path visualizer's): no modifiers, none recorded.
+            let fin = tb(recs, |r| {
+                ev(r, "path_fin") && r["path"].as_str().is_some_and(|p| p.starts_with("5671#"))
+            });
+            let seek = of_path(recs, fin, "path_seek");
+            recs[seek]["mods"] = json!(false);
+            let m = of_path(recs, fin, "path_mod");
+            recs.remove(m);
+            renumber(recs);
+        }),
+        ("a fake path where FixPathIfTooShort keeps", |recs| {
+            let at = tb(recs, |r| {
+                ev(r, "uc_v")
+                    && r["f"] == "path"
+                    && r["fake"] == false
+                    && r["v"].as_array().is_some_and(|a| a.len() == 2)
+            });
+            recs[at]["fake"] = json!(true);
+        }),
+        ("the end node", |recs| {
+            let at = fin_of_done(recs);
+            recs[at]["end"] = json!(-999);
+        }),
+        ("a path_seek of a path no request started", |recs| {
+            let at = of_path(recs, fin_of_done(recs), "path_seek");
+            let mut r = recs[at].clone();
+            r["path"] = json!("nonexistent#0");
+            recs.insert(at + 1, r);
+            renumber(recs);
+        }),
+        ("a record of another frame", |recs| {
+            let at = fin_of_done(recs);
+            recs[at]["t"] = json!(1);
+        }),
+        ("driven replay: agent: a ray query from", |recs| {
+            let at = later(recs, |r| ev(r, "ag_phys") && r["ctx"] == "tick");
+            recs[at]["col"]["sib"] = json!([999]);
+        }),
+        ("a path no request started", |recs| {
             let at = fin_of_done(recs);
             recs[at]["path"] = json!("5198#99");
         }),
@@ -989,4 +1037,13 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
         }),
     ];
     damage_cases(&dir, &cases);
+    // A replay's navigation timer runs on its recording's clock reads: its refresh is the sim's.
+    let replay: Vec<(&str, Change)> = vec![("driven replay: paths: ", |recs| {
+        let at = (1..recs.len())
+            .find(|j| ev(&recs[*j], "nav_tags") && ev(&recs[*j - 1], "turn_tick"))
+            .unwrap();
+        recs.remove(at);
+        renumber(recs);
+    })];
+    damage_cases_of(&dir, "replay-1", &replay);
 }

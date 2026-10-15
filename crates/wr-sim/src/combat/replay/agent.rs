@@ -517,6 +517,7 @@ impl Driver<'_> {
             if let Some((who, _)) = key.rsplit_once('#') {
                 *self.ags.req_counts.entry(who.to_owned()).or_default() += 1;
             }
+            self.nav_seeker_start(key);
         }
     }
 

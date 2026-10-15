@@ -706,6 +706,10 @@ pub fn prepare_world(
     let (mut w, _) =
         crate::hydrate::hydrate(content, registry, &s, &crate::hydrate::Options::default())?;
     let trace = Trace::load(&dir.join(format!("{run_name}.trace.jsonl.gz")))?;
+    // A replay's navigation timer and clock reads are its recording's (the paths' grid).
+    if run_name != "record" {
+        w.combat.nav.recording_clock = Some(nav::recording_clock(dir));
+    }
     let start: J = serde_json::from_slice(
         &std::fs::read(dir.join(format!("state-start-{run_name}.json")))
             .context("state-start dump")?,

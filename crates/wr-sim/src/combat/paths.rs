@@ -399,6 +399,9 @@ pub struct NavRun {
     /// An input wasn't established at one of the hooks, or a graph update failed: the grid isn't
     /// the game's from there (reported; later paths aren't computed).
     pub broken: bool,
+    /// A replay's recording's navigation timer and clock reads (read beside its trace by
+    /// `replay::prepare_world`; WrathOracle replays them, its trace doesn't hold them).
+    pub recording_clock: Option<std::result::Result<(f32, Vec<f32>), String>>,
     /// Turn starts, removals and tag refreshes (combat start and end, the timer) the sim ran.
     pub turn_starts: usize,
     pub removals: usize,
