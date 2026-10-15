@@ -325,6 +325,7 @@ internal static class Fidelity
         Hooks.Install(h);
         TurnBased.Install(h);
         WallClock.Install(h);
+        TieObs.Install(h);
         PathSync.Install(h);
         ProjPin.Install(h);
         DeathFxPin.Install(h);
@@ -345,6 +346,8 @@ internal static class Fidelity
         if (ProjPin.Installed) Observers.Add("proj_arrival");
         // Death effects' dismember decisions and DismemberUnitFX's buff (death_fx, dismember; DeathFxPin.cs).
         if (DeathFxPin.Installed) Observers.Add("death_effect");
+        // The initiative comparers' identity-hash decisions (init_tie; TieObs.cs).
+        if (TieObs.Installed) Observers.Add("init_ties");
         if (PathSync.CritterIdOk) Observers.Add("critter_paths");
         else Health.Failed("critter path identification", new MissingFieldException("CritterMoveAgent.m_Seeker or Seeker.tmpPathCallback"));
         // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
