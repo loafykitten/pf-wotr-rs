@@ -168,6 +168,9 @@ pub struct Outcome {
     pub ag_reads: usize,
     pub ag_rows: usize,
     pub ag_inputs: std::collections::BTreeMap<String, usize>,
+    /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
+    /// messages against the recording's ([`crate::game_log::check`]).
+    pub clog: Option<crate::game_log::check::Summary>,
 }
 
 /// Who triggered a root rule, from its recorded call site (`origin`: the game's methods,
@@ -475,12 +478,15 @@ pub enum Phase {
     Helpless,
     /// `InspectUnitsController`: dead units' knowledge checks.
     Inspect,
+    /// `GameLogController`, the frame's last controller: the combat log's queued events to their
+    /// threads.
+    GameLog,
     /// After `Game.Tick`: the UI, coroutines (UniRx timers), the oracle's inputs.
     Post,
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 12] = [
+const WORK: [Phase; 13] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
@@ -492,6 +498,7 @@ const WORK: [Phase; 12] = [
     Phase::Leave,
     Phase::Helpless,
     Phase::Inspect,
+    Phase::GameLog,
     Phase::Post,
 ];
 
@@ -504,7 +511,7 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         return None;
     }
     Some(match p {
-        Phase::Prefix | Phase::Post => true,
+        Phase::Prefix | Phase::Post | Phase::GameLog => true,
         Phase::Sleeping | Phase::Helpless => true,
         Phase::Time | Phase::Commands | Phase::Projectiles | Phase::Fx | Phase::Life => m != PAUSE,
         Phase::Join | Phase::Prepare | Phase::LeavePrefix | Phase::Leave => m == DEFAULT,
@@ -927,6 +934,11 @@ struct Driver<'t> {
     /// item (a limb granted again holds a new one), as the limbs rule's slots (or a first attack
     /// list) showed them.
     limb_ids: HashMap<EntityIdx, String>,
+    /// The combat log is modelled (the recording declares `combat_log`): the events taken from
+    /// the recording, by type, and each recorded rule event's place in the recorded queue.
+    clog: bool,
+    clog_inputs: BTreeMap<String, usize>,
+    clog_rule_q: HashMap<i64, usize>,
     out: Outcome,
 }
 
@@ -1166,9 +1178,35 @@ impl<'t> Driver<'t> {
                 .find(|r| r["k"] == "begin")
                 .is_some_and(|b| b["mode"] == "replay"),
             limb_ids: HashMap::new(),
+            clog: false,
+            clog_inputs: BTreeMap::new(),
+            clog_rule_q: HashMap::new(),
             out,
         };
         let mut d = d;
+        // The combat log (WrathOracle's `combat_log`): modelled from the window's start.
+        if let Some(b) = recs.iter().find(|r| r["k"] == "begin")
+            && b["observers"].as_array().is_some_and(|a| a.iter().any(|o| o == "combat_log"))
+        {
+            d.clog = true;
+            w.game_log = crate::game_log::GameLog { frame: -1, ..Default::default() };
+            crate::game_log::check::activate(w, b);
+            // Each recorded rule event's place in the recorded queue (an input's attack roll is
+            // found through it), and the event types the sim neither raises nor takes as input.
+            let qs = recs.iter().filter(|r| r["k"] == "obs" && r["ev"] == "clog_q");
+            for (k, r) in qs.enumerate() {
+                if let Some(id) = r["rule"].as_i64() {
+                    d.clog_rule_q.insert(id, k);
+                }
+                let ty = r["e"].as_str().unwrap_or("");
+                if !crate::game_log::check::is_input(ty)
+                    && !crate::game_log::check::raised_by_sim(ty)
+                {
+                    w.coverage
+                        .unsupported(format!("combat log: a {ty} event the sim doesn't raise"));
+                }
+            }
+        }
         // Any of WrathOracle's tick records (a trace that lost some reports them).
         let tt_family = recs.iter().any(|r| {
             r["k"] == "obs"
@@ -1417,6 +1455,11 @@ impl<'t> Driver<'t> {
             w.events.push("draw", p);
         }
         fire::set_current(w, None);
+        if self.clog {
+            let inputs = std::mem::take(&mut self.clog_inputs);
+            self.out.clog = Some(crate::game_log::check::compare(w, &self.trace.records, inputs));
+            w.game_log.on = false;
+        }
         let trace = self.trace;
         let mut out = self.out;
         out.oracle = oracle_stream(trace, &self.echo_spans, &self.unverified, &mut out);
@@ -1427,6 +1470,43 @@ impl<'t> Driver<'t> {
 }
 
 impl Driver<'_> {
+    /// A `clog_*` record (WrathOracle's `combat_log`): an event the sim doesn't raise is queued
+    /// from its `clog_q` (an input); the rest are compared when the run ends.
+    fn clog_record(&mut self, w: &mut World, r: &J) {
+        if !self.clog {
+            w.coverage.unsupported(
+                "combat log: a clog record in a recording that doesn't declare combat_log",
+            );
+            return;
+        }
+        // A record of this frame, in its controller's phase: `GameLogController`'s tick and its
+        // messages are the frame's last controller's (placed there, the sim's tick runs; a record of
+        // an earlier phase after them is out of place); the party's combat state is raised in
+        // `UnitCombatJoinController` (`Player.UpdateIsInCombat`).
+        if r["t"].as_i64() != Some(self.tick) {
+            w.coverage.unsupported("combat log: a log record of another frame");
+        }
+        match r["ev"].as_str() {
+            Some("clog_tick") => self.place(w, Phase::GameLog, "the combat log's tick"),
+            Some("clog_msg") => self.place(w, Phase::GameLog, "a combat log message"),
+            Some("clog_q")
+                if matches!(
+                    r["e"].as_str(),
+                    Some("GameLogEventCombatStateChanged" | "GameLogEventPartyCombatState")
+                ) =>
+            {
+                self.place(w, Phase::Join, "the party's combat state event");
+            }
+            _ => {}
+        }
+        if r["ev"] != "clog_q" {
+            return;
+        }
+        if crate::game_log::check::is_input(r["e"].as_str().unwrap_or("")) {
+            crate::game_log::check::input(w, r, &mut self.clog_inputs, &self.clog_rule_q);
+        }
+    }
+
     /// At a frame's end (the turn port): the sim's turn events and `LeaveCombat` calls the
     /// recording didn't have, and recorded `ChooseNextUnit` calls the sim didn't make.
     fn frame_leftovers(&mut self, w: &mut World) {
@@ -1787,6 +1867,7 @@ impl Driver<'_> {
                 Phase::Life => super::life::life_tick(w),
                 Phase::Helpless => super::life::helpless_tick(w),
                 Phase::Inspect => super::inspect::tick(w),
+                Phase::GameLog => crate::game_log::tick(w),
                 // A recording with `loot_timer` records fires each timer at its record.
                 Phase::Post => {
                     // `EntityDestructionController` (late in the frame) destroys marked entities
@@ -2867,6 +2948,7 @@ impl Driver<'_> {
                 }
                 self.frame_at = Some(i);
                 self.tick = r["t"].as_i64().unwrap_or(-1);
+                w.game_log.frame = self.tick;
                 self.time_seen = false;
                 if self.turn_begin.take().is_some() {
                     w.coverage
@@ -2904,6 +2986,9 @@ impl Driver<'_> {
             }
             Some("obs") if self.ag && r["ev"] == "path_ret" => self.ag_path_ret(w, r),
             Some("obs") if self.ag && r["ev"] == "path_start" => self.ag_path_start(w, r),
+            Some("obs") if r["ev"].as_str().is_some_and(|e| e.starts_with("clog_")) => {
+                self.clog_record(w, r);
+            }
             Some("obs") => self.obs(w, i),
             // The clocks after `TimeController.Tick`.
             Some("time") => {
@@ -3268,6 +3353,8 @@ impl Driver<'_> {
             // `TurnStartTime = GameTime` (the record's: it is written as the call returns).
             Some("combat_start") => {
                 self.place_combat_change(w, "a combat start");
+                // `IPartyCombatHandler`: the game log's handlers.
+                crate::game_log::party_combat_changed(w, true);
                 w.combat.combat_active = true;
                 super::life::update_turn_based(w);
                 self.ag_combat_start(w);
@@ -3462,6 +3549,7 @@ impl Driver<'_> {
             }
             Some("combat_end") => {
                 self.place_combat_change(w, "a combat end");
+                crate::game_log::party_combat_changed(w, false);
                 if self.port {
                     // `Clear()`: the current turn, if any, is cleared (its `turn_clear` follows).
                     if let Some(c) = w.combat.current_unit {

@@ -139,6 +139,8 @@ fn try_make_knowledge_check(w: &mut World, u: EntityIdx) -> usize {
             "InspectUnitsManager.TryMakeKnowledgeCheck: the knowledge check (RuleSkillCheck)",
         );
     }
-    // `IKnowledgeHandler.HandleKnowledgeUpdated`: the UI's.
+    // `IKnowledgeHandler.HandleKnowledgeUpdated`: the UI's, and the game log's handler
+    // (`GameLogEventKnowledge`: no thread handles it, but it takes a place in the queue).
+    crate::game_log::knowledge_updated(w);
     rolls
 }

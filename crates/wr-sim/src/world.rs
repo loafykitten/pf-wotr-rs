@@ -489,6 +489,8 @@ pub struct World {
     /// Units the load's start pass took as awake whose toggles acted (see
     /// `spawn::settle_assumed_awake`), until settled.
     pub assumed_awake_at_load: Vec<EntityIdx>,
+    /// `GameLogController` and `GameLogContext` (the combat log), when a run models it.
+    pub game_log: crate::game_log::GameLog,
 }
 
 /// `AbilityParams.Empty` (`AbilityParams.cs:7`): a `static readonly` instance with mutable
@@ -605,6 +607,7 @@ impl World {
             level_up: Vec::new(),
             unregistered_items: std::collections::HashSet::new(),
             assumed_awake_at_load: Vec::new(),
+            game_log: crate::game_log::GameLog::default(),
         }
     }
 

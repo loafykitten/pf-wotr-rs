@@ -311,6 +311,8 @@ fn set_life_state(w: &mut World, u: EntityIdx, new: i32) {
     }
     if prev != new {
         bus::raise_global_call(w, "IUnitLifeStateChanged", "HandleUnitLifeStateChanged", Some(u));
+        // The game log's `GameEventsHandler` (`GameLogEventUnitLifeStateChanged`).
+        crate::game_log::life_state_changed(w, u, prev);
     }
 }
 

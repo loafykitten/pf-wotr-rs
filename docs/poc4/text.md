@@ -121,9 +121,9 @@ game's own output in every dialogue run.
 
 ## Not done
 
-- The templates of the combat log, the kingdom, the UI and tutorials (`count`, `source`,
-  `kingdomname`, `bind`, `t`, `ui`…), `flag` and `date`/`time` (no game clock text yet): the
-  `Env` reports them. Voice-over (`Sound.json`'s events) is read but not played.
+- The templates of the kingdom, the UI and tutorials (`kingdomname`, `bind`, `t`, `ui`…), `flag`
+  and `date`/`time` (no game clock text yet): the `Env` reports them. The combat log's (`count`,
+  `source`, `d20`…) are ported: `docs/poc5/combat-log.md`. Voice-over (`Sound.json`'s events) is read but not played.
 - Locales other than English: the oracle build runs in English; the packs load the same way.
 - The shared strings in other files of the bundle (2,220 referenced entries).
 - Not exercised by a capture yet (round 4's residual gaps): a non-null custom speaker state

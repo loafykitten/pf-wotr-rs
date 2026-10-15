@@ -98,13 +98,13 @@ fn phases_follow_the_registration_order() {
     assert_eq!(f.to(Fx), Ok(vec![]));
     assert_eq!(f.to(Commands), Err(Misplaced::Late));
     assert_eq!(f.to(LeavePrefix), Ok(vec![Life]), "the leave controller's inputs before its work");
-    assert_eq!(f.to(Post), Ok(vec![Leave, Helpless, Inspect, Post]));
+    assert_eq!(f.to(Post), Ok(vec![Leave, Helpless, Inspect, GameLog, Post]));
     assert_eq!(f.to(Post), Ok(vec![]), "once");
     assert_eq!(f.start(mode::DEFAULT), vec![]);
     // A frame without events: everything at its end.
     let all = vec![
         Groups, Turn, TurnChoose, Move, Sleeping, Cooldowns, Buffs, Life, Leave, Helpless, Inspect,
-        Post,
+        GameLog, Post,
     ];
     assert_eq!(f.start(mode::DEFAULT), all);
     assert_eq!(f.finish(), all);
@@ -124,16 +124,19 @@ fn phases_follow_the_game_modes_registrations() {
     let mut f = Frame::default();
     f.start(mode::PAUSE);
     assert_eq!(f.to(Time), Err(Misplaced::NotRegistered));
-    assert_eq!(f.finish(), vec![Sleeping, Helpless, Post]);
+    assert_eq!(f.finish(), vec![Sleeping, Helpless, GameLog, Post]);
     f.start(mode::CUTSCENE);
     assert_eq!(f.to(Prepare), Err(Misplaced::NotRegistered));
     assert_eq!(f.to(LeavePrefix), Err(Misplaced::NotRegistered));
     assert_eq!(
         f.finish(),
-        vec![Groups, Turn, TurnChoose, Move, Sleeping, Life, Helpless, Inspect, Post]
+        vec![Groups, Turn, TurnChoose, Move, Sleeping, Life, Helpless, Inspect, GameLog, Post]
     );
     f.start(mode::DIALOG);
-    assert_eq!(f.finish(), vec![Groups, Move, Sleeping, Buffs, Life, Helpless, Inspect, Post]);
+    assert_eq!(
+        f.finish(),
+        vec![Groups, Move, Sleeping, Buffs, Life, Helpless, Inspect, GameLog, Post]
+    );
     f.start(2);
     assert_eq!(f.to(Time), Err(Misplaced::NoModel));
     assert_eq!(f.finish(), vec![]);

@@ -144,6 +144,8 @@ fn trigger_internal(w: &mut World, rule: &mut dyn RuleEvent) -> Result<(), Rules
     bus::raise_rule_hooks(w, rule, bus::RuleHook::Before);
     check(w)?;
     record(w, rule, "AboutToTrigger");
+    // `RulebookEventHooksManager.OnBeforeEventAboutToTrigger` (the hooks run first): the game log.
+    crate::game_log::about_to_trigger(w, rule);
     bus::rulebook_about_to_trigger(w, rule);
     check(w)?;
     record(w, rule, "OnTrigger");
@@ -154,6 +156,8 @@ fn trigger_internal(w: &mut World, rule: &mut dyn RuleEvent) -> Result<(), Rules
     check(w)?;
     record(w, rule, "DidTrigger");
     bus::rulebook_did_trigger(w, rule);
+    // `RulebookEventHooksManager.OnAfterEventDidTrigger` (after the subscribers): the game log.
+    crate::game_log::did_trigger(w, rule);
     on_did_trigger(w, rule);
     check(w)?;
     Ok(())

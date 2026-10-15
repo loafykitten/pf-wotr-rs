@@ -144,7 +144,8 @@ fn time() {
 
 #[test]
 fn other_templates_go_to_the_env() {
-    assert_eq!(p("{Source} {count|x|y}").unwrap(), "<source:true:> <count:false:x,y>");
+    // The kingdom's, the UI's (the combat log's are `log_templates`).
+    assert_eq!(p("{Bind|x|y} {kingdomname}").unwrap(), "<bind:true:x,y> <kingdomname:false:>");
 }
 
 #[test]
@@ -268,4 +269,104 @@ fn concurrent_writers_each_replace_the_pack_whole() {
         .filter(|e| e.file_name().to_string_lossy().starts_with("race.wrtext."))
         .count();
     assert_eq!(leftovers, 0);
+}
+
+/// A combat log context (`GameLogContext`) for the log templates.
+#[derive(Default)]
+struct Log {
+    source: Option<LogUnit>,
+    target: Option<LogUnit>,
+    fact: Option<String>,
+    text: Option<String>,
+    tags: Option<String>,
+    count: i32,
+    attack_number: i32,
+    d20: Option<LogRoll>,
+}
+
+impl Env for Log {
+    fn log_unit(&mut self, field: LogUnitField) -> Result<Option<LogUnit>, TextError> {
+        Ok(match field {
+            LogUnitField::SourceUnit => self.source.clone(),
+            LogUnitField::Target => self.target.clone(),
+        })
+    }
+    fn log_source_fact_name(&mut self) -> Result<Option<String>, TextError> {
+        Ok(self.fact.clone())
+    }
+    fn log_str(&mut self, field: LogStrField) -> Result<Option<String>, TextError> {
+        Ok(match field {
+            LogStrField::Text => self.text.clone(),
+            LogStrField::TextWithTags => self.tags.clone(),
+            _ => None,
+        })
+    }
+    fn log_int(&mut self, field: LogIntField) -> Result<i32, TextError> {
+        Ok(match field {
+            LogIntField::Count => self.count,
+            LogIntField::AttackNumber => self.attack_number,
+            _ => 0,
+        })
+    }
+    fn log_roll(&mut self, field: LogRollField) -> Result<Option<LogRoll>, TextError> {
+        Ok(match field {
+            LogRollField::D20 => self.d20.clone(),
+            LogRollField::D100 => None,
+        })
+    }
+}
+
+#[test]
+fn log_templates() {
+    let unit = |n: &str| LogUnit { name: n.into(), color_rgb: "262626".into() };
+    let mut e = Log { source: Some(unit("A")), count: 1, attack_number: 0, ..Log::default() };
+    // `LogHelper.GetUnitName`, and a null unit.
+    assert_eq!(
+        process("{source} hits {target}", &mut e).unwrap(),
+        "<b><color=#262626>A</color></b> hits <no unit>"
+    );
+    // `{source}` without a unit: the fact's name, else "".
+    e.source = None;
+    assert_eq!(process("[{source}]", &mut e).unwrap(), "[]");
+    e.fact = Some("Bless".into());
+    assert_eq!(process("[{Source}]", &mut e).unwrap(), "[Bless]");
+    // `count_form`: the first form for exactly one.
+    assert_eq!(process("{count} {count_form|point|points}", &mut e).unwrap(), "1 point");
+    e.count = 2;
+    assert_eq!(process("{count} {count_form|point|points}", &mut e).unwrap(), "2 points");
+    // `attack_number` is one-based; a null string appends nothing.
+    assert_eq!(process("#{attack_number}{text}", &mut e).unwrap(), "#1");
+    e.attack_number = i32::MAX;
+    assert_eq!(process("{attack_number}", &mut e).unwrap(), i32::MIN.to_string());
+    // `text_with_tags` is processed again; null throws (`Process(null)`).
+    e.tags = Some("{count}x".into());
+    assert_eq!(process("{text_with_tags}", &mut e).unwrap(), "2x");
+    e.tags = None;
+    assert!(matches!(process("{text_with_tags}", &mut e), Err(TextError::Throws(_))));
+    // A null roll writes "".
+    assert_eq!(process("({d20})", &mut e).unwrap(), "()");
+    // Unsupported by default.
+    assert!(matches!(process("{count}", &mut NoEnv), Err(TextError::Unsupported(_))));
+}
+
+#[test]
+fn roll_descriptions() {
+    let r = |result, history: Option<Vec<i32>>| LogRoll {
+        result,
+        history,
+        replaced_one: false,
+        replace_one_with_max: false,
+        rerolls: None,
+    };
+    assert_eq!(r(7, None).description(), "7");
+    assert_eq!(r(7, Some(vec![7])).description(), "7");
+    // One kept roll, marked once (the first equal one).
+    assert_eq!(r(15, Some(vec![3, 15, 15])).description(), "3, <b><u>15</u></b>, 15");
+    let mut one = r(20, Some(vec![1]));
+    one.replaced_one = true;
+    assert_eq!(one.description(), "<s>1</s> 20");
+    let mut max = r(20, Some(vec![1, 4]));
+    max.replace_one_with_max = true;
+    max.rerolls = Some(vec![Some("Luck".into()), None, Some("Fate".into())]);
+    assert_eq!(max.description(), "<s>1</s> 20, 4 [LuckFate]");
 }

@@ -2250,7 +2250,18 @@ fn base_fields() -> serde_json::Map<String, J> {
 /// innermost rule, of a kind the replay reads, with every field typed; diffs of the rule's own
 /// fields, each value of its field's kind. No lifecycle record, other observation or exception.
 fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
-    let SpanCx { tick, w, replay, sites, limb, rules, root_reason, achievements, impatience } = *cx;
+    let SpanCx {
+        tick,
+        w,
+        replay,
+        sites,
+        limb,
+        rules,
+        root_reason,
+        achievements,
+        impatience,
+        combat_log,
+    } = *cx;
     struct Frame {
         id: i64,
         class: String,
@@ -2280,6 +2291,8 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         achievements: [HashMap<String, usize>; 2],
         /// Its engagement controller's provokes (one call at most per rule).
         provokes: u8,
+        /// Its game log event queued (`clog_q`, once at most).
+        clog: bool,
     }
     // `Rules.StableId`: the id, or for an id longer than 8 (a unit created in the window, or a GUID
     // id) `new:` and its blueprint; `-` for none.
@@ -2338,6 +2351,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
             globals: [HashMap::new(), HashMap::new()],
             achievements: [HashMap::new(), HashMap::new()],
             provokes: 0,
+            clog: false,
         };
         reason.then_some(f)
     };
@@ -2654,6 +2668,33 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     && t.is_some()
                     && (pair == (a, t) || pair == (t, a))
             }
+            // The game log's event of this very rule, queued by `GameLogController`'s did hook
+            // (`OnAfterEventDidTrigger`: after the did subscribers and WrathOracle's `did`, before
+            // `OnDidTrigger`'s `rule_end`), outside any handler of it, once; a rule event of its
+            // class with its id, enabled, no override, nothing else. Its place in the queue and its
+            // rule's units are compared with the sim's own event (`game_log::check`).
+            Some("obs") if x["ev"] == "clog_q" => {
+                let shape = x.as_object().is_some_and(|o| {
+                    let mut k: Vec<&str> = o.keys().map(String::as_str).collect();
+                    k.sort_unstable();
+                    k == ["e", "en", "ev", "id", "k", "ov", "rule", "seq", "t"]
+                });
+                let ok = combat_log
+                    && shape
+                    && !own_handler
+                    && stage == 4
+                    && !top.clog
+                    && x["rule"].as_i64() == Some(rule)
+                    && x["id"].as_i64().is_some_and(|i| i > 0)
+                    && x["e"].as_str()
+                        == Some(format!("GameLogRuleEvent<{}>", short_class(&top.class)).as_str())
+                    && x["en"] == true
+                    && x["ov"].is_null();
+                if let Some(f) = frames.last_mut() {
+                    f.clog = true;
+                }
+                ok
+            }
             Some("obs") if x["ev"] == "eng_prov" => {
                 // Called by the handler of this very rule (its subscribers list's type argument).
                 let list = format!(
@@ -2855,6 +2896,8 @@ struct SpanCx<'a> {
     achievements: &'a std::cell::RefCell<HashMap<String, usize>>,
     /// The impatience controller is observed (its handlers' records may be in a span).
     impatience: bool,
+    /// The combat log is observed (`combat_log`: a rule's own `clog_q` may be in a span).
+    combat_log: bool,
 }
 
 /// The `RulebookTargetEvent`s among the rules seen inside attacks.
@@ -3919,6 +3962,7 @@ impl Driver<'_> {
                     root_reason: &root_reason,
                     achievements: &self.achievements,
                     impatience: self.imp,
+                    combat_log: self.clog,
                 },
             );
         if !ok {
@@ -4331,7 +4375,8 @@ mod tests {
                 rules: &rules,
                 root_reason: &root_reason,
                 achievements: &ach,
-                impatience: false
+                impatience: false,
+                combat_log: false
             }
         ));
         // The root's reason is the one `AssignSource` gave.
@@ -4349,7 +4394,8 @@ mod tests {
                     rules: &rules,
                     root_reason: &other,
                     achievements: &ach,
-                    impatience: false
+                    impatience: false,
+                    combat_log: false
                 }
             ),
             "another reason for the root"
@@ -4368,7 +4414,8 @@ mod tests {
                     rules: &only_two,
                     root_reason: &root_reason,
                     achievements: &ach,
-                    impatience: false
+                    impatience: false,
+                    combat_log: false
                 }
             ),
             "a reason's unallocated rule"
@@ -4388,6 +4435,7 @@ mod tests {
                     root_reason: &root_reason,
                     achievements: &ach,
                     impatience: false,
+                    combat_log: false,
                 },
             )
         };
