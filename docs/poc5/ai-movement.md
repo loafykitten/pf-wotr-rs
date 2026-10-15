@@ -122,6 +122,15 @@ a target out of reach (commands.md, slice D: "every AI path in these fights is c
 The hand-made tests (`a_step_*`, `segment_circle_intersection_cases`) cover those branches' logic
 only, not the game's numbers.
 
+**Reviews:** gpt-6.1-sol (high), five rounds, every finding confirmed and fixed; round 5 found
+nothing. Round 1: orphaned simulation records, the inputs' unit, a query without its result,
+mismatches kept before a missing input, a `ScorePath`'s later steps after one not established,
+`Mathf.Epsilon` reported only where it decides, `0f - B` (a tangent at the start gave -0). Round 2:
+the constructor's own corpulence reads, `ScorePath`'s next leaf for the step's lookup, every query
+between steps read, the requested format found by any of its records. Round 3: corpulences and
+`FindPath`'s speed bound to their units, queries after the last step. Round 4: a `FindPath`
+request serves one `ScorePath`; a trace ending inside one is audited.
+
 ## Observer changes requested
 
 In `oracle/mods/WrathOracle/CommandObsAgent.cs` (written, not built; the agent observer, so the
