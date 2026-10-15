@@ -106,7 +106,10 @@ pub fn ray_hits_box(
         2.0 * half[k] * dot(col, col).sqrt()
     };
     let grow = 1e-2 * 2.0 * (world_edge(0) + world_edge(1) + world_edge(2));
-    if !ray_hits_aabb(o, d, max, lo, hi, grow) {
+    // The enclosure an unsure face defers to (PhysX's box hits lie on the box, within f32
+    // rounding), and a prefilter wide enough for every sure touch.
+    let enclosed = ray_hits_aabb(o, d, max, lo, hi, grow);
+    if !enclosed && !ray_hits_aabb(o, d, max, lo, hi, grow + UNSURE_SLACKS * slack(o, max)) {
         return false;
     }
     let corner = |i: usize| {
@@ -124,10 +127,10 @@ pub fn ray_hits_box(
     if point_in_box(o, m, center, half) {
         return true;
     }
+    let touch = |t: Touch| t == Touch::Yes || (t == Touch::Unsure && enclosed);
     FACES.iter().any(|f| {
-        // Unsure: the grown bounds the ray crossed above enclose the box's hits.
-        ray_touches_triangle(o, d, max, [c[f[0]], c[f[1]], c[f[2]]], 0.0) != Touch::No
-            || ray_touches_triangle(o, d, max, [c[f[0]], c[f[2]], c[f[3]]], 0.0) != Touch::No
+        touch(ray_touches_triangle(o, d, max, [c[f[0]], c[f[1]], c[f[2]]], 0.0))
+            || touch(ray_touches_triangle(o, d, max, [c[f[0]], c[f[2]], c[f[3]]], 0.0))
     })
 }
 
@@ -203,9 +206,10 @@ pub fn ray_touches_triangle(
     if cond < 1e-3 {
         return Touch::Unsure;
     }
-    // PhysX's crossing point carries an error of order 1e-7 of the triangle's size, amplified
-    // by 1 / cond, along the ray and across it alike.
-    let margin = slack(o, max) + (2.0 * bary_eps + 1e-5 / cond) * edges;
+    // PhysX's crossing point carries an error of order 1e-7 of the coordinates' and the
+    // triangle's size (the slack covers the first), amplified by 1 / cond, along the ray and
+    // across it alike; at most a thousand slacks (see [`UNSURE_SLACKS`]).
+    let margin = (slack(o, max) + 1e-5 * edges) / cond + 2.0 * bary_eps * edges;
     let t = dot(sub(a, o), n) / dot(d, n);
     if t < -margin || t > max + margin {
         return Touch::No;
@@ -213,6 +217,10 @@ pub fn ray_touches_triangle(
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
     if point_triangle_distance(p, a, b, c) <= margin { Touch::Yes } else { Touch::No }
 }
+
+/// A prefilter on a shape's bounds grows by this many [`slack`]s on top of
+/// [`triangle_grow`]: [`ray_touches_triangle`]'s margin reaches `slack / 1e-3`.
+pub const UNSURE_SLACKS: f64 = 1e3;
 
 /// How far beyond its vertices' bounds [`ray_touches_triangle`] may answer [`Touch::Yes`] (on
 /// top of the [`slack`]): a prefilter on bounds must grow by at least this.

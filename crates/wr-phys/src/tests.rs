@@ -229,6 +229,48 @@ fn meshes_and_other_shapes_fail_closed() {
         s2.raycast_down([2.3, 3.0, 2.3], 100.0, 1),
         Err(QueryError::Unverified { .. })
     ));
+    // The same sliver beside a small far triangle: the mesh's own bounds, grown, still decide.
+    let mut far = sliver.clone();
+    if let ShapeKind::Mesh { vertices, .. } = &mut far.shapes[0].kind {
+        vertices[3..].copy_from_slice(&[
+            [-1000.0, -200.0, -1000.0],
+            [-1000.0, -200.0, -999.0],
+            [-999.0, -200.0, -1000.0],
+        ]);
+    }
+    let s3 = Scene::new(&far);
+    assert!(matches!(
+        s3.raycast_down([2.3, 3.0, 2.3], 100.0, 1),
+        Err(QueryError::Unverified { .. })
+    ));
+    // A long ray far out: the origin's rounding, amplified by the triangle's angle (the player's
+    // midphase hits at 999996.625).
+    let long = World {
+        shapes: vec![Shape {
+            name: "long".into(),
+            layer: 0,
+            is_trigger: false,
+            visual_layer_move: false,
+            kind: ShapeKind::Mesh {
+                local_to_world: id,
+                vertices: vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, -1.0, 1.00528],
+                    [1.0, 1.0, 1.0],
+                    [-10.0, 10.0, -10.0],
+                    [-10.0, 10.0, -9.0],
+                    [-9.0, 10.0, -10.0],
+                ],
+                triangles: vec![[0, 1, 2], [3, 4, 5]],
+                geom_epsilon: 10.0 * 2f32.powi(-22),
+            },
+        }],
+    };
+    let s4 = Scene::new(&long);
+    assert!(matches!(
+        s4.raycast_down([0.5, 1_000_000.0, 0.501584], 999_997.0, 1),
+        Err(QueryError::Unverified { .. })
+    ));
     assert_eq!(scene.raycast_down([60.0, 1.0, 60.0], 100.0, 1).unwrap(), None);
     assert_eq!(scene.raycast_down([30.0, 1.0, 30.0], 100.0, 2).unwrap(), None, "other layer");
     assert!(unverified([200.5, 5.0, 0.5], 2));

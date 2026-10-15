@@ -117,12 +117,17 @@ impl<'w> Scene<'w> {
                             hi[k] = hi[k].max(p[k]);
                         }
                     }
-                    // Grown so the prefilter keeps every touch the triangle test may count.
+                    // Grown so the prefilter keeps every touch the triangle test may count, and
+                    // every node PhysX may test for an unsure one: each triangle's allowance, plus
+                    // a hundredth of the mesh's extent (the pruner's 1.01 inflation, BV4's
+                    // quantized node bounds).
                     let eps = f64::from(*geom_epsilon);
+                    let extent = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max);
                     let grow = tris
                         .iter()
                         .map(|t| conservative::triangle_grow(*t, eps))
-                        .fold(0.0, f64::max);
+                        .fold(0.0, f64::max)
+                        + 0.01 * extent;
                     Prepared::Mesh { tris, eps, lo: lo.map(|x| x - grow), hi: hi.map(|x| x + grow) }
                 }
                 ShapeKind::Other { min, max, .. } => {
@@ -246,12 +251,17 @@ fn may_touch(p: &Prepared, o: [f64; 3], max: f64) -> bool {
             conservative::ray_hits_box(o, DOWN, max, m, *center, *half)
         }
         Prepared::Mesh { tris, eps, lo, hi } => {
-            conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0)
-                // Unsure: the mesh's grown bounds, which the ray crosses, enclose every node BV4
-                // would test.
+            // An unsure triangle defers to the mesh's grown bounds (every node BV4 may test);
+            // the prefilter is wide enough for every sure touch.
+            let enclosed = conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0);
+            let grow = conservative::UNSURE_SLACKS * conservative::slack(o, max);
+            (enclosed || conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, grow))
                 && tris.iter().any(|t| {
-                    conservative::ray_touches_triangle(o, DOWN, max, *t, *eps)
-                        != conservative::Touch::No
+                    match conservative::ray_touches_triangle(o, DOWN, max, *t, *eps) {
+                        conservative::Touch::Yes => true,
+                        conservative::Touch::Unsure => enclosed,
+                        conservative::Touch::No => false,
+                    }
                 })
         }
         Prepared::Other { lo, hi } => conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0),
