@@ -74,7 +74,6 @@ internal static class ProjPin
         PerLauncher.Clear();
         Tape.Clear();
         Untracked.Clear();
-        Pres.Clear();
         RecordedOn = false;
         Tracked = HeldBack = Forced = 0;
     }
@@ -90,6 +89,12 @@ internal static class ProjPin
     public static void TapeRecord(JObject o)
     {
         var ev = (string)o["ev"];
+        if (ev == "proj_untracked")
+        {
+            // A projectile from before the recording's window landed in it: nothing pins that arrival.
+            Sched.Invalidate("the recording has a projectile launched before its window hitting inside it (proj_untracked): its arrival isn't pinned");
+            return;
+        }
         if (ev != "proj_launch" && ev != "proj_hit") return;
         if (o["pres"]?.Type == JTokenType.Boolean && (bool)o["pres"]) return;
         var k = o["p"]?.Type == JTokenType.String ? (string)o["p"] : null;
@@ -131,22 +136,28 @@ internal static class ProjPin
     // Inside a decorative launcher (ProjectileSpawner.Fire, FxProjectileLauncher.LaunchProjectile): its
     // projectiles are presentation (Pres), noted and never pinned.
     private static int _decorative;
-    private static readonly HashSet<Projectile> Pres = new HashSet<Projectile>(new RefEq<Projectile>());
+    // Kept across windows (a decorative projectile launched before a window may land inside it), weakly.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Projectile, object> Pres =
+        new System.Runtime.CompilerServices.ConditionalWeakTable<Projectile, object>();
+    private static readonly object PresMark = new object();
+    private static bool IsPres(Projectile p) => Pres.TryGetValue(p, out _);
     public static void DecorativePrefix() => _decorative++;
     public static Exception DecorativeFinalizer(Exception __exception) { _decorative--; return __exception; }
 
     public static void AddPostfix(Projectile p)
     {
-        if (!On || p == null) return;
+        if (!Installed || p == null) return;
         try
         {
             if (!p.View) return; // AddProjectile skipped it (no view): never ticked
+            // A decorative launch is marked whenever it happens (main thread), in a window or not.
+            if (_decorative > 0 && Trace.OnMainThread && !IsPres(p)) Pres.Add(p, PresMark);
+            if (!On) return;
             var bp = Snap.Guid(p.Blueprint);
             var tgt = p.Target?.UnitRef.Id;
             if (string.IsNullOrEmpty(tgt)) tgt = null;
-            if (_decorative > 0)
+            if (IsPres(p))
             {
-                Pres.Add(p);
                 Sched.Obs("proj_launch", j => { j.Prop("pres", true); j.Prop("bp", bp); j.Prop("tgt", tgt); });
                 return;
             }
@@ -214,7 +225,7 @@ internal static class ProjPin
             if (!Tracks.TryGetValue(p, out var t))
             {
                 // Not launched in this window (or presentation): native. One that matters hitting here is unpinned.
-                if (!p.IsHit || Pres.Contains(p) || !Untracked.Add(p)) return;
+                if (!p.IsHit || IsPres(p) || !Untracked.Add(p)) return;
                 Sched.Obs("proj_untracked", j => j.Prop("bp", Snap.Guid(p.Blueprint)));
                 if (Sched.Replay) Sched.Invalidate($"a projectile launched before the window hit at tick {now} (its arrival isn't pinned)");
                 return;
@@ -280,7 +291,7 @@ internal static class ProjPin
         catch (Exception e) { Trace.HookFailed("projectile arrival", e); }
     }
 
-    // ---- Projectile.OnHit (prefix): on its hit's tick ----
+    // ---- Projectile.OnHit (prefix and finalizer): on its hit's tick, completed ----
 
     public static void OnHitPrefix(Projectile __instance)
     {
@@ -288,34 +299,66 @@ internal static class ProjPin
         try
         {
             if (!Tracks.TryGetValue(__instance, out var t)) return;
-            t.OnHit = true;
             if (t.Hit != Trace.Tick) Sched.Invalidate($"projectile {t.K}: OnHit at tick {Trace.Tick}, its hit at tick {t.Hit}");
         }
         catch (Exception e) { Trace.HookFailed("projectile on-hit", e); }
     }
 
-    // ---- ProjectileHitController.Tick (postfix): every due hit made, with its OnHit ----
-
-    public static void HitTickPostfix()
+    // An OnHit that threw didn't do what the recording's did (and ProjectileHitController.Tick, which it ends,
+    // skipped the projectiles after it): noted, and a replay is invalid. One that returned counts as made.
+    public static Exception OnHitFinalizer(Projectile __instance, Exception __exception)
     {
-        if (!On || !Sched.Replay || Sched.Invalid != null) return;
+        if (!On || __instance == null) return __exception;
         try
         {
-            var now = Trace.Tick;
-            foreach (var t in Pending)
-                if (t.Hit < 0 && t.Due <= now)
-                {
-                    Sched.Invalidate($"projectile {t.K} was due to hit at tick {t.Due}; it didn't (gone or not ticked)");
-                    return;
-                }
-            foreach (var t in Tracks.Values)
-                if (t.Hit == now && !t.OnHit)
-                {
-                    Sched.Invalidate($"projectile {t.K} hit at tick {now} without its OnHit");
-                    return;
-                }
+            Tracks.TryGetValue(__instance, out var t);
+            if (__exception != null)
+            {
+                var k = t?.K;
+                var what = __exception.GetType().Name;
+                Sched.Obs("proj_onhit_exc", j => { j.Prop("p", k); j.Prop("exc", what); });
+                if (Sched.Replay) Sched.Invalidate($"projectile {k ?? "(untracked)"}: OnHit threw {what} at tick {Trace.Tick}");
+            }
+            else if (t != null) t.OnHit = true;
+        }
+        catch (Exception e) { Trace.HookFailed("projectile on-hit end", e); }
+        return __exception;
+    }
+
+    // ---- ProjectileHitController.Tick (finalizer, so it runs when an OnHit threw too): every due hit made,
+    // with its OnHit ----
+
+    public static Exception HitTickFinalizer(Exception __exception)
+    {
+        if (!On || !Sched.Replay || Sched.Invalid != null) return __exception;
+        try
+        {
+            if (__exception != null)
+            {
+                Sched.Invalidate($"ProjectileHitController.Tick threw {__exception.GetType().Name} at tick {Trace.Tick}");
+                return __exception;
+            }
+            CheckObligations(Trace.Tick);
         }
         catch (Exception e) { Trace.HookFailed("projectile hits", e); }
+        return __exception;
+    }
+
+    // Due hits made by `now`, and every hit's OnHit made (on its tick: OnHitPrefix checks the tick).
+    private static void CheckObligations(int now)
+    {
+        foreach (var t in Pending)
+            if (t.Hit < 0 && t.Due <= now)
+            {
+                Sched.Invalidate($"projectile {t.K} was due to hit at tick {t.Due}; it didn't (gone or not ticked)");
+                return;
+            }
+        foreach (var t in Tracks.Values)
+            if (t.Hit >= 0 && t.Hit <= now && !t.OnHit)
+            {
+                Sched.Invalidate($"projectile {t.K} hit at tick {t.Hit} without its OnHit");
+                return;
+            }
     }
 
     // Before the window closes (Sched.CheckComplete): every recorded launch and due hit happened.
@@ -329,7 +372,9 @@ internal static class ProjPin
             return;
         }
         var owed = Pending.FirstOrDefault(t => t.Hit < 0);
-        if (owed != null) Sched.Invalidate($"projectile {owed.K} was due to hit at tick {owed.Due}; the window closed first");
+        if (owed != null) { Sched.Invalidate($"projectile {owed.K} was due to hit at tick {owed.Due}; the window closed first"); return; }
+        // A hit on the window's last tick whose OnHit never came (ProjectileHitController.Tick didn't finish).
+        CheckObligations(Trace.Tick);
     }
 
     public static void Install(Harmony h)
@@ -341,8 +386,9 @@ internal static class ProjPin
                 postfix: new HarmonyMethod(typeof(ProjPin), nameof(AddPostfix)));
             h.Patch(AccessTools.Method(typeof(Projectile), nameof(Projectile.Tick)),
                 prefix: new HarmonyMethod(typeof(ProjPin), nameof(TickPrefix)), postfix: new HarmonyMethod(typeof(ProjPin), nameof(TickPostfix)));
-            h.Patch(AccessTools.Method(typeof(Projectile), nameof(Projectile.OnHit)), prefix: new HarmonyMethod(typeof(ProjPin), nameof(OnHitPrefix)));
-            h.Patch(AccessTools.Method(typeof(ProjectileHitController), nameof(ProjectileHitController.Tick)), postfix: new HarmonyMethod(typeof(ProjPin), nameof(HitTickPostfix)));
+            h.Patch(AccessTools.Method(typeof(Projectile), nameof(Projectile.OnHit)), prefix: new HarmonyMethod(typeof(ProjPin), nameof(OnHitPrefix)),
+                finalizer: new HarmonyMethod(typeof(ProjPin), nameof(OnHitFinalizer)));
+            h.Patch(AccessTools.Method(typeof(ProjectileHitController), nameof(ProjectileHitController.Tick)), finalizer: new HarmonyMethod(typeof(ProjPin), nameof(HitTickFinalizer)));
             foreach (var (type, name) in new[] { (typeof(Kingmaker.View.Spawners.Projectile.ProjectileSpawner), "Fire"), (typeof(Kingmaker.View.FxProjectileLauncher), "LaunchProjectile") })
                 h.Patch(AccessTools.Method(type, name) ?? throw new MissingMethodException(type.Name + "." + name),
                     prefix: new HarmonyMethod(typeof(ProjPin), nameof(DecorativePrefix)), finalizer: new HarmonyMethod(typeof(ProjPin), nameof(DecorativeFinalizer)));

@@ -408,7 +408,8 @@ distance and the wall flag as the arrival leaves them; the flight itself (positi
   `proj_hit` at the tick `IsHit` became true (`fl` ticks since the launch, `wall` its `IsHitWall`, `pd` its
   `PassedDistance`). A projectile launched inside one of the two decorative launchers (`ProjectileSpawner.Fire`:
   a scene's ambient spawner, random targets, always a miss; `FxProjectileLauncher.LaunchProjectile`: a scene
-  effect on a delay) is presentation: `proj_launch` with `pres`, never pinned. Every other one is pinned, a
+  effect on a delay) is presentation: `proj_launch` with `pres`, never pinned (marked whenever it is launched,
+  so one launched before a window and landing inside it is still known as decorative). Every other one is pinned, a
   point-launched ability projectile's too (the roll and range an ability sets after the launch don't count: the
   key's contents are what the launch had). The fields are read, not resolved through getters that cache
   (`UnitRef.Id`, not `UnitRef.Entity`).
@@ -424,9 +425,11 @@ distance and the wall flag as the arrival leaves them; the flight itself (positi
   (`held`: native hits taken back, `forced`).
 - **Invalid**: a launch the recording didn't make, or made with other contents or at another tick; a recorded
   launch that didn't happen by the window's end; a due hit that didn't happen (the projectile cleared or not
-  ticked: checked after every `ProjectileHitController.Tick`); `OnHit` on another tick than the hit; another
-  distance flown at the hit; a projectile launched before the window hitting inside it (unpinned); a recording
-  without `proj_arrival` in its observers, or whose launch and hit records lack or mistype a field.
+  ticked: checked after every `ProjectileHitController.Tick`, a finalizer, so also when it threw); `OnHit` on
+  another tick than the hit, or one that threw (`proj_onhit_exc`) or never completed; another distance flown at
+  the hit; a projectile launched before the window hitting inside it (`proj_untracked`, unpinned: in a replay at
+  once, and a recording that has one gives its replays nothing to follow); a recording without `proj_arrival` in
+  its observers, or whose launch and hit records lack or mistype a field.
 - End record (turn-based windows): `projectiles_tracked`, `projectile_hits_held`, `projectile_hits_forced`.
 
 Why this pin and not another [I]: taping the target point per flight tick would keep the native arithmetic but
