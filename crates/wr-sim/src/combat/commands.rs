@@ -1028,6 +1028,11 @@ fn tick<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<()> {
             x.s.result = ret;
             x.s.acted = true;
             raise_command(w, c, "IUnitCommandActHandler", "HandleUnitCommandDidAct")?;
+            // The memory controller's handler of the same event (its `AddToMemory` calls).
+            let x = cmd(w, c)?;
+            let executor = x.s.executor.as_deref().and_then(|id| w.by_id.get(id)).copied();
+            let target = x.s.target.unit().map(str::to_owned);
+            super::impatience::memory_command_did_act(w, executor, target.as_deref());
         }
     }
     let s = &cmd(w, c)?.s;

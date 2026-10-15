@@ -91,6 +91,39 @@ pub struct Impatience {
     /// not yet matched with their `mem_q` records; `None` without WrathOracle's `memory` observer
     /// (docs/poc5/memory.md).
     pub memory_adds: Option<VecDeque<(EntityIdx, EntityIdx)>>,
+    /// Its `AddToMemory` calls at a command's act (`HandleUnitCommandDidAct`), not yet matched;
+    /// `None` as `memory_adds`.
+    pub memory_acts: Option<VecDeque<(EntityIdx, EntityIdx)>>,
+}
+
+/// `UnitMemoryController.HandleUnitCommandDidAct(command)`'s `AddToMemory` calls, as the command
+/// acts: a players' enemy's command on a unit of the player's faction makes the executor remember
+/// the target (unless it's invisible: reported, see-invisibility isn't ported) and the target the
+/// executor. Matched with their `mem_q` records as they come (the memory queue itself isn't wired).
+pub fn memory_command_did_act(w: &mut World, executor: Option<EntityIdx>, target: Option<&str>) {
+    if w.combat.impatience.memory_acts.is_none() {
+        return;
+    }
+    // `command.TargetUnit == null` returns before anything.
+    let Some(t) = target.and_then(|id| w.by_id.get(id).copied()).filter(|t| w.unit(*t).is_some())
+    else {
+        return;
+    };
+    let Some(e) = executor else {
+        w.coverage.unsupported("memory: a command acting without its executor");
+        return;
+    };
+    if !(super::units::is_players_enemy(w, e) && super::units::is_player_faction(w, t)) {
+        return;
+    }
+    if crate::unit_state::has_condition(w, t, crate::combat::memory::INVISIBLE) {
+        w.coverage.unsupported("memory: a command acting on an invisible target");
+        return;
+    }
+    if let Some(q) = w.combat.impatience.memory_acts.as_mut() {
+        q.push_back((e, t));
+        q.push_back((t, e));
+    }
 }
 
 /// `UnitMemoryController.HandleUnitMakeOffensiveAction(unit, target)`'s `AddToMemory` calls, as

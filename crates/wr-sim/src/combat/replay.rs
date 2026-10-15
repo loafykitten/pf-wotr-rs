@@ -151,8 +151,8 @@ pub struct Outcome {
     /// The memory controller's `AddToMemory` calls in offensive actions (`memory` observer), each
     /// matched with the sim's.
     pub mem_adds: usize,
-    /// Its `AddToMemory` calls in commands' acts, taken as inputs (`mem_q` outside a rule).
-    pub mem_act_inputs: usize,
+    /// Its `AddToMemory` calls in commands' acts, each matched with the sim's.
+    pub mem_act_adds: usize,
     /// The movement agent (`agent` observer): its entries run (`TickUnit`, `PathTo`,
     /// `OnPathComplete`, calls), the states checked, the units ticked, the requests checked, its
     /// draws, and what it still takes from the recording, by kind.
@@ -1307,6 +1307,7 @@ impl<'t> Driver<'t> {
         // controller's `AddToMemory` calls (`mem_q`): matched with the sim's.
         w.combat.impatience.memory_adds =
             (w.combat.impatience.on && declared.contains(&"memory")).then(Default::default);
+        w.combat.impatience.memory_acts = w.combat.impatience.memory_adds.clone();
         // The movement agent is the sim's with the `agent` observer's initial states (`ag_init`,
         // since poc5-tb-106); an older capture's agent records are taken as before.
         d.ag = d.imp && declared.contains(&"agent") && recs.iter().any(|r| r["ev"] == "ag_init");

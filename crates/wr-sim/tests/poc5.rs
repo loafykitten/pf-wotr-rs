@@ -5979,7 +5979,32 @@ fn missing_or_wrong_memory_additions_are_reported() {
     }
     const C: &str = "driven replay: commands:";
     const M: &str = "driven replay: memory:";
-    let cases: [(&str, Change); 12] = [
+    let cases: [(&str, Change); 14] = [
+        // An act's call copied where no command acts (after a memory tick of its frame).
+        (M, |recs| {
+            let at = recs
+                .iter()
+                .position(|r| {
+                    r["ev"] == "mem_q"
+                        && r["by"].as_str().is_some_and(|b| b.contains("HandleUnitCommandDidAct"))
+                })
+                .unwrap();
+            let mut r = recs[at].clone();
+            let end = recs
+                .iter()
+                .position(|x| x["ev"] == "mem_tick_end" && x["t"].as_i64() > r["t"].as_i64())
+                .unwrap();
+            r["t"] = recs[end]["t"].clone();
+            recs.insert(end + 1, r);
+            renumber(recs);
+        }),
+        // An offensive action's call by another route.
+        (M, |recs| {
+            let at = mem_q(recs);
+            recs[at]["by"] = json!(
+                "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitMakeOffensiveAction<StartCombat.RunAction"
+            );
+        }),
         // Both calls after the impatience handler's record.
         (M, |recs| {
             let at = mem_q(recs);

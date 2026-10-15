@@ -283,8 +283,6 @@ struct TickWorld<'c, 'a> {
     mem: HashMap<u32, GroupMemory<u32>>,
     now: TimeSpan,
     frame: i32,
-    /// `Cleanup`'s removals (`mem_remove`, by `Cleanup`) seen on the way: (group, unit).
-    removals: Vec<(u32, u32)>,
     /// The memory's recorded changes since the last comparison, in order.
     changes: Changes,
     /// The model's, in the order it made them (collected from the memories it touched before each
@@ -335,8 +333,8 @@ impl<'a> TickWorld<'_, 'a> {
         match r["ev"].as_str() {
             Some("hash") => self.c.see_hash(r),
             Some("mem_remove") if r["by"] == "Cleanup" => {
-                let p = pair(self)?;
-                self.removals.push(p);
+                let (g, u) = pair(self)?;
+                self.changes.push((g, Change::Cleaned(u)));
             }
             Some("mem_remove") if r["by"] == "Remove" => {
                 let (g, u) = pair(self)?;
@@ -416,8 +414,8 @@ impl<'a> TickWorld<'_, 'a> {
     }
 }
 
-/// The memory's recorded additions (new keys) and removals by `Remove`, in order across every
-/// memory, are the model's.
+/// The memory's recorded additions (new keys), removals by `Remove` and `Cleanup`'s removals, in
+/// order across every memory, are the model's.
 fn check_changes(c: &mut Check<'_>, recorded: &Changes, model: &Changes) {
     if recorded != model {
         let show = |v: &Changes| -> Vec<String> {
@@ -425,15 +423,17 @@ fn check_changes(c: &mut Check<'_>, recorded: &Changes, model: &Changes) {
                 .map(|&(g, x)| match x {
                     Change::Added(k) => format!("{}+{}", c.name(g), c.name(k)),
                     Change::Removed(k) => format!("{}-{}", c.name(g), c.name(k)),
+                    Change::Cleaned(k) => format!("{}~{}", c.name(g), c.name(k)),
                 })
                 .collect()
         };
         let (a, b) = (show(model), show(recorded));
         c.fail(format!("the memories' changes: model {a:?}, game {b:?}"));
     }
-    let adds = recorded.iter().filter(|x| matches!(x.1, Change::Added(_))).count();
-    c.count("additions recorded", adds);
-    c.count("removals recorded", recorded.len() - adds);
+    let n = |f: fn(&Change<u32>) -> bool| recorded.iter().filter(|x| f(&x.1)).count();
+    c.count("additions recorded", n(|x| matches!(x, Change::Added(_))));
+    c.count("removals recorded", n(|x| matches!(x, Change::Removed(_))));
+    c.count("Cleanup removals recorded", n(|x| matches!(x, Change::Cleaned(_))));
 }
 
 fn bool_of(r: &Value, k: &str) -> Result<bool, Desync> {
@@ -636,16 +636,8 @@ impl MemoryWorld<u32, u32> for TickWorld<'_, '_> {
             let n = self.c.name(g).to_owned();
             self.c.fail(format!("{n}'s memory after its pass: model {a}, game {b}"));
         }
-        // What the tick added and removed so far, in order.
+        // What the tick added and removed so far, `Cleanup`'s removals included, in order.
         self.compare_changes()?;
-        // `Cleanup`'s removals, in removal order.
-        let seen: Vec<u32> = self.removals.iter().filter(|x| x.0 == g).map(|x| x.1).collect();
-        self.removals.retain(|x| x.0 != g);
-        if seen != removed {
-            let (a, b) = (self.c.names_of(removed), self.c.names_of(&seen));
-            let n = self.c.name(g).to_owned();
-            self.c.fail(format!("{n}'s Cleanup removed {a:?} in the model, {b:?} in the game"));
-        }
         self.c.count("groups passed", 1);
         self.c.count("forgotten", removed.len());
         // The rest of the tick goes on from the recorded state.
@@ -768,6 +760,9 @@ impl Check<'_> {
         let t = self.id_of(&r["tgt"], "a target")?;
         let peaceful = bool_of(r, "peaceful")?;
         let queued = bool_of(r, "queued")?;
+        if !r["by"].is_string() {
+            return Err(Desync(format!("a mem_q without its callers ({r})")));
+        }
         let Some(q) = self.queue.take() else { return Ok(()) };
         let mut c = MemoryController { units_for_add: q, cleanup_pending: Vec::new() };
         let before = c.units_for_add.len();
@@ -843,16 +838,12 @@ impl Check<'_> {
             mem: HashMap::new(),
             now: TimeSpan(gt),
             frame,
-            removals: Vec::new(),
             changes: Vec::new(),
             model_changes: Vec::new(),
         };
         let res = super::tick(&mut ctl, &mut w).and_then(|()| w.drain()).and_then(|()| w.sync());
-        let TickWorld { mem, removals, changes, model_changes, .. } = w;
+        let TickWorld { mem, changes, model_changes, .. } = w;
         let res = res.and_then(|()| {
-            if !removals.is_empty() {
-                return Err(Desync(format!("Cleanup removals outside a pass: {removals:?}")));
-            }
             // The queue's changes, in order.
             check_changes(self, &changes, &model_changes);
             self.tick_end(gt, mem)
@@ -1414,6 +1405,14 @@ fn a_damaged_window_is_caught() {
                 v.swap(a, b);
             }),
         ),
+        (
+            "a Cleanup removal before the pass's reads",
+            Box::new(move |v| {
+                let r = v.remove(removal);
+                v.insert(near, r);
+            }),
+        ),
+        ("a mem_q without its callers", Box::new(move |v| v[q]["by"] = json!(null))),
         ("a pre row twice", twice(pre)),
         ("an end row twice", twice(end)),
         (

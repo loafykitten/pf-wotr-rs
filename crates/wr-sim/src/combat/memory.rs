@@ -83,8 +83,8 @@ pub struct GroupMemory<K> {
     /// `m_EnemiesList`, `m_EnemiesListValid`.
     enemies: Vec<K>,
     enemies_valid: bool,
-    /// The keys `Add` and `Remove` changed, in order, while logging ([`Self::log_changes`]): what
-    /// WrathOracle's `mem_add` and `mem_remove` (by `Remove`) record.
+    /// The keys `Add`, `Remove` and `Cleanup` changed, in order, while logging
+    /// ([`Self::log_changes`]): what WrathOracle's `mem_add` and `mem_remove` record.
     log: Option<Vec<Change<K>>>,
 }
 
@@ -95,6 +95,8 @@ pub enum Change<K> {
     Added(K),
     /// `Remove` of a key that was there.
     Removed(K),
+    /// `Cleanup` removed it (WrathOracle's `mem_remove` by `Cleanup`).
+    Cleaned(K),
 }
 
 impl<K: Copy + Eq + Hash> Default for GroupMemory<K> {
@@ -234,6 +236,9 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         for k in std::mem::take(pending) {
             if self.units.remove(&k).is_some() {
                 gone.push(k);
+                if let Some(log) = self.log.as_mut() {
+                    log.push(Change::Cleaned(k));
+                }
             }
         }
         gone

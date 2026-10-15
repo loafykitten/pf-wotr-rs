@@ -11,6 +11,26 @@ use std::collections::VecDeque;
 
 use serde_json::Value as J;
 
+/// A `mem_q`'s callers (WrathOracle's four frames) from an offensive action: the memory
+/// controller's handler, `RaiseEvents`' callback and the event bus' dispatch.
+const MEM_Q_OFFENSIVE: &str = "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitMakeOffensiveAction<<>c__DisplayClass5_0.<RaiseEvents>b__0<SubscriptionManager`1.ExecuteActionInternal";
+
+/// A `mem_q`'s callers from a command's act: the handler, `UnitCommand.Tick`'s callback and the
+/// event bus' dispatch.
+const MEM_Q_ACT: &str = "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitCommandDidAct<UnitCommand.<Tick>b__230_0<SubscriptionManager`1.ExecuteActionInternal";
+
+/// A `mem_q` of its writer's shape, of frame `tick`, from `callers`, that didn't throw.
+fn mem_q_shape(r: &J, tick: i64, callers: &str) -> bool {
+    fields(r, &["o", "tgt", "peaceful", "queued", "exc", "by"])
+        && r["t"].as_i64() == Some(tick)
+        && r["exc"] == false
+        && r["peaceful"].is_boolean()
+        && r["queued"].is_boolean()
+        && r["o"].is_string()
+        && r["tgt"].is_string()
+        && r["by"] == callers
+}
+
 use super::Driver;
 use super::commands::{describe, id, is_unit, obs, opt_str, phase_of};
 use super::engage::{fields, float};
@@ -386,32 +406,28 @@ impl Driver<'_> {
     }
 
     /// A `mem_q` outside a rule's span: only a command's act makes one there in these fights
-    /// (`HandleUnitCommandDidAct`: a players' enemy's command on a unit of the player's faction),
-    /// taken as an input of its writer's shape, of its frame, its units the sim's (the commands
-    /// model doesn't raise it to the memory model yet: docs/poc5/memory.md, wiring notes).
-    /// Anything else (an offensive action's outside its rule, `StartCombat`, a random encounter,
-    /// a dungeon) is reported.
+    /// (`HandleUnitCommandDidAct`), matched with the sim's next call at the act it ran
+    /// (`impatience::memory_command_did_act`): its writer's shape, its frame, its callers. Whether
+    /// it queued is the memory queue's, which isn't wired: taken as recorded. Anything else (an
+    /// offensive action's outside its rule, `StartCombat`, a random encounter, a dungeon) is
+    /// reported.
     pub(super) fn mem_q_outside(&mut self, w: &mut World, r: &J) {
-        let unit = |k: &str| r[k].as_str().is_some_and(|id| is_unit(w, id));
-        let ok = fields(r, &["o", "tgt", "peaceful", "queued", "exc", "by"])
-            && r["t"].as_i64() == Some(self.tick)
-            && r["exc"] == false
-            && r["peaceful"].is_boolean()
-            && r["queued"].is_boolean()
-            && unit("o")
-            && unit("tgt")
-            && r["by"].as_str().is_some_and(|b| {
-                b.starts_with(
-                "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitCommandDidAct<",
-            )
-            });
+        let pair = (r["o"].clone(), r["tgt"].clone());
+        let want = w.combat.impatience.memory_acts.as_mut().and_then(VecDeque::pop_front);
+        let sim = want.map(|(o, t)| {
+            (J::from(w.entity(o).unique_id.clone()), J::from(w.entity(t).unique_id.clone()))
+        });
+        let ok = mem_q_shape(r, self.tick, MEM_Q_ACT) && sim.as_ref() == Some(&pair);
         if ok {
-            self.out.mem_act_inputs += 1;
+            self.out.mem_act_adds += 1;
         } else {
             w.coverage.unsupported(format!(
-                "driven replay: memory: an AddToMemory outside an offensive action's rule that isn't a command's act ({})",
+                "driven replay: memory: an AddToMemory outside a rule that isn't the sim's command act's ({})",
                 describe(r)
             ));
+            if let Some(q) = w.combat.impatience.memory_acts.as_mut() {
+                q.clear();
+            }
         }
     }
 
@@ -490,18 +506,7 @@ impl Driver<'_> {
                     });
                     let unit = |v: &J| v.get("$unit").cloned().unwrap_or(J::Null);
                     let pair = (r["o"].clone(), r["tgt"].clone());
-                    let shape = super::engage::fields(
-                        r,
-                        &["o", "tgt", "peaceful", "queued", "exc", "by"],
-                    ) && r["t"].as_i64() == Some(self.tick)
-                        && r["exc"] == false
-                        && r["peaceful"].is_boolean()
-                        && r["queued"].is_boolean()
-                        && r["by"].as_str().is_some_and(|b| {
-                            b.starts_with(
-                                "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitMakeOffensiveAction<",
-                            )
-                        });
+                    let shape = mem_q_shape(r, self.tick, MEM_Q_OFFENSIVE);
                     let placed = rule.is_some_and(|(_, a, t)| {
                         pair == (unit(a), unit(t)) || pair == (unit(t), unit(a))
                     });
@@ -760,10 +765,13 @@ impl Driver<'_> {
                 "driven replay: an impatience handler record the recording doesn't have",
             );
         }
-        if let Some(q) = w.combat.impatience.memory_adds.as_mut().filter(|q| !q.is_empty()) {
-            q.clear();
-            w.coverage
-                .unsupported("driven replay: memory: an AddToMemory the recording doesn't have");
+        for q in [&mut w.combat.impatience.memory_adds, &mut w.combat.impatience.memory_acts] {
+            if let Some(q) = q.as_mut().filter(|q| !q.is_empty()) {
+                q.clear();
+                w.coverage.unsupported(
+                    "driven replay: memory: an AddToMemory the recording doesn't have",
+                );
+            }
         }
         self.imp_prepare_ready = None;
         if !self.imp_prepared.is_empty() || self.imp_prepare_tail.take().is_some() {
