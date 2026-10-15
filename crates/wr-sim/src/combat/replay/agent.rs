@@ -14,7 +14,7 @@ use serde_json::Value as J;
 use super::commands::describe;
 use super::{Driver, Phase};
 use crate::combat::agent::{
-    self as ag, Agent, AgentInputs, AgentPath, DestAgent, PathRequest, Proxy, V2, V3,
+    self as ag, Agent, AgentInputs, AgentPath, AgentPhysics, DestAgent, PathRequest, Proxy, V2, V3,
 };
 use crate::combat::commands::{Desync, R};
 use crate::combat::movement::{self, MoveInputs};
@@ -423,6 +423,10 @@ impl Driver<'_> {
             // movement simulation's physics (its `msim` leaf: still recorded).
             "ag_v" if r["f"] == "isdone" => self.ag_input("isdone (outside the agent)"),
             "ag_phys" if r["ctx"] == "sim" => self.ag_input("physics (the AI's simulation)"),
+            // The AI's movement simulation (`SimulateTickMovementForTurnBased`, ported in
+            // `combat::ai_sim`, not yet run by the AI): its steps and reads are the AI's inputs.
+            "ag_sim" | "ag_sim_end" => self.ag_input("the AI's simulation steps"),
+            "ag_v" if r["ctx"] == "sim" => self.ag_input("the AI's simulation reads"),
             "ag_v" if r["f"] == "corp" || r["f"] == "speedmps" || r["f"] == "cells" => {
                 // FindPath's reads (not ported: the AI's requests are inputs).
                 self.ag_input("FindPath's reads");
@@ -867,6 +871,31 @@ impl Driver<'_> {
     }
 }
 
+impl AgentPhysics for Driver<'_> {
+    fn raycast(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        o: V3,
+        d: V3,
+        max: f32,
+        mask: i32,
+    ) -> R<Option<f32>> {
+        self.ag_phys(w, u, "ray", o, &d, max, mask)
+    }
+    fn disc_cast(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        o: V3,
+        r: f32,
+        max: f32,
+        mask: i32,
+    ) -> R<Option<f32>> {
+        self.ag_phys(w, u, "disc", o, &[r], max, mask)
+    }
+}
+
 impl AgentInputs for Driver<'_> {
     fn is_done(&mut self, w: &mut World, u: EntityIdx, path: &str) -> R<bool> {
         let r = self.ag_leaf(w, u, "isdone")?;
@@ -956,28 +985,6 @@ impl AgentInputs for Driver<'_> {
     }
     fn fly_height(&mut self, w: &mut World, u: EntityIdx) -> R<f32> {
         f(&self.ag_leaf(w, u, "fly")?["v"]).ok_or_else(|| Desync("fly without a value".into()))
-    }
-    fn raycast(
-        &mut self,
-        w: &mut World,
-        u: EntityIdx,
-        o: V3,
-        d: V3,
-        max: f32,
-        mask: i32,
-    ) -> R<Option<f32>> {
-        self.ag_phys(w, u, "ray", o, &d, max, mask)
-    }
-    fn disc_cast(
-        &mut self,
-        w: &mut World,
-        u: EntityIdx,
-        o: V3,
-        r: f32,
-        max: f32,
-        mask: i32,
-    ) -> R<Option<f32>> {
-        self.ag_phys(w, u, "disc", o, &[r], max, mask)
     }
     fn in_combat(&mut self, w: &mut World, u: EntityIdx) -> R<bool> {
         Ok(w.unit(u).is_some_and(|x| x.combat.in_combat))

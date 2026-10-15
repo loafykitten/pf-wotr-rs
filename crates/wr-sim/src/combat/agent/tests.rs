@@ -383,6 +383,31 @@ impl Recorded<'_> {
     }
 }
 
+impl AgentPhysics for Recorded<'_> {
+    fn raycast(
+        &mut self,
+        _: &mut World,
+        _: EntityIdx,
+        o: V3,
+        d: V3,
+        max: f32,
+        mask: i32,
+    ) -> R<Option<f32>> {
+        self.take_phys("ray", o, &d, max, mask)
+    }
+    fn disc_cast(
+        &mut self,
+        _: &mut World,
+        _: EntityIdx,
+        o: V3,
+        r: f32,
+        max: f32,
+        mask: i32,
+    ) -> R<Option<f32>> {
+        self.take_phys("disc", o, &[r], max, mask)
+    }
+}
+
 impl AgentInputs for Recorded<'_> {
     fn is_done(&mut self, _: &mut World, _: EntityIdx, path: &str) -> R<bool> {
         let r = self.take_leaf("isdone")?;
@@ -663,28 +688,6 @@ impl AgentInputs for Recorded<'_> {
     }
     fn fly_height(&mut self, _: &mut World, _: EntityIdx) -> R<f32> {
         Ok(f(&self.take_leaf("fly")?["v"]))
-    }
-    fn raycast(
-        &mut self,
-        _: &mut World,
-        _: EntityIdx,
-        o: V3,
-        d: V3,
-        max: f32,
-        mask: i32,
-    ) -> R<Option<f32>> {
-        self.take_phys("ray", o, &d, max, mask)
-    }
-    fn disc_cast(
-        &mut self,
-        _: &mut World,
-        _: EntityIdx,
-        o: V3,
-        r: f32,
-        max: f32,
-        mask: i32,
-    ) -> R<Option<f32>> {
-        self.take_phys("disc", o, &[r], max, mask)
     }
     fn in_combat(&mut self, _: &mut World, _: EntityIdx) -> R<bool> {
         Ok(b(&self.tick["combat"]))

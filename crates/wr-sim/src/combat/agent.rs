@@ -160,7 +160,33 @@ impl Default for Agent {
 
 /// What the agent reads outside itself and the calls it makes into the unit, in the order the
 /// game makes them.
-pub trait AgentInputs {
+/// The physics queries `UnitMovementAgentBase.Move` makes (the movement simulation of the AI
+/// makes them too, through `move_tb`).
+pub trait AgentPhysics {
+    /// `Physics.Raycast(origin, direction, out hit, max, mask)`: the hit's distance.
+    fn raycast(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        o: V3,
+        d: V3,
+        max: f32,
+        mask: i32,
+    ) -> R<Option<f32>>;
+
+    /// `PhysicUtils.HeuristicDiscCastDown(origin, radius, out hit, max, mask)`: the distance.
+    fn disc_cast(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        o: V3,
+        r: f32,
+        max: f32,
+        mask: i32,
+    ) -> R<Option<f32>>;
+}
+
+pub trait AgentInputs: AgentPhysics {
     /// `Path.IsDone()` of a path the agent holds.
     fn is_done(&mut self, w: &mut World, u: EntityIdx, path: &str) -> R<bool>;
     /// `Game.Instance.TurnBasedCombatController.CurrentTurn != null`.
@@ -252,26 +278,6 @@ pub trait AgentInputs {
     fn max_speed(&mut self, w: &mut World, u: EntityIdx) -> R<f32>;
     /// `UnitEntityData.FlyHeight`.
     fn fly_height(&mut self, w: &mut World, u: EntityIdx) -> R<f32>;
-    /// `Physics.Raycast(origin, direction, out hit, max, mask)`: the hit's distance.
-    fn raycast(
-        &mut self,
-        w: &mut World,
-        u: EntityIdx,
-        o: V3,
-        d: V3,
-        max: f32,
-        mask: i32,
-    ) -> R<Option<f32>>;
-    /// `PhysicUtils.HeuristicDiscCastDown(origin, radius, out hit, max, mask)`: the distance.
-    fn disc_cast(
-        &mut self,
-        w: &mut World,
-        u: EntityIdx,
-        o: V3,
-        r: f32,
-        max: f32,
-        mask: i32,
-    ) -> R<Option<f32>>;
     /// `UnitEntityData.IsInCombat`.
     fn in_combat(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
     /// `Unit.OnMovementInterrupted(destination)` (the move command's and group command's
@@ -690,7 +696,7 @@ pub fn move_tb(
     p: V3,
     shift: V3,
     fly: f32,
-    inp: &mut dyn AgentInputs,
+    inp: &mut dyn AgentPhysics,
 ) -> R<V3> {
     const MASK: i32 = 2_099_457;
     let mut v = [p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]];

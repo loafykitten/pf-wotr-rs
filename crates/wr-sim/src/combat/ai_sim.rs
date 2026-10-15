@@ -9,7 +9,7 @@
 //! itself ([`SimInputs`]: `MaxSpeed`, `FlyHeight`, the physics queries, the grid node's
 //! `AllyBlocked`, line of sight) is an input.
 
-use super::agent::{self, AgentInputs, AgentPath, Proxy, V2, V3, m};
+use super::agent::{self, AgentPhysics, V2, V3, m};
 use super::commands::{Desync, R};
 use crate::csharp::arith::store_f32;
 use crate::world::{EntityIdx, World};
@@ -231,63 +231,7 @@ pub trait SimInputs {
 /// reports any other read (`Move` makes none).
 struct MovePhysics<'a>(&'a mut dyn SimInputs);
 
-fn not_read<T>(what: &str) -> R<T> {
-    bad(format!("Move, in the movement simulation, read the agent's {what}"))
-}
-
-macro_rules! not_read {
-    ($($name:ident($($arg:ident: $t:ty),*) -> $ret:ty;)*) => {$(
-        fn $name(&mut self, $($arg: $t),*) -> R<$ret> {
-            $(let _ = $arg;)*
-            not_read(stringify!($name))
-        }
-    )*};
-}
-
-impl AgentInputs for MovePhysics<'_> {
-    not_read! {
-        is_done(w: &mut World, u: EntityIdx, path: &str) -> bool;
-        has_current_turn(w: &mut World) -> bool;
-        current_and_acting(w: &mut World, u: EntityIdx) -> bool;
-        turn_tick_movement(w: &mut World, u: EntityIdx, dt: f32, force: bool) -> f32;
-        cutscene_active(w: &mut World, u: EntityIdx) -> bool;
-        move_dont_interrupt(w: &mut World, u: EntityIdx) -> bool;
-        nav_obstacles(w: &mut World) -> bool;
-        gamepad(w: &mut World, u: EntityIdx) -> bool;
-        random_range(w: &mut World, u: EntityIdx, min: f32, max: f32) -> f32;
-        call(w: &mut World, u: EntityIdx, f: &'static str, index: Option<i32>) -> ();
-        group_memory(w: &mut World, u: EntityIdx) -> bool;
-        obstacles_group(w: &mut World, u: EntityIdx) -> bool;
-        saddled(w: &mut World, u: EntityIdx) -> bool;
-        dest_proxy(w: &mut World, u: EntityIdx, view: &str) -> Proxy;
-        accelerate_if_long(w: &mut World, u: EntityIdx, path: &AgentPath) -> ();
-        unreachable(w: &mut World, u: EntityIdx, dest_view: &str) -> ();
-        movement_started(w: &mut World, u: EntityIdx, dest: V3) -> ();
-        has_commands(w: &mut World, u: EntityIdx) -> bool;
-        soft_collider_closest(w: &mut World, u: EntityIdx, point: V3) -> Option<V3>;
-        on_navmesh(w: &mut World, u: EntityIdx, pos: V3) -> bool;
-        frames(w: &mut World) -> (i32, i32);
-        init_move_direction(w: &mut World, u: EntityIdx) -> V2;
-        corpulence(w: &mut World, u: EntityIdx) -> f32;
-        size_in_cells(w: &mut World, u: EntityIdx) -> i32;
-        grid_erosion(w: &mut World) -> Option<(i32, i32)>;
-        fudge_radius(w: &mut World, u: EntityIdx, command: Option<u32>) -> f32;
-        speed_mps(w: &mut World, u: EntityIdx) -> f32;
-        move_command(w: &mut World, u: EntityIdx) -> Option<(f32, bool)>;
-        request_key(w: &mut World, u: EntityIdx) -> String;
-        prone(w: &mut World, u: EntityIdx) -> bool;
-        repath_all(w: &mut World) -> ();
-        rider_in_combat(w: &mut World, u: EntityIdx) -> bool;
-        anim_prevents(w: &mut World, u: EntityIdx) -> Option<bool>;
-        commands_prevent(w: &mut World, u: EntityIdx) -> bool;
-        max_speed(w: &mut World, u: EntityIdx) -> f32;
-        fly_height(w: &mut World, u: EntityIdx) -> f32;
-        in_combat(w: &mut World, u: EntityIdx) -> bool;
-        movement_interrupted(w: &mut World, u: EntityIdx, dest: V3) -> ();
-        movement_complete(w: &mut World, u: EntityIdx) -> ();
-        waypoint_update(w: &mut World, u: EntityIdx, index: i32) -> ();
-    }
-
+impl AgentPhysics for MovePhysics<'_> {
     fn raycast(
         &mut self,
         w: &mut World,
@@ -299,7 +243,6 @@ impl AgentInputs for MovePhysics<'_> {
     ) -> R<Option<f32>> {
         self.0.raycast(w, u, o, d, max, mask)
     }
-
     fn disc_cast(
         &mut self,
         w: &mut World,
