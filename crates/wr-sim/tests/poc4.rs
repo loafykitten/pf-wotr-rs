@@ -312,19 +312,26 @@ fn horgus_runs_are_valid() {
     }
 }
 
-/// Camelia (`poc4-camelia-5`, round 12): Seelah's meeting, then the main character teleported into
-/// `CameliaDialogueTrigger`, whose cutscene starts the dialogue (`CommandStartDialog`, placed by
-/// the recording's `cs_dialog`) after skipping a command whose entry condition failed
-/// (`cs_entry`), and Camelia recruited. Every run is valid: the ordered T0 stream equals the
-/// oracle's, the end state and the units match; the combat log's item copy (the original's UI,
-/// in Pause mode) is left out of the oracle's stream, once.
+/// Camelia (round 12): from Ember's `Manual_20_WR_PreCamelia` the main character walks into
+/// `CameliaDialogueTrigger` (`poc4-camelia-6`); and the development capture `poc4-camelia-5`
+/// (Seelah's meeting from Manual_13, then a teleport into the trigger). The trigger's cutscene
+/// starts the dialogue (`CommandStartDialog`, placed by the recording's `cs_dialog`) after
+/// skipping a command whose entry condition failed (`cs_entry`), and Camelia is recruited. Every
+/// run is valid: the ordered T0 stream equals the oracle's, the end state and the units match;
+/// the combat log's item copy (the original's UI, in Pause mode) is left out of the oracle's
+/// stream, once.
 #[test]
-#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-camelia-5 capture"]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-camelia-5 and -6 captures"]
 fn camelia_runs_are_valid() {
-    for name in ["camelia-a", "camelia-b"] {
+    for (cap, name) in [
+        ("poc4-camelia-6", "camelia-walk-a"),
+        ("poc4-camelia-6", "camelia-walk-b"),
+        ("poc4-camelia-5", "camelia-a"),
+        ("poc4-camelia-5", "camelia-b"),
+    ] {
         for r in ["record", "replay-1"] {
             let spec = root().join("crates/wr-sim/fixtures/poc4.json");
-            let d = root().join("fixtures/captures/oracle/poc4-camelia-5/fixtures").join(name);
+            let d = root().join("fixtures/captures/oracle").join(cap).join("fixtures").join(name);
             let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
                 ability_params_empty: None,
                 spec: &spec,

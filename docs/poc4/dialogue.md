@@ -13,7 +13,7 @@ coordinator commits after review). Captures are local and gitignored
 | Seelah/Anevia meeting, paths A, B, C (12 runs: record, replay, perturbed replays); **round 3 below: now the whole stream equal to the end** | **Every run's dialogue stream equal [M]** (71, 81, 76 records per path), every rule draw equal (7, 13, 7), every rule result equal up to the recruitment; the ordered stream equal up to the recruitment (102/354, 130/382, 108/357 records), where the oracle builds the companion's new unit (`ChangeUnitBlueprint`) and applies a buff (`AttachBuff`), both reported unsupported by the sim. Character sheets 100% on every run (3 units, 1,737 fields) |
 | The three reachable Seelah checks on success and failure tapes | **Yes [M]**: Athletics `ded4aae5…`, Knowledge World `d530baf0…`, Diplomacy `d0ef7c0d…`, each recorded failing and passing (perturbed d20), each matched by the sim. The fourth (Oread-only Athletics) is unreachable from Manual_13 (Kitsune PC) |
 | Horgus (Manual_19, Prologue_Neathholm), check path and alternative path (6 runs) | **Dialogue streams equal on every run [M]** (52 and 64 records); the party Diplomacy check (authored DC 16) passing in the record (flag `ddfedbde…` = 2000) and failing in a perturbed replay (= 1000), the alternative path setting 500; all 10 rule records before the closing cutscene equal (roller, stat 8, DC 16, d20, total); character sheets 100% (7 units, 4,269 fields); narrative end state equal except the ToyBox etude. The ordered stream diverges at the closing cutscene (`HideUnit`, `Spawn`: reported unsupported) |
-| Round 12 (2026-10-14, twentieth session): Camelia | **All 4 runs of `poc4-camelia-5` valid [M]** (a development capture: Seelah's meeting, then a teleport into Camelia's zone): her cutscene starts the dialogue (`cs_dialog`), skips a command on its entry check (`cs_entry`), and she joins; whole T0 stream, end state and units equal (round 12 below) |
+| Round 12 (2026-10-14, twentieth session): Camelia | **All 4 runs of `poc4-camelia-6` valid [M]** (from Ember's Manual_20, walking into her trigger), and all 4 of the development capture `poc4-camelia-5` (Seelah's meeting, then a teleport): her cutscene starts the dialogue (`cs_dialog`), skips a command on its entry check (`cs_entry`), and she joins; whole T0 stream, end state and units equal (round 12 below) |
 | Round 11 (2026-10-14, nineteenth session): text | **Every dialogue run valid with the dialogue's text compared [M]**: on `poc4-seelah-7`, `poc4-horgus-11` and `cert-24` (recorded with `dialog_text`), every history line, cue and answer text and speaker name and colour equals the game's (`docs/poc4/text.md`). Camelia's meeting recorded for the first time (`poc4-camelia-1`, round 11 below): not yet run by the sim |
 | POC-4 pass criterion, round 10 (2026-10-14) | **Met on every run**: the 6 Horgus runs (`poc4-horgus-9`) are valid too, with the unit groups modelled and checked against every recorded group state and roaming's two draws tied to their recorded producers; the 12 Seelah runs (`poc4-seelah-5`) stay valid with the groups checked, and the 3 `dialog-checks` runs (`cert-22`) (round 10 below) |
 | POC-4 pass criterion, round 9 (2026-10-14) | **Met on 18 of 24 runs, on captures with every recorded input (`poc4-seelah-4`, `cert-22`)**: the 15 Seelah and 3 `dialog-checks` runs are valid with the cutscene lock's buff tick and postpone, Cutscene and Pause modes, the zone entry's tick and every tick's mode checked. The 6 Horgus runs (`poc4-horgus-8`) are T0-equal with the end state 1.0000, invalid on group membership and roaming's two draws (round 9 below) |
@@ -702,6 +702,16 @@ the roaming audit's id lookup and a lint.
   origin has a `Kingmaker.UI` frame (`ui_excluded`; player input is neutral in recordings).
   `FollowersFormationController.PrepareFormation`'s draw (a follower's facing) is audited T1.
 
+**The regular fixture:** Ember's `Manual_20_WR_PreCamelia` (Seelah recruited, the cloak looted,
+the party just outside Camelia's trigger; hydration 1.0000 against `manual20-dump-1`, nothing
+unsupported at load). At load the main character stands in `Camelia_Radius_Check`, whose entry
+has no conditions, actions, scene calls or `IScriptZoneHandler` subscribers: such an entry at
+load no longer reports the `OnAreaDidLoad` subscribers' order (one with effects still does).
+`poc4-camelia.spec.json` walks into the trigger (`camelia-walk-a`, `-b`); recorded as
+`poc4-camelia-6` (all four runs clean): **all 4 runs valid** on the first try, the whole stream
+(312 and 356 records), end state and units equal. The teleport spec is now
+`poc4-camelia-tp.spec.json`.
+
 Result on `poc4-camelia-5` (record and replay of `camelia-a` and `camelia-b`): **all 4 runs
 valid**, the whole ordered T0 stream equal (695 and 739 records: both dialogues, the cutscenes'
 commands, the recruitment), the end state equal (etudes 1307/1307) and the units 1.0000; one UI
@@ -721,6 +731,8 @@ and `EtudeStatus` do). All fixed, with tests.
 | `fixtures/captures/oracle/poc4-seelah-7` (Manual_13) | as `poc4-seelah-5`, with `dialog_text` and the window's speaker state | record, replay-1, perturbed replays (b: 3, c: 2) |
 | `fixtures/captures/oracle/poc4-horgus-11` (Manual_19) | as `poc4-horgus-9`, with `dialog_text` | record, replay-1, perturbed |
 | `fixtures/captures/oracle/cert-24` (Manual_13, the certification plan) | `dialog-checks`, `dice`, `attack`, with `dialog_text` | record, replay-1, perturbed |
+| `fixtures/captures/oracle/poc4-camelia-6` (Manual_20) | `camelia-walk-a`, `camelia-walk-b` (the main character walks into Camelia's trigger) | record, replay-1 |
+| `fixtures/captures/oracle/manual20-dump-1` (Manual_20) | the state after load | |
 | `fixtures/captures/oracle/poc4-camelia-5` (Manual_13) | `camelia-a`, `camelia-b` (development: Seelah's meeting, then a teleport into Camelia's zone), with `cutscene_commands` and `paused_origins` | record, replay-1 |
 | `poc4-camelia-1`, `-3`, `-4` | superseded (`-1` played Seelah's dialogue; `-3`/`-4` predate the final hooks); archived on the external volume, with the two aborted `-2` tries | |
 | `poc4-seelah-5`/`-6`, `poc4-horgus-9`/`-10`, `cert-22`/`-23` | superseded (the `-6`, `-10`, `-23` without the window's speaker state); archived on the external volume | |
@@ -748,10 +760,9 @@ non-perturbed runs' `begin` records (cosmetic, oracle side).
 2. See round 5's next steps.
 3. The load-time long tail per save (`coverage.json`), and placeholder spawning's pre-cast buffs
    (`ShieldOfFaithBuff` above: `IsFromSpell` and inactive in the oracle).
-4. Camelia's meeting: valid on a development capture (round 12). For a regular fixture: a save
-   just before Camelia (Ember), or a driver `loot` step and the sim's looting (the container's
-   interaction, the loot window's take-all, `PartyInventoryTrigger`). Facts' handler interfaces
-   (the save schema's gap, round 12). `crates/wr-text`: done (round 11); left: the combat log's,
+4. Camelia's meeting: valid on Ember's Manual_20 (round 12). Left: facts' handler interfaces
+   (the save schema's gap, round 12); looting (a driver `loot` step and the sim's container
+   interaction, take-all and `PartyInventoryTrigger`) when a fixture needs it. `crates/wr-text`: done (round 11); left: the combat log's,
    kingdom's and UI templates.
 
 ## Files

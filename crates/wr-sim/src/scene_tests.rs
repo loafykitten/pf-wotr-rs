@@ -997,11 +997,23 @@ fn a_hidden_unit_does_not_use_up_a_once_only_zone_at_load() {
     let fake = area_unit(&mut w, "fake", [0.0; 3], true);
     w.unit_mut(fake).expect("unit").blueprint = Some(fake_bp.guid);
     let eligible = area_unit(&mut w, "eligible", [1.0, 0.0, 0.0], true);
+    let actions = Node::Object(Box::new(obj(
+        "Kingmaker.ElementsSystem.ActionList",
+        &[("Actions", Node::Seq(vec![action("Play2DSound")]))],
+    )));
+    insert(
+        &w,
+        0x20E1,
+        "Kingmaker.Blueprints.Area.BlueprintScriptZone",
+        &[("EnterActions", actions)],
+    );
+    w.scene.zones[z].blueprint = Some(Guid(0x20E1));
     crate::scene::on_area_did_load(&mut w);
     let inside: Vec<EntityIdx> = w.scene.zones[z].inside.iter().map(|i| i.unit).collect();
     assert_eq!(inside, vec![eligible], "hidden {hidden:?} and fake {fake:?} aren't enumerated");
     assert!(!w.scene.zones[z].is_active, "the eligible unit used the zone up");
-    // A zone firing at load runs among the other `OnAreaDidLoad` subscribers: reported.
+    // A zone firing at load (its enter actions) runs among the other `OnAreaDidLoad`
+    // subscribers: reported.
     let kinds: Vec<&String> = w.coverage.unsupported.keys().collect();
     assert_eq!(
         kinds,
@@ -1919,4 +1931,21 @@ fn deal_damage_reports_the_evaluated_bonus_first() {
     );
     assert!(crate::elements::actions::run(&mut w, &owner, crate::content::View(&a)).is_err());
     assert!(w.coverage.unsupported.keys().any(|k| k.contains("EvaluatedBonus")));
+}
+
+/// A unit inside a zone at load whose entry has no effect (no conditions, actions, scene calls
+/// or `IScriptZoneHandler` subscribers) just joins its list: not reported.
+#[test]
+fn a_quiet_zone_entry_at_load_is_not_reported() {
+    let (mut w, u, z) = zone_world(false, false);
+    w.entity_mut(u).is_in_game = false;
+    {
+        let cache = w.scene.cache.as_mut().expect("cache");
+        Rc::get_mut(cache).expect("unique").zones[0].shapes = vec![cylinder([0.0; 3], 3.0, 5.0)];
+    }
+    let eligible = area_unit(&mut w, "eligible", [1.0, 0.0, 0.0], true);
+    crate::scene::on_area_did_load(&mut w);
+    let inside: Vec<EntityIdx> = w.scene.zones[z].inside.iter().map(|i| i.unit).collect();
+    assert_eq!(inside, vec![eligible]);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
 }

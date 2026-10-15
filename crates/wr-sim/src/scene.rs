@@ -676,6 +676,23 @@ fn untargetable(w: &mut World, u: EntityIdx) -> bool {
 }
 
 /// `ScriptZone.TryAddUnit`.
+/// Whether a unit's entry into zone `zi` does anything beyond joining its inside list (and a
+/// once-only zone switching itself off): trigger conditions, enter actions, the scene's calls,
+/// or an `IScriptZoneHandler` subscriber.
+fn entry_has_effects(w: &World, zi: usize, info: &ZoneInfo) -> bool {
+    let bp = w.scene.zones[zi].blueprint.and_then(|g| w.content.get(g));
+    let listed = |field: &str, list: &str| {
+        bp.as_ref().is_some_and(|b| b.view().obj(field).is_some_and(|l| !l.objs(list).is_empty()))
+    };
+    listed("TriggerConditions", "Conditions")
+        || listed("EnterActions", "Actions")
+        || info.unit_entered_calls > 0
+        || w.bus
+            .global
+            .get("IScriptZoneHandler")
+            .is_some_and(|l| l.list.iter().any(Option::is_some))
+}
+
 fn try_add_unit(w: &mut World, zi: usize, unit: EntityIdx, info: &ZoneInfo) {
     let zone_bp = w.scene.zones[zi].blueprint;
     let bp = zone_bp.and_then(|g| w.content.get(g));
@@ -832,10 +849,12 @@ pub fn on_area_did_load(w: &mut World) {
                 if inside && !w.scene.zones[zi].inside.iter().any(|i| i.unit == u) {
                     // The zone runs its conditions, actions and `IScriptZoneHandler` here, among
                     // the other `IAreaHandler.OnAreaDidLoad` subscribers, whose order isn't
-                    // modelled.
-                    w.coverage.unsupported(
-                        "ScriptZone.OnAreaDidLoad: a unit enters at load (order among the IAreaHandler subscribers)",
-                    );
+                    // modelled: an entry with none of them only joins the zone's list.
+                    if entry_has_effects(w, zi, &info) {
+                        w.coverage.unsupported(
+                            "ScriptZone.OnAreaDidLoad: a unit enters at load (order among the IAreaHandler subscribers)",
+                        );
+                    }
                     try_add_unit(w, zi, u, &info);
                 }
             }
