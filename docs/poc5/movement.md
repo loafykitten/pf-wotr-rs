@@ -132,7 +132,7 @@ flag, the destination's proxy, and `RepathNeeded` on other agents (its world hol
 
 ## Steps
 
-1. `agent` observer; record `tb-nearest` and `tb-focus`. **Done** (`poc5-tb-100`, `-101`).
+1. `agent` observer; record `tb-nearest` and `tb-focus`. **Done** (`poc5-tb-100` to `-103`; `-103` is current).
 2. The sim's agent with recorded paths and physics. `TickMovement` **done** against the records. Next: `PathTo`
    (it needs the unit's orientation, `InitMoveDirection`: orientation isn't modelled yet, so `UnitMoveController`'s
    `LookRotation`/`eulerAngles` and `UpdateSlowRotation` come with it), `OnPathComplete` and the deliveries at

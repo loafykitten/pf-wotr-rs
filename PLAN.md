@@ -277,6 +277,12 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   reads the older ones with what they lack taken as noted in `docs/poc5/movement.md`); `-98`/`-99` archived. `UnityEngine.CoreModule` is decompiled into
   `decompiled/UnityEngine.CoreModule` (Vector2/Vector3/Mathf/Quaternion's managed code). The agent's check:
   `cargo test --release -p wr-sim --lib every_recorded_tick -- --ignored --nocapture` (`WR_AGENT_CAPTURES` picks others).
+  The sim regression (`scripts/regress.sh`) wasn't rerun: the agent isn't wired into any replay yet (only a field on
+  `UnitCombat`), so the baseline stays `cache/regress/out-facthandlers`; rerun it once `UnitMoveController` runs in
+  `Phase::Move`. For `PathTo`'s orientation (`InitMoveDirection` reads `OrientationDirection`; `UnitMoveController`
+  writes `Quaternion.LookRotation(forward).eulerAngles.y`): the player's icall stubs are `LookRotation_Injected` at
+  0x81c2d0 and `Internal_ToEulerRad_Injected` at 0x81c074 (not yet ported); port and check them as `wr-nav`'s
+  `native_check.rs` does `RotateTowards` (through the stub when the implementation returns through x8).
 - **Twenty-first session (2026-10-15):** the regression baseline is `cache/regress/out-facthandlers` (identical to
   `out-camelia2` but Manual_10's coverage). `wr-combat replay` doesn't print executed handlers; a temporary print of
   `w.coverage.executed` is how round 13 counted them.
