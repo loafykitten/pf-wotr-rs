@@ -153,15 +153,21 @@ pub struct Outcome {
     pub mem_adds: usize,
     /// Its `AddToMemory` calls in commands' acts, each matched with the sim's.
     pub mem_act_adds: usize,
-    /// The movement agent (`agent` observer): its entries run (`TickUnit`, `PathTo`,
-    /// `OnPathComplete`, calls), the states checked, the units ticked, the requests checked, its
-    /// draws, and what it still takes from the recording, by kind.
+    /// The movement agent (`agent` observer): its entries run (`TickUnit`, `FindPath`,
+    /// `OnPathComplete`, calls), the commands' calls it ran, the states checked, the units
+    /// ticked, the requests checked, its draws, the synchronizations taken, its getters checked
+    /// (the commands' and the turn controller's reads), the observation rows checked, and what
+    /// it still takes from the recording, by kind.
     pub ag_entries: usize,
+    pub ag_command_calls: usize,
     pub ag_states: usize,
     pub ag_ticks: usize,
     pub ag_requests: usize,
     pub ag_draws: usize,
-    pub ag_inputs: std::collections::BTreeMap<&'static str, usize>,
+    pub ag_syncs: usize,
+    pub ag_reads: usize,
+    pub ag_rows: usize,
+    pub ag_inputs: std::collections::BTreeMap<String, usize>,
 }
 
 /// Who triggered a root rule, from its recorded call site (`origin`: the game's methods,
@@ -893,19 +899,7 @@ struct Driver<'t> {
     /// `TickMovement`'s and `PathTo`'s records, `SlowDown`'s draw sites, the grid's erosion
     /// settings (the area's nav file).
     ag: bool,
-    ag_paths: HashMap<String, Vec<[f32; 3]>>,
-    ag_all: Vec<EntityIdx>,
-    ag_last_state: HashMap<EntityIdx, J>,
-    ag_tick_rec: Option<J>,
-    ag_req_rec: Option<J>,
-    ag_slow_sites: Vec<i64>,
-    ag_erosion: Result<Option<(i32, i32)>, String>,
-    /// The agents whose next recorded state is taken (a real-time span came before it).
-    ag_after_rt: std::collections::HashSet<EntityIdx>,
-    /// The frame of each unit's last `TickUnit`.
-    ag_last_ctl: HashMap<EntityIdx, i64>,
-    /// The capture records FindPath's callback (`ag_findclr`).
-    ag_has_findclr: bool,
+    ags: agent::AgDriver,
     imp_init_n: usize,
     imp_init_closed: bool,
     imp_tick_frame: Option<i64>,
@@ -1148,16 +1142,7 @@ impl<'t> Driver<'t> {
             tgt_runs: Vec::new(),
             imp: false,
             ag: false,
-            ag_paths: HashMap::new(),
-            ag_all: Vec::new(),
-            ag_last_state: HashMap::new(),
-            ag_tick_rec: None,
-            ag_req_rec: None,
-            ag_slow_sites: Vec::new(),
-            ag_erosion: Ok(None),
-            ag_after_rt: std::collections::HashSet::new(),
-            ag_last_ctl: HashMap::new(),
-            ag_has_findclr: false,
+            ags: agent::AgDriver::default(),
             imp_init_n: 0,
             imp_init_closed: false,
             imp_tick_frame: None,
@@ -1308,18 +1293,41 @@ impl<'t> Driver<'t> {
         w.combat.impatience.memory_adds =
             (w.combat.impatience.on && declared.contains(&"memory")).then(Default::default);
         w.combat.impatience.memory_acts = w.combat.impatience.memory_adds.clone();
-        // The movement agent is the sim's with the `agent` observer's initial states (`ag_init`,
-        // since poc5-tb-106); an older capture's agent records are taken as before.
-        d.ag = d.imp && declared.contains(&"agent") && recs.iter().any(|r| r["ev"] == "ag_init");
-        d.ag_has_findclr = d.ag && recs.iter().any(|r| r["ev"] == "ag_findclr");
+        // The movement agent is the sim's with the `agent` observer and its synchronization
+        // records (`agent_sync`: the states where real time ends, positions written outside the
+        // agent, `PreviousPosition` at the start). An older capture (`agent` alone) replays with
+        // the agent's records taken as before; `WR_AGENT_DRIVEN` runs the sim's agent on one with
+        // initial states anyway (a diagnostic: reported, never valid).
+        let has_init = recs.iter().any(|r| r["k"] == "obs" && r["ev"] == "ag_init");
+        let sync = declared.contains(&"agent_sync");
+        let dev = std::env::var_os("WR_AGENT_DRIVEN").is_some() && has_init;
+        d.ag = d.imp && d.port && declared.contains(&"agent") && (sync || dev);
+        d.ags.strict = sync;
+        if sync && !d.ag {
+            w.coverage.unsupported(
+                "driven replay: the recording declares agent_sync without the agent, impatience, targets, engage, ai, command and turn records",
+            );
+        }
+        if d.ag && !sync {
+            w.coverage.unsupported(
+                "driven replay: agent: the sim's agent on a capture without agent_sync (WR_AGENT_DRIVEN, diagnostic)",
+            );
+        }
+        if sync && !has_init {
+            w.coverage.unsupported(
+                "driven replay: agent: a recording declaring agent_sync without its initial states (ag_init)",
+            );
+        }
+        d.ags.has_findclr =
+            d.ag && (sync || recs.iter().any(|r| r["k"] == "obs" && r["ev"] == "ag_findclr"));
         if d.ag {
-            d.ag_slow_sites = trace
+            d.ags.slow_sites = trace
                 .sites
                 .iter()
                 .filter(|(_, v)| v.0 == crate::rng::sites::AGENT_SLOW_DOWN.0)
                 .map(|(k, _)| *k)
                 .collect();
-            d.ag_erosion = match w.player.area {
+            d.ags.erosion = match w.player.area {
                 None => Err("the save names no current area (its nav file)".to_owned()),
                 Some(g) => match wr_nav::NavFile::read(&wr_nav::path_for(&g.to_string())) {
                     Ok(f) => {
@@ -1388,10 +1396,14 @@ impl<'t> Driver<'t> {
         self.tgt_frame_end(w);
         self.imp_frame_end(w);
         self.uc_finish(w);
+        self.ags.ending = true;
         let outgoing = self.frame.mode;
         let rest = self.frame.finish();
         self.draining = outgoing;
         self.run_phases(w, &rest);
+        if self.ag {
+            self.ag_finish(w);
+        }
         if self.tt {
             self.tt_close(w);
         }
@@ -1698,6 +1710,18 @@ impl Driver<'_> {
 
     fn run_phases(&mut self, w: &mut World, phases: &[Phase]) {
         for p in phases {
+            if self.ag {
+                self.ag_frame(w);
+                // The frame's prefix is over: its unwritten observation rows; a frame's
+                // `UnitMoveController` batch opens at its phase and closes after it.
+                self.ag_rows_check(w);
+                if *p > Phase::Move {
+                    self.ag_batch_close(w);
+                }
+                if *p == Phase::Move {
+                    self.ag_batch_open(w);
+                }
+            }
             match p {
                 Phase::Groups => super::groups::tick(w),
                 Phase::Turn if self.port => {
@@ -2388,6 +2412,9 @@ impl Driver<'_> {
                     w.coverage.unsupported("driven replay: ContinueActing: the turn's surprise-round flag differs from the sim's");
                 }
                 self.tt_counters(w, &r["wb"], "ContinueActing's start");
+                // Its reads of the agent (`WantsToMove`, the uninterruptable command's flag) and
+                // the unit's motion are the sim's.
+                self.ag_turn_reads(w, u, r);
                 let t = &mut w.combat.turns.ctl;
                 t.stage = Stage::StatusDone;
                 let go_on = match tt::continue_acting(t, &input, &state) {
@@ -2401,6 +2428,10 @@ impl Driver<'_> {
                 };
                 if !go_on {
                     tt::to_end(&mut w.combat.turns.ctl);
+                }
+                // `CheckAndClearWantsToMoveInTurnBased()` clears the agent's flag it read.
+                if std::mem::take(&mut w.combat.turns.ctl.cleared_no_more) {
+                    self.ag_turn_cleared(w, u);
                 }
                 if go_on != res {
                     w.coverage.unsupported(
@@ -2595,7 +2626,9 @@ impl Driver<'_> {
                         "driven replay: TickMovement of another unit than the current one",
                     );
                 }
-                match super::cooldowns::tick_movement(w, u, &input) {
+                let computed = super::cooldowns::tick_movement(w, u, &input);
+                self.ags.cd_out = computed;
+                match computed {
                     Some(out) if Some(out) == f("dt_out") => {}
                     Some(_) => w.coverage.unsupported(
                         "driven replay: TickMovement's delta out differs from the recording's",
@@ -2765,6 +2798,14 @@ impl Driver<'_> {
         let recs = &trace.records;
         let r = &recs[i];
         self.tgt_clear_boundary(w, r);
+        // A snapshot block is contiguous (its rows and their path definitions only).
+        if self.ag
+            && self.ags.block.is_some()
+            && !(r["k"] == "obs"
+                && matches!(r["ev"].as_str(), Some("ag_init" | "ag_sync" | "ag_pathdef")))
+        {
+            self.ag_block_close(w);
+        }
         match r["k"].as_str() {
             // A frame starts at the `tick` record (`GameMode.Tick`'s prefix): the previous
             // frame's remaining phases run first.
@@ -2778,6 +2819,9 @@ impl Driver<'_> {
                     );
                 }
                 self.mode = Some(m);
+                if self.ag {
+                    self.ag_frame_end(w);
+                }
                 self.cd_frame_end(w);
                 self.uc_frame_end(w);
                 self.tgt_frame_end(w);
@@ -2841,6 +2885,7 @@ impl Driver<'_> {
                 return self.ag_record(w, i);
             }
             Some("obs") if self.ag && r["ev"] == "path_ret" => self.ag_path_ret(w, r),
+            Some("obs") if self.ag && r["ev"] == "path_start" => self.ag_path_start(w, r),
             Some("obs") => self.obs(w, r),
             // The clocks after `TimeController.Tick`.
             Some("time") => {
@@ -2944,6 +2989,15 @@ impl Driver<'_> {
                 }
             }
             // With the ai observer `SelectAction`'s draws are the sim's AI's.
+            // With the agent the sim's, `SlowDown`'s draws are its.
+            Some("draw") if self.ag && self.ag_slow_draw(r) => {
+                let _ = w.rng.range_float(crate::rng::sites::AGENT_SLOW_DOWN, 0.2, 0.3);
+                if !self.uc_skipping {
+                    w.coverage.unsupported(
+                        "driven replay: agent: a SlowDown draw the sim's agent didn't make",
+                    );
+                }
+            }
             Some("draw") if self.ai_draw_record(r) => {
                 let _ = w.rng.range_float(crate::rng::sites::AI_NEXT_COMMAND_TIME, 0.0, 0.1);
                 if !self.uc_skipping {
@@ -2974,6 +3028,9 @@ impl Driver<'_> {
                 if let (Some(u), Some(row)) =
                     (r["u"].as_str(), r["s"].as_str().and_then(Row::parse))
                 {
+                    if self.ag {
+                        self.ag_row(w, u, &row);
+                    }
                     self.pos.last.insert(u.to_owned(), row);
                 }
             }
@@ -3193,6 +3250,7 @@ impl Driver<'_> {
                 self.place_combat_change(w, "a combat start");
                 w.combat.combat_active = true;
                 super::life::update_turn_based(w);
+                self.ag_combat_start(w);
                 clear_turns(w);
                 // `m_Units`: every unit of `State.Units` in combat; then initialized.
                 // `foreach u in State.Units`: the pool (`NotFake`, the states' units) through its

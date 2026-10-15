@@ -193,6 +193,8 @@ pub trait AgentInputs: AgentPhysics {
     fn has_current_turn(&mut self, w: &mut World) -> R<bool>;
     /// `unit.IsCurrentUnit() && currentTurn.IsActing`.
     fn current_and_acting(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
+    /// `CanMoveInTurnBased(ref deltaTime)` returned `result`, leaving `dt`.
+    fn can_move_end(&mut self, w: &mut World, u: EntityIdx, result: bool, dt: f32) -> R<()>;
     /// `currentTurn.TickMovement(unit, ref deltaTime, isInForceMode)`: the delta it leaves.
     fn turn_tick_movement(&mut self, w: &mut World, u: EntityIdx, dt: f32, force: bool) -> R<f32>;
     /// `unit.CutsceneControlledUnit?.GetCurrentlyActive() != null`.
@@ -214,10 +216,19 @@ pub trait AgentInputs: AgentPhysics {
     /// before) and returns `ret` (`ag_tick_end`).
     fn tick_start(&mut self, w: &mut World, u: EntityIdx, dt: f32) -> R<()>;
     fn tick_end(&mut self, w: &mut World, u: EntityIdx, ret: V3) -> R<()>;
-    /// `OnPathComplete(p, forcedPath)` starts (`ag_done`) and returns (`ag_done_end`).
-    fn done_start(&mut self, w: &mut World, u: EntityIdx, path: &str, forced: bool) -> R<()>;
+    /// `OnPathComplete(p, forcedPath)` starts (`ag_done`; `error`: the path's `error`) and
+    /// returns (`ag_done_end`).
+    fn done_start(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        path: &AgentPath,
+        forced: bool,
+        error: bool,
+    ) -> R<()>;
     fn done_end(&mut self, w: &mut World, u: EntityIdx) -> R<()>;
-    /// `PathTo` starts (`ag_req`) and returns (`ag_req_end`, with the request it made).
+    /// `PathTo` or `FindPath` starts (`ag_req`) and returns (`ag_req_end`, with the request it
+    /// made).
     fn req_start(&mut self, w: &mut World, u: EntityIdx) -> R<()>;
     fn req_end(&mut self, w: &mut World, u: EntityIdx, request: Option<&PathRequest>) -> R<()>;
     /// `unit.EntityData.Group?.Memory != null` (`ConnectToGroups` returns before marking the
@@ -261,8 +272,9 @@ pub trait AgentInputs: AgentPhysics {
     fn speed_mps(&mut self, w: &mut World, u: EntityIdx) -> R<f32>;
     /// `Unit.EntityData.Commands.Move`: its `MovementDelay` and `Roaming` (`None`: no move).
     fn move_command(&mut self, w: &mut World, u: EntityIdx) -> R<Option<(f32, bool)>>;
-    /// The key of the request `PathTo` starts (WrathOracle's `PathSync` key, `<unit>#<n>`).
-    fn request_key(&mut self, w: &mut World, u: EntityIdx) -> R<String>;
+    /// The key of the request `PathTo` or `FindPath` starts, to `end` (WrathOracle's `PathSync`
+    /// key, `<unit>#<n>`: the unit's `n`th request of the window).
+    fn request_key(&mut self, w: &mut World, u: EntityIdx, end: V3) -> R<String>;
     /// `UnitEntityView.IsProne`.
     fn prone(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
     /// `RepathNeeded = true` on every agent of `UnitMovementAgentBase.AllAgents` (the enabled
@@ -664,6 +676,7 @@ fn can_move_in_turn_based(
         }
         flag = false;
     }
+    inp.can_move_end(w, u, flag, *dt)?;
     Ok(flag)
 }
 
@@ -944,7 +957,9 @@ pub struct PathRequest {
     /// `enabledTags` (`ConstructTags`).
     pub tags: i32,
     pub graph_mask: i32,
-    pub approach: f32,
+    /// The ending condition: `LosPathConditionForGrid` with this approach radius, or
+    /// `MaxDistanceEndingCondition` (`FindPath` without one).
+    pub approach: Option<f32>,
     pub los: bool,
     pub ignore_blocker: f32,
     pub max_distance: f32,
@@ -1070,7 +1085,7 @@ fn path_to_body(
     let tags = construct_tags(w, u, inp)?;
     let ignore = inp.fudge_radius(w, u, command)?;
     let max_distance = 6.0 * inp.speed_mps(w, u)?;
-    let key = inp.request_key(w, u)?;
+    let key = inp.request_key(w, u, destination)?;
     let req = PathRequest {
         key: key.clone(),
         start: pos,
@@ -1078,7 +1093,7 @@ fn path_to_body(
         clearance: [cx, 0.0, cz],
         tags,
         graph_mask: 2,
-        approach,
+        approach: Some(approach),
         los: dest_agent.is_some(),
         ignore_blocker: ignore,
         max_distance,
@@ -1099,6 +1114,78 @@ fn path_to_body(
         None => agent_mut(w, u)?.roaming = false,
     }
     Ok(Some(req))
+}
+
+/// `FindPath(destination, callback, approachRadius, needLOS, ignoreBlockerRadius)` in turn-based
+/// combat (the AI's request): `None` while a request is in flight, else the request it starts
+/// (`m_RequestedFindPath`, the only field of the agent it writes; its callback clears it).
+pub fn find_path(
+    w: &mut World,
+    u: EntityIdx,
+    destination: V3,
+    approach: Option<f32>,
+    need_los: bool,
+    ignore: f32,
+    inp: &mut dyn AgentInputs,
+) -> R<Option<PathRequest>> {
+    inp.req_start(w, u)?;
+    let req = find_path_body(w, u, destination, approach, need_los, ignore, inp)?;
+    inp.req_end(w, u, req.as_ref())?;
+    Ok(req)
+}
+
+fn find_path_body(
+    w: &mut World,
+    u: EntityIdx,
+    destination: V3,
+    approach: Option<f32>,
+    need_los: bool,
+    ignore: f32,
+    inp: &mut dyn AgentInputs,
+) -> R<Option<PathRequest>> {
+    if !w.combat.turn_based {
+        return bad("FindPath outside turn-based combat (real time isn't ported)");
+    }
+    for key in [
+        agent(w, u)?.requested.as_ref().map(|p| p.key.clone()),
+        agent(w, u)?.requested_find.as_ref().map(|p| p.key.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !inp.is_done(w, u, &key)? {
+            return Ok(None);
+        }
+    }
+    let approach = approach.map(|a| if a < 0.0 { 0.0 } else { a });
+    // `m_Seeker.clearance = m_AvoidanceDisabled ? Vector3.zero : new Vector3(Unit.Corpulence *
+    // 2f, 0f, Unit.Corpulence * 2f)` (the view is there: the agent's unit).
+    let clearance = if agent(w, u)?.avoidance_off {
+        [0.0; 3]
+    } else {
+        let cx = inp.corpulence(w, u)? * 2.0;
+        let cz = inp.corpulence(w, u)? * 2.0;
+        [cx, 0.0, cz]
+    };
+    let tags = construct_tags(w, u, inp)?;
+    let max_distance = 6.0 * inp.speed_mps(w, u)?;
+    let pos = agent(w, u)?.pos;
+    let key = inp.request_key(w, u, destination)?;
+    agent_mut(w, u)?.requested_find =
+        Some(AgentPath { key: key.clone(), points: Vec::new(), forced: false });
+    Ok(Some(PathRequest {
+        key,
+        start: pos,
+        end: destination,
+        clearance,
+        tags,
+        graph_mask: 2,
+        approach,
+        los: need_los,
+        ignore_blocker: ignore,
+        max_distance,
+        distance_xz: false,
+    }))
 }
 
 /// `CheckApproachRadius(point)`: the path's end within `MaxApproachRadius` of the destination,
@@ -1133,7 +1220,7 @@ pub fn on_path_complete(
     forced: bool,
     inp: &mut dyn AgentInputs,
 ) -> R<()> {
-    inp.done_start(w, u, &p.key, forced)?;
+    inp.done_start(w, u, p, forced, error)?;
     on_path_complete_body(w, u, p, error, forced, inp)?;
     inp.done_end(w, u)
 }

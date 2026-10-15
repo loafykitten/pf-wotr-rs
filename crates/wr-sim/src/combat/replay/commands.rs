@@ -1262,6 +1262,17 @@ impl Inputs for Driver<'_> {
             (Of::Pair(..), _) => &[],
             (Of::CmdUnit(..), _) => &["c", "u", "v"],
         };
+        // The agent's getters (`moving`, `rmoving`, `wants`) are the sim's agent's with it (an
+        // `rmoving` reads `IsDone`, recorded before its leaf).
+        let unit = match &of {
+            Of::Unit(u) => u.clone(),
+            Of::Cmd(c) => w.combat.commands.get(*c).and_then(|x| x.s.executor.clone()),
+            _ => None,
+        };
+        let computed = match self.ag_command_leaf(w, f, unit.as_deref()) {
+            Ok(v) => v,
+            Err(d) => return self.uc_reject(self.i, d.0),
+        };
         let at = self.uc_leaf_record(w, f, payload)?;
         let r = &self.trace.records[at];
         let ok = match (&of, f) {
@@ -1279,7 +1290,14 @@ impl Inputs for Driver<'_> {
             }
         };
         match (ok, r["v"].as_bool()) {
-            (true, Some(v)) => Ok(v),
+            (true, Some(v)) if computed.is_none_or(|x| x == v) => Ok(v),
+            (true, Some(_)) => {
+                let d = describe(r);
+                self.uc_reject(
+                    at,
+                    format!("the sim's agent has {f} {computed:?} of {of:?}, the recording {d}"),
+                )
+            }
             _ => {
                 let d = describe(r);
                 self.uc_reject(at, format!("the sim reads {f} of {of:?}, the recording has {d}"))
@@ -1824,7 +1842,9 @@ impl Inputs for Driver<'_> {
             return self.uc_reject(at, format!("the sim calls {call:?}, the recording has {d}"));
         }
         self.out.approach_calls += 1;
-        Ok(())
+        // With the agent the sim's, the call runs it (its records pulled where it makes them).
+        let rec = r.clone();
+        self.ag_command_call(w, call, &rec)
     }
 
     fn approach_draw(&mut self, w: &mut World, c: u32) -> R<f32> {
