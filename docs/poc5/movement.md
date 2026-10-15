@@ -145,6 +145,37 @@ after (orientation is stream B's, `docs/poc5/orientation.md`); the completion ch
 from the nested completion's state (the AI's `FindPath` callback clears it unobserved; the next capture should
 record the state at a call's start).
 
+## The driven replay: design (2026-10-15)
+
+The agent runs inside `wr-combat replay` (`combat/replay.rs`, `replay/agent.rs` new) when the recording declares
+`agent` with the `-105` fields; older captures replay as before. Entries, as the commands' slices do it (an entry
+record starts the sim's code, which pulls the records it makes and reads, in order; any other agent record in
+between is a desync):
+- **`ag_ctl`** (`UnitMoveController.TickUnit`, placed in `Phase::Move`): the sim's `TickUnit`: `PreviousPosition`,
+  the agent's `IsReallyMoving` and the `canmove` leaf, `InterruptMove` into the commands model, `TickMovement`
+  (pulling its leaves, physics, draws and calls), the positions (`SetPositionWithoutWaking`, the view's), the
+  orientation (stream B's port; until it lands, `ag_ctl_end.orient` is a recorded input), `UpdateSlowRotation`
+  (`ag_rot`), the place-on-ground step (`ag_ground`, an input), `UpdateVelocity`; checked against `ag_ctl_end`
+  (`pos`, `vpos`, `orient`). The frame's `ag_ctl` units must be the awake units the controller iterates, in order
+  (`State.AwakeUnits` not controlled by the director, with an agent), and none when the controller returns early
+  (`WaitingForUI`).
+- **`TurnController.TickMovement`** from `CanMoveInTurnBased`: the agent's callback runs the ported
+  `cooldowns::tick_movement` with the agent's delta, force mode and `NearTheEnd`, the `cd_move` record's other
+  fields staying inputs (limit, the modify flags, the five-foot step, auto-stop, speed, panic); `cd_move`'s
+  delta out and the agent's own outcome are checks.
+- **`uc_call`** (the commands model's calls): `moveto` runs `PathTo` (`UnitEntityView.MoveTo`'s gate: an agent and
+  an active graph), `follow` runs `FollowPrecomputedPath`, `stop` runs `Stop`; each pulls its `ag_req`/`ag_call`
+  records.
+- **Path deliveries** (`path_ret` of a request the agent made): `OnPathComplete` with the path's contents from
+  `ag_done` (until stream C computes them), pulling its records; a `FindPath` delivery clears
+  `m_RequestedFindPath` (its combined callback).
+- **Outside entries**: an `ag_call` the sim's code didn't make (`Stop` from `TryCancelCommands`, `EnterProneState`,
+  `HandleCombatEnd`) is applied to the sim's agent as the recording says and counted (an input), like the targets
+  slice's outside writes.
+- **The commands' agent leaves** (`moving`, `rmoving`, `wants`) are answered by the sim's agent and checked against
+  their records; `ag_tick`'s turn fields (`turn`, `cur`, `acting`, `combat`, `dontint`) are checks of the sim's
+  turn and commands state.
+
 ## Steps
 
 1. `agent` observer; record `tb-nearest` and `tb-focus`. **Done** (`poc5-tb-100` to `-103`; `-103` is current).
