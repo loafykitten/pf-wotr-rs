@@ -403,8 +403,8 @@ captures replay as before (`-109`, `-95`, `-96` unchanged).
   under its id starts from its old row).
 - **Between ticks** the memory changes as the sim changes it: the readers' cache fills, `Remove` at a destruction,
   `Clear` at a disposal, the cache clears. The memory's own records of its changes between ticks (`mem_add`,
-  `mem_remove`, `mem_clear` with its count) are matched with the sim's, in order, at each tick's entry and at the
-  window's end (393 changes matched in and between ticks over the 24 runs). Each `pre` row is checked: the dictionary
+  `mem_remove`, `mem_clear` with its count; none before the window's `mem_initq`) are matched with the sim's, in
+  order across the memories, at each tick's entry and at each frame's end (so in their own frame) (393 changes matched in and between ticks over the 24 runs). Each `pre` row is checked: the dictionary
   must be the sim's. `UnitReturnToConsciousController` is modelled (its own phase after the leave controller, in
   Default, Dialog and Cutscene: out of combat, each unit of `State.Units` not in combat reads its group's
   `Memory.Enemies`, filling it). A cache filled by a reader the sim doesn't run (the fog of war, whose early-outs
@@ -427,9 +427,9 @@ unmodelled readers verified …, changes matched …; readers' reads checked {�
 `poc5-tb-111`, `-112`, `-113` and `-114` the replay is valid (equal T0 stream, nothing reported); per record run: ticks
 2,484 / 2,713, 3,007 / 1,992, 2,033 / 1,873, 2,883 / 2,656 (focus / nearest), 164,786 to 290,262 tick reads checked.
 `computed_memory_replays_are_valid_and_damage_is_reported` (`tests/poc5.rs`) replays `-111` and `-114`'s 12 runs and
-damages `-111` 21 ways (an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
-fill that can't be one, a pre row's `Enemies` or `UnitsList` missing an entry, a `mem_clear`'s count or the record
-itself, the frame, a hash, `queued`, `peaceful`, a reader's `Enemies`, a flat-footed `Contains`, a leave row) and a
+damages `-111` 23 ways (an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
+fill that can't be one, a pre row's `Enemies` or `UnitsList` missing an entry, a `mem_clear`'s count, the record
+itself, a frame early or before the initial state, the frame, a hash, `queued`, `peaceful`, a reader's `Enemies`, a flat-footed `Contains`, a leave row) and a
 replay's hashes against the record run's tape 2 ways (a value, the flag): each reported. The POC-5 suite and the agent's stay as they were.
 
 Still inputs (the design's later steps): the ready groups and `IsInFogOfWar` (fog of war), the near units (vision

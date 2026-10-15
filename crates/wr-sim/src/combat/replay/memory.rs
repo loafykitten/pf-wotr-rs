@@ -199,16 +199,15 @@ impl Driver<'_> {
             "mem_initq" => self.mem_initq(w, r),
             "mem_tick" => return self.mem_tick(w, i),
             "hash" => self.mem_hash(w, r),
-            // A change outside the tick (a destruction's `Remove`, a disposal's `Clear`):
-            // matched with the sim's at the next tick's entry.
-            "mem_add" | "mem_remove" | "mem_clear" if self.mem.started || ev == "mem_clear" => {
-                match change_of(w, r) {
-                    Some(c) => self.mem.between.push(c),
-                    None => w
-                        .coverage
-                        .unsupported("driven replay: memory: a memory change it can't read"),
+            // A change outside the tick (a destruction's `Remove`, a disposal's `Clear`), after the
+            // window's initial state: matched with the sim's at the next tick's entry or the
+            // frame's end, whichever comes first.
+            "mem_add" | "mem_remove" | "mem_clear" if self.mem.initq > 0 => match change_of(w, r) {
+                Some(c) => self.mem.between.push(c),
+                None => {
+                    w.coverage.unsupported("driven replay: memory: a memory change it can't read")
                 }
-            }
+            },
             _ => w.coverage.unsupported(format!(
                 "driven replay: memory: a {ev} record outside the memory controller's tick"
             )),
@@ -309,9 +308,9 @@ impl Driver<'_> {
                 "driven replay: memory: a group without its initial memory (mem_init)",
             );
         }
-        // The window's state is the sim's from here: what changed before is in it.
+        // The window's state is the sim's from here: what changed before is in it (and no change
+        // is recorded before it).
         let _ = sim::take_changes(w);
-        self.mem.between.clear();
     }
 
     /// A `leave_tick` group row's memory (the leave controller's prefix): the sim's dictionary keys
@@ -369,9 +368,10 @@ impl Driver<'_> {
         }
     }
 
-    /// The window's end: the changes since the last tick are the sim's.
-    pub(super) fn mem_finish(&mut self, w: &mut World) {
-        if self.mem.on && self.mem.started {
+    /// A frame's end (its remaining phases run), or the window's: the changes since the last
+    /// comparison are the sim's (so a change is the sim's in its own frame).
+    pub(super) fn mem_frame_done(&mut self, w: &mut World) {
+        if self.mem.on && self.mem.initq > 0 {
             self.mem_between(w);
         }
     }

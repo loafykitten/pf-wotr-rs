@@ -1496,7 +1496,7 @@ impl<'t> Driver<'t> {
         self.tgt_frame_end(w);
         self.imp_frame_end(w);
         self.mem_frame_end(w);
-        self.mem_finish(w);
+        self.mem_frame_done(w);
         self.out.mem_checked = std::mem::take(&mut w.combat.memory.checked);
         self.uc_finish(w);
         self.ags.ending = true;
@@ -3003,6 +3003,7 @@ impl Driver<'_> {
                 self.draining = outgoing;
                 self.run_phases(w, &rest);
                 self.draining = None;
+                self.mem_frame_done(w);
                 if self.tt {
                     self.tt_close(w);
                 }

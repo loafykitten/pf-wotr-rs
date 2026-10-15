@@ -6176,7 +6176,7 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
     const M: &str = "driven replay: memory:";
     const S: &str = "memory: the sim's";
     const D: &str = "driven replay:";
-    let cases: [(&str, Change); 21] = [
+    let cases: [(&str, Change); 23] = [
         // Inputs the memory follows: the sim's memory then differs from the recorded states.
         (M, |recs| {
             let at = pos(recs, |r| leaf(r, "los") && r["v"] == true);
@@ -6258,6 +6258,28 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
         (M, |recs| {
             let at = pos(recs, |r| ev(r, "mem_clear"));
             recs.remove(at);
+            for (n, r) in recs.iter_mut().enumerate() {
+                r["seq"] = json!(n);
+            }
+        }),
+        // The Clear a frame early (after the previous frame's memory tick).
+        (M, |recs| {
+            let at = pos(recs, |r| ev(r, "mem_clear"));
+            let t = recs[at]["t"].as_i64().unwrap() - 1;
+            let mut c = recs.remove(at);
+            let end = pos(recs, |r| ev(r, "mem_tick_end") && r["t"].as_i64() == Some(t));
+            c["t"] = json!(t);
+            recs.insert(end + 1, c);
+            for (n, r) in recs.iter_mut().enumerate() {
+                r["seq"] = json!(n);
+            }
+        }),
+        // A Clear before the window's initial state is complete.
+        (M, |recs| {
+            let mut c = recs[pos(recs, |r| ev(r, "mem_clear"))].clone();
+            let at = pos(recs, |r| ev(r, "mem_initq"));
+            c["t"] = recs[at]["t"].clone();
+            recs.insert(at, c);
             for (n, r) in recs.iter_mut().enumerate() {
                 r["seq"] = json!(n);
             }
