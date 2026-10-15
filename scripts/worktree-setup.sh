@@ -8,7 +8,10 @@
 #     don't rebuild), linked as target/;
 #   - cache: its own directory beside the main one whose entries link to the main cache's (reads
 #     see the main cache; new top-level entries stay private), linked as cache/.
-# Prints the environment to use (CARGO_TARGET_DIR and WR_CACHE point at the links' targets).
+# Prints the environment to use (CARGO_TARGET_DIR and WR_CACHE point at the links' targets;
+# CARGO_BUILD_JOBS keeps a stream's builds to 4 jobs, so parallel streams don't exhaust memory).
+# Memory-heavy runs (capture replays and sweeps, ignored capture suites) go through
+# scripts/heavy.sh, which runs them one at a time across the machine.
 set -euo pipefail
 name=${1:?stream name, e.g. paths}
 wt=$(git rev-parse --show-toplevel)
@@ -34,4 +37,4 @@ for e in "$main_cache"/*; do
 done
 [ -e target ] || ln -s "$target" target
 [ -e cache ] || ln -s "$cache" cache
-echo "export CARGO_TARGET_DIR=$target WR_CACHE=$cache"
+echo "export CARGO_TARGET_DIR=$target WR_CACHE=$cache CARGO_BUILD_JOBS=4"

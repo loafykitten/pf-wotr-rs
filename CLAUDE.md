@@ -43,7 +43,12 @@ survey and notes on other rewrites.
   mods recreated in our version later (PLAN, After the POC, item 4). Implementation subagents run on **Opus 5.5 at high
   effort** (Ember, 2026-10-15; was Sonnet), at most 3 at once (Ember, 2026-10-15: briefly 5, back to 3), and every brief says "don't
   spawn sub-agents". Parallel streams work in git worktrees prepared by `scripts/worktree-setup.sh NAME` (linked inputs,
-  their own target and cache dirs); only the main session builds and installs WrathOracle and records. Game and GPU share one lock, `builds/.oracle-run.lock`; match
+  their own target and cache dirs); only the main session builds and installs WrathOracle and records.
+  **Memory (2026-10-15: the Mac, 32 GB, froze out of memory with three streams, a sweep and the suites at once):**
+  one driven replay of a long capture peaks at about 8.5 GB. Run every capture replay or sweep, ignored capture
+  suite and recording analysis through `scripts/heavy.sh` (one at a time machine-wide, waits for free memory);
+  `.config/nextest.toml` runs capture tests one at a time; stream builds use `CARGO_BUILD_JOBS=4`
+  (`worktree-setup.sh` prints it). Check `memory_pressure` before starting anything big, and say so in every brief. Game and GPU share one lock, `builds/.oracle-run.lock`; match
   the game with `pgrep -x 'Pathfinder Wrath Of The Righteous'`, never `-f`.
 - **Toolchain:** Rust via Homebrew `rustup` (keg-only; PATH set in `~/.zshenv`; a shell
   started before that may need `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`).

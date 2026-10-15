@@ -1,0 +1,16 @@
+# Tests that read oracle captures or the install load whole recordings into memory: one driven
+# replay of a long capture peaks at about 8.5 GB. They run one at a time (everything else stays
+# parallel), so a suite can't take the machine's memory with it.
+[test-groups]
+captures = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = '''
+binary_id(/^wr-sim::(poc4|poc5|poc5_agent|poc5_log|poc5_spells|manual13)$/)
+| binary_id(wr-save::fixtures)
+| (package(wr-sim) & kind(lib) & test(/^combat::[a-z_]+::(tests|tick_tests)::(every_|a_damaged|damaged_|recorded_)/))
+| (package(wr-sim) & kind(lib) & test(/^scene_tests::real_zone/))
+| (package(wr-phys) & test(/^tests::every_recorded/))
+| (package(wr-content) & test(/full_zip_decodes/))
+'''
+test-group = 'captures'

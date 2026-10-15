@@ -320,9 +320,10 @@ fn attack_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
             w.coverage.unsupported("AttackBonusConditional: the fact has no context");
             return;
         }
-        // A null `Conditions` or `Bonus` throws in the C# (a handler exception): reported.
-        if v.obj("Conditions").is_none() || v.obj("Bonus").is_none() {
-            w.coverage.unsupported("AttackBonusConditional: a null Conditions or Bonus");
+        // A null `Conditions` throws in the C# (a handler exception): reported. `Bonus` is
+        // dereferenced only where it's evaluated (below).
+        if v.obj("Conditions").is_none() {
+            w.coverage.unsupported("AttackBonusConditional: a null Conditions");
             return;
         }
         let pass = crate::elements::with_ctx(
@@ -334,6 +335,11 @@ fn attack_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
             |w| crate::elements::check_conditions(w, &bp, v.obj("Conditions")),
         );
         if pass {
+            // `Bonus.Calculate(Context)` on a null `Bonus` throws: reported.
+            if v.obj("Bonus").is_none() {
+                w.coverage.unsupported("AttackBonusConditional: a null Bonus evaluated");
+                return;
+            }
             let rank = crate::components::fact_rank(w, c.fact);
             let value = context_value(w, c, v.obj("Bonus"));
             let id = w.entity(target).unique_id.clone();
@@ -375,9 +381,10 @@ fn damage_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
         w.coverage.unsupported("DamageBonusConditional: the fact has no context");
         return;
     }
-    // A null `Conditions` or `Bonus` throws in the C# (a handler exception): reported.
-    if v.obj("Conditions").is_none() || v.obj("Bonus").is_none() {
-        w.coverage.unsupported("DamageBonusConditional: a null Conditions or Bonus");
+    // A null `Conditions` throws in the C# (a handler exception): reported. `Bonus` is
+    // dereferenced only where it's evaluated (below).
+    if v.obj("Conditions").is_none() {
+        w.coverage.unsupported("DamageBonusConditional: a null Conditions");
         return;
     }
     let pass = crate::elements::with_ctx(
@@ -398,6 +405,11 @@ fn damage_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
     // `First?.AddModifierTargetRelated(Bonus.Calculate(Context), …)`: no first damage, no
     // evaluation.
     if evt.bundle.is_empty() {
+        return;
+    }
+    // `Bonus.Calculate(Context)` on a null `Bonus` throws: reported.
+    if v.obj("Bonus").is_none() {
+        w.coverage.unsupported("DamageBonusConditional: a null Bonus evaluated");
         return;
     }
     let value = context_value(w, c, v.obj("Bonus"));
@@ -1455,6 +1467,63 @@ mod tests {
         bus::raise_global_call(&mut w, "IUnitCombatHandler", "HandleUnitLeaveCombat", Some(u));
         assert!(!has(&w, u, buff), "the end actions ran");
         assert!(w.coverage.unsupported.is_empty(), "{:?}", w.coverage.unsupported);
+    }
+
+    /// `DamageBonusConditional` with a null `Bonus`: the C# dereferences it only in
+    /// `First?.AddModifierTargetRelated(Bonus.Calculate(Context), …)`, so a damage with no first
+    /// damage (or failing conditions) is a no-op, not a report; with a first damage it's reported.
+    #[test]
+    fn damage_bonus_conditional_reads_a_null_bonus_only_where_the_game_does() {
+        let checker = node(
+            "Kingmaker.ElementsSystem.ConditionsChecker",
+            &[("Conditions", Node::Seq(Vec::new()))],
+        );
+        let comp = node(
+            "Kingmaker.Designers.Mechanics.Buffs.DamageBonusConditional",
+            &[
+                ("Conditions", checker),
+                ("Bonus", Node::Null),
+                ("CheckWielder", Node::Bool(false)),
+                ("OnlyWeaponDamage", Node::Bool(false)),
+            ],
+        );
+        let (mut w, u, bp, _) = world_with_fact(comp);
+        let f = *w
+            .entity(u)
+            .facts
+            .list
+            .iter()
+            .find(|&&f| w.fact(f).blueprint == Some(bp.guid))
+            .expect("the feature");
+        let c = crate::world::CompRef { fact: f, comp: 0 };
+        let mut evt = super::super::attack::RuleCalculateDamage {
+            base: crate::rulebook::RuleBase::default(),
+            initiator: u,
+            target: u,
+            bundle: Vec::new(),
+            disable_precision: false,
+            half: false,
+            already_halved: false,
+            half_because_saving_throw: false,
+            modifier_bonus: None,
+            calculated: Vec::new(),
+        };
+        super::damage_bonus_conditional(&mut w, c, &mut evt, true);
+        assert!(w.coverage.unsupported.is_empty(), "{:?}", w.coverage.unsupported);
+        evt.bundle.push(super::super::attack::BaseDamage::new(
+            super::super::attack::DamageTypeDesc::default(),
+            super::super::weapon::ModifiableDiceFormula::default(),
+            0,
+        ));
+        super::damage_bonus_conditional(&mut w, c, &mut evt, true);
+        assert!(
+            w.coverage
+                .unsupported
+                .keys()
+                .any(|k| k == "DamageBonusConditional: a null Bonus evaluated"),
+            "{:?}",
+            w.coverage.unsupported
+        );
     }
 
     /// An action the sim has no port for is reported, not skipped.
