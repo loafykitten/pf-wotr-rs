@@ -123,6 +123,10 @@ pub fn activate(w: &mut World, begin: &J) {
             unsupported(w, "a malformed game_log.threads entry");
             continue;
         };
+        if !keys_are(t, &["event", "by"]) {
+            unsupported(w, "a malformed game_log.threads entry");
+            continue;
+        };
         let Some(ty) = parse_type(ev) else {
             unsupported(w, format!("game_log.threads: an event type {ev}"));
             continue;
@@ -143,6 +147,11 @@ pub fn activate(w: &mut World, begin: &J) {
             continue;
         };
         for ((name, ord), th) in rec.iter().zip(&ours) {
+            // `LogObs.ThreadId`: ordinals from 0, in the order the table first names a thread.
+            let fresh = !by_ordinal.contains_key(ord);
+            if fresh && *ord != i64::try_from(by_ordinal.len()).unwrap_or(-1) {
+                unsupported(w, format!("{ev}'s thread ordinal {ord} out of order"));
+            }
             let same_name = *name == THREADS[*th].0;
             let a = *by_ordinal.entry(*ord).or_insert(*th) == *th;
             let b = *ordinal_of.entry(*th).or_insert(*ord) == *ord;
@@ -168,6 +177,29 @@ pub fn activate(w: &mut World, begin: &J) {
         unsupported(w, "a GameLogContext scope open when the window opened");
     }
     context(w, &g["ctx"]);
+}
+
+/// A reference as `LogObs.Val` writes it, of the kind the field holds: a unit by id, a fact by id
+/// and blueprint, a localized string by key, a roll by its rule's id and class, a tooltip's object.
+fn reference_ok(field: &str, v: &J) -> bool {
+    match field {
+        "SourceUnit" | "Target" => keys_are(v, &["$unit"]) && v["$unit"].is_string(),
+        "SourceFact" => {
+            keys_are(v, &["$fact", "bp"])
+                && v["$fact"].is_string()
+                && (v["bp"].is_null() || v["bp"].is_string())
+        }
+        "Message" => keys_are(v, &["$key"]) && (v["$key"].is_null() || v["$key"].is_string()),
+        "D20" | "D100" => {
+            keys_are(v, &["$rule", "class"]) && v["$rule"].is_i64() && v["class"].is_string()
+        }
+        _ => {
+            (keys_are(v, &["$type"]) && v["$type"].is_string())
+                || (keys_are(v, &["$entity", "class"])
+                    && v["$entity"].is_string()
+                    && v["class"].is_string())
+        }
+    }
 }
 
 /// `GameLogContext`'s fields when the window opens: every one, of its type; the ones `Clear`
@@ -213,7 +245,7 @@ fn context(w: &mut World, c: &J) {
         let typed = match kind {
             'i' => v.as_i64().is_some_and(|x| i32::try_from(x).is_ok()),
             's' => v.is_null() || v.is_string(),
-            _ => v.is_null() || v.is_object(),
+            _ => v.is_null() || reference_ok(k, v),
         };
         if !typed {
             unsupported(w, format!("game_log.ctx.{k} malformed"));
@@ -222,8 +254,7 @@ fn context(w: &mut World, c: &J) {
         let int = || v.as_i64().and_then(|x| i32::try_from(x).ok()).unwrap_or(0);
         match k {
             "SourceFact" if !v.is_null() => {
-                w.game_log.ctx.source_fact =
-                    super::SourceFact::Unknown(format!("from before the window: {v}"));
+                w.game_log.ctx.source_fact = super::SourceFact::Unknown(v.clone());
             }
             "SourceFact" => {}
             "Formula" => w.game_log.ctx.formula = v.as_str().map(str::to_owned),
@@ -253,7 +284,11 @@ pub fn input(
     match ty {
         "GameLogEventBark" => {
             let f = &r["f"];
-            if f.as_object().is_none_or(|f| f.len() != 2) {
+            let entity = &f["Entity"];
+            let entity_ok = entity.is_null()
+                || (keys_are(entity, &["$unit"]) && entity["$unit"].is_string())
+                || (keys_are(entity, &["$entity", "class"]) && entity["$entity"].is_string());
+            if !keys_are(f, &["Entity", "Text"]) || !entity_ok {
                 unsupported(w, "a bark's fields malformed");
                 return;
             }
@@ -275,8 +310,11 @@ pub fn input(
         }
         "GameLogEventProjectileHit" => {
             let rule = &r["f"]["Projectile"];
-            if r["f"].as_object().is_none_or(|f| f.len() != 1)
-                || !(rule.is_null() || rule["class"] == "RuleAttackRoll")
+            if !keys_are(&r["f"], &["Projectile"])
+                || !(rule.is_null()
+                    || (keys_are(rule, &["$rule", "class"])
+                        && rule["$rule"].is_i64()
+                        && rule["class"] == "RuleAttackRoll"))
             {
                 unsupported(w, "a projectile hit's fields malformed");
                 return;
@@ -484,6 +522,27 @@ pub fn compare(
             diff(w, &mut s, format!("a malformed or unknown log record (seq {})", r["seq"]));
         }
     }
+    for (i, r) in recs.iter().enumerate() {
+        if r["k"] != "obs" || r["ev"] != "clog_q" {
+            continue;
+        }
+        let Some(rule) = r["rule"].as_i64() else { continue };
+        let did = i.checked_sub(1).map(|j| &recs[j]);
+        let end = recs[i + 1..].iter().find(|x| x["k"] != "mut");
+        let ok = did.is_some_and(|d| d["k"] == "did" && d["id"] == rule)
+            && end.is_some_and(|x| x["k"] == "rule_end" && x["id"] == rule)
+            && recs[i + 1..]
+                .iter()
+                .take_while(|x| x["k"] == "mut")
+                .all(|x| x["rule"].as_i64() == Some(rule));
+        if !ok {
+            diff(
+                w,
+                &mut s,
+                format!("a rule's event queued outside its did hook (seq {})", r["seq"]),
+            );
+        }
+    }
     let sim_kinds: Vec<char> = w
         .game_log
         .out
@@ -646,6 +705,14 @@ pub fn compare(
         }
         if r["icon"].as_i64() != Some(i64::from(m.icon)) {
             bad.push(format!("icon {} vs {}", r["icon"], m.icon));
+        }
+        if r["scope"].as_u64() != Some(u64::from(m.scope)) {
+            bad.push(format!("scope {} vs {}", r["scope"], m.scope));
+        }
+        match &m.ctx {
+            Some(c) if *c == r["ctx"] => {}
+            Some(c) => bad.push(format!("context {} vs {c}", r["ctx"])),
+            None => bad.push("context (a roll the sim knows by its result only)".into()),
         }
         let text_ok = bad.is_empty();
         match (&m.tip, &r["tip"]) {

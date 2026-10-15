@@ -170,7 +170,8 @@ pub fn threads_of(ty: EventType) -> Vec<usize> {
 pub enum Roll {
     #[default]
     Null,
-    Known(LogRoll),
+    /// A `RuleRollD20` the sim rolled, with its rule's id (`GameLog::rules_seen`'s).
+    Known(LogRoll, i64),
     /// A rule's roll the sim keeps only as its result (its history isn't established).
     ResultOnly(i32),
 }
@@ -180,8 +181,9 @@ pub enum Roll {
 pub enum SourceFact {
     #[default]
     Null,
-    /// A fact the sim doesn't name (its `Name` is reported when read).
-    Unknown(String),
+    /// A fact the sim doesn't name (its `Name` is reported when read): the recording's
+    /// reference to it.
+    Unknown(serde_json::Value),
 }
 
 /// `GameLogContext`'s static fields.
@@ -304,6 +306,14 @@ pub struct AttackRollLog {
     pub is_sneak_attack: bool,
     /// `SuspendCombatLog` as created (`RuleAttackWithWeapon`: the weapon is ranged).
     pub suspend: bool,
+    /// `IsCriticalRoll`, `TargetCriticalAC` and `CriticalConfirmationD20` (the second d20 rolled
+    /// inside it; an automatic confirmation's is an untriggered rule, id 0, of 20).
+    pub is_critical_roll: bool,
+    pub target_critical_ac: i32,
+    pub confirmation: Roll,
+    /// `AttackIndexForLog ?? RuleAttackWithWeapon?.AttackNumber ?? -1` and the count alike
+    /// (`None`: made by a `RuleAttackWithWeapon` the log didn't see open).
+    pub numbers: Option<(i32, i32)>,
 }
 
 /// What `DamageLogMessage.GetData` reads of a `RuleDealDamage`.
@@ -339,6 +349,8 @@ pub struct Event {
     pub payload: Payload,
     /// The frame it was queued in (`None` while open).
     pub queued: Option<i64>,
+    /// A `RuleAttackWithWeapon`'s `AttackNumber` and `AttacksCount`.
+    pub attack_numbers: Option<(i32, i32)>,
 }
 
 /// A message's tooltip.
@@ -368,6 +380,10 @@ pub struct Msg {
     pub color: String,
     pub icon: i32,
     pub tip: Tip,
+    /// `GameLogContext`'s scope count and fields when it is added (`None`: a field the sim can't
+    /// write as the observer does).
+    pub scope: u32,
+    pub ctx: Option<serde_json::Value>,
 }
 
 /// What the sim's log did, in order.
@@ -419,7 +435,7 @@ pub struct GameLog {
 /// A `RuleAttackRoll`'s log members.
 #[derive(Debug, Clone, Default)]
 pub struct AttackState {
-    pub entry: Option<Msg>,
+    pub entry: Option<Msg0>,
     pub suspend: bool,
     pub added: bool,
 }
@@ -445,7 +461,7 @@ fn unsupported(w: &mut World, what: impl std::fmt::Display) {
 
 /// `IRulebookEventAboutToTriggerHook.OnBeforeEventAboutToTrigger`: a root rule, or any rule
 /// inside an open one, becomes an event and is pushed.
-pub fn about_to_trigger(w: &mut World, rule: &dyn RuleEvent) {
+pub fn about_to_trigger(w: &mut World, rule: &mut dyn RuleEvent) {
     if !w.game_log.on {
         return;
     }
@@ -455,15 +471,23 @@ pub fn about_to_trigger(w: &mut World, rule: &dyn RuleEvent) {
     if w.game_log.stack.is_empty() && !root {
         return;
     }
+    let (seq, units) = (rule.base().seq, [Some(rule.initiator()), rule.target()]);
+    // A `RuleAttackWithWeapon`'s `AttackNumber` and `AttacksCount`, set as it was made (its roll's
+    // log reads them while it's still open).
+    let attack_numbers = rule
+        .as_any()
+        .downcast_ref::<crate::combat::attack::RuleAttackWithWeapon>()
+        .map(|r| (r.attack_number, r.attacks_count));
     let ev = Event {
         ty: EventType::Rule(class),
-        rule_seq: Some(rule.base().seq),
+        rule_seq: Some(seq),
         rule_id: Some(w.game_log.rules_seen),
-        units: [Some(rule.initiator()), rule.target()],
+        units,
         enabled: true,
         override_message: None,
         payload: Payload::None,
         queued: None,
+        attack_numbers,
     };
     w.game_log.events.push(ev);
     let i = w.game_log.events.len() - 1;
@@ -501,6 +525,12 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
     let any = rule.as_any();
     if let Some(r) = any.downcast_ref::<RuleAttackRoll>() {
         let suspend = r.reason_full_attack.is_some() && r.weapon.is_ranged();
+        // Its `RuleAttackWithWeapon` (its reason's rule) is the open event below it.
+        let numbers = if r.reason_full_attack.is_some() {
+            w.game_log.stack.last().and_then(|p| w.game_log.events[*p].attack_numbers)
+        } else {
+            Some((-1, -1))
+        };
         return Payload::AttackRoll(Box::new(AttackRollLog {
             seq: r.base.seq,
             initiator: r.initiator,
@@ -518,6 +548,31 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
             is_critical_confirmed: r.is_critical_confirmed,
             is_sneak_attack: r.is_sneak_attack,
             suspend,
+            numbers,
+            is_critical_roll: r.is_critical_roll,
+            target_critical_ac: r.target_critical_ac,
+            confirmation: if !r.is_critical_roll {
+                Roll::Null
+            } else if r.auto_critical_confirmation {
+                // `new RuleRollD20(Initiator, 20)`, never triggered: no history.
+                Roll::Known(
+                    LogRoll {
+                        result: 20,
+                        history: None,
+                        replaced_one: false,
+                        replace_one_with_max: false,
+                        rerolls: None,
+                    },
+                    0,
+                )
+            } else {
+                match w.game_log.d20s.get(&ev).and_then(|v| v.get(1)) {
+                    Some(Roll::Known(x, id)) if x.result == r.critical_confirmation_d20 => {
+                        Roll::Known(x.clone(), *id)
+                    }
+                    _ => Roll::ResultOnly(r.critical_confirmation_d20),
+                }
+            },
         }));
     }
     if let Some(r) = any.downcast_ref::<RuleAttackWithWeapon>() {
@@ -554,14 +609,18 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
     {
         // `Rerolls` (each reroll's source) isn't kept by the sim: a roll with rerolls is known by
         // its result only.
+        let id = w.game_log.events[ev].rule_id.unwrap_or(0);
         return Payload::D20(if r.reroll_amount == 0 {
-            Roll::Known(LogRoll {
-                result: r.result(),
-                history: r.roll_history.clone(),
-                replaced_one: r.replaced_one(),
-                replace_one_with_max: r.replace_one_with_max,
-                rerolls: None,
-            })
+            Roll::Known(
+                LogRoll {
+                    result: r.result(),
+                    history: r.roll_history.clone(),
+                    replaced_one: r.replaced_one(),
+                    replace_one_with_max: r.replace_one_with_max,
+                    rerolls: None,
+                },
+                id,
+            )
         } else {
             Roll::ResultOnly(r.result())
         });
@@ -573,7 +632,7 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
 /// rule's; else known by its result only.
 fn first_d20(w: &World, ev: usize, result: i32) -> Roll {
     match w.game_log.d20s.get(&ev).and_then(|v| v.first()) {
-        Some(Roll::Known(r)) if r.result == result => Roll::Known(r.clone()),
+        Some(Roll::Known(r, id)) if r.result == result => Roll::Known(r.clone(), *id),
         _ => Roll::ResultOnly(result),
     }
 }
@@ -605,6 +664,7 @@ pub fn add_event(w: &mut World, ty: &'static str, payload: Payload, units: [Opti
         ty: EventType::Other(ty),
         rule_seq: None,
         rule_id: None,
+        attack_numbers: None,
         units,
         enabled: true,
         override_message: None,
@@ -769,6 +829,7 @@ fn handle(w: &mut World, th: usize, e: usize) {
 
 fn add_message(w: &mut World, th: usize, e: Option<usize>, m: Msg0) {
     let frame = w.game_log.frame;
+    let (scope, ctx) = (w.game_log.scope, context_json(w));
     w.game_log.out.push(Out::Msg(Msg {
         frame,
         thread: th,
@@ -777,16 +838,60 @@ fn add_message(w: &mut World, th: usize, e: Option<usize>, m: Msg0) {
         color: m.color,
         icon: m.icon,
         tip: m.tip,
+        scope,
+        ctx,
     }));
 }
 
-/// A `CombatLogMessage` before a thread adds it.
+/// `GameLogContext`'s fields as the observer writes them (`LogObs.WriteContext`); `None` for a
+/// field the sim holds without what the observer writes (a roll known by its result only).
+fn context_json(w: &World) -> Option<serde_json::Value> {
+    use serde_json::{Value as J, json};
+    let c = &w.game_log.ctx;
+    let unit =
+        |u: Option<EntityIdx>| u.map_or(J::Null, |u| json!({"$unit": w.entity(u).unique_id}));
+    let roll = |r: &Roll| match r {
+        Roll::Null => Some(J::Null),
+        Roll::Known(_, id) => Some(json!({"$rule": id, "class": "RuleRollD20"})),
+        Roll::ResultOnly(_) => None,
+    };
+    let fact = match &c.source_fact {
+        SourceFact::Null => J::Null,
+        SourceFact::Unknown(v) => v.clone(),
+    };
+    Some(json!({
+        "SourceUnit": unit(c.source_unit),
+        "SourceFact": fact,
+        "Target": unit(c.target),
+        "Message": c.message.as_ref().map_or(J::Null, |k| json!({"$key": k})),
+        "Formula": c.formula,
+        "Text": c.text,
+        "TextWithTags": c.text_with_tags,
+        "Description": c.description,
+        "Count": c.count,
+        "Roll": c.roll,
+        "D20": roll(&c.d20)?,
+        "D100": roll(&c.d100)?,
+        "Modifier": c.modifier,
+        "DC": c.dc,
+        "ChanceDC": c.chance_dc,
+        "ConcealmentStatus": c.concealment,
+        "Rations": c.rations,
+        "AttackNumber": c.attack_number,
+        "AttacksCount": c.attacks_count,
+        "RoundNumber": c.round_number,
+        "Tooltip": J::Null,
+        "RollChance": c.roll_chance,
+    }))
+}
+
+/// A `CombatLogMessage` before a thread adds it (or kept on its attack roll).
 #[derive(Debug, Clone)]
-struct Msg0 {
-    text: String,
-    color: String,
-    icon: i32,
-    tip: Tip,
+pub struct Msg0 {
+    pub text: String,
+    pub color: String,
+    pub icon: i32,
+    pub tip: Tip,
 }
 
 impl Msg0 {
@@ -911,15 +1016,7 @@ fn attack_thread(w: &mut World, th: usize, e: usize, a: &AttackRollLog) -> R {
     let kept = st.entry.clone();
     let msg = match kept {
         Some(m) => Some(m),
-        None => attack_data(w, a)?.map(|m| Msg {
-            frame: 0,
-            thread: th,
-            src: Some(e),
-            text: m.text,
-            color: m.color,
-            icon: m.icon,
-            tip: m.tip,
-        }),
+        None => attack_data(w, a)?,
     };
     // `GetParryData`: the sim has no parry (`Parry` null).
     let st = w.game_log.attack_state.entry(a.seq).or_default();
@@ -966,6 +1063,15 @@ fn attack_data_in_scope(w: &mut World, a: &AttackRollLog) -> Result<Option<Msg0>
         c.modifier = a.attack_bonus;
         c.dc = a.target_ac;
     }
+    let Some((number, count)) = a.numbers else {
+        return Err(TextError::Unsupported(
+            "an attack roll's RuleAttackWithWeapon (its attack number)".into(),
+        ));
+    };
+    w.game_log.ctx.attack_number = number;
+    w.game_log.ctx.attacks_count = count;
+    // `SetConcealment`: the sim's concealment checks don't roll (a concealment is reported);
+    // `SetMissChance`: the sim's rolls have no miss chance.
     // `AttackNumber`/`AttacksCount` (the tooltip's), the concealment and miss chance (the
     // tooltip's) aren't read by the message.
     let weapon_name = weapon_text(w, a)?;
@@ -998,9 +1104,31 @@ fn attack_data_in_scope(w: &mut World, a: &AttackRollLog) -> Result<Option<Msg0>
         s.push(' ');
         s.push_str(&suffix(w, "SneakSuffix")?);
     }
+    // The tooltip's part that changes the context (its text isn't made): a critical roll's
+    // confirmation (`CriticalConfirmationBonus` 0: the sim's confirmation adds none), then `DC` back
+    // to the target's AC. (Concealment never fails in the sim; fortification is reported.)
+    if !a.auto_miss && !a.auto_hit && a.is_critical_roll {
+        let conf = match &a.confirmation {
+            Roll::Known(r, _) => r.result,
+            Roll::ResultOnly(v) => *v,
+            Roll::Null => 0,
+        };
+        let c = &mut w.game_log.ctx;
+        c.roll = crate::csharp::arith::add(conf, a.attack_bonus);
+        c.d20 = a.confirmation.clone();
+        c.modifier = a.attack_bonus;
+        c.dc = a.target_ac;
+    }
     let icon = icon(w);
     let color = color_of(w, "GameLog/Attack")?;
-    Ok(Some(Msg0 { text: s, color, icon, tip: Tip::NotPorted("TooltipTemplateCombatLogMessage") }))
+    // An auto miss has no breakdown (`AutoMiss`: the tooltip's text is empty, the template null):
+    // `CombatLogMessage` makes `TooltipTemplateSimple(null, message)`.
+    let tip = if a.auto_miss {
+        Tip::Simple { cls: "TooltipTemplateSimple", header: None, desc: Some(s.clone()) }
+    } else {
+        Tip::NotPorted("TooltipTemplateCombatLogMessage")
+    };
+    Ok(Some(Msg0 { text: s, color, icon, tip }))
 }
 
 /// `rule.Weapon.Wielder == null ? rule.Reason.Name : rule.Weapon.Name`.
@@ -1024,11 +1152,11 @@ fn damage_thread(w: &mut World, th: usize, e: usize, d: &DealDamageLog) -> R {
     }
     w.game_log.retain();
     let r = damage_data(w, d);
-    w.game_log.release();
-    if let Some(m) = r? {
-        add_message(w, th, Some(e), m);
+    if let Ok(Some(m)) = &r {
+        add_message(w, th, Some(e), m.clone());
     }
-    Ok(())
+    w.game_log.release();
+    r.map(|_| ())
 }
 
 fn damage_data(w: &mut World, d: &DealDamageLog) -> Result<Option<Msg0>, TextError> {
@@ -1083,11 +1211,11 @@ fn initiative_thread(
         c.modifier = modifier;
     }
     let r = game_log_message(w, "GameLog/InitiativeRoll");
-    w.game_log.release();
-    if let Some(m) = r? {
-        add_message(w, th, Some(e), m);
+    if let Ok(Some(m)) = &r {
+        add_message(w, th, Some(e), m.clone());
     }
-    Ok(())
+    w.game_log.release();
+    r.map(|_| ())
 }
 
 /// `UnitLifeStateChangedLogThread`: a unit dead (as the tick finds it) and not immortal.
@@ -1100,12 +1228,12 @@ fn death_thread(w: &mut World, th: usize, e: usize, unit: EntityIdx) -> R {
     w.game_log.retain();
     w.game_log.ctx.source_unit = Some(unit);
     let r = game_log_message(w, "GameLog/UnitDeath");
-    w.game_log.release();
     // `new CombatLogMessage(null, …)` throws: no message.
-    if let Some(m) = r? {
-        add_message(w, th, Some(e), m.copy_without_tip());
+    if let Ok(Some(m)) = &r {
+        add_message(w, th, Some(e), m.clone().copy_without_tip());
     }
-    Ok(())
+    w.game_log.release();
+    r.map(|_| ())
 }
 
 /// `MechanicsFeatureType.Immortality`.
@@ -1137,11 +1265,11 @@ fn party_xp_thread(w: &mut World, th: usize, e: usize, experience: i32) -> R {
     w.game_log.ctx.count =
         crate::csharp::arith::div(crate::csharp::arith::mul(experience, rate), 100).unwrap_or(0);
     let r = game_log_message(w, "GameLog/XpGain");
-    w.game_log.release();
-    if let Some(m) = r? {
-        add_message(w, th, Some(e), m.copy_without_tip());
+    if let Ok(Some(m)) = &r {
+        add_message(w, th, Some(e), m.clone().copy_without_tip());
     }
-    Ok(())
+    w.game_log.release();
+    r.map(|_| ())
 }
 
 /// `BarkLogThread` for a unit's bark (a map object's isn't ported).
@@ -1153,11 +1281,11 @@ fn bark_thread(w: &mut World, th: usize, e: usize, unit: Option<EntityIdx>, text
     w.game_log.ctx.source_unit = Some(u);
     w.game_log.ctx.text = Some(text);
     let r = game_log_message(w, "GameLog/UnitBark");
-    w.game_log.release();
-    if let Some(m) = r? {
-        add_message(w, th, Some(e), m.copy_without_tip());
+    if let Ok(Some(m)) = &r {
+        add_message(w, th, Some(e), m.clone().copy_without_tip());
     }
-    Ok(())
+    w.game_log.release();
+    r.map(|_| ())
 }
 
 /// `ProjectileHitLogThread`: the attack roll's message, made now unless kept.
@@ -1181,20 +1309,12 @@ fn projectile_thread(w: &mut World, th: usize, e: usize, attack: Option<usize>) 
     }
     let kept = w.game_log.attack_state.get(&a.seq).and_then(|s| s.entry.clone());
     let msg = match kept {
-        Some(m) => Some(Msg0 { text: m.text, color: m.color, icon: m.icon, tip: m.tip }),
+        Some(m) => Some(m),
         None => attack_data(w, &a)?,
     };
     let st = w.game_log.attack_state.entry(a.seq).or_default();
     if st.suspend {
-        st.entry = msg.map(|m| Msg {
-            frame: 0,
-            thread: th,
-            src: Some(e),
-            text: m.text,
-            color: m.color,
-            icon: m.icon,
-            tip: m.tip,
-        });
+        st.entry = msg;
         return Ok(());
     }
     st.added = true;
@@ -1266,9 +1386,9 @@ impl Env for LogEnv<'_> {
     fn log_source_fact_name(&mut self) -> Result<Option<String>, TextError> {
         match &self.w.game_log.ctx.source_fact {
             SourceFact::Null => Ok(None),
-            SourceFact::Unknown(d) => {
-                Err(TextError::Unsupported(format!("GameLogContext.SourceFact's name ({d})")))
-            }
+            SourceFact::Unknown(d) => Err(TextError::Unsupported(format!(
+                "GameLogContext.SourceFact's name (from before the window: {d})"
+            ))),
         }
     }
 
@@ -1305,7 +1425,7 @@ impl Env for LogEnv<'_> {
         };
         match r {
             Roll::Null => Ok(None),
-            Roll::Known(r) => Ok(Some(r.clone())),
+            Roll::Known(r, _) => Ok(Some(r.clone())),
             Roll::ResultOnly(_) => {
                 Err(TextError::Unsupported("a roll's history (RuleRollDice.RollHistory)".into()))
             }

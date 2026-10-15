@@ -8,11 +8,11 @@ type names and counts only.
 
 | | Result |
 |---|---|
-| Messages | **Every combat log message of `poc5-tb-115` (tb-nearest, tb-focus), `-116` (tb-hold) and `-117` (tb-solo) is the sim's [M]**: 318 of 318 over the 12 runs (25, 27, 27 and 27 per run), text bit-exact, with its colour, prefix icon, thread, event and frame |
+| Messages | **Every combat log message of `poc5-tb-115` (tb-nearest, tb-focus), `-116` (tb-hold) and `-117` (tb-solo) is the sim's [M]**: 318 of 318 over the 12 runs (25, 27, 27 and 27 per run), text bit-exact, with its colour, prefix icon, thread instance, event and frame, and `GameLogContext` as the thread adds it (every field, and its scope count) |
 | Queue | Every event the log queues (1,446 over the 12 runs) and every tick's queue (330) equal the game's [M] |
 | Tooltips | 81 compared and equal (the initiative rolls'); the attack and damage tooltips (the stat breakdowns, 138) are not made yet: counted, not compared |
 | Inputs | 9 projectile hits (`GameLogEventProjectileHit`) taken from the recording: projectiles aren't modelled |
-| Fail closed | `crates/wr-sim/tests/poc5_log.rs` damages `-117` 30 ways (text, colour, icon, thread, event, frame of a message; a dropped or duplicated message or tick; a tick's queue; an event's fields, type, override; a projectile's rule; a rule's own event in its span: disabled, of another rule, early, twice; the begin record's tables and context; the declaration dropped): each is reported |
+| Fail closed | `crates/wr-sim/tests/poc5_log.rs` damages `-117` 47 ways (a message's text, colour, icon, thread, thread instance, event, frame, number, scope, handler flag or context; a dropped, duplicated or reordered message or tick; a tick's queue; an event's fields, type, override, rule (another of its class and units), or its place in its rule's lifecycle; a projectile's rule reference; a rule's own event in its span: disabled, of another rule, early, twice; an unknown log record, a gate flag; the begin record's fields, root types, dispatch rows (a duplicate, another thread, an ordinal), context fields (missing, malformed); the declaration dropped): each is reported |
 
 ## How the game writes the log [C]
 
@@ -129,10 +129,16 @@ replays, all tick-exact in the game.
   listed above with their messages and the `GameLogMessage` tooltips, item names (`names.rs`).
   A rule's `D20` is the first d20 the sim rolled inside it (known with its history), else known
   by its result only (reading its history is reported).
-- `check.rs` compares, at the run's end, the sim's queue, ticks and messages with the recorded
-  ones in order (frame, type, rule class and units, a non-rule event's fields, `IsEnabled`, the
-  override; each tick's queue; each message's thread, event, text, colour, icon and, where made,
-  tooltip) and the begin record's tables with the sim's, and reports each difference. The driven
+- `check.rs` checks every log record's exact shape and numbering (event ids from 1, messages
+  from 0), each rule event's place (right after its rule's `did`, before its `rule_end`, only its
+  damage between), then compares, at the run's end, the sim's queue, ticks and messages with the
+  recorded ones as one ordered stream (frame, type, the rule itself: the window's rules are
+  numbered alike, its class and units; a non-rule event's fields, `IsEnabled`, the override; each
+  tick's queue; each message's thread instance, event, text, colour, icon, scope count, context
+  and, where made, tooltip) and the begin record's tables and context with the sim's, and reports
+  each difference. The context a message is added with includes what its tooltip's code sets
+  (a critical roll's confirmation: `Roll`, `D20`, `Modifier`, `DC`), so that part of the tooltip's
+  code is ported though its text isn't. The driven
   replay's span check (`replay/commands.rs` `span_ok`) accepts a rule's own `clog_q` only where the
   game writes it: after its `did`, outside its handlers, once, enabled, of its class and id.
 

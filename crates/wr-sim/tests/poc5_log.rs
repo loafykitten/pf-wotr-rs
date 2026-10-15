@@ -87,7 +87,7 @@ const C: &str = "driven replay: commands:";
 type Change = fn(&mut Vec<V>);
 
 /// The damaged recordings, each with the report it must make.
-const CASES: [(&str, Change); 41] = [
+const CASES: [(&str, Change); 47] = [
     // Messages.
     (L, |recs| {
         let at = nth(recs, "clog_msg", 3);
@@ -279,6 +279,31 @@ const CASES: [(&str, Change); 41] = [
         if let Some(c) = recs[0]["game_log"]["ctx"].as_object_mut() {
             c.remove("Target");
         }
+    }),
+    // An initiative's event (outside the checked spans) queued before its rule's `did`.
+    (L, |recs| {
+        let at = first_q(recs, "GameLogRuleEvent<RuleInitiativeRoll>");
+        let did = (0..at).rev().find(|&i| recs[i]["k"] == "did").unwrap_or(at);
+        let r = recs.remove(at);
+        recs.insert(did, r);
+        renumber(recs);
+    }),
+    // A message's context or scope.
+    (L, |recs| {
+        let at = first_msg(recs, "UnitInitiativeLogThread");
+        recs[at]["ctx"] = json!({});
+    }),
+    (L, |recs| {
+        let at = first_msg(recs, "UnitInitiativeLogThread");
+        recs[at]["scope"] = json!(999);
+    }),
+    // A thread's ordinal out of the observer's allocation; a malformed sticky reference.
+    (L, |recs| recs[0]["game_log"]["threads"][0]["by"][0][1] = json!(-1)),
+    (L, |recs| recs[0]["game_log"]["ctx"]["SourceFact"] = json!({})),
+    // A projectile's rule reference with another field.
+    (L, |recs| {
+        let at = first_q(recs, "GameLogEventProjectileHit");
+        recs[at]["f"]["Projectile"]["extra"] = json!(1);
     }),
 ];
 
