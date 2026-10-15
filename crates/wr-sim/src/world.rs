@@ -398,6 +398,12 @@ pub struct World {
     pub recorded_awake: Option<Box<crate::spawn::RecordedAwake>>,
     /// Cutscene progress taken from a recording: [`crate::elements::cutscene::RecordedCutscene`].
     pub recorded_cs: Option<Box<crate::elements::cutscene::RecordedCutscene>>,
+    /// Unit groups' states recorded in a dialogue fixture, checked after each groups tick:
+    /// [`crate::combat::groups::RecordedGroups`].
+    pub recorded_groups: Option<Box<crate::combat::groups::RecordedGroups>>,
+    /// Roaming's recorded producers by oracle tick, audited at their ticks
+    /// ([`crate::runner::roaming_tick`]).
+    pub recorded_roaming: Option<Box<std::collections::BTreeMap<i64, Vec<serde_json::Value>>>>,
     /// A recording's dialogue inputs (oracle tick, step), applied at their ticks.
     pub recorded_inputs: Option<std::collections::VecDeque<(i64, String)>>,
     pub bus: EventBus,
@@ -533,6 +539,8 @@ impl World {
             coverage: Coverage::default(),
             recorded_awake: None,
             recorded_cs: None,
+            recorded_groups: None,
+            recorded_roaming: None,
             recorded_inputs: None,
             bus: EventBus::default(),
             rulebook: crate::rulebook::Rulebook::default(),

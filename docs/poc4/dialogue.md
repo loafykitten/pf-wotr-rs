@@ -13,6 +13,7 @@ coordinator commits after review). Captures are local and gitignored
 | Seelah/Anevia meeting, paths A, B, C (12 runs: record, replay, perturbed replays); **round 3 below: now the whole stream equal to the end** | **Every run's dialogue stream equal [M]** (71, 81, 76 records per path), every rule draw equal (7, 13, 7), every rule result equal up to the recruitment; the ordered stream equal up to the recruitment (102/354, 130/382, 108/357 records), where the oracle builds the companion's new unit (`ChangeUnitBlueprint`) and applies a buff (`AttachBuff`), both reported unsupported by the sim. Character sheets 100% on every run (3 units, 1,737 fields) |
 | The three reachable Seelah checks on success and failure tapes | **Yes [M]**: Athletics `ded4aae5…`, Knowledge World `d530baf0…`, Diplomacy `d0ef7c0d…`, each recorded failing and passing (perturbed d20), each matched by the sim. The fourth (Oread-only Athletics) is unreachable from Manual_13 (Kitsune PC) |
 | Horgus (Manual_19, Prologue_Neathholm), check path and alternative path (6 runs) | **Dialogue streams equal on every run [M]** (52 and 64 records); the party Diplomacy check (authored DC 16) passing in the record (flag `ddfedbde…` = 2000) and failing in a perturbed replay (= 1000), the alternative path setting 500; all 10 rule records before the closing cutscene equal (roller, stat 8, DC 16, d20, total); character sheets 100% (7 units, 4,269 fields); narrative end state equal except the ToyBox etude. The ordered stream diverges at the closing cutscene (`HideUnit`, `Spawn`: reported unsupported) |
+| POC-4 pass criterion, round 10 (2026-10-14) | **Met on every run**: the 6 Horgus runs (`poc4-horgus-9`) are valid too, with the unit groups modelled and checked against every recorded group state and roaming's two draws tied to their recorded producers; the 12 Seelah runs (`poc4-seelah-5`) stay valid with the groups checked, and the 3 `dialog-checks` runs (`cert-22`) (round 10 below) |
 | POC-4 pass criterion, round 9 (2026-10-14) | **Met on 18 of 24 runs, on captures with every recorded input (`poc4-seelah-4`, `cert-22`)**: the 15 Seelah and 3 `dialog-checks` runs are valid with the cutscene lock's buff tick and postpone, Cutscene and Pause modes, the zone entry's tick and every tick's mode checked. The 6 Horgus runs (`poc4-horgus-8`) are T0-equal with the end state 1.0000, invalid on group membership and roaming's two draws (round 9 below) |
 | POC-4 pass criterion, round 5 | **Met on 15 of 21 runs (round 5 below, after its review)**: the 12 Seelah and 3 `dialog-checks` runs are valid (nothing unsupported, whole ordered stream equal). The 6 Horgus runs are not valid: they report the cutscenes' random-track gates (the oracle draws there and in roaming, which the sim doesn't run) and the awake state of the unit the closing cutscene spawns, whose toggle the sim therefore doesn't tick (stream 127/130, the 3 records that toggle) |
 | Hydration, sheets after load | Manual_13 2,372/2,372 (100%); **Manual_19 4,269/4,269 (100%, first measurement)**; Manual_10 98.46% (was 97.35%) |
@@ -578,12 +579,70 @@ Reviews: gpt-6.1-sol (high), two rounds (the first found the pool order, the con
 admission: only over Default and outside turn-based combat, and Default, Dialog, Cutscene and
 Rest stop a Pause first).
 
+## Round 10: roaming's producers and the unit groups (2026-10-14, eighteenth session) [M]
+
+The two things that kept the Horgus runs invalid, closed with recorded inputs and checks:
+
+- **Roaming's draws** (round 6's open question). `RoamingWaypointData.SelectNextPoint` draws through
+  `LinqExtensions.WeightedRandom` and `SelectPrevPoint` through `LinqExtensions.Random`: their site
+  keys name the helper, not the roaming unit [C]. The waypoint they choose is only where the unit
+  walks next (T1); what it does on arrival is another choice, `SelectCutscene` [C:
+  `UnitRoamingController.TickOnUnit`, `AdvancePoint`]. **WrathOracle** (`ProducerObs.InstallRoaming`,
+  declared `roam_producers`) adds to each `roam_point` the candidates' count (`n`), the caller
+  (`controller` inside `UnitRoamingController.TickOnUnit`, `advance` inside `UnitPartRoaming.Advance`,
+  the innermost) and the roaming unit. **The comparison** (`runner::oracle_stream`) excludes such a
+  draw as T1 only when the record just before it is its producer: that method's `roam_point` in the
+  same tick, by the controller, for a unit, with candidates, and the draw's range theirs (`Random`:
+  `[0, n)`); a producer with candidates and no draw right after it is reported. **The audit**
+  (`runner::audit_roaming`) checks each producer against the sim's world: a roaming unit the sim has
+  (`UnitPartRoaming`), a waypoint of the scene cache, the next waypoints' count the cache's, and no
+  idle cutscene to start (the waypoint's `IdleCutscenes` in the cache and the record, `n` 0;
+  `RollNextPoint`'s settings' list empty). Not the controller (`Advance`: the AI's roam, overrun and
+  teleport abilities) is reported. At load, a saved roaming state whose next point is a
+  `RoamingPoint` of its own with an idle cutscene (it plays on arrival without a draw) is reported,
+  for units and placeholders.
+- **The unit groups.** `OnIsInGameChanged` drops a unit's cached group (`m_Group?.Remove`); the
+  groups model (`combat/groups.rs`, the combat replay's) now runs in dialogue runs whose recording
+  declares `group_ticks`: `UnitGroupsController.Start` after the load, its tick in Default, Dialog and
+  Cutscene modes before the clock [C: `GameModesFactory`], `HandleUnitSpawned` (`entityData.Group`)
+  and `HandleUnitDestroyed` (memory removal, reported where a memory is known). Group memory follows
+  vision, so in dialogue runs it is unknown (a read is reported). **WrathOracle**
+  (`GroupObs.InstallTicks`) writes `grp_tick` after each `UnitGroupsController.Tick` outside
+  turn-based windows when anything changed (the first always): the groups in order (units, combat
+  count, leave timer) and every unit of `State.Units` with its cached group. **The runner** checks
+  after every groups tick that the sim's state, run-created ids renamed through the recorded awake
+  states' matches, equals the latest recorded one (the first check takes the recorded list order,
+  as the combat replay does: the load's first `Group` accesses aren't modelled); a record in a tick
+  the sim's controller didn't run, or after the run's end, is reported (`WR_DEBUG_GROUPS=1` prints a
+  difference). A damaged copy of the recording (a unit dropped from one state) fails 19 ticks.
+
+- **The units pool's order** (found by the group check on Seelah): `State.Units` is one
+  `EntityPool` list that appends a unit when it joins any state [C: `EntityPool.HandleAdded`], so
+  the recruited companion's new unit comes last; the sim ordered the pool by state (cross-scene
+  first). `scene::units_pool` now keeps the load's order and appends units that join a state
+  later in join order (`Player::joined_after_load`). The order also drives the buffs controller's
+  and the other sweeps, in the combat replay too.
+- Run-created ids are resolved through one rule (`RecordedAwake::resolve`: a saved id as is, a
+  run-created one through its blueprint match), used by the awake inputs, the group check (before
+  renaming, as a unit spawned last tick may not be in an awake record yet) and the roaming audit.
+
+Result on `poc4-horgus-9` (Manual_19) and `poc4-seelah-5` (Manual_13), both recorded with the new
+observers: **all 6 Horgus runs valid**, whole ordered T0 stream equal (193 to 199 records), end
+state 1.0000, nothing reported, roaming's two draws excluded with their producers, and the three
+recorded group states (the load's, the hidden unit leaving at tick 188, the spawned unit joining
+at 207) equal; **all 12 Seelah runs valid** with the groups model checked (two states: the load's
+and Seelah's new unit joining). With `cert-22`'s 3 `dialog-checks` runs, **every dialogue run is
+valid**. Reviews: gpt-6.1-sol (high); the first round found the late id match in the group check,
+the roaming audit's id lookup and a lint.
+
 ## Recordings (local, gitignored)
 
 | Capture | Fixtures | Runs |
 |---|---|---|
-| `fixtures/captures/oracle/poc4-seelah-4` (Manual_13) | as `poc4-seelah-1`, with `cutscene_progress`, `cutscene_lock`, `zone_enter`, `aa_awake` | record, replay-1, perturbed replays |
-| `fixtures/captures/oracle/poc4-horgus-8` (Manual_19) | as `poc4-horgus-1`, with the same observers | record, replay-1, perturbed |
+| `fixtures/captures/oracle/poc4-seelah-5` (Manual_13) | as `poc4-seelah-4`, with `roam_producers`, `group_ticks` | record, replay-1, perturbed replays (b: 3, c: 2) |
+| `fixtures/captures/oracle/poc4-seelah-4` (Manual_13, superseded by `-5`) | as `poc4-seelah-1`, with `cutscene_progress`, `cutscene_lock`, `zone_enter`, `aa_awake` | record, replay-1, perturbed replays |
+| `fixtures/captures/oracle/poc4-horgus-9` (Manual_19) | as `poc4-horgus-1`, with the same observers and `roam_producers`, `group_ticks` | record, replay-1, perturbed |
+| `fixtures/captures/oracle/poc4-horgus-8` (Manual_19) | as `poc4-horgus-1`, with the same observers (superseded by `-9`) | record, replay-1, perturbed |
 | `fixtures/captures/oracle/cert-22` (Manual_13, the certification plan) | `dialog-checks`, `dice`, `attack` | record, replay-1, perturbed |
 | `poc4-seelah-3`, `poc4-horgus-7`, `cert-21` | the same, without `zone_enter` (superseded; prune with Ember's say-so) | |
 | `fixtures/captures/oracle/poc4-seelah-1` (Manual_13) | `seelah-a` (Athletics, then `1cfe1ed0…`), `seelah-b` (question `7ce19f7c…`, Knowledge World), `seelah-c` (Diplomacy) | record, replay-1, perturbed replays (a: +8 on d20 #7; b: +8/+14 on #13, +8 on #7; c: +8/+14 on #7) |

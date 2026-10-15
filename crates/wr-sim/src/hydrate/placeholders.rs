@@ -74,6 +74,9 @@ impl Loader<'_> {
             roaming_idle_cutscene: o
                 .obj("m_Roaming")
                 .is_some_and(|r| r.obj("IdleCutscene").is_some()),
+            roaming_next_idle_cutscene: o
+                .obj("m_Roaming")
+                .is_some_and(super::graph::roaming_next_idle_cutscene),
             vendor_table: o.guid("m_VendorTable"),
             has_prefab_id: o.str("m_PrefabId").is_some_and(|s| !s.is_empty()),
             prefab_id: o.str("m_PrefabId").filter(|s| !s.is_empty()).map(str::to_owned),

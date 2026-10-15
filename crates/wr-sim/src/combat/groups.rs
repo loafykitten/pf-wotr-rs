@@ -87,6 +87,9 @@ pub struct Groups {
     /// Units' commands (`Commands.Raw`, then `Queue`), as last recorded; `None` before the
     /// first record.
     pub commands: Option<HashMap<String, Vec<Command>>>,
+    /// Groups' memory isn't established (a dialogue run: memory follows vision, and nothing
+    /// records it there): a group is made with none, so a read of it is reported.
+    pub memory_unknown: bool,
 }
 
 impl Groups {
@@ -107,7 +110,8 @@ impl Groups {
 
     fn make(&mut self, id: Option<String>) -> GroupIdx {
         // A new group's memory is empty (`new UnitGroupMemory`).
-        self.arena.push(Group { id, memory: Some(Memory::default()), ..Group::default() });
+        let memory = (!self.memory_unknown).then(Memory::default);
+        self.arena.push(Group { id, memory, ..Group::default() });
         GroupIdx(self.arena.len() - 1)
     }
 }
@@ -262,6 +266,35 @@ pub fn tick(w: &mut World) {
 pub fn start(w: &mut World) {
     w.combat.groups = Groups { on: true, ..Groups::default() };
     tick(w);
+}
+
+/// `UnitGroupsController.Start()` in a dialogue run: as [`start`], the groups' memory unknown.
+pub fn start_without_memory(w: &mut World) {
+    w.combat.groups = Groups { on: true, memory_unknown: true, ..Groups::default() };
+    tick(w);
+}
+
+/// `UnitGroupsController.HandleUnitSpawned`: `entityData.Group` (its `UpdateGroup`; the attack
+/// factions are computed from the members when read).
+pub fn spawned(w: &mut World, u: EntityIdx) {
+    group_of(w, u);
+}
+
+/// `UnitGroupsController.HandleUnitDestroyed`: `entityData.Group`, then every group's memory
+/// forgets the unit (`UnitGroupMemory.Remove`, reported where a memory is known).
+pub fn destroyed(w: &mut World, u: EntityIdx) {
+    if group_of(w, u).is_none() {
+        return;
+    }
+    let id = w.entity(u).unique_id.clone();
+    let groups = &w.combat.groups;
+    if groups
+        .list
+        .iter()
+        .any(|g| groups.get(*g).memory.as_ref().is_some_and(|m| m.dict.contains(&id)))
+    {
+        w.coverage.unsupported("UnitGroupsController.HandleUnitDestroyed: UnitGroupMemory.Remove");
+    }
 }
 
 /// `++Unit.Group.IsInCombat` (`UnitCombatState.JoinCombat`).
@@ -571,5 +604,212 @@ fn tick_group(w: &mut World, g: GroupIdx, ignore_timer: bool) {
         if super::is_in_combat(w, u) {
             super::life::leave_combat(w, u);
         }
+    }
+}
+
+/// A recorded `grp_tick` (WrathOracle outside turn-based windows, after a
+/// `UnitGroupsController.Tick` that changed anything): the groups in order and every unit's
+/// cached group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupTick {
+    /// Each group: its id, units, combat count and leave timer (bits).
+    pub groups: Vec<(String, Vec<String>, i64, u32)>,
+    /// Each unit of `State.Units`, in order: its id and cached group (`GroupObs.GroupKey`: the
+    /// id, `~fake`, `~disposed:<id>`; `None` without one).
+    pub units: Vec<(String, Option<String>)>,
+}
+
+/// The recording's group states by oracle tick (a dialogue run with `group_ticks`).
+#[derive(Debug, Default)]
+pub struct RecordedGroups {
+    pub by_tick: std::collections::BTreeMap<i64, GroupTick>,
+    /// The state the last recorded change left.
+    pub last: Option<GroupTick>,
+    /// The first check ran (it takes the recorded list order).
+    pub checked: bool,
+}
+
+impl RecordedGroups {
+    /// From a recording's records: `Ok(None)` when it doesn't declare `group_ticks`.
+    ///
+    /// # Errors
+    ///
+    /// A malformed record, or two in one tick.
+    pub fn of(records: &[serde_json::Value]) -> Result<Option<Self>, String> {
+        let declared = records.iter().find(|r| r["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|a| a.iter().any(|o| o == "group_ticks"))
+        });
+        if !declared {
+            return Ok(None);
+        }
+        let mut out = Self::default();
+        for r in records.iter().filter(|r| r["k"] == "obs" && r["ev"] == "grp_tick") {
+            let t = r["t"].as_i64().ok_or("grp_tick without its tick")?;
+            let ids = |v: &serde_json::Value| -> Result<Vec<String>, String> {
+                v.as_array()
+                    .ok_or("grp_tick: units aren't an array")?
+                    .iter()
+                    .map(|x| x.as_str().map(str::to_owned).ok_or_else(|| format!("grp_tick: {x}")))
+                    .collect()
+            };
+            let mut groups = Vec::new();
+            for g in r["groups"].as_array().ok_or("grp_tick: groups aren't an array")? {
+                let (Some(id), Some(ic), Some(timer)) =
+                    (g["id"].as_str(), g["in_combat"].as_i64(), g["timer"].as_f64())
+                else {
+                    return Err(format!("grp_tick: a group {g}"));
+                };
+                #[allow(clippy::cast_possible_truncation)]
+                groups.push((id.to_owned(), ids(&g["units"])?, ic, (timer as f32).to_bits()));
+            }
+            let mut units = Vec::new();
+            for u in r["units"].as_array().ok_or("grp_tick: units aren't an array")? {
+                let (Some(id), key) = (u[0].as_str(), &u[1]) else {
+                    return Err(format!("grp_tick: a unit {u}"));
+                };
+                if !(key.is_null() || key.is_string()) || u.as_array().is_none_or(|a| a.len() != 2)
+                {
+                    return Err(format!("grp_tick: a unit {u}"));
+                }
+                units.push((id.to_owned(), key.as_str().map(str::to_owned)));
+            }
+            if out.by_tick.insert(t, GroupTick { groups, units }).is_some() {
+                return Err(format!("two grp_tick records in tick {t}"));
+            }
+        }
+        Ok(Some(out))
+    }
+}
+
+/// The sim's groups as WrathOracle writes them, the run-created ids renamed to the recording's
+/// (`RecordedAwake::mapped`).
+fn group_tick_of(w: &mut World) -> GroupTick {
+    let pool: Vec<EntityIdx> = crate::scene::units_pool(w)
+        .into_iter()
+        .filter(|u| crate::scene::enumerated_by_pool(w, *u))
+        .collect();
+    let w = &*w;
+    let renamed: HashMap<String, String> = w
+        .recorded_awake
+        .as_ref()
+        .map(|a| {
+            a.mapped.iter().map(|(rec, e)| (w.entity(*e).unique_id.clone(), rec.clone())).collect()
+        })
+        .unwrap_or_default();
+    let name = |id: &str| renamed.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    let groups = &w.combat.groups;
+    let gs = groups
+        .list
+        .iter()
+        .map(|g| {
+            let grp = groups.get(*g);
+            (
+                name(grp.id.as_deref().unwrap_or_default()),
+                grp.units.iter().map(|u| name(&w.entity(*u).unique_id)).collect(),
+                i64::from(grp.in_combat),
+                grp.leave_timer.to_bits(),
+            )
+        })
+        .collect();
+    let units = pool
+        .into_iter()
+        .map(|u| {
+            let key = groups.cached.get(&u).map(|g| {
+                let grp = groups.get(*g);
+                let id = name(grp.id.as_deref().unwrap_or_default());
+                if grp.is_fake() {
+                    "~fake".to_owned()
+                } else if grp.disposed {
+                    format!("~disposed:{id}")
+                } else {
+                    id
+                }
+            });
+            (name(&w.entity(u).unique_id), key)
+        })
+        .collect();
+    GroupTick { groups: gs, units }
+}
+
+/// After the sim's `UnitGroupsController.Tick` in the oracle's tick `t`: the groups and every
+/// unit's cached group equal the recording's latest state (written when it changed). The first
+/// check takes the recorded list order when the groups are the same (the list's order is the
+/// order of the area load's first `Group` accesses, which aren't modelled). A record in a tick
+/// the sim's controller didn't run is reported.
+pub fn check_recorded(w: &mut World, t: i64) {
+    let Some(mut rec) = w.recorded_groups.take() else { return };
+    if rec.by_tick.range(..t).next().is_some() {
+        rec.by_tick.retain(|k, _| *k >= t);
+        w.coverage.unsupported(
+            "dialogue replay: a recorded unit group state in a tick the sim's UnitGroupsController didn't run",
+        );
+    }
+    if let Some(g) = rec.by_tick.remove(&t) {
+        rec.last = Some(g);
+    }
+    let Some(want) = rec.last.clone() else {
+        w.coverage.unsupported("dialogue replay: the unit groups tick before any recorded state");
+        w.recorded_groups = Some(rec);
+        return;
+    };
+    // The run-created units the state names, matched to the sim's before the renaming (a unit
+    // created last tick may not have been in an awake record yet).
+    if let Some(mut awake) = w.recorded_awake.take() {
+        for id in want.units.iter().map(|u| &u.0) {
+            if awake.new_bp.contains_key(id) && !awake.mapped.contains_key(id) {
+                awake.resolve(w, id);
+            }
+        }
+        w.recorded_awake = Some(awake);
+    }
+    if !rec.checked {
+        rec.checked = true;
+        let ours = group_tick_of(w);
+        let mut a: Vec<&String> = ours.groups.iter().map(|g| &g.0).collect();
+        let mut b: Vec<&String> = want.groups.iter().map(|g| &g.0).collect();
+        a.sort();
+        b.sort();
+        if a == b {
+            let order: Vec<GroupIdx> = want
+                .groups
+                .iter()
+                .filter_map(|g| ours.groups.iter().position(|o| o.0 == g.0))
+                .map(|i| w.combat.groups.list[i])
+                .collect();
+            w.combat.groups.list = order;
+        }
+    }
+    let ours = group_tick_of(w);
+    if ours != want {
+        if std::env::var_os("WR_DEBUG_GROUPS").is_some() {
+            let only = |a: &GroupTick, b: &GroupTick| {
+                let g: Vec<_> = a.groups.iter().filter(|x| !b.groups.contains(x)).collect();
+                let u: Vec<_> = a.units.iter().filter(|x| !b.units.contains(x)).collect();
+                format!("groups {g:?} units {u:?}")
+            };
+            eprintln!(
+                "groups t={t}: ours only {}; recorded only {}; order equal {}",
+                only(&ours, &want),
+                only(&want, &ours),
+                ours.groups.iter().map(|g| &g.0).eq(want.groups.iter().map(|g| &g.0))
+                    && ours.units.iter().map(|u| &u.0).eq(want.units.iter().map(|u| &u.0))
+            );
+        }
+        w.coverage.unsupported("dialogue replay: the unit groups differ from the recording's");
+    }
+    w.recorded_groups = Some(rec);
+}
+
+/// The run ended (at the oracle's tick `last`): a recorded state it didn't check is reported,
+/// in a tick it ran or after its end.
+pub fn recorded_finish(w: &mut World, last: i64) {
+    let Some(r) = w.recorded_groups.as_ref() else { return };
+    if r.by_tick.range(..=last).next().is_some() {
+        w.coverage.unsupported(
+            "dialogue replay: a recorded unit group state in a tick the sim's UnitGroupsController didn't run",
+        );
+    }
+    if r.by_tick.range(last + 1..).next().is_some() {
+        w.coverage.unsupported("dialogue replay: a recorded unit group state after the run's end");
     }
 }

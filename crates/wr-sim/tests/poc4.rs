@@ -136,13 +136,13 @@ fn poc4_recordings_match_the_dialogue_and_draws() {
     let runs: &[(&str, &str, &[&str])] = &[
         (
             "seelah-a",
-            "poc4-seelah-4/fixtures/seelah-a",
+            "poc4-seelah-5/fixtures/seelah-a",
             &["record", "replay-1", "replay-2-perturbed"],
         ),
-        ("seelah-b", "poc4-seelah-4/fixtures/seelah-b", &["record", "replay-2-perturbed"]),
-        ("seelah-c", "poc4-seelah-4/fixtures/seelah-c", &["record", "replay-2-perturbed"]),
-        ("horgus-check", "poc4-horgus-8/fixtures/horgus-check", &["record", "replay-2-perturbed"]),
-        ("horgus-alt", "poc4-horgus-8/fixtures/horgus-alt", &["record"]),
+        ("seelah-b", "poc4-seelah-5/fixtures/seelah-b", &["record", "replay-2-perturbed"]),
+        ("seelah-c", "poc4-seelah-5/fixtures/seelah-c", &["record", "replay-2-perturbed"]),
+        ("horgus-check", "poc4-horgus-9/fixtures/horgus-check", &["record", "replay-2-perturbed"]),
+        ("horgus-alt", "poc4-horgus-9/fixtures/horgus-alt", &["record"]),
     ];
     for (name, dir, rs) in runs {
         for r in *rs {
@@ -184,20 +184,31 @@ fn poc4_recordings_match_the_dialogue_and_draws() {
 /// Round 3: the Seelah runs equal the oracle's ordered T0 stream to the end (the recruited
 /// companion's body, its items, the armor rules, the potion's ability, the late toggle buff,
 /// the replaced NPC's disposal), and the end state of every unit matches the oracle's dump.
-/// Round 9: on captures with the cutscene locks, the zone entries and the modes
-/// (`poc4-seelah-4`), with the lock's buff tick and postpone, Cutscene and Pause modes.
+/// Round 9: on captures with the cutscene locks, the zone entries and the modes, with the
+/// lock's buff tick and postpone, Cutscene and Pause modes. Round 10 (`poc4-seelah-5`): the unit
+/// groups modelled and equal to every recorded group state (the recruited companion's new unit
+/// joins the pool last).
 #[test]
-#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-4 capture"]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-seelah-5 capture"]
 fn seelah_streams_equal_the_oracle_to_the_end() {
     let runs: &[(&str, &[&str])] = &[
         ("seelah-a", &["record", "replay-1", "replay-2-perturbed"]),
-        ("seelah-b", &["record", "replay-1", "replay-2-perturbed"]),
-        ("seelah-c", &["record", "replay-1", "replay-2-perturbed"]),
+        (
+            "seelah-b",
+            &[
+                "record",
+                "replay-1",
+                "replay-2-perturbed",
+                "replay-3-perturbed",
+                "replay-4-perturbed",
+            ],
+        ),
+        ("seelah-c", &["record", "replay-1", "replay-2-perturbed", "replay-3-perturbed"]),
     ];
     for (name, rs) in runs {
         for r in *rs {
             let spec = root().join("crates/wr-sim/fixtures/poc4.json");
-            let d = root().join("fixtures/captures/oracle/poc4-seelah-4/fixtures").join(name);
+            let d = root().join("fixtures/captures/oracle/poc4-seelah-5/fixtures").join(name);
             let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
                 ability_params_empty: None,
                 spec: &spec,
@@ -213,6 +224,7 @@ fn seelah_streams_equal_the_oracle_to_the_end() {
             // Valid: nothing unsupported at load or in the run (the area's scene entities,
             // script zone and `ActivateTrigger` included).
             assert!(f.valid(), "{name} {r}: {:?}", f.world.coverage.unsupported);
+            assert!(f.world.combat.groups.on && f.world.recorded_groups.is_some(), "{name} {r}");
             let units = f.units_diff.as_ref().expect("units");
             assert!(
                 units.match_rate > 0.9999,
@@ -237,22 +249,21 @@ fn seelah_streams_equal_the_oracle_to_the_end() {
     }
 }
 
-/// Horgus (`poc4-horgus-8`: cutscene progress, locks, zone entries, awake states recorded):
-/// every run's ordered T0 stream equals the oracle's, gate draws and the closing cutscene's lock
-/// included, and the end state matches. The runs stay invalid on what isn't ported:
-/// `OnIsInGameChanged`'s group membership and roaming's two draws (`SelectNextPoint`'s
-/// `WeightedRandom`, `SelectPrevPoint`).
+/// Horgus (`poc4-horgus-9`: cutscene progress, locks, zone entries, awake states, roaming's
+/// producers and the unit groups recorded): every run is valid. The ordered T0 stream equals the
+/// oracle's (gate draws and the closing cutscene's lock included), the end state matches, the
+/// groups model runs and equals every recorded group state, and roaming's two draws are tied to
+/// their recorded producers (the roaming controller choosing a waypoint: movement, T1).
 #[test]
-#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-horgus-8 capture"]
-fn horgus_runs_report_what_they_do_not_port() {
-    const GROUP: &str = "UnitEntityData.OnIsInGameChanged: group membership";
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-horgus-9 capture"]
+fn horgus_runs_are_valid() {
     for (name, rs) in [
         ("horgus-check", &["record", "replay-1", "replay-2-perturbed", "replay-3-perturbed"][..]),
         ("horgus-alt", &["record", "replay-1"][..]),
     ] {
         for r in rs {
             let spec = root().join("crates/wr-sim/fixtures/poc4.json");
-            let d = root().join("fixtures/captures/oracle/poc4-horgus-8/fixtures").join(name);
+            let d = root().join("fixtures/captures/oracle/poc4-horgus-9/fixtures").join(name);
             let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
                 ability_params_empty: None,
                 spec: &spec,
@@ -264,18 +275,16 @@ fn horgus_runs_report_what_they_do_not_port() {
             .expect("fixture");
             assert!(f.outcome.failure.is_none(), "{name} {r}: {:?}", f.outcome.failure);
             let td = f.trace_diff.as_ref().expect("trace");
-            assert!(td.all.equal, "{name} {r}: {:?}", td.all.first_difference);
-            let kinds: Vec<&String> = f.world.coverage.unsupported.keys().collect();
-            assert!(kinds == [GROUP], "{name} {r}: {kinds:?}");
-            assert!(!f.valid(), "{name} {r}");
-            let sites: Vec<&String> = td.unmodelled_draws.keys().collect();
-            assert!(
-                sites.len() == 2
-                    && sites
-                        .iter()
-                        .all(|k| k.contains("WeightedRandom") || k.contains("SelectPrevPoint")),
-                "{name} {r}: {sites:?}"
-            );
+            assert!(td.equal(), "{name} {r}: {td:?}");
+            assert!(f.valid(), "{name} {r}: {:?}", f.world.coverage.unsupported);
+            assert!(f.world.combat.groups.on && f.world.recorded_groups.is_some(), "{name} {r}");
+            let roaming: u64 = td
+                .t1_excluded
+                .iter()
+                .filter(|(k, _)| k.starts_with("roaming: "))
+                .map(|(_, n)| n)
+                .sum();
+            assert_eq!(roaming, 2, "{name} {r}: {:?}", td.t1_excluded);
             let units = f.units_diff.as_ref().expect("units");
             assert!(units.match_rate > 0.9999, "{name} {r}: units {}", units.match_rate);
             check_units(&f, &format!("{name} {r}"));

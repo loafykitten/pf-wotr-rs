@@ -10,10 +10,10 @@ survey and notes on other rewrites.
   certification) passed**. Ember's fixture saves exist: `Manual_18_WR_FirstBattle` and
   `Manual_19_WR_PreHorgus` (read-only copies in `fixtures/saves/`, gitignored).
   Where each workstream stands, with its handoff:
-  - POC-4 (`docs/poc4/dialogue.md`, round 9): 18 of 24 dialogue runs are valid end to end on captures with every
-    input recorded (`poc4-seelah-4`: 15 Seelah runs; `cert-22`: 3 dialog-checks runs), the cutscene lock's buff tick
-    and postpone, game modes and the zone entry's tick included; the 6 Horgus runs (`poc4-horgus-8`) are T0-equal,
-    invalid on group membership and two roaming draws (next: PLAN item 2). Manual_13 loads clean; Manual_19 1.0000.
+  - POC-4 (`docs/poc4/dialogue.md`, round 10): every dialogue run is valid end to end on captures with every input
+    recorded (`poc4-seelah-5`: 12 Seelah runs; `poc4-horgus-9`: 6 Horgus runs; `cert-22`: 3 dialog-checks runs), the
+    unit groups modelled and checked against the game's every state, roaming's draws tied to their recorded producers.
+    Next: each save's load tail (`coverage.json`). Manual_13 loads clean; Manual_19 1.0000.
   - POC-5 (`docs/poc5/combat.md`, `docs/poc5/commands.md` round 14 slice G): every run of `poc5-tb-95` and `-96` valid (three fights with different choices: the pass as worded)
     with cooldowns, turns, the commands' lifecycle, `UnitAttack`, the approach, the AI, the engagement controller,
     units' `LastTarget`/`ManualTarget` and the impatience controller computed (`combat/commands/*.rs`, `combat/ai.rs`,

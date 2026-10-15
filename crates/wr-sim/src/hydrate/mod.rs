@@ -621,6 +621,23 @@ impl Loader<'_> {
             disposing: false,
             is_disposed: false,
         });
+        // A saved roaming state that would start a cutscene the roaming controller plays (one
+        // mid-way, or a next point of its own with an idle cutscene) isn't modelled; otherwise
+        // roaming only moves the unit (T1).
+        if let Some(r) = o
+            .obj("Parts")
+            .map(|p| p.objs("m_Parts"))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p.ty() == "UnitPartRoaming")
+        {
+            if r.obj("IdleCutscene").is_some() {
+                self.w.coverage.unsupported("UnitPartRoaming: an idle cutscene playing");
+            }
+            if graph::roaming_next_idle_cutscene(r) {
+                self.w.coverage.unsupported(crate::spawn::ROAMING_NEXT_IDLE_CUTSCENE);
+            }
+        }
         // Items first (modifiers and facts point at them), then facts, then stats.
         let inv = d.obj("m_Inventory");
         let inv_items: Vec<EntityIdx> = inv

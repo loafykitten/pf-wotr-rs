@@ -20,8 +20,11 @@ namespace WrathOracle;
 // draw's site key names only the method. So each call writes an "obs" record just before its
 // draw, naming the producer and what the choice can start (the cutscenes among the candidates):
 //   gate_track  CutscenePlayerGateData.SelectTrackToStart: the gate and its player's cutscene
-//   roam_point  RoamingWaypointData.SelectNextPoint/SelectPrevPoint/SelectCutscene: the point and
-//               its idle cutscenes
+//   roam_point  RoamingWaypointData.SelectNextPoint/SelectPrevPoint/SelectCutscene: the point, its
+//               idle cutscenes, and (InstallRoaming) the candidates' count (n: the next waypoints, the
+//               previous ones or the idle cutscenes) and who asked (caller: "controller" inside
+//               UnitRoamingController.TickOnUnit, "advance" inside UnitPartRoaming.Advance, the
+//               innermost; null elsewhere) for which roaming unit (unit)
 //   roam_roll   UnitRoamingController.RollNextPoint: the unit and its roaming settings' idle cutscenes
 // And when a cutscene's CommandAction runs (cs_action: the command and its player's cutscene), whose
 // timing the sim can't compute (delays, animations): a replay runs a cutscene's T0 actions then.
@@ -69,6 +72,43 @@ internal static class ProducerObs
         {
             Health.Failed("patch CutsceneController.Tick", e);
         }
+    }
+
+    // Who is selecting a roaming point (roam_point's caller and unit): UnitRoamingController.TickOnUnit
+    // (the controller moving its unit along the waypoints) or UnitPartRoaming.Advance (the AI's roam
+    // and abilities that move along the path).
+    public static void InstallRoaming(Harmony h)
+    {
+        void P(Type t, string method, string prefix)
+        {
+            try
+            {
+                var m = AccessTools.Method(t, method) ?? throw new MissingMethodException(t.FullName, method);
+                h.Patch(m, prefix: new HarmonyMethod(typeof(ProducerObs), prefix), finalizer: new HarmonyMethod(typeof(ProducerObs), nameof(RoamFinalizer)));
+            }
+            catch (Exception e)
+            {
+                Health.Failed("patch " + t.Name + "." + method, e);
+            }
+        }
+        P(typeof(UnitRoamingController), "TickOnUnit", nameof(RoamTickPrefix));
+        P(typeof(UnitPartRoaming), nameof(UnitPartRoaming.Advance), nameof(RoamAdvancePrefix));
+        _roamingContext = true;
+    }
+
+    private static bool _roamingContext;
+    private static readonly List<KeyValuePair<string, string>> RoamCallers = new List<KeyValuePair<string, string>>();
+
+    public static void RoamTickPrefix(UnitEntityData unit) =>
+        RoamCallers.Add(new KeyValuePair<string, string>("controller", unit?.UniqueId));
+
+    public static void RoamAdvancePrefix(UnitPartRoaming __instance) =>
+        RoamCallers.Add(new KeyValuePair<string, string>("advance", __instance?.Owner?.UniqueId));
+
+    public static Exception RoamFinalizer(Exception __exception)
+    {
+        if (RoamCallers.Count > 0) RoamCallers.RemoveAt(RoamCallers.Count - 1);
+        return __exception;
     }
 
     public static void InstallZones(Harmony h)
@@ -139,13 +179,25 @@ internal static class ProducerObs
         try
         {
             var id = p?.UniqueId;
-            var idle = p?.WaypointView?.IdleCutscenes;
+            var view = p?.WaypointView;
+            var idle = view?.IdleCutscenes;
+            int? n = view == null ? (int?)null
+                : m == "SelectNextPoint" ? view.NextWaypoints.Count
+                : m == "SelectPrevPoint" ? view.PrevWaypoints.Count
+                : view.IdleCutscenes.Count;
+            var ctx = _roamingContext && RoamCallers.Count > 0 ? RoamCallers[RoamCallers.Count - 1] : default;
             Trace.Emit("obs", j =>
             {
                 j.Prop("ev", "roam_point");
                 j.Prop("m", m);
                 j.Prop("point", id);
                 Guids(j, "idle", idle);
+                if (_roamingContext)
+                {
+                    j.Prop("n", n);
+                    j.Prop("caller", ctx.Key);
+                    j.Prop("unit", ctx.Value);
+                }
             });
         }
         catch (Exception e) { Trace.HookFailed("roam_point", e); }

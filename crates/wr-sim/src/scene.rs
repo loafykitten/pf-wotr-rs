@@ -744,12 +744,21 @@ pub fn area_has_parts(w: &World) -> bool {
 
 /// `Game.Instance.State.Units.All`: the `EntityPool<UnitEntityData>` with the `NotFake`
 /// filter (`PersistentState.Units`: a unit whose blueprint `IsFake` never joins it), in the
-/// order the units joined their states (the cross-scene state, then the area's); a unit
-/// removed from its state (disposed) leaves it.
+/// order the units joined their states (at the load the cross-scene state's, then the area's;
+/// a unit that joins one later is appended); a unit removed from its state (disposed) leaves it.
 #[must_use]
 pub fn units_pool(w: &World) -> Vec<EntityIdx> {
     let mut out: Vec<EntityIdx> = Vec::new();
-    for &u in w.player.cross_scene_units.iter().chain(&w.player.area_units) {
+    let held =
+        |u: &EntityIdx| w.player.cross_scene_units.contains(u) || w.player.area_units.contains(u);
+    let loaded = w
+        .player
+        .cross_scene_units
+        .iter()
+        .chain(&w.player.area_units)
+        .filter(|u| !w.player.joined_after_load.contains(u));
+    let joined = w.player.joined_after_load.iter().filter(|u| held(u));
+    for &u in loaded.chain(joined) {
         let Some(x) = w.unit(u) else { continue };
         let fake =
             x.blueprint.and_then(|g| w.content.get(g)).is_some_and(|b| b.view().bool("IsFake"));

@@ -88,6 +88,7 @@ internal sealed class Json : IDisposable
     public Json Prop(string k, uint v) { W.WritePropertyName(k); W.WriteValue(v); return this; }
     public Json Prop(string k, float v) { W.WritePropertyName(k); W.WriteValue(v); return this; }
     public Json Prop(string k, double v) { W.WritePropertyName(k); W.WriteValue(v); return this; }
+    public Json Prop(string k, int? v) { W.WritePropertyName(k); if (v.HasValue) W.WriteValue(v.Value); else W.WriteNull(); return this; }
     public Json Prop(string k, bool? v) { W.WritePropertyName(k); if (v.HasValue) W.WriteValue(v.Value); else W.WriteNull(); return this; }
     public Json Prop(string k, Vector3 v) { W.WritePropertyName(k); Vec(v); return this; }
     public Json Prop(string k, Vector2 v) { W.WritePropertyName(k); W.WriteStartArray(); W.WriteValue(v.x); W.WriteValue(v.y); W.WriteEndArray(); return this; }

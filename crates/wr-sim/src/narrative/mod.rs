@@ -142,6 +142,9 @@ pub struct Player {
     pub cross_scene_units: Vec<EntityIdx>,
     /// The loaded area's main-state units, in order.
     pub area_units: Vec<EntityIdx>,
+    /// `Units.All` appends a unit when it joins a state (`EntityPool.HandleAdded`): the units
+    /// that joined one after the load, in that order (the load's are in their states' order).
+    pub joined_after_load: Vec<EntityIdx>,
     /// `EntityCreationController.m_ToCreate`: units built but not yet in a state (the flag:
     /// the cross-scene state, else the loaded area's main state).
     pub creation_queue: Vec<(EntityIdx, bool)>,

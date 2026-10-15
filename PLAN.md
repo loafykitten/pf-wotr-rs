@@ -11,6 +11,14 @@ is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-4 round 10 (eighteenth session, `docs/poc4/dialogue.md`): every dialogue run valid** (`poc4-seelah-5`'s 12,
+  `poc4-horgus-9`'s 6, `cert-22`'s 3). The Horgus runs too: roaming's two draws are tied to their recorded producers (WrathOracle's `roam_point` now names
+  the caller and the unit; a draw counts as T1 only right after its producer, by `UnitRoamingController`, and
+  `runner::audit_roaming` checks each producer against the scene cache and the units: no idle cutscene can start),
+  and the unit groups model runs in dialogue runs (`UnitGroupsController` start, tick, spawn and destroy handlers),
+  checked after every tick against WrathOracle's new `grp_tick` states. The group check found the units pool's order
+  wrong for units that join a state after the load (the game appends them; `scene::units_pool` now does). Saved
+  roaming next points with their own idle cutscene are reported at load.
 - **POC-4 round 9 (eighteenth session, `docs/poc4/dialogue.md`): 18 of 24 dialogue runs valid with every input recorded.**
   `CommandLockControls`' buff tick and postpone are modelled (`UnitBuffsController` in dialogue runs, `m_PreviousTime`,
   `TickAll`/`PostponeAll` over `Units.All`, the controller's `Activate` at each mode activation), with the game-mode
@@ -195,10 +203,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
    choices are recorded and valid: `-95`'s two and `-96`).
-2. Horgus (`docs/poc4/dialogue.md`, rounds 6 to 9): on `poc4-horgus-8` every run's T0 stream is equal (gate draws
-   and the closing cutscene's lock included) and the end state 1.0000. Left: roaming's two draws as recorded inputs
-   (WrathOracle records their producers, `roam_point`/`roam_roll`) and `OnIsInGameChanged`'s group membership (run
-   the groups model in dialogue runs); then each save's load tail (`coverage.json`).
+2. POC-4 (`docs/poc4/dialogue.md`): every dialogue run is valid (round 10). Left: each save's load tail
+   (`coverage.json`), Camelia's meeting (needs her trigger zone), `crates/wr-text`.
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
    features, a few abilities and buffs; `compare-Manual_10.json` and the two dumps show them). They also offset every
    later fact id: `manual10-ids-1/ids-load.json` names each allocation the sim misses (working notes).
@@ -208,9 +214,10 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
-- **Eighteenth session (2026-10-14):** captures `poc4-seelah-4`, `poc4-horgus-8`, `cert-22` (every dialogue observer);
-  `poc4-seelah-3`, `poc4-horgus-7`, `cert-21` are superseded (no `zone_enter`; prune with Ember's say-so). The POC-4
-  suite and `scripts/regress.sh` use the new ones; the regression baseline is `cache/regress/out-lockmodel`. The
+- **Eighteenth session (2026-10-14):** captures `poc4-seelah-5`, `poc4-horgus-9` (with `roam_producers` and
+  `group_ticks`) and `cert-22`; `poc4-seelah-3`/`-4`, `poc4-horgus-7`/`-8`, `cert-21` are superseded (prune with
+  Ember's say-so; `cert-22`'s `dialog-checks` has no roaming and runs without the groups model, valid). The POC-4
+  suite and `scripts/regress.sh` use the new ones; the regression baseline is `cache/regress/out-round10`. The
   certification's real-time `attack` replay is one tick late in `cert-22` (as in `cert-16` and `-18`, not in `-21`):
   the known real-time frontier (no phase pin), not the new hooks. The combat replay still reports any game-mode change
   (its controllers' `Activate`), and the dialogue runner models only Default, Dialog, Cutscene and recorded Pause.
@@ -270,8 +277,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - Scene caches for POC-4: `scripts/scene-cache.sh <area> <guid>` (schema v2 since 2026-10-14, with roaming waypoints;
   rebuild both areas' caches after pulling).
 - The oracle regression: `scripts/regress.sh <label> <bindir>` then `scripts/regress-diff.sh <new> <base>`
-  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-lockmodel` (release build; the dialogue fixtures from
-  `poc4-seelah-4`, `poc4-horgus-8` and `cert-22`; before it `out-cs4`, the Horgus fixtures from `poc4-horgus-6`; before it `out-mythic2`: the mythic levels and three components, only
+  (outputs in `cache/regress/`; the last baseline is `cache/regress/out-round10` (release build; the dialogue fixtures from
+  `poc4-seelah-5`, `poc4-horgus-9` and `cert-22`; before it `out-lockmodel`, with `poc4-seelah-4`, `poc4-horgus-8`; before it `out-cs4`, the Horgus fixtures from `poc4-horgus-6`; before it `out-mythic2`: the mythic levels and three components, only
   Manual_10 changed; before it `out-awake-start`, the fact pairing's `out-fact-pairing`,
   `out-slice-g`); pass the outputs' full paths to `regress-diff.sh`). Run parallel ones with a
   private `WR_CACHE` (symlink every `cache/*` entry except `sim` and `poc5`, which are copied).

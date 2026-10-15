@@ -37,6 +37,12 @@ pub struct BuildFlags {
     pub do_not_create_plan: bool,
 }
 
+/// A saved roaming state whose next point is a `RoamingPoint` of its own with an idle cutscene:
+/// `UnitRoamingController.TickOnUnit` plays it on arrival (`RoamingPoint.SelectCutscene` draws
+/// nothing, so no recorded producer names it).
+pub const ROAMING_NEXT_IDLE_CUTSCENE: &str =
+    "UnitPartRoaming: a saved next point with an idle cutscene (RoamingPoint.IdleCutscene)";
+
 /// A placeholder as saved, with its reserved unit entity.
 #[derive(Debug, Clone)]
 pub struct PlaceholderData {
@@ -58,6 +64,9 @@ pub struct PlaceholderData {
     pub roaming: bool,
     /// The saved roaming state's `IdleCutscene` (a cutscene player mid-way) is set.
     pub roaming_idle_cutscene: bool,
+    /// The saved roaming state's next point is a `RoamingPoint` of its own (`RollNextPoint`'s)
+    /// with an idle cutscene.
+    pub roaming_next_idle_cutscene: bool,
     /// `m_VendorTable` (`UnitPartVendor.SharedInventory`).
     pub vendor_table: Option<Guid>,
     /// `m_PrefabId` is set (`UnitSpawningData.PrefabGuid`): `EntityCreator.SpawnUnit` then
@@ -217,6 +226,9 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
         w.coverage.stub("UnitPartRoaming.RestoreFrom (roaming movement along waypoints: T1)");
         if p.roaming_idle_cutscene {
             w.coverage.unsupported("UnitPartRoaming.RestoreFrom: an idle cutscene playing");
+        }
+        if p.roaming_next_idle_cutscene {
+            w.coverage.unsupported(ROAMING_NEXT_IDLE_CUTSCENE);
         }
     }
     // `unit.Ensure<UnitPartVendor>().SetSharedInventory(m_VendorTable)`: the part points at
@@ -625,6 +637,11 @@ pub fn entity_creator_tick(w: &mut World) {
         } else {
             w.player.area_units.push(e);
         }
+        w.player.joined_after_load.retain(|u| *u != e);
+        w.player.joined_after_load.push(e);
+        // `UnitGroupsController` (subscribed when the controllers start, before the area's
+        // facts) is the first `IUnitHandler`.
+        crate::combat::groups::spawned(w, e);
         crate::rulebook::bus::raise_global_call(w, "IUnitHandler", "HandleUnitSpawned", Some(e));
         crate::rulebook::bus::raise_global_call(
             w,
@@ -669,6 +686,7 @@ pub fn entity_destroyer_tick(w: &mut World) {
         if w.unit(e).is_some_and(|u| u.has_dropped_loot_ref) {
             w.coverage.unsupported("UnitEntityData.OnDestroy: TransferInventoryToDroppedLoot");
         }
+        crate::combat::groups::destroyed(w, e);
         crate::rulebook::bus::raise_global_call(w, "IUnitHandler", "HandleUnitDestroyed", Some(e));
         // `entity.Dispose()`.
         crate::entity::dispose(w, e);
@@ -932,52 +950,63 @@ impl RecordedAwake {
 /// matched to a live sim unit (a saved id as is, a run-created one by its blueprint, the match
 /// unique). A tick in which the recording's controller didn't run, or an id the sim can't
 /// match, is reported.
+/// A unit the recording's controllers can visit: in the state's pool (not queued for creation),
+/// live, indexed, not a preview.
+fn recorded_live(w: &World, pool: &std::collections::HashSet<EntityIdx>, e: EntityIdx) -> bool {
+    pool.contains(&e)
+        && !w.entity(e).is_disposed
+        && w.by_id.get(&w.entity(e).unique_id) == Some(&e)
+        && w.unit(e).is_some_and(|x| x.preview_of.is_none())
+}
+
+impl RecordedAwake {
+    /// The sim's unit for a recorded id: a saved id as is, a run-created one (announced with its
+    /// blueprint) through its match, made here when it isn't yet (the one live unit the run
+    /// created with that blueprint, not matched to another id); `None` when there is none.
+    pub fn resolve(&mut self, w: &World, id: &str) -> Option<EntityIdx> {
+        let pool: std::collections::HashSet<EntityIdx> =
+            crate::scene::units_pool(w).into_iter().collect();
+        if let Some(bp) = self.new_bp.get(id).copied() {
+            return match self.mapped.get(id).copied() {
+                Some(e) if recorded_live(w, &pool, e) => Some(e),
+                Some(_) => None,
+                None => {
+                    let taken: Vec<EntityIdx> = self.mapped.values().copied().collect();
+                    let candidates: Vec<EntityIdx> = (0..w.entities.len())
+                        .map(|i| EntityIdx(u32::try_from(i).unwrap_or(u32::MAX)))
+                        .filter(|e| {
+                            recorded_live(w, &pool, *e)
+                                && w.unit(*e).is_some_and(|x| x.blueprint == Some(bp))
+                                && !self.saved.contains(&w.entity(*e).unique_id)
+                                && !taken.contains(e)
+                        })
+                        .collect();
+                    if let [e] = candidates[..] {
+                        self.mapped.insert(id.to_owned(), e);
+                        Some(e)
+                    } else {
+                        None
+                    }
+                }
+            };
+        }
+        if self.saved.contains(id) {
+            w.by_id.get(id).copied().filter(|e| recorded_live(w, &pool, *e))
+        } else {
+            None
+        }
+    }
+}
+
 pub fn recorded_awake_for_tick(w: &mut World, tick: i64) {
     let Some(mut rec) = w.recorded_awake.take() else { return };
     rec.now = None;
-    // A unit the controller can visit: in the state's pool (not queued for creation), live,
-    // indexed, not a preview.
-    let pool: std::collections::HashSet<EntityIdx> =
-        crate::scene::units_pool(w).into_iter().collect();
-    let live = |w: &World, e: EntityIdx| {
-        pool.contains(&e)
-            && !w.entity(e).is_disposed
-            && w.by_id.get(&w.entity(e).unique_id) == Some(&e)
-            && w.unit(e).is_some_and(|x| x.preview_of.is_none())
-    };
     match rec.sets.get(&tick).cloned() {
         None => w.coverage.unsupported("dialogue replay: no recorded awake state for a tick"),
         Some(set) => {
             let mut now = std::collections::HashSet::new();
             for id in set {
-                let e = if let Some(bp) = rec.new_bp.get(&id).copied() {
-                    match rec.mapped.get(&id).copied() {
-                        Some(e) if live(w, e) => Some(e),
-                        Some(_) => None,
-                        None => {
-                            let taken: Vec<EntityIdx> = rec.mapped.values().copied().collect();
-                            let candidates: Vec<EntityIdx> = (0..w.entities.len())
-                                .map(|i| EntityIdx(u32::try_from(i).unwrap_or(u32::MAX)))
-                                .filter(|e| {
-                                    live(w, *e)
-                                        && w.unit(*e).is_some_and(|x| x.blueprint == Some(bp))
-                                        && !rec.saved.contains(&w.entity(*e).unique_id)
-                                        && !taken.contains(e)
-                                })
-                                .collect();
-                            if let [e] = candidates[..] {
-                                rec.mapped.insert(id.clone(), e);
-                                Some(e)
-                            } else {
-                                None
-                            }
-                        }
-                    }
-                } else if rec.saved.contains(&id) {
-                    w.by_id.get(&id).copied().filter(|e| live(w, *e))
-                } else {
-                    None
-                };
+                let e = rec.resolve(w, &id);
                 match e {
                     Some(e) => {
                         now.insert(e);

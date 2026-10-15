@@ -320,6 +320,14 @@ internal static class Fidelity
         failed = Health.FailedCount;
         AwakeObs.Install(h);
         if (Health.FailedCount == failed) Observers.Add("aa_awake");
+        // Roaming's draw producers' caller and unit (roam_point), and the unit groups outside
+        // turn-based windows (grp_tick).
+        failed = Health.FailedCount;
+        ProducerObs.InstallRoaming(h);
+        if (Health.FailedCount == failed) Observers.Add("roam_producers");
+        failed = Health.FailedCount;
+        GroupObs.InstallTicks(h);
+        if (Health.FailedCount == failed) Observers.Add("group_ticks");
         OracleTime.Install(h);
         InstallSeconds = sw.Elapsed.TotalSeconds;
         Notes.Add($"install total {InstallSeconds:0.00} s");

@@ -28,6 +28,10 @@ namespace WrathOracle;
 //  - cmds (same prefix): a unit's commands (Raw, then Queue), as changes;
 //  - choose_next (CombatController.ChooseNextUnit's prefix): the turn order's inputs it can't compute;
 //  - leave_combat (UnitEntityData.LeaveCombat's prefix): who leaves, and from where.
+// And outside turn-based windows (dialogue fixtures; InstallTicks, declared as group_ticks):
+//  - grp_tick (UnitGroupsController.Tick's postfix, when anything changed since the last one; the
+//    window's first always): UnitGroupsController.Groups in order (id, units, combat count, leave
+//    timer) and every unit of State.Units with its cached m_Group (GroupKey).
 // Everything is read through fields and plain getters: UnitEntityData.Group runs UpdateGroup,
 // UnitGroupMemory.UnitsList/Enemies fill caches, a command's TargetUnit resolves an EntityRef (which can
 // create a proxy) and CombatController.IsInTurnBasedCombat sets CanChangeWeaponSet, so none is used.
@@ -91,6 +95,7 @@ internal static class GroupObs
 
     public static void ResetWindow()
     {
+        _lastTick = null;
         _opened = false;
         _lastGate = null;
         LastCooldowns.Clear();
@@ -132,6 +137,64 @@ internal static class GroupObs
             });
         }
         catch (Exception e) { Trace.HookFailed("observe group_state", e); }
+    }
+
+    private static string _lastTick;
+
+    public static void InstallTicks(Harmony h)
+    {
+        try
+        {
+            var m = AccessTools.Method(typeof(Kingmaker.Controllers.Units.UnitGroupsController), nameof(Kingmaker.Controllers.Units.UnitGroupsController.Tick)) ?? throw new MissingMethodException("UnitGroupsController.Tick");
+            h.Patch(m, postfix: new HarmonyMethod(typeof(GroupObs), nameof(GroupsTickPostfix)));
+        }
+        catch (Exception e)
+        {
+            Health.Failed("patch UnitGroupsController.Tick (grp_tick)", e);
+        }
+    }
+
+    public static void GroupsTickPostfix()
+    {
+        if (!Trace.Active || !Trace.OnMainThread || Sched.Window) return;
+        try
+        {
+            var game = Game.Instance;
+            var groups = new List<(string id, List<string> units, int inCombat, float timer)>();
+            foreach (var g in game.UnitGroups)
+                groups.Add((g.Id, GroupUnits(g).Select(r => r.UniqueId).ToList(), g.IsInCombat.GuardCount, g.LeaveCombatTimer));
+            var units = new List<(string id, string group)>();
+            foreach (var u in game.State.Units)
+                if (u != null) units.Add((u.UniqueId, GroupKey(CachedGroup(u))));
+            var key = new System.Text.StringBuilder();
+            foreach (var g in groups)
+                key.Append(g.id).Append('|').Append(string.Join(",", g.units)).Append('|').Append(g.inCombat).Append('|')
+                    .Append(g.timer.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(';');
+            key.Append('#');
+            foreach (var u in units) key.Append(u.id).Append('=').Append(u.group).Append(';');
+            var k = key.ToString();
+            if (k == _lastTick) return;
+            _lastTick = k;
+            Trace.Emit("obs", j =>
+            {
+                j.Prop("ev", "grp_tick");
+                j.Arr("groups");
+                foreach (var g in groups)
+                {
+                    j.Obj();
+                    j.Prop("id", g.id);
+                    j.Arr("units"); foreach (var id in g.units) j.W.WriteValue(id); j.EndArr();
+                    j.Prop("in_combat", g.inCombat);
+                    j.Prop("timer", g.timer);
+                    j.End();
+                }
+                j.EndArr();
+                j.Arr("units");
+                foreach (var u in units) { j.Arr(); j.W.WriteValue(u.id); j.W.WriteValue(u.group); j.EndArr(); }
+                j.EndArr();
+            });
+        }
+        catch (Exception e) { Trace.HookFailed("observe grp_tick", e); }
     }
 
     public static void GetGroupPrefix(out int __state)

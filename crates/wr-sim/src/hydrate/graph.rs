@@ -246,3 +246,12 @@ pub fn str_of(v: &Value) -> Option<&str> {
         _ => None,
     }
 }
+
+/// A saved `UnitPartRoaming` (a unit's part, a placeholder's `m_Roaming`) whose next point is a
+/// `RoamingPoint` of its own with an idle cutscene (a blueprint reference, not null).
+#[must_use]
+pub fn roaming_next_idle_cutscene(r: O<'_>) -> bool {
+    r.obj("m_PersistentNextPoint")
+        .and_then(|p| p.get("IdleCutscene"))
+        .is_some_and(|v| !matches!(v, Value::Null | Value::NullText | Value::GuidEmpty))
+}

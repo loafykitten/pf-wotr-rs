@@ -326,6 +326,12 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
         }
         return;
     }
+    // 1b. UnitGroupsController (Default, Dialog, Cutscene; registered before the clock), with a
+    // recording's group states checked after it.
+    if w.combat.groups.on && matches!(w.player.mode, "Default" | "Dialog" | "Cutscene") {
+        crate::combat::groups::tick(w);
+        crate::combat::groups::check_recorded(w, w.events.tick - 1);
+    }
     // 2. TimeController.
     let frame = crate::time::Frame {
         delta_time: FIXED_DELTA,
@@ -353,6 +359,11 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
     // cutscene classification accepts.
     if matches!(w.player.mode, "Default" | "Dialog" | "Rest" | "GlobalMap") {
         crate::combat::life::buffs_tick(w);
+    }
+    // 2d. UnitRoamingController (Default, Dialog, Cutscene, Rest): the recorded producers of
+    // its choices, audited now.
+    if matches!(w.player.mode, "Default" | "Dialog" | "Cutscene" | "Rest") {
+        roaming_tick(w, t);
     }
     // 3. ScriptZoneController (Default and Cutscene modes).
     if let Some(z) = zone {
@@ -868,6 +879,49 @@ pub fn oracle_health(records: &[Value]) -> (Vec<String>, Value) {
     (problems, h.clone())
 }
 
+/// The roaming method behind a draw whose site key names only a `LinqExtensions` helper or
+/// the method: `RoamingWaypointData.SelectNextPoint`'s `WeightedRandom` and `SelectPrevPoint`'s
+/// `Random`. The waypoint they choose is where the roaming unit walks next (T1); what it does
+/// there is another recorded choice (`SelectCutscene`, audited by [`audit_roaming`]).
+fn roaming_method(key: &str) -> Option<&'static str> {
+    if !key.starts_with("global|")
+        && key.contains("|Kingmaker.Utility.LinqExtensions|WeightedRandom")
+    {
+        Some("SelectNextPoint")
+    } else if key.starts_with("global|")
+        && key.contains("|Kingmaker.View.Roaming.RoamingWaypointData|SelectPrevPoint(")
+        && key.contains("|via LinqExtensions.Random|")
+    {
+        Some("SelectPrevPoint")
+    } else {
+        None
+    }
+}
+
+/// Whether `p`, the record just before the draw `r` (WrathOracle writes `roam_point` right
+/// before the method draws, nothing in between), is its producer: that method's `roam_point`
+/// in the same tick, asked by the roaming controller for a unit, with candidates to draw from,
+/// and the draw's range theirs (`Random`: `[0, n)`; `WeightedRandom`: from 0).
+fn roaming_producer(p: Option<&Value>, r: &Value, method: &str) -> bool {
+    let Some(p) = p else { return false };
+    let n = p["n"].as_i64();
+    p["k"] == "obs"
+        && p["ev"] == "roam_point"
+        && p["m"] == method
+        && p["t"].is_i64()
+        && p["t"] == r["t"]
+        && p["caller"] == "controller"
+        && p["unit"].is_string()
+        && p["point"].is_string()
+        && n.is_some_and(|n| n > 0)
+        && match method {
+            "SelectPrevPoint" => {
+                r["m"] == "Range_ii" && r["a"][0].as_i64() == Some(0) && r["a"][1].as_i64() == n
+            }
+            _ => r["m"] == "Range_ff" && r["a"][0].as_f64() == Some(0.0),
+        }
+}
+
 /// The oracle trace's stream.
 #[must_use]
 pub fn oracle_stream(records: &[Value]) -> Stream {
@@ -876,9 +930,31 @@ pub fn oracle_stream(records: &[Value]) -> Stream {
     // Per rule id: its class and its fields (the push snapshot, then each phase's changes).
     let mut rules: std::collections::HashMap<i64, (String, serde_json::Map<String, Value>)> =
         std::collections::HashMap::new();
-    for r in records {
+    for (i, r) in records.iter().enumerate() {
         let k = r["k"].as_str().unwrap_or("");
         match k {
+            // A roaming point choice with candidates draws right after its record: one without
+            // its draw is a recording the comparison can't read.
+            "obs"
+                if r["ev"] == "roam_point"
+                    && matches!(r["m"].as_str(), Some("SelectNextPoint" | "SelectPrevPoint"))
+                    && r["n"].as_i64().is_some_and(|n| n > 0) =>
+            {
+                let m = r["m"].as_str().unwrap_or("");
+                let next = records.get(i + 1).filter(|d| d["k"] == "draw" && d["c"] == "sim");
+                let tied = next.is_some_and(|d| {
+                    let key = d["site"]
+                        .as_i64()
+                        .and_then(|id| keys.get(&id).cloned())
+                        .or_else(|| d["key"].as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    roaming_method(&key) == Some(m) && roaming_producer(Some(r), d, m)
+                });
+                if !tied {
+                    *s.unmodelled.entry(format!("roaming: a {m} without its draw")).or_default() +=
+                        1;
+                }
+            }
             "rule" => {
                 let class = short_class(&r["class"]);
                 let fields = r["fields"].as_object().cloned().unwrap_or_default();
@@ -920,7 +996,18 @@ pub fn oracle_stream(records: &[Value]) -> Stream {
                         Err(e) => *s.unmodelled.entry(e).or_default() += 1,
                     },
                     SiteClass::AuditedT1 => *s.t1_excluded.entry(key).or_default() += 1,
-                    SiteClass::Unmodelled => *s.unmodelled.entry(key).or_default() += 1,
+                    SiteClass::Unmodelled => match roaming_method(&key) {
+                        Some(m)
+                            if roaming_producer(i.checked_sub(1).map(|j| &records[j]), r, m) =>
+                        {
+                            *s.t1_excluded
+                                .entry(format!(
+                                    "roaming: RoamingWaypointData.{m} (its producer recorded)"
+                                ))
+                                .or_default() += 1;
+                        }
+                        _ => *s.unmodelled.entry(key).or_default() += 1,
+                    },
                 }
             }
             _ => {
@@ -1135,6 +1222,124 @@ pub fn compare_streams(ours: &Stream, oracle: &Stream, ids: &RuntimeIds) -> Trac
 
 // ---- a whole fixture -----------------------------------------------------------------------
 
+/// The recording's roaming producers (`roam_point`, `roam_roll`) by oracle tick, for
+/// [`roaming_tick`] (one without a tick is reported there, under tick -1).
+#[must_use]
+pub fn recorded_roaming(records: &[Value]) -> std::collections::BTreeMap<i64, Vec<Value>> {
+    let mut out: std::collections::BTreeMap<i64, Vec<Value>> = std::collections::BTreeMap::new();
+    for r in records
+        .iter()
+        .filter(|r| r["k"] == "obs" && matches!(r["ev"].as_str(), Some("roam_point" | "roam_roll")))
+    {
+        out.entry(r["t"].as_i64().unwrap_or(-1)).or_default().push(r.clone());
+    }
+    out
+}
+
+/// At `UnitRoamingController`'s place in the oracle's tick `t` (Default, Dialog, Cutscene,
+/// Rest): the tick's recorded producers, audited against the world as it is then
+/// ([`audit_roaming`]). A producer in an earlier tick the sim's roaming controller didn't run is
+/// reported.
+pub fn roaming_tick(w: &mut World, t: i64) {
+    let Some(mut rec) = w.recorded_roaming.take() else { return };
+    let earlier: Vec<i64> = rec.range(..t).map(|(k, _)| *k).collect();
+    if !earlier.is_empty() {
+        for k in earlier {
+            rec.remove(&k);
+        }
+        w.coverage.unsupported(
+            "roaming: a recorded producer in a tick the sim's roaming controller didn't run",
+        );
+    }
+    if let Some(now) = rec.remove(&t) {
+        audit_roaming(w, &now);
+    }
+    w.recorded_roaming = Some(rec);
+}
+
+/// Roaming's recorded producers (`roam_point`, `roam_roll`) against the sim's world: a roaming
+/// choice only moves its unit (T1) when the roaming controller makes it for a roaming unit the
+/// sim has, at a waypoint of the area's scene, and it can't start an idle cutscene (the
+/// waypoint's and the unit's settings' lists empty, as the recording says too). Anything else is
+/// reported: the draws tied to these records ([`oracle_stream`]) are accepted only so.
+pub fn audit_roaming(w: &mut World, records: &[Value]) {
+    // The unit through the recording's identities (a saved id as is, a run-created one through
+    // its match): without the awake records, identities aren't established.
+    let unit = |w: &mut World, r: &Value| -> bool {
+        let Some(id) = r["unit"].as_str() else { return false };
+        let Some(mut awake) = w.recorded_awake.take() else { return false };
+        let e = awake.resolve(w, id);
+        w.recorded_awake = Some(awake);
+        e.is_some_and(|e| w.entity(e).parts.iter().any(|p| p.clr == "UnitPartRoaming"))
+    };
+    let empty = |v: &Value| v.as_array().is_some_and(Vec::is_empty);
+    for r in records.iter().filter(|r| r["k"] == "obs") {
+        match r["ev"].as_str() {
+            Some("roam_point") => {
+                let m = r["m"].as_str().unwrap_or("");
+                if r["caller"] != "controller" {
+                    w.coverage.unsupported(
+                        "roaming: a waypoint choice not made by UnitRoamingController (or its caller not recorded)",
+                    );
+                    continue;
+                }
+                if !unit(w, r) {
+                    w.coverage.unsupported("roaming: a roaming unit the sim doesn't have");
+                }
+                let view = r["point"].as_str().and_then(|p| {
+                    w.scene
+                        .cache
+                        .as_ref()?
+                        .view(p)
+                        .cloned()
+                        .filter(|v| v.class.ends_with(".RoamingWaypointView"))
+                });
+                let Some(view) = view else {
+                    w.coverage.unsupported("roaming: a waypoint the scene cache doesn't have");
+                    continue;
+                };
+                let fields = view
+                    .components
+                    .iter()
+                    .find(|c| c.class.ends_with(".RoamingWaypointView"))
+                    .map(|c| c.fields.clone())
+                    .unwrap_or(Value::Null);
+                let count = |f: &str| fields[f].as_array().map(|a| a.len() as i64);
+                match m {
+                    "SelectCutscene" => {
+                        if !(empty(&fields["IdleCutscenes"])
+                            && empty(&r["idle"])
+                            && r["n"].as_i64() == Some(0))
+                        {
+                            w.coverage
+                                .unsupported("roaming: a waypoint's idle cutscene (not modelled)");
+                        }
+                    }
+                    "SelectNextPoint" if r["n"].as_i64() == count("NextWaypoints") => {}
+                    // `PrevWaypoints` is built from the other waypoints' links at `OnEnable`.
+                    "SelectPrevPoint" if r["n"].as_i64().is_some_and(|n| n >= 0) => {}
+                    _ => w.coverage.unsupported(
+                        "roaming: a waypoint choice unlike the scene cache's waypoint",
+                    ),
+                }
+            }
+            // `RollNextPoint`: a point of the unit's own around its origin; an idle cutscene from
+            // its settings would play on arrival.
+            Some("roam_roll") => {
+                if !empty(&r["idle"]) {
+                    w.coverage.unsupported(
+                        "roaming: a roaming unit's idle cutscenes (RollNextPoint, not modelled)",
+                    );
+                }
+                if !unit(w, r) {
+                    w.coverage.unsupported("roaming: a roaming unit the sim doesn't have");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn read_json(p: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(
         &std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
@@ -1275,6 +1480,20 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
                 w.coverage.unsupported(format!("dialogue replay: a malformed awake record ({e})"))
             }
         }
+        // Roaming's producers, audited at their ticks.
+        w.recorded_roaming = Some(Box::new(recorded_roaming(&records)));
+        // The unit groups, with the recording's states (`UnitGroupsController.Start` ran at the
+        // load); without them a change of membership is reported.
+        match crate::combat::groups::RecordedGroups::of(&records) {
+            Ok(Some(r)) => {
+                w.recorded_groups = Some(Box::new(r));
+                crate::combat::groups::start_without_memory(&mut w);
+            }
+            Ok(None) => {}
+            Err(e) => w
+                .coverage
+                .unsupported(format!("dialogue replay: a malformed unit group record ({e})")),
+        }
         // The window starts after the oracle's settle ticks: its clock.
         let start = read_json(&dir.join(format!("state-start-{}.json", o.run)))?;
         if let (Some(gt), Some(rt)) =
@@ -1301,6 +1520,10 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
     }
     let last = w.events.tick - 1;
     crate::elements::cutscene::recorded_finish(&mut w, last);
+    if w.recorded_roaming.as_ref().is_some_and(|r| !r.is_empty()) {
+        w.coverage.unsupported("roaming: a recorded producer in a tick the run didn't reach");
+    }
+    crate::combat::groups::recorded_finish(&mut w, last);
     let run_ms = t0.elapsed().as_secs_f64() * 1e3;
     w.finish_run();
     let narrative_end = crate::narrative::dump::dump(&mut w, "end");
@@ -1339,7 +1562,248 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    const NEXT_SITE: &str = "Assembly-CSharp|Kingmaker.Utility.LinqExtensions|WeightedRandom`1(IList`1)|#0@40|Range(float,float)";
+    const PREV_KEY: &str = "global|Assembly-CSharp|Kingmaker.View.Roaming.RoamingWaypointData|SelectPrevPoint()|via LinqExtensions.Random|Range_ii";
+
+    fn roam(m: &str, n: i64, caller: &str) -> Value {
+        json!({ "k": "obs", "t": 5, "ev": "roam_point", "m": m, "point": "p1", "idle": [], "n": n,
+                "caller": caller, "unit": "u1" })
+    }
+
+    fn next_draw() -> Value {
+        json!({ "k": "draw", "t": 5, "site": 7, "c": "sim", "m": "Range_ff", "a": [0.0, 2.0], "v": 1.5 })
+    }
+
+    fn prev_draw(n: i64) -> Value {
+        json!({ "k": "draw", "t": 5, "site": -1, "key": PREV_KEY, "c": "sim", "m": "Range_ii", "a": [0, n], "v": 0 })
+    }
+
+    fn stream(body: &[Value]) -> super::Stream {
+        let mut records = vec![json!({ "k": "begin", "rng_sites": [[7, NEXT_SITE]] })];
+        records.extend(body.iter().cloned());
+        super::oracle_stream(&records)
+    }
+
+    /// Roaming's helper draws are excluded only right after their producer's record, made by
+    /// the roaming controller with candidates and the draw's range; anything else stays
+    /// unmodelled, and a producer with candidates but no draw is reported.
+    #[test]
+    fn roaming_draws_count_only_with_their_producer() {
+        let ok = stream(&[roam("SelectNextPoint", 2, "controller"), next_draw()]);
+        assert!(ok.unmodelled.is_empty(), "{:?}", ok.unmodelled);
+        assert_eq!(ok.t1_excluded.values().sum::<u64>(), 1);
+        let ok = stream(&[roam("SelectPrevPoint", 3, "controller"), prev_draw(3)]);
+        assert!(ok.unmodelled.is_empty(), "{:?}", ok.unmodelled);
+        for (what, body) in [
+            ("no producer", vec![next_draw()]),
+            ("advance", vec![roam("SelectNextPoint", 2, "advance"), next_draw()]),
+            ("other method", vec![roam("SelectPrevPoint", 2, "controller"), next_draw()]),
+            ("wrong range", vec![roam("SelectPrevPoint", 2, "controller"), prev_draw(3)]),
+            (
+                "not adjacent",
+                vec![
+                    roam("SelectNextPoint", 2, "controller"),
+                    json!({ "k": "tick", "t": 5 }),
+                    next_draw(),
+                ],
+            ),
+            ("no draw", vec![roam("SelectNextPoint", 2, "controller")]),
+        ] {
+            let s = stream(&body);
+            assert!(!s.unmodelled.is_empty(), "{what}: accepted");
+        }
+        // Without candidates the method draws nothing, and nothing is expected.
+        let none = stream(&[roam("SelectNextPoint", 0, "controller")]);
+        assert!(none.unmodelled.is_empty());
+    }
+
+    /// `audit_roaming`: a choice is movement only for a roaming unit the sim has, at a waypoint
+    /// of the scene cache, by the controller, with no idle cutscene to start.
+    #[test]
+    fn roaming_producers_are_audited_against_the_world() {
+        use crate::scene::{CompInfo, SceneCache, ViewInfo};
+        let mut w = crate::combat::turns::tests::world();
+        let u = crate::combat::turns::tests::unit(&mut w, "u1", Some("g"), 0);
+        w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartRoaming" });
+        // A run-created unit recorded as "n1" whose sim id is "u1"'s namesake elsewhere: "n2" in
+        // the sim, without the part, while the recording's "u2" names a sim unit with it.
+        let bp = wr_content::Guid(0x77);
+        let n = crate::combat::turns::tests::unit(&mut w, "n2", Some("g"), 0);
+        w.unit_mut(n).expect("unit").blueprint = Some(bp);
+        let other = crate::combat::turns::tests::unit(&mut w, "n1", Some("g"), 0);
+        w.entity_mut(other).parts.push(crate::world::Part { clr: "UnitPartRoaming" });
+        w.recorded_awake = Some(Box::new(crate::spawn::RecordedAwake {
+            saved: ["u1".to_owned()].into_iter().collect(),
+            new_bp: [("n1".to_owned(), bp)].into_iter().collect(),
+            ..crate::spawn::RecordedAwake::default()
+        }));
+        let view = |id: &str, idle: Value| ViewInfo {
+            unique_id: id.into(),
+            class: "Kingmaker.View.Roaming.RoamingWaypointView".into(),
+            scene: "s".into(),
+            active_in_hierarchy: true,
+            is_in_game: true,
+            components: vec![CompInfo {
+                class: "Kingmaker.View.Roaming.RoamingWaypointView".into(),
+                fields: json!({ "IdleCutscenes": idle, "NextWaypoints": [{}, {}] }),
+            }],
+            position: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            group: None,
+        };
+        w.scene.cache = Some(std::rc::Rc::new(SceneCache {
+            schema: String::new(),
+            area: String::new(),
+            name: String::new(),
+            source: String::new(),
+            zones: Vec::new(),
+            views: vec![view("p1", json!([])), view("p2", json!(["c"]))],
+        }));
+        let cutscene = |point: &str| {
+            json!({ "k": "obs", "t": 5, "ev": "roam_point", "m": "SelectCutscene", "point": point,
+                    "idle": [], "n": 0, "caller": "controller", "unit": "u1" })
+        };
+        let mut audit = |records: &[Value]| {
+            let mut w2 = std::mem::take(&mut w.coverage);
+            super::audit_roaming(&mut w, records);
+            std::mem::swap(&mut w.coverage, &mut w2);
+            w2.unsupported.keys().cloned().collect::<Vec<_>>()
+        };
+        assert!(audit(&[roam("SelectNextPoint", 2, "controller"), cutscene("p1")]).is_empty());
+        for (what, r) in [
+            ("an idle cutscene in the cache", cutscene("p2")),
+            ("unknown waypoint", cutscene("p3")),
+            ("candidates unlike the cache", roam("SelectNextPoint", 1, "controller")),
+            ("advance", roam("SelectNextPoint", 2, "advance")),
+            (
+                "no caller",
+                json!({ "k": "obs", "t": 5, "ev": "roam_point", "m": "SelectNextPoint", "point": "p1", "idle": [], "n": 2 }),
+            ),
+            (
+                "unknown unit",
+                json!({ "k": "obs", "t": 5, "ev": "roam_point", "m": "SelectNextPoint", "point": "p1",
+                        "idle": [], "n": 2, "caller": "controller", "unit": "u9" }),
+            ),
+            (
+                "roll with idle",
+                json!({ "k": "obs", "t": 5, "ev": "roam_roll", "unit": "u1", "settings": true, "idle": ["c"] }),
+            ),
+            // The recorded run-created "n1" is the sim's "n2" (no roaming part), not the sim's
+            // own "n1".
+            (
+                "a run-created id resolved by its match",
+                json!({ "k": "obs", "t": 5, "ev": "roam_point", "m": "SelectNextPoint", "point": "p1",
+                        "idle": [], "n": 2, "caller": "controller", "unit": "n1" }),
+            ),
+        ] {
+            assert!(!audit(&[r]).is_empty(), "{what}: not reported");
+        }
+        assert!(
+            audit(&[json!({ "k": "obs", "t": 5, "ev": "roam_roll", "unit": "u1", "settings": true, "idle": [] })])
+                .is_empty()
+        );
+        // At their ticks: a producer naming a unit the run creates only later is reported then,
+        // and one in a tick the controller didn't run (or the run didn't reach) is reported.
+        let late = json!({ "k": "obs", "t": 1, "ev": "roam_roll", "unit": "u7", "settings": true, "idle": [] });
+        let early = json!({ "k": "obs", "t": 0, "ev": "roam_roll", "unit": "u1", "settings": true, "idle": [] });
+        w.recorded_roaming = Some(Box::new(super::recorded_roaming(&[early.clone(), late])));
+        let before = std::mem::take(&mut w.coverage);
+        super::roaming_tick(&mut w, 0);
+        assert!(w.coverage.unsupported.is_empty(), "{:?}", w.coverage.unsupported);
+        super::roaming_tick(&mut w, 1);
+        assert!(!w.coverage.unsupported.is_empty());
+        w.coverage = crate::registry::Coverage::default();
+        w.recorded_roaming = Some(Box::new(super::recorded_roaming(&[early])));
+        super::roaming_tick(&mut w, 2);
+        assert!(!w.coverage.unsupported.is_empty(), "a skipped tick");
+        w.coverage = before;
+    }
+
+    /// The groups' recorded states: read only when declared, strictly; after each groups tick
+    /// the sim's state must equal the latest recorded one, and a record in a tick the sim's
+    /// controller didn't run is reported.
+    #[test]
+    fn recorded_groups_are_checked_after_each_tick() {
+        use crate::combat::groups::{
+            RecordedGroups, check_recorded, recorded_finish, start_without_memory,
+        };
+        use crate::combat::turns::tests::{unit, world};
+        let begin = json!({ "k": "begin", "observers": ["group_ticks"] });
+        let state = |t: i64, units: Value| {
+            json!({ "k": "obs", "t": t, "ev": "grp_tick",
+                    "groups": [{ "id": "g", "units": units, "in_combat": 0, "timer": 0.0 }],
+                    "units": [["a", "g"], ["b", "g"]] })
+        };
+        assert!(RecordedGroups::of(&[state(0, json!(["a", "b"]))]).unwrap().is_none());
+        assert!(
+            RecordedGroups::of(&[begin.clone(), state(0, json!(["a"])), state(0, json!(["a"]))])
+                .is_err()
+        );
+        assert!(
+            RecordedGroups::of(&[
+                begin.clone(),
+                json!({ "k": "obs", "t": 0, "ev": "grp_tick", "groups": 3 })
+            ])
+            .is_err()
+        );
+        let run = |records: &[Value], ticks: &[i64]| {
+            let mut w = world();
+            unit(&mut w, "a", Some("g"), 0);
+            unit(&mut w, "b", Some("g"), 0);
+            start_without_memory(&mut w);
+            assert!(w.combat.groups.list.iter().all(|g| w.combat.groups.get(*g).memory.is_none()));
+            w.recorded_groups = RecordedGroups::of(records).unwrap().map(Box::new);
+            for t in ticks {
+                crate::combat::groups::tick(&mut w);
+                check_recorded(&mut w, *t);
+            }
+            recorded_finish(&mut w, *ticks.last().unwrap());
+            w.coverage.unsupported.keys().cloned().collect::<Vec<_>>()
+        };
+        assert!(run(&[begin.clone(), state(0, json!(["a", "b"]))], &[0, 1, 2]).is_empty());
+        assert!(!run(&[begin.clone(), state(0, json!(["b", "a"]))], &[0, 1]).is_empty());
+        assert!(
+            !run(&[begin.clone(), state(0, json!(["a", "b"])), state(1, json!(["a"]))], &[0, 1])
+                .is_empty()
+        );
+        // A record in a tick the sim's controller didn't run (the sim skipped tick 1).
+        assert!(
+            !run(
+                &[begin.clone(), state(0, json!(["a", "b"])), state(1, json!(["a", "b"]))],
+                &[0, 2]
+            )
+            .is_empty()
+        );
+        // A unit the run created, "y" in the sim and "x" in the recording (announced with its
+        // blueprint by the awake records): matched before the renaming, in the first check.
+        {
+            let bp = wr_content::Guid(0x78);
+            let mut w = world();
+            unit(&mut w, "a", Some("g"), 0);
+            let y = unit(&mut w, "y", Some("g"), 0);
+            w.unit_mut(y).expect("unit").blueprint = Some(bp);
+            w.recorded_awake = Some(Box::new(crate::spawn::RecordedAwake {
+                saved: ["a".to_owned()].into_iter().collect(),
+                new_bp: [("x".to_owned(), bp)].into_iter().collect(),
+                ..crate::spawn::RecordedAwake::default()
+            }));
+            start_without_memory(&mut w);
+            let rec = json!({ "k": "obs", "t": 0, "ev": "grp_tick",
+                    "groups": [{ "id": "g", "units": ["a", "x"], "in_combat": 0, "timer": 0.0 }],
+                    "units": [["a", "g"], ["x", "g"]] });
+            w.recorded_groups = RecordedGroups::of(&[begin.clone(), rec]).unwrap().map(Box::new);
+            crate::combat::groups::tick(&mut w);
+            check_recorded(&mut w, 0);
+            assert!(w.coverage.unsupported.is_empty(), "{:?}", w.coverage.unsupported);
+        }
+        // A record after the run's last tick: the run didn't reach it.
+        assert!(
+            !run(&[begin, state(0, json!(["a", "b"])), state(2, json!(["a", "b"]))], &[0, 1])
+                .is_empty()
+        );
+    }
 
     /// `RuleCalculateAbilityParams.Result` is compared on its stored members: the oracle's
     /// snapshot also has the `IsChanged` getter, the sim's record doesn't.
