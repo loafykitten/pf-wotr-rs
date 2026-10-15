@@ -37,7 +37,7 @@ namespace WrathOracle;
 //  - mem_s: a memory's state: after each ready group's Cleanup ("pass"), and at the tick's entry ("pre") and end
 //    ("end") each group's of UnitGroupsController.Groups whose state differs from the one last recorded for its id (a
 //    group never recorded is taken as a new memory: no slots, caches invalid);
-//  - mem_q: each AddToMemory (observer, target, the target's Faction.Peaceful, whether it queued, whether it threw, the
+//  - mem_q: each AddToMemory (o, the observer; tgt, the target: t is the record's frame; the target's Faction.Peaceful, whether it queued, whether it threw, the
 //    caller chain);
 //  - in_game: each change of a unit's IsInGame, with the caller chain, before its effects;
 // and, while installed: group_remove's caller chain (by), Cleanup's mem_remove in removal order (GroupObs), and hash
@@ -351,7 +351,7 @@ internal static partial class CommandObs
             var by = Observe.Callers(4);
             Sched.Obs("mem_q", j =>
             {
-                j.Prop("o", o); j.Prop("t", t); j.Prop("peaceful", peaceful); j.Prop("queued", queued); j.Prop("exc", exc); j.Prop("by", by);
+                j.Prop("o", o); j.Prop("tgt", t); j.Prop("peaceful", peaceful); j.Prop("queued", queued); j.Prop("exc", exc); j.Prop("by", by);
             });
         }
         catch (Exception e) { Trace.HookFailed("observe mem_q", e); }
