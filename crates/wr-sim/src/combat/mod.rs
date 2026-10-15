@@ -12,6 +12,7 @@
 
 pub mod agent;
 pub mod ai;
+pub mod ai_sim;
 pub mod attack;
 pub mod commands;
 pub mod components;

@@ -50,7 +50,10 @@ namespace WrathOracle;
 //  - ag_ground: UnitPlaceOnGroundController.TickUnit (physics: an input for now), the position before and after;
 //  - ag_pathdef: a path's definition the first time the window refers to it (PathSync key, or an observer id for a path
 //    PathSync didn't see), with its points, error and CompleteState, so paths carried into the window are known;
-//  - ag_v isdone: each Path.IsDone() the agent evaluates (PathTo, FindPath, IsReallyMoving, PathFailed), with the path.
+//  - ag_v isdone: each Path.IsDone() the agent evaluates (PathTo, FindPath, IsReallyMoving, PathFailed), with the path;
+//  - ag_sim / ag_sim_end: each SimulateTickMovementForTurnBased step (ScorePath's movement simulation, the path
+//    visualizer's), the simulator before (with its path's points) and after, the step's result; its reads in between
+//    are ag_v leaves with ctx "sim": maxspeed, fly, near (GetNearest's AllyBlocked), los (HasObstacle).
 // Gated like the other observers: inside a turn-based window, on the main thread.
 internal static partial class CommandObs
 {
@@ -381,7 +384,50 @@ internal static partial class CommandObs
         if (AgCtx.Count > 0) AgCtx.RemoveAt(AgCtx.Count - 1);
     }
 
-    public static void AgSimPrefix(UnitMovementAgent __instance) => AgCtx.Add((__instance, "sim"));
+    // SimulateTickMovementForTurnBased(ref sim, deltaTime, maxMoveLength) (ScorePath's and the path visualizer's
+    // movement simulation, docs/poc5/ai-movement.md): ag_sim with the simulator before the step (its fields, read as
+    // fields, and its path's points), ag_sim_end with its result and the simulator after. The step's reads between them
+    // are ag_v leaves with ctx "sim" (maxspeed, fly, near, los) and ag_phys with ctx "sim".
+    private static void WriteSim(Json j, ref MovementSimulator sim, bool points)
+    {
+        j.Obj("sim");
+        j.Prop("p", sim.Position); j.Prop("len", sim.LastMoveLength); j.Prop("rmd", sim.ReachedMaxDistance); j.Prop("wi", sim.WaypointIndex);
+        j.Prop("nwp", sim.NextWaypoint); j.Prop("nwp3", sim.NextWaypoint3D);
+        j.Prop("ap", sim.ApproachPoint); j.Prop("ar", sim.ApproachRadius); j.Prop("los", sim.CheckLOS); j.Prop("ibr", sim.IgnoreBlockerRadius);
+        var pts = sim.Path?.vectorPath;
+        if (points)
+        {
+            j.Key("pts");
+            if (pts == null) j.W.WriteNull();
+            else { j.W.WriteStartArray(); foreach (var x in pts) j.Vec(x); j.W.WriteEndArray(); }
+        }
+        j.W.WriteEndObject();
+    }
+
+    public static void AgSimPrefix(UnitMovementAgent __instance, ref MovementSimulator sim, float deltaTime, float maxMoveLength)
+    {
+        AgCtx.Add((__instance, "sim"));
+        try
+        {
+            if (!AgObserved()) return;
+            var u = UnitOfAgent(__instance);
+            var copy = sim;
+            Sched.Obs("ag_sim", j => { j.Prop("u", u); j.Prop("dt", deltaTime); j.Prop("max", maxMoveLength); WriteSim(j, ref copy, true); });
+        }
+        catch (Exception e) { Trace.HookFailed("observe ag_sim", e); }
+    }
+
+    public static void AgSimPostfix(UnitMovementAgent __instance, ref MovementSimulator sim, bool __result)
+    {
+        try
+        {
+            if (!AgObserved()) return;
+            var u = UnitOfAgent(__instance);
+            var copy = sim;
+            Sched.Obs("ag_sim_end", j => { j.Prop("u", u); j.Prop("ret", __result); WriteSim(j, ref copy, false); });
+        }
+        catch (Exception e) { Trace.HookFailed("observe ag_sim_end", e); }
+    }
 
     // CanMoveInTurnBased(ref deltaTime): its answer and the delta it leaves.
     public static void AgCanMovePostfix(UnitMovementAgent __instance, float deltaTime, bool __result)
@@ -405,7 +451,9 @@ internal static partial class CommandObs
         {
             if (!AgObserved()) return;
             var u = AgUnit();
-            Sched.Obs("ag_v", j => { j.Prop("f", f); j.Prop("u", u); v(j); });
+            // A read inside the movement simulation (ag_sim .. ag_sim_end) says so.
+            var sim = AgCtx.Count > 0 && AgCtx[AgCtx.Count - 1].ctx == "sim";
+            Sched.Obs("ag_v", j => { j.Prop("f", f); j.Prop("u", u); if (sim) j.Prop("ctx", "sim"); v(j); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_v " + f, e); }
     }
@@ -435,6 +483,24 @@ internal static partial class CommandObs
     {
         var v = u.FlyHeight;
         AgLeaf("fly", j => j.Prop("v", v));
+        return v;
+    }
+
+    // The movement simulation's GridGraph.GetNearest(position): the node's AllyBlocked (null without a node).
+    public static NNInfoInternal TapAgSimNearest(NavGraph g, Vector3 position)
+    {
+        var v = g.GetNearest(position);
+        int? blocked = v.node == null ? (int?)null : v.node.AllyBlocked;
+        AgLeaf("near", j => { j.Prop("p", position); j.Prop("v", blocked); });
+        return v;
+    }
+
+    // The movement simulation's LineOfSightGeometry.HasObstacle(from, to, fudgeRadius).
+    public static bool TapAgSimLos(Owlcat.Runtime.Visual.RenderPipeline.RendererFeatures.FogOfWar.LineOfSightGeometry g, Vector3 from, Vector3 to,
+        float fudgeRadius)
+    {
+        var v = g.HasObstacle(from, to, fudgeRadius);
+        AgLeaf("los", j => { j.Prop("from", from); j.Prop("to", to); j.Prop("r", fudgeRadius); j.Prop("v", v); });
         return v;
     }
 
@@ -1021,6 +1087,7 @@ internal static partial class CommandObs
         var move = AgBase.GetMethods(all).Single(m => m.Name == "Move" && m.GetParameters().Length == 5);
         var moveUnit = M(AgBase, "MoveUnit");
         var tick = M(Ag, "TickMovement");
+        var sim = M(Ag, "SimulateTickMovementForTurnBased");
         var can = M(Ag, "CanMoveInTurnBased");
         var slow = M(Ag, "SlowDown");
         var ctl = M(typeof(UnitMoveController), "TickUnit");
@@ -1043,6 +1110,12 @@ internal static partial class CommandObs
             (tick, typeof(UnitAnimationManager), "get_IsPreventingMovement", Type.EmptyTypes, nameof(TapAgAnimPrevents), 1),
             (tick, typeof(UnitEntityView), "get_IsCommandsPreventMovement", Type.EmptyTypes, nameof(TapAgCommandsPrevent), 1),
             (tick, AgBase, "get_MaxSpeed", Type.EmptyTypes, nameof(TapAgMaxSpeed), 2),
+            (sim, AgBase, "get_MaxSpeed", Type.EmptyTypes, nameof(TapAgMaxSpeed), 1),
+            (sim, typeof(UnitEntityData), "get_FlyHeight", Type.EmptyTypes, nameof(TapAgFlyHeight), 1),
+            (sim, typeof(NavGraph), nameof(NavGraph.GetNearest), new[] { typeof(Vector3) }, nameof(TapAgSimNearest), 1),
+            (sim, typeof(Owlcat.Runtime.Visual.RenderPipeline.RendererFeatures.FogOfWar.LineOfSightGeometry),
+                nameof(Owlcat.Runtime.Visual.RenderPipeline.RendererFeatures.FogOfWar.LineOfSightGeometry.HasObstacle),
+                new[] { typeof(Vector3), typeof(Vector3), typeof(float) }, nameof(TapAgSimLos), 1),
             (can, typeof(UnitAnimationManager), "get_IsPreventingMovement", Type.EmptyTypes, nameof(TapAgAnimPrevents), 1),
             (can, typeof(UnitEntityView), "get_IsCommandsPreventMovement", Type.EmptyTypes, nameof(TapAgCommandsPrevent), 1),
             (can, typeof(UnitEntityData), "get_CutsceneControlledUnit", Type.EmptyTypes, nameof(TapAgCutsceneControl), 1),
@@ -1123,7 +1196,7 @@ internal static partial class CommandObs
         }
 
         patch(M(Ag, "TickMovement"), nameof(AgTickPrefix), nameof(AgTickPostfix), nameof(AgCtxFinalizer));
-        patch(M(Ag, "SimulateTickMovementForTurnBased"), nameof(AgSimPrefix), null, nameof(AgCtxFinalizer));
+        patch(M(Ag, "SimulateTickMovementForTurnBased"), nameof(AgSimPrefix), nameof(AgSimPostfix), nameof(AgCtxFinalizer));
         patch(M(Ag, "CanMoveInTurnBased"), null, nameof(AgCanMovePostfix), null);
         patch(M(Ag, "PathTo"), nameof(AgPathToPrefix), nameof(AgReqPostfix), null);
         patch(M(Ag, "FindPath"), nameof(AgFindPathPrefix), nameof(AgFindPathPostfix), null);
