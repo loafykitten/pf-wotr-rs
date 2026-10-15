@@ -54,6 +54,16 @@ enum Cmd {
         #[arg(long)]
         guid: String,
     },
+    /// Writes the area's physics file for the sim, `cache/sim/phys/<guid>.wrphys`: the
+    /// colliders of the area's scenes in wr-phys's format.
+    PhysPack {
+        /// The area's bundle name, lower case (e.g. `prologue_caves_1`).
+        #[arg(long)]
+        area: String,
+        /// The area blueprint's guid.
+        #[arg(long)]
+        guid: String,
+    },
     /// Runs a path query on an area's graph cache.
     Path {
         #[arg(long, default_value = "prologue_caves_1")]
@@ -153,6 +163,41 @@ fn main() -> Result<()> {
                 std::fs::metadata(&path)?.len(),
                 t.elapsed()
             );
+            Ok(())
+        }
+        Cmd::PhysPack { area, guid } => {
+            let t = Instant::now();
+            let a = wr_import::oracle_diff::load_area_scenes(&area)?;
+            let (world, rep) = wr_import::phys::build(&a.universe, &a.scenes)?;
+            let mut scenes: Vec<String> = a.scenes.iter().map(|s| s.bundle.clone()).collect();
+            scenes.dedup();
+            let file = wr_phys::PhysFile { area: guid.clone(), scenes, world };
+            let path = wr_phys::path_for(&guid);
+            file.write(&path)?;
+            let back = wr_phys::PhysFile::read(&path)?;
+            anyhow::ensure!(back == file, "{} does not read back as written", path.display());
+            eprintln!(
+                "wrote {} ({} shapes {:?}, {} inactive left out, {} bytes) in {:?}",
+                path.display(),
+                rep.shapes,
+                rep.by_kind,
+                rep.skipped_inactive,
+                std::fs::metadata(&path)?.len(),
+                t.elapsed()
+            );
+            for m in &rep.meshes {
+                eprintln!(
+                    "  cooked {} (format {}, midphase {}): {} vertices ({} also render vertices; render {}), {} triangles (render {})",
+                    m.mesh,
+                    m.version,
+                    m.midphase,
+                    m.cooked_vertices,
+                    m.cooked_in_render,
+                    m.render_vertices,
+                    m.cooked_triangles,
+                    m.render_triangles
+                );
+            }
             Ok(())
         }
         Cmd::Path { area, from, to } => {

@@ -11,6 +11,7 @@ description = "Offline importer: reads the game's Unity bundles and writes our o
 wr-paths.workspace = true
 wr-assets.workspace = true
 wr-nav.workspace = true
+wr-phys.workspace = true
 texture2ddecoder = "0.1.2"
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }

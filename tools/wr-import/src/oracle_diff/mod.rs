@@ -147,8 +147,23 @@ fn astar_settings(inv: &Inventory) -> (f32, bool) {
     (100.0, false)
 }
 
-/// Decodes the area's scenes and graph cache from the install (read-only).
-pub fn load_ours(area: &str) -> Result<Ours> {
+/// The area's scene files decoded, with the universe that resolves their references.
+pub struct AreaScenes {
+    pub universe: Universe,
+    pub scenes: Vec<SceneData>,
+    pub blueprints: BlueprintIndex,
+    pub locations: Locations,
+    pub deps: Dependencies,
+}
+
+impl std::fmt::Debug for AreaScenes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AreaScenes").field("scenes", &self.scenes.len()).finish_non_exhaustive()
+    }
+}
+
+/// Decodes the area's scene bundles from the install (read-only).
+pub fn load_area_scenes(area: &str) -> Result<AreaScenes> {
     let paths = wr_paths::GamePaths::from_env();
     let bundles = paths.bundles();
     let cabs =
@@ -162,7 +177,7 @@ pub fn load_ours(area: &str) -> Result<Ours> {
     let universe = Universe::new(&bundles, cabs);
     universe.add_loose_file(&paths.app.join("Contents/Resources/unity default resources"))?;
     universe.add_loose_file(&paths.data().join("Resources/unity_builtin_extra"))?;
-    let (scene_bundles, nav_bundle) = area_roots(&deps, area);
+    let (scene_bundles, _) = area_roots(&deps, area);
     if scene_bundles.is_empty() {
         bail!("no scene bundles for area {area}");
     }
@@ -189,6 +204,13 @@ pub fn load_ours(area: &str) -> Result<Ours> {
             scenes.push(SceneData::load(&universe, b, &scene_name, file)?);
         }
     }
+    Ok(AreaScenes { universe, scenes, blueprints, locations, deps })
+}
+
+/// Decodes the area's scenes and graph cache from the install (read-only).
+pub fn load_ours(area: &str) -> Result<Ours> {
+    let AreaScenes { universe, scenes, blueprints, locations, deps } = load_area_scenes(area)?;
+    let (_, nav_bundle) = area_roots(&deps, area);
     let mut resolver = Resolver {
         universe: &universe,
         blueprints: &blueprints,

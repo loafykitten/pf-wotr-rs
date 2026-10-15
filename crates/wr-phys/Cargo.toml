@@ -1,0 +1,22 @@
+[package]
+name = "wr-phys"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Physics queries exact to the game: Unity's Physics.Raycast over PhysX 4.1 and Owlcat's disc cast against an area's colliders, and the area physics file."
+
+[dependencies]
+wr-paths.workspace = true
+anyhow.workspace = true
+postcard.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+serde_json.workspace = true
+flate2 = "1.1"
+
+[lints]
+workspace = true
