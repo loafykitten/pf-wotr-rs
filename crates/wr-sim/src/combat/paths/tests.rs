@@ -53,7 +53,8 @@ fn same(a: V3, b: V3) -> bool {
 }
 
 fn captures() -> Vec<(String, PathBuf)> {
-    let labels = std::env::var("WR_PATH_CAPTURES").unwrap_or_else(|_| "poc5-tb-103".into());
+    let labels =
+        std::env::var("WR_PATH_CAPTURES").unwrap_or_else(|_| "poc5-tb-103,poc5-tb-114".into());
     let mut out = Vec::new();
     for label in labels.split(',') {
         let root =
@@ -97,7 +98,7 @@ struct LosAnswer {
 /// How a request's check came out.
 #[derive(Debug, Default)]
 struct Tally {
-    /// Computed without line of sight; every recorded delivery equal.
+    /// Every recorded delivery equal, with no line of sight asked or every answer recorded.
     exact: usize,
     /// Computed with line-of-sight answers implied by the recorded end; deliveries equal.
     los_implied: usize,
@@ -113,18 +114,24 @@ struct Tally {
     forced_equal: usize,
     /// `FollowPrecomputedPath`s of a path whose `FindPath` result isn't recorded.
     forced_unchecked: usize,
+    /// `FollowPrecomputedPath`s of the path visualizer's replacement path: a prefix of the
+    /// computed path and a recorded simulation position (the visualizer isn't ported).
+    forced_visualizer: usize,
     /// Turn starts and removals applied to the grid.
     turn_starts: usize,
     removals: usize,
     tag_refreshes: usize,
     /// Requests whose corpulence came from the request's own clearance.
     corpulence_from_request: usize,
-    /// Paths computed with recorded line-of-sight answers (observer `paths`).
+    /// Of the exact paths, those that asked for line of sight, answered from the recording
+    /// (observer `paths`).
     los_recorded: usize,
     /// Graph events (`nav_guo`, `nav_update`, `nav_tags`) compared.
     nav_events: usize,
     /// `ag_req_end`s reporting a request already started (`PathTo` keeping it).
     retained: usize,
+    /// The movement simulation's `AllyBlocked` reads (`ag_v near`) equal to the grid's.
+    ally_reads: usize,
 }
 
 struct Fight<'a> {
@@ -150,6 +157,15 @@ struct Fight<'a> {
     last_find_checked: HashMap<String, bool>,
     /// The requests checked, by `PathSync` key, with their recorded fields.
     started: HashMap<String, Value>,
+    /// The path visualizer's last computed path per unit, with its simulation's steps (the
+    /// waypoint index each started at, the position it reached); dropped at the unit's next
+    /// FindPath or turn start.
+    visualizer: HashMap<String, Preview>,
+    /// A replay's navigation clock tape (its recording's reads), and the recording's timer.
+    tape: Option<VecDeque<NavRead>>,
+    tape_timer0: Option<f32>,
+    tick: i64,
+    tick_counts: HashMap<(String, String), usize>,
     /// The trace declares observer `paths`: its graph records are compared with
     /// [`CombatNav::log`] in order.
     nav_paths: bool,
@@ -500,6 +516,8 @@ impl Fight<'_> {
         self.started.insert(key.clone(), rq.clone());
         if fun == "find" {
             self.last_find_checked.insert(u.clone(), false);
+            // A new FindPath replaces whatever the visualizer showed before.
+            self.visualizer.remove(&u);
         }
         // The request as the agent built it.
         let clear = opt_v3(&rq["clear"]);
@@ -760,10 +778,12 @@ impl Fight<'_> {
             ));
         }
         if bad.is_empty() {
-            if recorded.is_some() {
-                self.tally.los_recorded += 1;
-            } else if got.search.los.is_empty() {
+            if recorded.is_some() || got.search.los.is_empty() {
+                // Exact: no line of sight asked, or every answer recorded.
                 self.tally.exact += 1;
+                if !got.search.los.is_empty() {
+                    self.tally.los_recorded += 1;
+                }
             } else {
                 self.tally.los_implied += 1;
                 for (_, blocked) in &got.search.los {
@@ -778,6 +798,11 @@ impl Fight<'_> {
             // caller): the paths a FollowPrecomputedPath must come from.
             if fun == "find" && dels.iter().any(|d| !d.raw) {
                 self.found_paths.entry(u.clone()).or_default().push(got.vector_path.clone());
+                // Not the AI's: the path visualizer's FindPath, whose simulation steps follow.
+                if !dels.iter().any(|d| d.what == "ai path") {
+                    let ends = self.visualizer_steps(i, &u, &got.vector_path);
+                    self.visualizer.insert(u.clone(), (got.vector_path.clone(), ends));
+                }
                 self.last_find_checked.insert(u, true);
             }
         } else {
@@ -793,6 +818,82 @@ impl Fight<'_> {
         }
     }
 
+    /// The movement simulation steps (`ag_sim_end`'s positions) of `u` after request `i`, up to
+    /// the next request: the path visualizer simulating its FindPath's result.
+    /// The simulation steps of `u` simulating `path` after request `i`, up to the next request:
+    /// (the step's end record, the waypoint index it started at, the position it reached). A
+    /// step whose recorded path (`sim.pts`) isn't `path` simulates something else: not taken.
+    fn visualizer_steps(&self, i: usize, u: &str, path: &[V3]) -> Vec<(usize, i64, V3)> {
+        let mut out = Vec::new();
+        let mut before = None;
+        for (j, r) in self.recs.iter().enumerate().skip(i + 1) {
+            if r["ev"] == "ag_req" || r["ev"] == "ag_req_end" {
+                break;
+            }
+            if r["u"] != u {
+                continue;
+            }
+            if r["ev"] == "ag_sim" {
+                before = (bits(&pts(&r["sim"]["pts"])) == bits(path))
+                    .then(|| r["sim"]["wi"].as_i64())
+                    .flatten();
+            } else if r["ev"] == "ag_sim_end"
+                && let Some(wi) = before.take()
+            {
+                out.push((j, wi, v3(&r["sim"]["p"])));
+            }
+        }
+        out
+    }
+
+    /// A navigation clock read (`UpdateNavigationGrid`): the timer, and the tags refreshed when
+    /// it runs out.
+    fn nav_read(&mut self, i: usize, v: f64) {
+        // `m_NavmeshUpdateTimer -= Time.unscaledTime` is read only while the timer is not
+        // negative (no navmesh cut updated here).
+        if self.timer < 0.0 {
+            self.fail(i, "navigation clock read with the timer negative".into());
+        }
+        self.timer = r_(d(self.timer) - v);
+        if self.timer <= 0.0 {
+            let turn = self.current_turn(i);
+            if let Err(e) = self.nav.update_navigation_grid_tags(turn.as_ref()) {
+                self.fail(i, format!("UpdateNavigationGridTags: {e:#}"));
+            }
+            self.tally.tag_refreshes += 1;
+        }
+    }
+
+    /// A replay reads the navigation clock from its recording's tape (WrathOracle's
+    /// `WallClock.NavUnscaledTime`, invalidating a replay whose reads differ) and writes no
+    /// `nav_clock`: each read is placed where the recording made it, before the same record of
+    /// the same tick.
+    fn tape_reads(&mut self, i: usize, k: &str, ev: &str) {
+        let t = self.recs[i]["t"].as_i64().unwrap_or(-1);
+        if t != self.tick {
+            self.tick = t;
+            self.tick_counts.clear();
+        }
+        let n = {
+            let c = self.tick_counts.entry((k.to_owned(), ev.to_owned())).or_insert(0);
+            *c += 1;
+            *c
+        };
+        while let Some(read) = self.tape.as_ref().and_then(|q| q.front()).cloned() {
+            if read.t < t {
+                self.fail(i, format!("taped navigation clock read {read:?} not placed"));
+                self.tape.as_mut().unwrap().pop_front();
+                continue;
+            }
+            if read.t == t && read.k == k && read.ev == ev && read.n == n {
+                self.tape.as_mut().unwrap().pop_front();
+                self.nav_read(i, read.v);
+                continue;
+            }
+            break;
+        }
+    }
+
     fn run(&mut self) {
         for i in 0..self.recs.len() {
             let r = &self.recs[i];
@@ -804,8 +905,13 @@ impl Fight<'_> {
             {
                 self.settle_leaving();
             }
+            if self.tape.is_some() {
+                self.tape_reads(i, k, ev);
+            }
             if k == "begin" {
-                self.timer = f(&r["nav_timer0"]);
+                // A replay's begin writes the game's timer before WrathOracle sets the
+                // recording's (`WallClock`): the recording's is the one the replay runs with.
+                self.timer = self.tape_timer0.unwrap_or_else(|| f(&r["nav_timer0"]));
                 self.nav_paths =
                     r["observers"].as_array().is_some_and(|a| a.iter().any(|o| o == "paths"));
                 continue;
@@ -892,6 +998,7 @@ impl Fight<'_> {
                         let u = u.to_owned();
                         // A turn's FollowPrecomputedPath comes from that turn's FindPaths.
                         self.found_paths.remove(&u);
+                        self.visualizer.remove(&u);
                         self.start_turn(i, &u);
                     }
                 }
@@ -907,25 +1014,35 @@ impl Fight<'_> {
                     self.initialized = false;
                 }
                 ("obs", "nav_clock") => {
-                    // UpdateNavigationGrid: `m_NavmeshUpdateTimer -= Time.unscaledTime` is read
-                    // only while the timer is not negative (no navmesh cut updated here).
-                    if self.timer < 0.0 {
-                        self.fail(i, "navigation clock read with the timer negative".into());
+                    if self.tape.is_some() {
+                        self.fail(i, "a replay wrote a navigation clock read".into());
                     }
-                    self.timer = r_(d(self.timer) - r["v"].as_f64().unwrap_or(f64::NAN));
-                    if self.timer <= 0.0 {
-                        let turn = self.current_turn(i);
-                        if let Err(e) = self.nav.update_navigation_grid_tags(turn.as_ref()) {
-                            self.fail(i, format!("UpdateNavigationGridTags: {e:#}"));
-                        }
-                        self.tally.tag_refreshes += 1;
-                    }
+                    self.nav_read(i, r["v"].as_f64().unwrap_or(f64::NAN));
                 }
                 ("obs", "ag_req_end") if r["rq"]["kind"] == "ABPathWithClearance" => {
                     self.request(i)
                 }
                 ("obs", "ag_req_end") if !r["rq"].is_null() && self.initialized => {
                     self.fail(i, format!("a {} request in turn-based combat", r["rq"]["kind"]));
+                }
+                ("obs", "ag_v") if r["f"] == "near" && self.initialized => {
+                    // The movement simulation's `GridGraph.GetNearest(p).node.AllyBlocked`: the
+                    // grid as blocked now.
+                    let p = v3(&r["p"]);
+                    let ours = self
+                        .nav
+                        .world
+                        .grid_nearest(p)
+                        .node
+                        .map(|n| i64::from(self.nav.world.ally_blocked(n)));
+                    if r["v"].as_i64() != ours {
+                        self.fail(
+                            i,
+                            format!("AllyBlocked under {p:?}: {}, the sim {ours:?}", r["v"]),
+                        );
+                    } else {
+                        self.tally.ally_reads += 1;
+                    }
                 }
                 ("obs", "uc_call") if r["fn"] == "follow" => {
                     let u = r["u"].as_str().unwrap_or("").to_owned();
@@ -952,6 +1069,16 @@ impl Fight<'_> {
                         self.tally.forced_equal += 1;
                         // Its candidates are spent: the next follow comes from new FindPaths.
                         self.found_paths.remove(&u);
+                        self.visualizer.remove(&u);
+                    } else if let Some(preview) = self.visualizer.remove(&u)
+                        && visualizer_replacement(&preview, &v, i)
+                    {
+                        // PathVisualizer's replacement path (not ported: it follows the UI's
+                        // action predictions): the start, each waypoint the simulation passed
+                        // before its last step (path[1..w], w the waypoint index that step started
+                        // at), then the position that step reached.
+                        self.tally.forced_visualizer += 1;
+                        self.found_paths.remove(&u);
                     } else {
                         self.fail(
                             i,
@@ -964,6 +1091,10 @@ impl Fight<'_> {
             if self.nav_paths {
                 self.match_nav();
             }
+        }
+        if let Some(left) = self.tape.as_ref().filter(|q| !q.is_empty()) {
+            let msg = format!("taped navigation clock reads not placed: {left:?}");
+            self.fail(self.recs.len() - 1, msg);
         }
         if self.nav_paths {
             let left_rec = self.rec_nav.len();
@@ -1032,6 +1163,100 @@ fn damaged_line_of_sight_transcripts_are_errors() {
     }
 }
 
+/// The path visualizer's computed path and its simulation's steps (the step's end record, the
+/// waypoint index it started at, the position it reached).
+type Preview = (Vec<V3>, Vec<(usize, i64, V3)>);
+
+/// Whether `v`, delivered at record `at`, is a replacement path `PathVisualizer` built from
+/// `preview` before it: the start, the waypoints the simulation passed before a step
+/// (`path[1..w]`, `w` the waypoint index that step started at), then the position that step
+/// reached.
+fn visualizer_replacement((path, steps): &Preview, v: &[V3], at: usize) -> bool {
+    v.len() >= 2
+        && v.len() <= path.len() + 1
+        && bits(&v[..v.len() - 1]) == bits(&path[..v.len() - 1])
+        && steps.iter().any(|&(j, wi, p)| {
+            j < at && usize::try_from(wi).is_ok_and(|w| w == v.len() - 1) && same(p, v[v.len() - 1])
+        })
+}
+
+#[test]
+fn a_replacement_path_follows_the_simulated_waypoints() {
+    let path = vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 0.0, 4.0]];
+    // Steps: two along the first segment, the waypoint passed, one along the second.
+    let steps = vec![(10, 1, [1.0, 0.0, 0.0]), (11, 1, [2.0, 0.0, 0.0]), (12, 2, [2.0, 0.0, 1.0])];
+    let preview = (path, steps);
+    let at = 20;
+    assert!(visualizer_replacement(&preview, &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], at));
+    assert!(visualizer_replacement(
+        &preview,
+        &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 0.0, 1.0]],
+        at
+    ));
+    // Delivered before the step that reached its end: refused.
+    assert!(!visualizer_replacement(
+        &preview,
+        &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 0.0, 1.0]],
+        12
+    ));
+    // A position reached before the waypoint, appended after it (backtracking): refused.
+    assert!(!visualizer_replacement(
+        &preview,
+        &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        at
+    ));
+    // The whole path then a position: refused; a position no step reached: refused.
+    assert!(!visualizer_replacement(
+        &preview,
+        &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 0.0, 4.0], [2.0, 0.0, 1.0]],
+        at
+    ));
+    assert!(!visualizer_replacement(&preview, &[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], at));
+}
+
+/// A navigation clock read of a recording, and where it was made: before the `n`-th record of
+/// kind `k`/`ev` in tick `t` (the first record after it that isn't a `paths` record).
+#[derive(Debug, Clone)]
+struct NavRead {
+    v: f64,
+    t: i64,
+    k: String,
+    ev: String,
+    n: usize,
+}
+
+/// A recording's timer at the window's start and its navigation clock reads.
+fn nav_tape(recs: &[Value]) -> (f32, Vec<NavRead>) {
+    let timer0 = f(&recs[0]["nav_timer0"]);
+    let key = |r: &Value| {
+        (r["k"].as_str().unwrap_or("").to_owned(), r["ev"].as_str().unwrap_or("").to_owned())
+    };
+    let mut out = Vec::new();
+    for (j, r) in recs.iter().enumerate() {
+        if r["ev"] != "nav_clock" {
+            continue;
+        }
+        let Some(anchor) = recs[j + 1..].iter().find(|x| {
+            !(x["k"] == "obs"
+                && matches!(
+                    x["ev"].as_str(),
+                    Some("nav_tags" | "nav_guo" | "nav_update" | "nav_clock")
+                ))
+        }) else {
+            continue;
+        };
+        let t = anchor["t"].as_i64().unwrap_or(-1);
+        let (k, ev) = key(anchor);
+        let n = recs[..=j]
+            .iter()
+            .chain(std::iter::once(anchor))
+            .filter(|x| x["t"].as_i64() == Some(t) && key(x) == (k.clone(), ev.clone()))
+            .count();
+        out.push(NavRead { v: r["v"].as_f64().unwrap_or(f64::NAN), t, k, ev, n });
+    }
+    (timer0, out)
+}
+
 fn r_(x: f64) -> f32 {
     x as f32
 }
@@ -1055,6 +1280,12 @@ fn every_turn_based_path_is_computed_bit_for_bit() {
     let mut enemies: HashMap<(String, String), Option<bool>> = HashMap::new();
     for (label, path) in captures() {
         let trace = Trace::load(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        // A replay runs with its recording's navigation clock.
+        let tape = (trace.records[0]["mode"] != "record").then(|| {
+            let rec = path.with_file_name("record.trace.jsonl.gz");
+            let rec = Trace::load(&rec).unwrap_or_else(|e| panic!("{}: {e:#}", rec.display()));
+            nav_tape(&rec.records)
+        });
         if world.is_none() {
             let save =
                 trace.records[0]["save_file"].as_str().unwrap_or("").trim_end_matches(".zks");
@@ -1093,6 +1324,11 @@ fn every_turn_based_path_is_computed_bit_for_bit() {
             leaving: Vec::new(),
             last_find_checked: HashMap::new(),
             started: HashMap::new(),
+            visualizer: HashMap::new(),
+            tape: tape.as_ref().map(|t| t.1.iter().cloned().collect()),
+            tape_timer0: tape.as_ref().map(|t| t.0),
+            tick: i64::MIN,
+            tick_counts: HashMap::new(),
             nav_paths: false,
             rec_nav: VecDeque::new(),
             log_at: 0,
@@ -1111,6 +1347,7 @@ fn every_turn_based_path_is_computed_bit_for_bit() {
         total.deliveries += t.deliveries;
         total.forced_equal += t.forced_equal;
         total.forced_unchecked += t.forced_unchecked;
+        total.forced_visualizer += t.forced_visualizer;
         total.turn_starts += t.turn_starts;
         total.removals += t.removals;
         total.tag_refreshes += t.tag_refreshes;
@@ -1118,6 +1355,7 @@ fn every_turn_based_path_is_computed_bit_for_bit() {
         total.los_recorded += t.los_recorded;
         total.nav_events += t.nav_events;
         total.retained += t.retained;
+        total.ally_reads += t.ally_reads;
     }
     eprintln!("total: {total:?}");
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
