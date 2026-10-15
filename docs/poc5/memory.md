@@ -8,8 +8,8 @@ membership read recorded in `poc5-tb-103` (59,991 `Memory.Enemies` reads, 369 fl
 isn't recorded. **H1 (stream H, same day): the controller's tick computed** against WrathOracle's new `memory`
 observer: on `poc5-tb-111`, `-112` and `-113` every recorded `UnitMemoryController.Tick` (42,306 over 18 runs) reruns from the recorded
 state to the recorded memory, slot for slot ("H1: result"). **Then wired (the slice the main session assigned as
-H2): the memory is computed in the driven replay** with the `memory` observer: `poc5-tb-111` to `-114` valid on all
-24 runs, 58,923 ticks run, 5,478,537 of their reads checked and the other models' 317,352 reads of the memory checks
+H2): the memory is computed in the driven replay** with the `memory` observer: `poc5-tb-111` to `-117` valid on all
+36 runs, 88,476 ticks run, 8,182,065 of their reads checked and the other models' 474,876 reads of the memory checks
 ("H2: the memory in the driven replay"). Tags as elsewhere: [M] measured, [C] from the decompiled code, [I]
 inferred.
 
@@ -404,17 +404,17 @@ captures replay as before (`-109`, `-95`, `-96` unchanged).
 - **Between ticks** the memory changes as the sim changes it: the readers' cache fills, `Remove` at a destruction,
   `Clear` at a disposal, the cache clears. The memory's own records of its changes between ticks (`mem_add`,
   `mem_remove`, `mem_clear` with its count; none before the window's `mem_initq`) are matched with the sim's, in
-  order across the memories, at each tick's entry and at each frame's end (so in their own frame) (393 changes matched in and between ticks over the 24 runs). Each `pre` row is checked: the dictionary
+  order across the memories, at each tick's entry and at each frame's end, so in their own frame (567 changes matched in and between ticks over the 36 runs). Each `pre` row is checked: the dictionary
   must be the sim's. `UnitReturnToConsciousController` is modelled (its own phase after the leave controller, in
   Default, Dialog and Cutscene: out of combat, each unit of `State.Units` not in combat reads its group's
   `Memory.Enemies`, filling it). A cache filled by a reader the sim doesn't run (the fog of war, whose early-outs
   the recording doesn't establish; the AI's ally lists `FillGroupFromMemory`; the agent's obstacles; the UI) is
-  taken only when it equals the sim's own fill now (9,168 over the 24 runs); anything else is reported.
+  taken only when it equals the sim's own fill now (13,710 over the 36 runs); anything else is reported.
 - **The readers' reads are checks** (`memory::sim::check`: the sim's value used, the recorded one compared, a
-  difference reported): the engagement's `Enemies` (313,953 over the 24 runs), the AI's `Enemies` (1,671) and
-  `HasPlayerCharacterInMemory` (none in these fights), `UnitAttack`'s `Enemies` (42), the attack of opportunity's
-  `target.Memory.Contains` (12), the flat-footed check's `Target.Memory.Contains(Initiator)` (1,401), the impatience
-  controller's `ContainsVisible` (273: its tick, `SetupPriorityTarget`, `TryAddBotherUnit`'s `vis`). The leave
+  difference reported): the engagement's `Enemies` (469,965 over the 36 runs), the AI's `Enemies` (2,343) and
+  `HasPlayerCharacterInMemory` (none in these fights), `UnitAttack`'s `Enemies` (57), the attack of opportunity's
+  `target.Memory.Contains` (15), the flat-footed check's `Target.Memory.Contains(Initiator)` (2,085), the impatience
+  controller's `ContainsVisible` (411: its tick, `SetupPriorityTarget`, `TryAddBotherUnit`'s `vis`). The leave
   controller reads the sim's memory (`Contains`, `UnitsList`, which it fills), its `leave_tick` rows checked against
   it (a list a reader the sim doesn't run filled taken as above).
 - **The queue.** `AddToMemory` from offensive actions and commands' acts runs on the sim's controller: each `mem_q`'s
@@ -424,8 +424,9 @@ captures replay as before (`-109`, `-95`, `-96` unchanged).
 
 Counters: `wr-combat replay` prints `memory computed: ticks …, reads checked …, inputs …, states checked …, fills by
 unmodelled readers verified …, changes matched …; readers' reads checked {…}`. On every run of
-`poc5-tb-111`, `-112`, `-113` and `-114` the replay is valid (equal T0 stream, nothing reported); per record run: ticks
-2,484 / 2,713, 3,007 / 1,992, 2,033 / 1,873, 2,883 / 2,656 (focus / nearest), 164,786 to 290,262 tick reads checked.
+`poc5-tb-111` to `-117` the replay is valid (equal T0 stream, nothing reported); per record run: ticks
+2,484 / 2,713, 3,007 / 1,992, 2,033 / 1,873, 2,883 / 2,656, 2,139 / 2,606 (focus / nearest, `-111` to `-115`), 2,618
+(`-116`, hold), 2,488 (`-117`, solo), 164,786 to 290,262 tick reads checked.
 `computed_memory_replays_are_valid_and_damage_is_reported` (`tests/poc5.rs`) replays `-111` and `-114`'s 12 runs and
 damages `-111` 23 ways (an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
 fill that can't be one, a pre row's `Enemies` or `UnitsList` missing an entry, a `mem_clear`'s count, the record
