@@ -138,8 +138,9 @@ these vertical results: the origins lie inside the field's inflated bounds, so t
   what Unity hands PhysX); none occurs here. PhysX's per-shape box raycast is ported and exact, but how Unity turns a
   `BoxCollider` into a `PxBoxGeometry` and shape pose (centre, lossy scale, its tolerance for "unscaled") isn't
   verified, and the BVH34 mesh raycast (`BV4_RaycastSingle`'s `RayTriOverlapT` and its transforms) isn't ported.
-- `Unsupported`: a trigger collider in the mask (`queriesHitTriggers`), the `*_!Visual` layer ambiguity above, two
-  height fields hit (the scene query's shape order would matter), a non-finite origin or negative distance.
+- `Unsupported`: a trigger collider in the mask (`queriesHitTriggers`), the `*_!Visual` layer ambiguity above, more
+  than one height field in the mask (the scene query's order shrinks the distance one passes the next, which can turn
+  a miss into a closer hit), a non-finite origin or negative distance.
 
 ## The file
 

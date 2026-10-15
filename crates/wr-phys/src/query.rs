@@ -113,7 +113,8 @@ impl<'w> Scene<'w> {
                         .collect();
                     let mut lo = [f64::INFINITY; 3];
                     let mut hi = [f64::NEG_INFINITY; 3];
-                    for p in tris.iter().flatten() {
+                    // Over every cooked vertex, used or not (PhysX's bounds are the vertices').
+                    for p in &w {
                         for k in 0..3 {
                             lo[k] = lo[k].min(p[k]);
                             hi[k] = hi[k].max(p[k]);
@@ -175,6 +176,19 @@ impl<'w> Scene<'w> {
         // `Vector3.down` normalised by `PhysicsScene.Raycast` and `Ray` stays (0, -1, 0).
         let dir = Vec3::new(0.0, -1.0, 0.0);
         let o = Vec3::from_array(origin);
+        // With several height fields, the scene query's order shrinks the distance one passes
+        // the next, which can turn a miss into a closer hit: not modelled.
+        let fields = self
+            .world
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.kind, ShapeKind::HeightField { .. }) && in_mask(s.layer, mask))
+            .count();
+        if fields > 1 {
+            return Err(QueryError::Unsupported(format!(
+                "{fields} height fields in the mask (the scene query's shape order)"
+            )));
+        }
         let mut hits: Vec<(usize, RayHit)> = Vec::new();
         for (i, (s, p)) in self.world.shapes.iter().zip(&self.prepared).enumerate() {
             let inside = in_mask(s.layer, mask);

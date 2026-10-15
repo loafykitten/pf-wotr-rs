@@ -115,6 +115,18 @@ fn a_flat_field_is_hit_at_its_height() {
 }
 
 #[test]
+fn several_height_fields_fail_closed() {
+    let mut w = terrain_world(flat_field(4));
+    w.shapes.push(w.shapes[0].clone());
+    let scene = Scene::new(&w);
+    assert!(matches!(
+        scene.raycast_down([1.3, 7.0, 4.1], 100.0, 1 << 8),
+        Err(QueryError::Unsupported(_))
+    ));
+    assert_eq!(scene.raycast_down([1.3, 7.0, 4.1], 100.0, 1).unwrap(), None, "neither in the mask");
+}
+
+#[test]
 fn holes_and_tess_flags() {
     // A sloped cell: heights 0 at x=0, 8 at x=1 (scaled 0.5 → 0..4 over 2 m).
     let mut f = flat_field(0);
@@ -227,6 +239,31 @@ fn meshes_and_other_shapes_fail_closed() {
     let s2 = Scene::new(&sliver);
     assert!(matches!(
         s2.raycast_down([2.3, 3.0, 2.3], 100.0, 1),
+        Err(QueryError::Unverified { .. })
+    ));
+    // The sliver with an unused vertex widening PhysX's bounds.
+    let unused = World {
+        shapes: vec![Shape {
+            name: "unused".into(),
+            layer: 0,
+            is_trigger: false,
+            visual_layer_move: false,
+            kind: ShapeKind::Mesh {
+                local_to_world: id,
+                vertices: vec![
+                    [0.0, 0.0, 0.0],
+                    [2.0, 2.0, 2.0],
+                    [1.0, 1.000_000_1, 0.999_999_9],
+                    [3.0, 0.0, 3.0],
+                ],
+                triangles: vec![[0, 1, 2]],
+                geom_epsilon: 3.0 * 2f32.powi(-22),
+            },
+        }],
+    };
+    let s5 = Scene::new(&unused);
+    assert!(matches!(
+        s5.raycast_down([2.3, 3.0, 2.3], 100.0, 1),
         Err(QueryError::Unverified { .. })
     ));
     // The same sliver beside a small far triangle: the mesh's own bounds, grown, still decide.
