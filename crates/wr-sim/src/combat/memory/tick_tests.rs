@@ -226,8 +226,15 @@ impl<'a> Check<'a> {
             self.fail(format!("a hash out of range ({r})"));
             return;
         };
-        if r["tape"] == true && self.tape.get(u) != Some(&h) {
-            self.fail(format!("{u}'s taped hash {h} isn't the record run's"));
+        // A replay takes a unit's hash from the tape when the record run recorded one.
+        if self.replay {
+            let taped = self.tape.get(u);
+            if r["tape"].as_bool() != Some(taped.is_some()) || taped.is_some_and(|&t| t != h) {
+                self.fail(format!(
+                    "{u}'s hash {h} (tape {}) against the record run's {taped:?}",
+                    r["tape"]
+                ));
+            }
         }
         let k = self.id(u);
         if self.hashes.insert(k, h32).is_some() {
@@ -268,13 +275,9 @@ fn structural(r: &Value) -> bool {
         )
 }
 
-/// The memory's own records of what changed (`mem_add` of a new key, `mem_remove` by `Remove`)
-/// in one step of the tick.
-#[derive(Default)]
-struct Effects {
-    adds: Vec<(u32, u32)>,
-    removes: Vec<(u32, u32)>,
-}
+/// The memory's own records of what changed (`mem_add` of a new key, `mem_remove` by `Remove`),
+/// in order: (group, change).
+type Changes = Vec<(u32, Change<u32>)>;
 
 /// The tick's world: its reads pulled strictly as the next records.
 struct TickWorld<'c, 'a> {
@@ -285,7 +288,7 @@ struct TickWorld<'c, 'a> {
     frame: i32,
     /// `Cleanup`'s removals (`mem_remove`, by `Cleanup`) seen on the way: (group, unit).
     removals: Vec<(u32, u32)>,
-    effects: Effects,
+    changes: Changes,
 }
 
 impl<'a> TickWorld<'_, 'a> {
@@ -294,7 +297,11 @@ impl<'a> TickWorld<'_, 'a> {
         if r["t"].as_i64() != Some(self.c.t) {
             return Err(Desync(format!("a record of another frame inside the tick ({r})")));
         }
+        // `mem_add` and `mem_remove`: exactly their writers' fields.
         let pair = |w: &mut Self| -> Result<(u32, u32), Desync> {
+            if !has_fields(r, &["group", "u", "by"]) || !r["by"].is_string() {
+                return Err(Desync(format!("a memory change of another shape ({r})")));
+            }
             Ok((w.c.id_of(&r["group"], "a memory's group")?, w.c.id_of(&r["u"], "a unit")?))
         };
         match r["ev"].as_str() {
@@ -304,13 +311,13 @@ impl<'a> TickWorld<'_, 'a> {
                 self.removals.push(p);
             }
             Some("mem_remove") if r["by"] == "Remove" => {
-                let p = pair(self)?;
-                self.effects.removes.push(p);
+                let (g, u) = pair(self)?;
+                self.changes.push((g, Change::Removed(u)));
             }
             Some("mem_remove") => return Err(Desync(format!("a removal it can't read ({r})"))),
             Some("mem_add") => {
-                let p = pair(self)?;
-                self.effects.adds.push(p);
+                let (g, u) = pair(self)?;
+                self.changes.push((g, Change::Added(u)));
             }
             Some("mem_clear") => {
                 return Err(Desync(format!("a memory cleared inside the tick ({r})")));
@@ -380,47 +387,26 @@ impl<'a> TickWorld<'_, 'a> {
     }
 }
 
-/// The memory's recorded additions (new keys) and removals by `Remove` in a step equal what the
-/// model's step did: the keys it holds that `before` didn't, and the keys `before` held that it
-/// doesn't, `Cleanup`'s removals aside.
-fn check_effects(
-    c: &mut Check<'_>,
-    e: &mut Effects,
-    g: u32,
-    before: &MemoryLayout<u32>,
-    after: &MemoryLayout<u32>,
-    cleaned: &[u32],
-) {
-    let keys = |l: &MemoryLayout<u32>| -> BTreeSet<u32> {
-        l.slots
-            .iter()
-            .filter_map(|s| match s {
-                RawSlot::Used(k, _) => Some(*k),
-                RawSlot::Free(_) => None,
-            })
-            .collect()
-    };
-    let (b, a) = (keys(before), keys(after));
-    let added: BTreeSet<u32> = a.difference(&b).copied().collect();
-    let removed: BTreeSet<u32> =
-        b.difference(&a).copied().filter(|k| !cleaned.contains(k)).collect();
-    let take = |v: &mut Vec<(u32, u32)>| -> Vec<u32> {
-        let mine: Vec<u32> = v.iter().filter(|x| x.0 == g).map(|x| x.1).collect();
-        v.retain(|x| x.0 != g);
-        mine
-    };
-    let (adds, removes) = (take(&mut e.adds), take(&mut e.removes));
-    let set = |v: &[u32]| v.iter().copied().collect::<BTreeSet<u32>>();
-    if adds.len() != set(&adds).len() || set(&adds) != added {
-        let (x, y) = (c.names_of(&added.into_iter().collect::<Vec<_>>()), c.names_of(&adds));
-        c.fail(format!("{}'s additions: model {x:?}, game {y:?}", c.name(g)));
+/// The memory's recorded additions (new keys) and removals by `Remove` of one group, in order,
+/// are the model's.
+fn check_changes(c: &mut Check<'_>, recorded: &mut Changes, g: u32, model: &[Change<u32>]) {
+    let mine: Vec<Change<u32>> = recorded.iter().filter(|x| x.0 == g).map(|x| x.1).collect();
+    recorded.retain(|x| x.0 != g);
+    if mine != model {
+        let show = |v: &[Change<u32>]| -> Vec<String> {
+            v.iter()
+                .map(|x| match *x {
+                    Change::Added(k) => format!("+{}", c.name(k)),
+                    Change::Removed(k) => format!("-{}", c.name(k)),
+                })
+                .collect()
+        };
+        let (a, b) = (show(model), show(&mine));
+        c.fail(format!("{}'s changes: model {a:?}, game {b:?}", c.name(g)));
     }
-    if removes.len() != set(&removes).len() || set(&removes) != removed {
-        let (x, y) = (c.names_of(&removed.into_iter().collect::<Vec<_>>()), c.names_of(&removes));
-        c.fail(format!("{}'s removals: model {x:?}, game {y:?}", c.name(g)));
-    }
-    c.count("additions recorded", adds.len());
-    c.count("removals recorded", removes.len());
+    let adds = mine.iter().filter(|x| matches!(x, Change::Added(_))).count();
+    c.count("additions recorded", adds);
+    c.count("removals recorded", mine.len() - adds);
 }
 
 fn bool_of(r: &Value, k: &str) -> Result<bool, Desync> {
@@ -554,10 +540,11 @@ impl MemoryWorld<u32, u32> for TickWorld<'_, '_> {
     fn memory(&mut self, g: u32) -> Result<&mut GroupMemory<u32>, Desync> {
         self.real(g)?;
         if !self.mem.contains_key(&g) {
-            let m = match self.c.recorded.get(&g) {
+            let mut m = match self.c.recorded.get(&g) {
                 Some(l) => GroupMemory::from_layout(l.clone()).expect("checked when recorded"),
                 None => GroupMemory::new(),
             };
+            m.log_changes();
             self.mem.insert(g, m);
         }
         Ok(self.mem.get_mut(&g).expect("just inserted"))
@@ -622,10 +609,9 @@ impl MemoryWorld<u32, u32> for TickWorld<'_, '_> {
             let n = self.c.name(g).to_owned();
             self.c.fail(format!("{n}'s memory after its pass: model {a}, game {b}"));
         }
-        // What the pass added and removed, against the group's state at the tick's entry.
-        let before =
-            self.c.recorded.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
-        check_effects(self.c, &mut self.effects, g, &before, &model, removed);
+        // What the pass added and removed, in order.
+        let changes = self.memory(g)?.take_changes();
+        check_changes(self.c, &mut self.changes, g, &changes);
         // `Cleanup`'s removals, in removal order.
         let seen: Vec<u32> = self.removals.iter().filter(|x| x.0 == g).map(|x| x.1).collect();
         self.removals.retain(|x| x.0 != g);
@@ -638,7 +624,9 @@ impl MemoryWorld<u32, u32> for TickWorld<'_, '_> {
         self.c.count("forgotten", removed.len());
         // The rest of the tick goes on from the recorded state.
         self.c.recorded.insert(g, row.clone());
-        self.mem.insert(g, GroupMemory::from_layout(row).expect("checked"));
+        let mut m = GroupMemory::from_layout(row).expect("checked");
+        m.log_changes();
+        self.mem.insert(g, m);
         Ok(())
     }
 }
@@ -803,6 +791,7 @@ impl Check<'_> {
         self.count("ticks", 1);
         // The changes made since the last record, at the tick's entry.
         let recs = self.recs;
+        let mut pre = BTreeSet::new();
         while let Some(x) =
             recs.get(self.i).filter(|x| obs(x, "mem_s").is_some() && x["at"] == "pre")
         {
@@ -812,6 +801,13 @@ impl Check<'_> {
                 return Err(Desync(format!("a mem_s of another shape or frame ({x})")));
             }
             let (g, l) = self.layout_of(x)?;
+            // One row per group whose memory changed.
+            let last =
+                self.recorded.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
+            if !pre.insert(g) || l == last {
+                self.resync();
+                return Err(Desync(format!("{}'s pre row twice or unchanged", self.name(g))));
+            }
             self.recorded.insert(g, l);
             self.count("changes between ticks", 1);
         }
@@ -822,15 +818,15 @@ impl Check<'_> {
             now: TimeSpan(gt),
             frame,
             removals: Vec::new(),
-            effects: Effects::default(),
+            changes: Vec::new(),
         };
         let res = super::tick(&mut ctl, &mut w).and_then(|()| w.drain());
-        let TickWorld { mem, removals, effects, .. } = w;
+        let TickWorld { mem, removals, changes, .. } = w;
         let res = res.and_then(|()| {
             if !removals.is_empty() {
                 return Err(Desync(format!("Cleanup removals outside a pass: {removals:?}")));
             }
-            self.tick_end(gt, mem, effects)
+            self.tick_end(gt, mem, changes)
         });
         match res {
             Ok(()) => {
@@ -852,9 +848,10 @@ impl Check<'_> {
         &mut self,
         gt: i64,
         mut mem: HashMap<u32, GroupMemory<u32>>,
-        mut effects: Effects,
+        mut changes: Changes,
     ) -> Result<(), Desync> {
         let recs = self.recs;
+        let mut seen = BTreeSet::new();
         loop {
             let r = recs
                 .get(self.i)
@@ -867,7 +864,14 @@ impl Check<'_> {
                 let (g, row) = self.layout_of(r)?;
                 let before =
                     self.recorded.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
-                let model = mem.remove(&g).map_or_else(|| before.clone(), |m| m.layout());
+                // One row per changed group.
+                if !seen.insert(g) || row == before {
+                    return Err(Desync(format!("{}'s end row twice or unchanged", self.name(g))));
+                }
+                let (model, model_changes) = match mem.remove(&g) {
+                    Some(mut m) => (m.layout(), m.take_changes()),
+                    None => (before, Vec::new()),
+                };
                 if model != row {
                     let (a, b) = (self.show(&model), self.show(&row));
                     self.fail(format!(
@@ -875,7 +879,7 @@ impl Check<'_> {
                         self.name(g)
                     ));
                 }
-                check_effects(self, &mut effects, g, &before, &model, &[]);
+                check_changes(self, &mut changes, g, &model_changes);
                 self.recorded.insert(g, row);
                 self.count("changed by the queue", 1);
                 continue;
@@ -896,7 +900,7 @@ impl Check<'_> {
             )));
         }
         // The memories the tick touched and the game didn't record as changed.
-        for (g, m) in mem {
+        for (g, mut m) in mem {
             let model = m.layout();
             let last =
                 self.recorded.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
@@ -907,11 +911,12 @@ impl Check<'_> {
                     self.name(g)
                 ));
             }
-            check_effects(self, &mut effects, g, &last, &model, &[]);
+            let model_changes = m.take_changes();
+            check_changes(self, &mut changes, g, &model_changes);
         }
-        if !effects.adds.is_empty() || !effects.removes.is_empty() {
-            let (a, b) = (effects.adds.len(), effects.removes.len());
-            self.fail(format!("{a} additions and {b} removals of memories the model didn't touch"));
+        if !changes.is_empty() {
+            let n = changes.len();
+            self.fail(format!("{n} recorded changes of memories the model didn't touch"));
         }
         Ok(())
     }
@@ -927,10 +932,18 @@ impl Check<'_> {
                 break;
             }
             self.i += 1;
-            if obs(r, "mem_s").is_some()
-                && let Ok((g, l)) = self.layout_of(r)
-            {
-                self.recorded.insert(g, l);
+            // Only this frame's records, of their writers' shape, are taken.
+            if r["t"].as_i64() != Some(self.t) {
+                self.fail(format!("{} of another frame", describe(r)));
+                continue;
+            }
+            if obs(r, "mem_s").is_some() {
+                match self.layout_of(r) {
+                    Ok((g, l)) if has_fields(r, &ROW) => {
+                        self.recorded.insert(g, l);
+                    }
+                    _ => self.fail(format!("a mem_s it can't read ({})", describe(r))),
+                }
             }
             if obs(r, "hash").is_some() {
                 self.see_hash(r);
@@ -1296,12 +1309,63 @@ fn a_damaged_window_is_caught() {
         ("a frame without its tick", Box::new(move |v| v.truncate(tick3))),
         ("a frame of another mode with a tick", Box::new(move |v| v[frame3]["mode"] = json!(4))),
         ("not the memory observer", Box::new(|v| v[0]["observers"] = json!([]))),
+        (
+            "two additions swapped",
+            Box::new(move |v| {
+                let j = v.iter().skip(add + 1).position(|r| r["ev"] == "mem_add").unwrap();
+                let (x, y) = (v[add]["u"].clone(), v[add + 1 + j]["u"].clone());
+                v[add]["u"] = y;
+                v[add + 1 + j]["u"] = x;
+            }),
+        ),
+        ("a pre row twice", twice(pre)),
+        ("an end row twice", twice(end)),
+        (
+            "an addition without its caller",
+            Box::new(move |v| drop(v[add].as_object_mut().unwrap().remove("by"))),
+        ),
+        ("an addition with another field", Box::new(move |v| v[add]["x"] = json!(1))),
     ];
     for (what, damage) in cases {
         let mut d = v.clone();
         damage(&mut d);
         assert!(!errors_of(&d).is_empty(), "{what}: not caught");
     }
+}
+
+#[test]
+fn a_replay_takes_its_hashes_from_the_record_runs_tape() {
+    let mut v = window();
+    let i = v.iter().position(|r| r["ev"] == "hash").unwrap();
+    v[i]["tape"] = json!(true);
+    let tape = HashMap::from([("f1".to_owned(), 392_888_320)]);
+    let errors = |v: &[Value], tape: &HashMap<String, i64>| {
+        let mut c = Check::new(v, tape.clone(), 0, true);
+        c.run();
+        c.errors
+    };
+    assert_eq!(errors(&v, &tape), Vec::<String>::new());
+    // The same phase, another value; the tape's value said not to be; no tape value.
+    let mut d = v.clone();
+    d[i]["h"] = json!(392_888_340);
+    assert!(!errors(&d, &tape).is_empty());
+    let mut d = v.clone();
+    d[i]["tape"] = json!(false);
+    assert!(!errors(&d, &tape).is_empty());
+    assert!(!errors(&v, &HashMap::new()).is_empty());
+    let mut d = v.clone();
+    d[i]["tape"] = json!("yes");
+    assert!(!errors(&d, &tape).is_empty());
+}
+
+#[test]
+fn a_resynchronisation_takes_only_its_frames_states() {
+    let mut v = window();
+    let i = v.iter().position(|r| r["f"] == "wake").unwrap();
+    v.remove(i);
+    let end = v.iter().position(|r| r["at"] == "end").unwrap();
+    v[end]["t"] = json!(900);
+    assert_eq!(errors_of(&v).len(), 2, "{:?}", errors_of(&v));
 }
 
 #[test]

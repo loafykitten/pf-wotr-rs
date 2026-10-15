@@ -80,6 +80,18 @@ pub struct GroupMemory<K> {
     /// `m_EnemiesList`, `m_EnemiesListValid`.
     enemies: Vec<K>,
     enemies_valid: bool,
+    /// The keys `Add` and `Remove` changed, in order, while logging ([`Self::log_changes`]): what
+    /// WrathOracle's `mem_add` and `mem_remove` (by `Remove`) record.
+    log: Option<Vec<Change<K>>>,
+}
+
+/// A change `Add` or `Remove` made to a memory's keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change<K> {
+    /// `Add` of a key not yet there.
+    Added(K),
+    /// `Remove` of a key that was there.
+    Removed(K),
 }
 
 impl<K: Copy + Eq + Hash> Default for GroupMemory<K> {
@@ -98,7 +110,18 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
             units_list_valid: false,
             enemies: Vec::new(),
             enemies_valid: false,
+            log: None,
         }
+    }
+
+    /// From now on, `Add` and `Remove` log the keys they change.
+    pub fn log_changes(&mut self) {
+        self.log.get_or_insert_with(Vec::new);
+    }
+
+    /// The changes logged since the last call.
+    pub fn take_changes(&mut self) -> Vec<Change<K>> {
+        self.log.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// A memory holding `keys` in this enumeration order, with no freed slots between them (what a
@@ -118,6 +141,9 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     pub fn add(&mut self, k: K, game_time: TimeSpan) -> &mut UnitInfo {
         self.enemies_valid = false;
         self.units_list_valid = false;
+        if let Some(log) = self.log.as_mut().filter(|_| !self.units.contains_key(&k)) {
+            log.push(Change::Added(k));
+        }
         self.units
             .get_or_insert_with(k, || UnitInfo { last_detect_time: game_time, visible: false })
     }
@@ -127,6 +153,9 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
         if self.units.remove(&k).is_some() {
             self.enemies_valid = false;
             self.units_list_valid = false;
+            if let Some(log) = self.log.as_mut() {
+                log.push(Change::Removed(k));
+            }
             true
         } else {
             false
@@ -301,6 +330,7 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
             units_list: l.units_list.unwrap_or_default(),
             enemies_valid: l.enemies.is_some(),
             enemies: l.enemies.unwrap_or_default(),
+            log: None,
         })
     }
 
