@@ -150,7 +150,8 @@ impl MovementSimulator {
 ///
 /// # Errors
 ///
-/// `A` between 0 and `FloatMinNormal`, where `Mathf.Epsilon`'s flush-to-zero setting decides.
+/// `A` between the smallest denormal and `FloatMinNormal` with a determinant not negative, where
+/// `Mathf.Epsilon`'s flush-to-zero setting decides.
 pub fn segment_circle_intersection(a: V2, b: V2, c: V2, radius: f32) -> R<Option<f32>> {
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
@@ -165,22 +166,25 @@ fn line_circle_intersection(a: V2, c: V2, radius: f32, dx: f32, dy: f32) -> R<f3
     let big_b = store_f32(2.0 * (d(dx) * (ax - cx) + d(dy) * (ay - cy)));
     let big_c = store_f32((ax - cx) * (ax - cx) + (ay - cy) * (ay - cy) - d(radius) * d(radius));
     let det = store_f32(d(big_b) * d(big_b) - 4.0 * d(big_a) * d(big_c));
-    if big_a > 0.0 && big_a <= FLOAT_MIN_NORMAL {
+    // `A <= Mathf.Epsilon || det < 0f`: a negative determinant, or an `A` at most the smallest
+    // denormal, rejects under either epsilon; an `A` up to `FloatMinNormal` depends on it.
+    if det < 0.0 || big_a <= f32::from_bits(1) {
+        return Ok(-1.0);
+    }
+    if big_a <= FLOAT_MIN_NORMAL {
         return bad(format!(
             "SegmentCircleIntersection: A = {big_a:e} against Mathf.Epsilon (flush-to-zero not established)"
         ));
     }
-    // `A <= Mathf.Epsilon`: with `A` outside (0, FloatMinNormal], either epsilon gives `A <= 0`.
-    if big_a <= 0.0 || det < 0.0 {
-        return Ok(-1.0);
-    }
+    // `0f - B` (not a negation: `0 - +0` is +0).
+    let minus_b = 0.0 - d(big_b);
     if det == 0.0 {
-        return Ok(store_f32(-d(big_b) / (2.0 * d(big_a))));
+        return Ok(store_f32(minus_b / (2.0 * d(big_a))));
     }
     // `(float)(((double)(0f - B) + Math.Sqrt(det)) / (double)(2f * A))`.
     let root = d(det).sqrt();
-    let num = store_f32((-d(big_b) + root) / (2.0 * d(big_a)));
-    let num2 = store_f32((-d(big_b) - root) / (2.0 * d(big_a)));
+    let num = store_f32((minus_b + root) / (2.0 * d(big_a)));
+    let num2 = store_f32((minus_b - root) / (2.0 * d(big_a)));
     if num <= num2 && num > 0.0 { Ok(num) } else { Ok(num2) }
 }
 

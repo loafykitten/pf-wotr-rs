@@ -135,6 +135,18 @@ fn segment_circle_intersection_cases() {
     assert_eq!(segment_circle_intersection([1.0, 0.0], [1.5, 0.0], [1.0, 0.0], 1.0).unwrap(), None);
     // A segment so short that `Mathf.Epsilon`'s setting would decide: reported.
     assert!(segment_circle_intersection([0.0, 0.0], [1e-20, 0.0], [1.0, 0.0], 1.0).is_err());
+    // ... unless either epsilon rejects it: the smallest denormal, a negative determinant.
+    assert_eq!(
+        segment_circle_intersection([0.0, 0.0], [4e-23, 0.0], [1.0, 0.0], 1.0).unwrap(),
+        None
+    );
+    assert_eq!(
+        segment_circle_intersection([0.0, 0.0], [1e-20, 0.0], [5.0, 5.0], 1.0).unwrap(),
+        None
+    );
+    // A tangent at the start: `(0f - B)` with `B` +0 is +0, not -0.
+    let t = segment_circle_intersection([0.0, 0.0], [1.0, 0.0], [0.0, 1.0], 1.0).unwrap();
+    assert_eq!(t.map(f32::to_bits), Some(0));
 }
 
 #[test]
@@ -307,6 +319,8 @@ struct Older {
 
 /// The inputs recorded inside one step, in order.
 struct Recorded<'a> {
+    /// The stepping agent's unit: every input record must be its.
+    unit: String,
     recs: Vec<&'a Value>,
     at: usize,
     errors: Vec<String>,
@@ -324,7 +338,8 @@ impl Recorded<'_> {
 
     fn leaf(&mut self, name: &str) -> R<Value> {
         let r = self.next(name)?.clone();
-        if r["ev"] != "ag_v" || r["f"] != name || r["ctx"] != "sim" {
+        if r["ev"] != "ag_v" || r["f"] != name || r["ctx"] != "sim" || r["u"] != self.unit.as_str()
+        {
             return Err(Desync(format!("wanted the step's leaf {name}, the recording has {r}")));
         }
         Ok(r)
@@ -332,7 +347,11 @@ impl Recorded<'_> {
 
     fn phys(&mut self, kind: &str, o: V3, shape: &[f32], max: f32, mask: i32) -> R<Option<f32>> {
         let r = self.next(kind)?.clone();
-        if r["ev"] != "ag_phys" || r["fn"] != kind || r["ctx"] != "sim" {
+        if r["ev"] != "ag_phys"
+            || r["fn"] != kind
+            || r["ctx"] != "sim"
+            || r["u"] != self.unit.as_str()
+        {
             return Err(Desync(format!("wanted a {kind} query, the recording has {r}")));
         }
         let recorded: Vec<Option<f32>> =
@@ -347,12 +366,12 @@ impl Recorded<'_> {
         {
             self.errors.push(format!("{kind} query from {o:?}: the recording's is {r}"));
         }
-        if r["hit"].as_bool() == Some(true) {
-            Ok(Some(
+        match r["hit"].as_bool() {
+            Some(true) => Ok(Some(
                 f(&r["dist"]).ok_or_else(|| Desync(format!("a hit without its distance: {r}")))?,
-            ))
-        } else {
-            Ok(None)
+            )),
+            Some(false) => Ok(None),
+            None => Err(Desync(format!("a {kind} query without its result: {r}"))),
         }
     }
 }
@@ -567,7 +586,8 @@ struct Tally {
 impl Tally {
     fn note(&mut self, at: String, got: R<bool>, inp: &Recorded<'_>, mut why: Vec<String>) {
         match got {
-            Err(e) if e.0.starts_with(UNSET) => {
+            // The rest isn't established; what was compared before it still counts.
+            Err(e) if e.0.starts_with(UNSET) && inp.errors.is_empty() => {
                 self.unset.push(format!("{at}: {}", e.0));
                 return;
             }
@@ -589,6 +609,9 @@ impl Tally {
 
 /// Captures with `ag_sim`: each step from its recorded simulator, with its own leaves.
 fn check_leaves(name: &str, recs: &[Value], t: &mut Tally) {
+    // Every simulation record must belong to a step: an orphan (a missing `ag_sim`, a second end,
+    // a leaf outside a step, an `msim` without its step) is reported.
+    let mut used = vec![false; recs.len()];
     let mut i = 0;
     while i < recs.len() {
         let r = &recs[i];
@@ -598,12 +621,24 @@ fn check_leaves(name: &str, recs: &[Value], t: &mut Tally) {
         }
         let u = r["u"].as_str().unwrap_or("");
         let at = format!("{name} t={} {u}", r["t"]);
+        used[i] = true;
         let Some(end) =
-            (i + 1..recs.len()).find(|&j| is(&recs[j], "ag_sim_end") && recs[j]["u"] == u)
+            (i + 1..recs.len()).find(|&j| is(&recs[j], "ag_sim_end") || is(&recs[j], "ag_sim"))
         else {
             t.failures.push(format!("{at}: a step without its end"));
             break;
         };
+        if !is(&recs[end], "ag_sim_end") || recs[end]["u"] != u {
+            t.failures.push(format!("{at}: a step whose next record is {}", recs[end]));
+            i = end;
+            continue;
+        }
+        used[end] = true;
+        for (j, x) in recs.iter().enumerate().take(end).skip(i + 1) {
+            if sim_record(x) {
+                used[j] = true;
+            }
+        }
         let pts: Option<Vec<V3>> =
             r["sim"]["pts"].as_array().and_then(|a| a.iter().map(v3).collect());
         let (Some(mut sim), Some(want), Some(max)) = (
@@ -628,6 +663,7 @@ fn check_leaves(name: &str, recs: &[Value], t: &mut Tally) {
             .filter(|x| x["k"] == "obs" && x["ev"].as_str().is_some_and(|e| e.starts_with("ag_")))
             .collect();
         let mut inp = Recorded {
+            unit: u.to_owned(),
             recs: inner,
             at: 0,
             errors: Vec::new(),
@@ -642,9 +678,11 @@ fn check_leaves(name: &str, recs: &[Value], t: &mut Tally) {
             }
             why.extend(sim_diff(&sim, &want));
             // The AI's own record of the step, when the AI made it: the next leaf.
-            if let Some(m) = recs[end + 1..].iter().find(|x| is(x, "uc_v") || is(x, "ag_sim"))
-                && let Some(m) = leaf(m, "msim")
+            if let Some(k) =
+                (end + 1..recs.len()).find(|&k| is(&recs[k], "uc_v") || is(&recs[k], "ag_sim"))
+                && let Some(m) = leaf(&recs[k], "msim")
             {
+                used[k] = true;
                 why.extend(msim_diff(m, ret, &sim));
                 if f(&m["max"]).map(f32::to_bits) != Some(max.to_bits()) {
                     why.push(format!("msim's max {}, the step's {max}", m["max"]));
@@ -654,6 +692,16 @@ fn check_leaves(name: &str, recs: &[Value], t: &mut Tally) {
         t.note(at, got, &inp, why);
         i = end + 1;
     }
+    for (j, x) in recs.iter().enumerate() {
+        if !used[j] && (sim_record(x) || is(x, "ag_sim_end") || leaf(x, "msim").is_some()) {
+            t.failures.push(format!("{name}: a simulation record outside a step: {x}"));
+        }
+    }
+}
+
+/// A record only a simulation step makes: its leaves and physics queries (`ctx: "sim"`).
+fn sim_record(r: &Value) -> bool {
+    (is(r, "ag_v") || is(r, "ag_phys")) && r["ctx"] == "sim"
 }
 
 /// `ScorePath`'s state as the AI's and the agent's records give it, for captures before `ag_sim`.
@@ -669,17 +717,25 @@ struct Scope {
     sim: Option<MovementSimulator>,
     /// The simulator was built with the unit's position from other records [I].
     inferred: bool,
+    /// Why the simulator's state isn't known any more (an input not established, a step that
+    /// differed): the rest of this `ScorePath`'s steps are counted, not checked.
+    lost: Option<String>,
+    /// The simulation stopped (a step returned false, reached its maximum distance or left less
+    /// than 0.0001): `ScorePath` makes no further step.
+    stopped: bool,
+    /// The next step's `maxMoveLength`: `num5 - LastMoveLength` [C].
+    next_max: Option<f32>,
     /// Where the current step's records start.
     from: usize,
 }
 
-/// Captures without `ag_sim`: each `msim` rerun from the simulator `ScorePath` builds (chained
-/// through its steps), with the step's physics (`ag_phys` ctx `sim`) and the rest from other
-/// records where they establish it.
 /// `FindPath`'s request: unit, destination, radius, `MaxSpeedOverride`, the corpulences read before
 /// it, `CurrentSpeedMps` (its `speedmps` leaf, since `poc5-tb-105`).
 type Find = (String, V3, f32, Option<f32>, Vec<u32>, Option<f32>);
 
+/// Captures without `ag_sim`: each `msim` rerun from the simulator `ScorePath` builds (chained
+/// through its steps), with the step's physics (`ag_phys` ctx `sim`) and the rest from other
+/// records where they establish it.
 fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
     // [I] each unit's last recorded position (`ag_ctl_end`, `ag_ground`), `MaxSpeed` and `FlyHeight`.
     let mut pos: HashMap<String, V3> = HashMap::new();
@@ -743,6 +799,9 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                     corps: c,
                     sim: None,
                     inferred: false,
+                    lost: None,
+                    stopped: false,
+                    next_max: None,
                     from: i + 1,
                 }),
                 _ => None,
@@ -760,18 +819,26 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                 .filter(|x| is(x, "ag_phys") && x["ctx"] == "sim" && x["u"] == s.unit.as_str())
                 .collect();
             s.from = i + 1;
+            if s.stopped {
+                t.failures.push(format!("{at}: a step after the simulation stopped"));
+                continue;
+            }
+            if let Some(why) = &s.lost {
+                t.unset.push(format!("{at}: {UNSET}the simulator after {why}"));
+                continue;
+            }
             if s.sim.is_none() {
                 // `new MovementSimulator(Unit.Position, CurrentPath, destination,
                 // ActionRangeWithCorpulence, checkLOS: true, 0f)`: the radius FindPath was given
                 // when the corpulences read again are the same [C]; the position [I].
                 if corps.len() != 2 || corps != s.corps {
                     t.unset.push(format!("{at}: {UNSET}the simulator's ActionRangeWithCorpulence"));
-                    scope = None;
+                    s.lost = Some("an unknown start".into());
                     continue;
                 }
                 let Some(&p) = pos.get(&s.unit) else {
                     t.unset.push(format!("{at}: {UNSET}the unit's position"));
-                    scope = None;
+                    s.lost = Some("an unknown start".into());
                     continue;
                 };
                 s.inferred = true;
@@ -788,8 +855,14 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                 t.failures.push(format!("{at}: msim without its max"));
                 continue;
             };
+            if let Some(want) = s.next_max
+                && want.to_bits() != max.to_bits()
+            {
+                t.failures.push(format!("{at}: msim's max {max}, the last step left {want}"));
+            }
             let Some(mut sim) = s.sim.clone() else { continue };
             let mut inp = Recorded {
+                unit: s.unit.clone(),
                 recs: inner,
                 at: 0,
                 errors: Vec::new(),
@@ -801,14 +874,19 @@ fn check_older(name: &str, recs: &[Value], t: &mut Tally) {
                 Ok(ret) => msim_diff(m, *ret, &sim),
                 Err(_) => Vec::new(),
             };
-            let stop = !matches!(got, Ok(true)) || !why.is_empty();
-            t.note(at, got, &inp, why);
-            // The next step goes on from this one; `ScorePath` makes no step after one that stops.
-            if stop {
-                scope = None;
-            } else {
-                s.sim = Some(sim);
+            match &got {
+                Ok(true) if why.is_empty() => {
+                    // `num5 -= sim.LastMoveLength`; `ReachedMaxDistance || num5 < 0.0001f` ends it.
+                    let left = store_f32(f64::from(max) - f64::from(sim.last_move_length));
+                    s.stopped = sim.reached_max_distance || left < 0.0001;
+                    s.next_max = Some(left);
+                    s.sim = Some(sim);
+                }
+                Ok(false) if why.is_empty() => s.stopped = true,
+                Err(e) if e.0.starts_with(UNSET) => s.lost = Some("a step not established".into()),
+                _ => s.lost = Some("a step that differed".into()),
             }
+            t.note(at, got, &inp, why);
         }
     }
 }
@@ -922,6 +1000,24 @@ fn the_checker_reads_the_requested_records() {
         }),
         Box::new(|r| {
             r.remove(5);
+        }),
+        // No prefix; a second end; another unit's leaf or query; a query without its result; a
+        // leaf after the step.
+        Box::new(|r| {
+            r.remove(0);
+        }),
+        Box::new(|r| {
+            let x = r[5].clone();
+            r.insert(6, x);
+        }),
+        Box::new(|r| r[1]["u"] = Value::from("5198")),
+        Box::new(|r| r[3]["u"] = Value::from("5198")),
+        Box::new(|r| {
+            r[3].as_object_mut().map(|o| o.remove("hit"));
+        }),
+        Box::new(|r| {
+            let x = r[1].clone();
+            r.push(x);
         }),
     ];
     for (i, d) in damage.iter().enumerate() {

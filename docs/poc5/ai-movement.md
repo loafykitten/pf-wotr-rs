@@ -53,8 +53,9 @@ in double; `maxMoveLength / shift.magnitude` is an argument (stored) before scal
 function's variables (`A`, `B`, `C`, `det`, `t`, `dx`, `dy`) are captured, so each assignment
 stores a `float`; `(a.x - c.x)` inside them is not stored. `Mathf.Epsilon` is
 `MathfInternal.FloatMinNormal` under flush-to-zero, else `float.Epsilon`: which the player runs
-with isn't established, and the two differ only for `0 < A <= 1.1754944e-38` (a segment shorter
-than about 1e-19 m), which the port reports. `LineOfSightGeometry.EyeShift` is a mutable static
+with isn't established, and the two differ only for `1.4e-45 < A <= 1.1754944e-38` with a
+determinant not negative (a segment shorter than about 1e-19 m), which the port reports. `0f - B`
+is a subtraction, not a negation: with `B` +0 (a tangent at the segment's start) `t` is +0. `LineOfSightGeometry.EyeShift` is a mutable static
 initialised to `Vector3.up` that nothing in the decompiled code assigns. `GetNearest` is called
 before the radius test, its node dereferenced only after it: no node with a positive radius is the
 game's `NullReferenceException`, reported.
@@ -83,11 +84,13 @@ two replays). Two ways, by capture:
 
 - **With the requested records** (`ag_sim`, none yet): each step rerun from the simulator it
   records, with the step's own leaves and physics in order, compared with `ag_sim_end` (result and
-  every field) and with the AI's `msim` leaf that follows, bit for bit; every record consumed;
+  every field) and with the AI's `msim` leaf that follows, bit for bit; every input the stepping
+  unit's, every query with its result, every record consumed, and any simulation record outside a
+  step (a missing `ag_sim`, a second end, a stray leaf, an `msim` without its step) reported;
   `deltaTime` 0.1. `the_checker_reads_the_requested_records` (not ignored) builds the records from
-  `poc5-tb-103`'s step and damages them 11 ways (a query's origin or distance, a leaf missing,
-  extra or without its context, the result, a field after, the `msim` leaf, the delta, the end):
-  each is reported.
+  `poc5-tb-103`'s step and damages them 17 ways (a query's origin, distance, result or unit, a
+  leaf missing, extra, another unit's or without its context, the result, a field after, the `msim`
+  leaf, the delta, the prefix, the end missing or twice, a leaf after the step): each is reported.
 - **Older captures**: each `msim` leaf rerun from the simulator `ScorePath` builds (chained
   through its steps), the step's `ag_phys` (`ctx: "sim"`) checked and consumed, the rest from other
   records where they establish it: the destination and radius from the `FindPath` request
@@ -97,7 +100,10 @@ two replays). Two ways, by capture:
   `poc5-tb-105`) [C], else the unit's last `TickMovement` read [I]; `FlyHeight` the unit's last
   `MoveUnit` read [I]; `Unit.Position` the unit's last `ag_ctl_end`/`ag_ground` position [I]; the
   step's own `GetNearest` the AI's `ablk` right after it when the step ended where it looked up
-  [C]; line of sight never. A step whose inputs aren't established is counted, not checked.
+  [C]; line of sight never. A step whose inputs aren't established is counted, not checked (with
+  the rest of its `ScorePath`'s steps), unless what it compared before the missing input already
+  differs; a step after the simulation stopped, or whose `maxMoveLength` isn't `num5 -
+  LastMoveLength` of the step before, is reported.
 
 **Result: the captures hold 21 steps, in `poc5-tb-100/tb-nearest` (3 per run), `-101/tb-focus` (3)
 and `-103/tb-focus` (1); every one is a two-point path whose end lies within one step (the first
