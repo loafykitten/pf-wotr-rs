@@ -473,11 +473,15 @@ impl AiInputs for Driver<'_> {
         }
     }
 
-    fn ai_blocked(&mut self, w: &mut World) -> R<i64> {
+    fn ai_blocked(&mut self, w: &mut World, p: [f32; 3]) -> R<i64> {
         let at = self.ai_leaf(w, "ablk", &["v"])?;
         // `sbyte AllyBlocked`; no node: the game throws.
         match self.trace.records[at]["v"].as_i64().filter(|x| i8::try_from(*x).is_ok()) {
-            Some(v) => Ok(v),
+            Some(v) => {
+                // The sim's grid's, when it keeps the grid.
+                self.nav_ai_blocked(w, p, v)?;
+                Ok(v)
+            }
             None => self.uc_reject(at, "a node's AllyBlocked it can't read (or no node)"),
         }
     }

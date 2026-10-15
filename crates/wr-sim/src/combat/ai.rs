@@ -125,7 +125,7 @@ pub trait AiInputs: Inputs {
     /// A movement simulation step, its `maxMoveLength` argument `max`.
     fn ai_sim_step(&mut self, w: &mut World, max: f32) -> R<SimStep>;
     /// `GetNearest(position).node.AllyBlocked`.
-    fn ai_blocked(&mut self, w: &mut World) -> R<i64>;
+    fn ai_blocked(&mut self, w: &mut World, p: [f32; 3]) -> R<i64>;
     /// `EngagementSimulator.CheckForAttacksOfOpportunity`.
     fn ai_aoo(&mut self, w: &mut World) -> R<i64>;
     /// `Group.Memory.Enemies`: the units' ids.
@@ -1889,7 +1889,7 @@ fn blocked_at<I: AiInputs>(
     seen: &mut Vec<([u32; 3], i64)>,
     p: [f32; 3],
 ) -> R<i64> {
-    let v = inp.ai_blocked(w)?;
+    let v = inp.ai_blocked(w, p)?;
     let key = p.map(f32::to_bits);
     match seen.iter().find(|(k, _)| *k == key) {
         Some((_, x)) if *x != v => desync(format!("AllyBlocked at {p:?} read {x}, then {v}")),

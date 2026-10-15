@@ -3115,6 +3115,8 @@ impl Driver<'_> {
                                 | "path_seek"
                                 | "path_mod"
                                 | "path_critter"
+                                | "path_to"
+                                | "path_done"
                         )
                     ) =>
             {

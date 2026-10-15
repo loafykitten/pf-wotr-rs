@@ -151,10 +151,12 @@ pub struct NavDriver {
     /// Definitions of a path recorded before the sim registered its request (a worker can finish
     /// before `ag_req_end`): its kind, and its points with `error` and `CompleteState` when given.
     early: HashMap<String, Vec<(String, Option<Def>)>>,
-    /// The trace records the movement simulation's steps (`ag_sim`); the last step the sim ran
-    /// (`maxMoveLength`, its result, the simulator after it), not yet read by the AI.
-    has_steps: bool,
+    /// The last step the sim ran (`maxMoveLength`, its result, the simulator after it), not yet
+    /// read by the AI.
     last_step: Option<(f32, bool, MovementSimulator)>,
+    /// The recorded `path_to`/`path_done` waiting for the sim's `PathTo`/`OnPathComplete`.
+    path_to: Option<usize>,
+    path_done: Option<usize>,
     /// Critters' requests (`path_critter`), and requests started inside spans taken from the
     /// recording.
     critters: std::collections::HashSet<String>,
@@ -249,8 +251,6 @@ impl Driver<'_> {
     pub(super) fn nav_start(&mut self, w: &mut World) {
         let trace = self.trace;
         let begin = trace.records.iter().find(|r| r["k"] == "begin");
-        self.ags.nav.has_steps =
-            trace.records.iter().any(|r| r["k"] == "obs" && r["ev"] == "ag_sim");
         // The global query settings `wr-phys` answers with (observer `phys_probe`): back faces
         // not hit (a mesh's would be; the terrain's rays come from above). Triggers fail closed
         // there either way.
@@ -533,6 +533,19 @@ impl Driver<'_> {
                 }
                 _ => Self::nav_unsupported(w, "a critter's request it can't read"),
             },
+            // `UnitMovementAgent.PathTo`'s and `OnPathComplete(Path)`'s prefixes (observer
+            // `Observe`): checked by the sim's call that follows, in turn-based combat.
+            "path_to" | "path_done" if w.combat.turn_based && self.ags.synced => {
+                let slot = if ev == "path_to" {
+                    &mut self.ags.nav.path_to
+                } else {
+                    &mut self.ags.nav.path_done
+                };
+                if slot.replace(i).is_some() {
+                    Self::nav_unsupported(w, format!("a {ev} without the sim's call"));
+                }
+            }
+            "path_to" | "path_done" => {}
             "path_fin" => self.nav_path_fin(w, r),
             "path_seek" => self.nav_path_seek(w, r),
             "path_mod" => self.nav_path_mod(w, r),
@@ -1221,6 +1234,8 @@ impl Driver<'_> {
                 && s.as_object().is_some_and(|o| o.len() == 11);
             ok.then_some((u, sim, f(&r["dt"])?, f(&r["max"])?))
         })();
+        // Both callers (`AiAction.ScorePath`, `PathVisualizer`) step by `0.1f`.
+        let parsed = parsed.filter(|(_, _, dt, _)| dt.to_bits() == 0.1f32.to_bits());
         let Some((u, mut sim, dt, max)) = parsed else {
             w.coverage.unsupported(format!(
                 "driven replay: agent: a simulation step it can't read ({})",
@@ -1341,17 +1356,93 @@ impl Driver<'_> {
         }
     }
 
+    /// `PathTo(destination, approachRadius, ...)`'s recorded prefix (`path_to`): the sim's call.
+    pub(super) fn nav_path_to(&mut self, w: &World, u: EntityIdx, dest: V3, radius: f32) -> R<()> {
+        if !self.ags.nav.paths {
+            return Ok(());
+        }
+        let Some(at) = self.ags.nav.path_to.take() else {
+            return Err(Desync("PathTo without its path_to".into()));
+        };
+        let r = &self.trace.records[at];
+        let from = w.unit(u).map(|x| x.combat.agent.pos);
+        if r["u"].as_str() != Some(w.entity(u).unique_id.as_str())
+            || v3(&r["dest"]).map(bits3) != Some(bits3(dest))
+            || f(&r["radius"]).map(f32::to_bits) != Some(radius.to_bits())
+            || v3(&r["from"]).map(bits3) != from.map(bits3)
+            || !fields(r, &["u", "dest", "radius", "from"])
+        {
+            return Err(Desync(format!(
+                "PathTo({dest:?}, {radius}) from {from:?}: the recording's path_to is {}",
+                describe(r)
+            )));
+        }
+        Ok(())
+    }
+
+    /// `OnPathComplete(Path)`'s recorded prefix (`path_done`): the delivered path's error, count,
+    /// end and `GetTotalLength()`, the sim's.
+    pub(super) fn nav_path_done(&mut self, w: &World, u: EntityIdx, err: bool, v: &[V3]) -> R<()> {
+        if !self.ags.nav.paths {
+            return Ok(());
+        }
+        let Some(at) = self.ags.nav.path_done.take() else {
+            return Err(Desync("OnPathComplete without its path_done".into()));
+        };
+        let r = &self.trace.records[at];
+        let end_ok = match v.last() {
+            Some(e) => v3(&r["end"]).map(bits3) == Some(bits3(*e)),
+            None => r.get("end").is_none(),
+        };
+        let keys: &[&str] = if v.is_empty() {
+            &["u", "error", "nodes", "length"]
+        } else {
+            &["u", "error", "nodes", "end", "length"]
+        };
+        let length = wr_nav::query::total_length(v);
+        if r["u"].as_str() != Some(w.entity(u).unique_id.as_str())
+            || r["error"].as_bool() != Some(err)
+            || r["nodes"].as_u64() != Some(v.len() as u64)
+            || !end_ok
+            || f(&r["length"]).map(f32::to_bits) != Some(length.to_bits())
+            || !fields(r, keys)
+        {
+            return Err(Desync(format!(
+                "OnPathComplete's path (error {err}, {} points, length {length}): the recording's path_done is {}",
+                v.len(),
+                describe(r)
+            )));
+        }
+        self.out.nav.deliveries += 1;
+        Ok(())
+    }
+
+    /// The AI's read of a grid node's `AllyBlocked` at `p` (`ScorePath`): the sim's grid's.
+    pub(super) fn nav_ai_blocked(&mut self, w: &World, p: V3, recorded: i64) -> R<()> {
+        if !self.ags.nav.paths {
+            return Ok(());
+        }
+        if !Self::nav_live(w) {
+            return Err(Desync("the AI reads AllyBlocked; the grid isn't the sim's".into()));
+        }
+        let world = &w.combat.nav.nav.as_ref().expect("live").world;
+        let ours = world.grid_nearest(p).node.map(|n| i64::from(world.ally_blocked(n)));
+        if ours != Some(recorded) {
+            return Err(Desync(format!(
+                "the AI's AllyBlocked under {p:?}: the sim's {ours:?}, the recording's {recorded}"
+            )));
+        }
+        self.out.nav.sim_grid_checked += 1;
+        Ok(())
+    }
+
     /// The AI's read of `ScorePath`'s simulation step (`msim`): the step the sim just ran.
     pub(super) fn nav_ai_msim(&mut self, max: f32, step: &crate::combat::ai::SimStep) -> R<()> {
         if !self.ag {
             return Ok(());
         }
         let Some((m, ret, sim)) = self.ags.nav.last_step.take() else {
-            if self.ags.nav.has_steps {
-                return Err(Desync("ScorePath's simulation step without the sim's step".into()));
-            }
-            self.ag_input("ScorePath's simulation step (no step recorded)");
-            return Ok(());
+            return Err(Desync("ScorePath's simulation step without the sim's step".into()));
         };
         let same = m.to_bits() == max.to_bits()
             && ret == step.ret
@@ -1381,6 +1472,9 @@ impl Driver<'_> {
                 w,
                 format!("graph events left: {left_rec} recorded, {left_ours} the sim's"),
             );
+        }
+        if self.ags.nav.path_to.is_some() || self.ags.nav.path_done.is_some() {
+            Self::nav_unsupported(w, "a path_to or path_done without the sim's call");
         }
         if self.ags.nav.tape.as_ref().is_some_and(|t| !t.is_empty()) {
             Self::nav_unsupported(w, "the recording's navigation clock reads left unused");

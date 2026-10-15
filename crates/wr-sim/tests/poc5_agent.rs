@@ -1068,6 +1068,25 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
                 .unwrap();
             recs[at]["kind"] = json!("XPath");
         }),
+        ("a simulation step it can't read", |recs| {
+            let (at, _) = sim_step(recs);
+            recs[at]["dt"] = json!(0.2);
+        }),
+        ("the recording's path_done", |recs| {
+            let fin = fin_of_done(recs);
+            let at = fin + recs[fin..].iter().position(|r| ev(r, "path_done")).unwrap();
+            recs[at]["length"] = json!(999.0);
+        }),
+        ("OnPathComplete without its path_done", |recs| {
+            let fin = fin_of_done(recs);
+            let at = fin + recs[fin..].iter().position(|r| ev(r, "path_done")).unwrap();
+            recs.remove(at);
+            renumber(recs);
+        }),
+        ("the recording's path_to", |recs| {
+            let at = tb(recs, |r| ev(r, "path_to"));
+            recs[at]["radius"] = json!(0.25);
+        }),
         ("a path no request started", |recs| {
             let at = fin_of_done(recs);
             recs[at]["path"] = json!("5198#99");
@@ -1103,10 +1122,25 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
     // The AI's read of a simulation step the sim ran (`poc5-tb-118`, whose AI walks; its run is
     // invalid on ports of other streams, so only the new report counts).
     if let Some(chain) = fixture_in("poc5-tb-118", "tb-chain") {
-        let msim: Vec<(&str, Change)> = vec![("ScorePath's simulation step", |recs| {
-            let at = pos(recs, |r| ev(r, "uc_v") && r["f"] == "msim");
-            recs[at]["len"] = json!(999.0);
-        })];
+        let msim: Vec<(&str, Change)> = vec![
+            ("ScorePath's simulation step", |recs| {
+                let at = pos(recs, |r| ev(r, "uc_v") && r["f"] == "msim");
+                recs[at]["len"] = json!("999");
+            }),
+            ("ScorePath's simulation step without the sim's step", |recs| {
+                // Every simulation record removed: the AI's reads stay.
+                recs.retain(|r| {
+                    !(ev(r, "ag_sim")
+                        || ev(r, "ag_sim_end")
+                        || ((ev(r, "ag_v") || ev(r, "ag_phys")) && r["ctx"] == "sim"))
+                });
+                renumber(recs);
+            }),
+            ("the AI's AllyBlocked under", |recs| {
+                let at = pos(recs, |r| ev(r, "uc_v") && r["f"] == "ablk");
+                recs[at]["v"] = json!(-1);
+            }),
+        ];
         damage_cases_of(&chain, "record", &msim, false);
     }
 }

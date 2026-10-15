@@ -2197,6 +2197,9 @@ impl AgentInputs for Driver<'_> {
     ) -> R<()> {
         let path = p.key.as_str();
         let r = self.ag_take(w, u, "ag_done", "OnPathComplete")?;
+        // `OnPathComplete(p, forcedPath)`'s prefix (`path_done`, right before `ag_done`): its
+        // path's.
+        self.nav_path_done(w, u, error, &p.points)?;
         // The path's contents (a delivered one's are the record's own; a `ForcedPath` is
         // constructed `Complete`).
         let pts: Option<Vec<V3>> = r["v"].as_array().and_then(|v| v.iter().map(v3).collect());
@@ -2243,6 +2246,13 @@ impl AgentInputs for Driver<'_> {
     }
     fn req_start(&mut self, w: &mut World, u: EntityIdx) -> R<()> {
         let r = self.ag_take(w, u, "ag_req", "PathTo/FindPath")?;
+        if r["fn"] == "pathto" {
+            let (p, radius) = (v3(&r["p"]), f(&r["r"]));
+            let (Some(p), Some(radius)) = (p, radius) else {
+                return Err(Desync(format!("a request record it can't read ({})", describe(&r))));
+            };
+            self.nav_path_to(w, u, p, radius)?;
+        }
         let want = self.ags.req_want.take();
         let shape = match r["fn"].as_str() {
             Some("pathto") => fields(
