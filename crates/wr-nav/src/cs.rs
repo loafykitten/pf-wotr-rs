@@ -236,6 +236,89 @@ pub fn quat_euler(deg: V3) -> [f32; 4] {
     ]
 }
 
+/// The player's `Vector3f` magnitude: `(x² + y²) + z²` and `sqrtf`, single precision.
+#[must_use]
+pub fn native_magnitude(a: V3) -> f32 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+/// The player's `Matrix3x3f::SetAxisAngle` (`m[row][col]`): `sincosf`, then Rodrigues' terms
+/// with `t = 1 - cos` multiplying the axis products.
+fn axis_angle(axis: V3, angle: f32) -> [[f32; 3]; 3] {
+    let (s, c) = angle.sin_cos();
+    let [x, y, z] = axis;
+    let t = 1.0 - c;
+    let (sx, sy, sz) = (s * x, s * y, s * z);
+    [
+        [c + t * (x * x), t * (x * y) - sz, sy + t * (x * z)],
+        [t * (x * y) + sz, c + t * (y * y), t * (y * z) - sx],
+        [t * (x * z) - sy, sx + t * (y * z), c + t * (z * z)],
+    ]
+}
+
+/// Unity's native `Vector3.RotateTowards` (`RotateTowards` in the player): `MoveTowards` when
+/// either vector is shorter than 1e-5 or they're within 1 - 1e-5 of parallel; else a rotation
+/// of the normalised `current` about `current × target` (Unity's `OrthoNormalVectorFast` axis
+/// when antiparallel) by `min(acos(dot), max_radians)`, scaled by the length clamped toward
+/// `target`'s by `max_magnitude`.
+#[must_use]
+#[expect(
+    clippy::neg_cmp_op_on_partial_ord,
+    reason = "the player's branches take a NaN the way these negations do"
+)]
+pub fn rotate_towards(current: V3, target: V3, max_radians: f32, max_magnitude: f32) -> V3 {
+    let lmag = native_magnitude(current);
+    let rmag = native_magnitude(target);
+    let move_towards = || {
+        let d = [target[0] - current[0], target[1] - current[1], target[2] - current[2]];
+        let sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        // Both tests branch on `le`, which a NaN takes.
+        if !(sq > max_magnitude * max_magnitude) {
+            return target;
+        }
+        let len = sq.sqrt();
+        if !(len > 1e-5) {
+            return current;
+        }
+        [0, 1, 2].map(|i| current[i] + d[i] / len * max_magnitude)
+    };
+    if !(lmag > 1e-5 && rmag > 1e-5) {
+        return move_towards();
+    }
+    let l = [current[0] / lmag, current[1] / lmag, current[2] / lmag];
+    let r = [target[0] / rmag, target[1] / rmag, target[2] / rmag];
+    let dot = l[0] * r[0] + l[1] * r[1] + l[2] * r[2];
+    // 0x3f7fff58: 1 - 1e-5 as the player's float.
+    let near = f32::from_bits(0x3f7f_ff58);
+    if dot > near {
+        return move_towards();
+    }
+    let (axis, angle) = if dot < -near {
+        let axis = if l[2].abs() > std::f32::consts::FRAC_1_SQRT_2 {
+            let k = 1.0 / (l[2] * l[2] + l[1] * l[1]).sqrt();
+            [0.0, -l[2] * k, l[1] * k]
+        } else {
+            let k = 1.0 / (l[0] * l[0] + l[1] * l[1]).sqrt();
+            [-l[1] * k, l[0] * k, 0.0]
+        };
+        (axis, max_radians)
+    } else {
+        let c = [l[1] * r[2] - l[2] * r[1], l[2] * r[0] - l[0] * r[2], l[0] * r[1] - l[1] * r[0]];
+        let n = native_magnitude(c);
+        let a = dot.acos();
+        ([c[0] / n, c[1] / n, c[2] / n], if a < max_radians { a } else { max_radians })
+    };
+    let m = axis_angle(axis, angle);
+    let rotated = [0, 1, 2].map(|i| m[i][0] * l[0] + m[i][1] * l[1] + m[i][2] * l[2]);
+    let delta = rmag - lmag;
+    let len = if delta > 0.0 {
+        lmag + if delta > max_magnitude { max_magnitude } else { delta }
+    } else {
+        lmag - if -delta > max_magnitude { max_magnitude } else { -delta }
+    };
+    rotated.map(|x| x * len)
+}
+
 /// Unity's native `Matrix4x4.TRS`, in float.
 #[must_use]
 pub fn trs(t: V3, q: [f32; 4], s: V3) -> M4 {

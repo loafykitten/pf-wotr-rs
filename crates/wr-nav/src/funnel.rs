@@ -50,16 +50,11 @@ fn qrot(q: Q, p: V3) -> V3 {
 /// `1.0 - (double)1e-6f`.
 const FROM_TO_PARALLEL: f64 = 1.0 - 1e-6_f32 as f64;
 
-/// The player's `Vector3f` magnitude: single precision throughout, unlike Mono's.
-fn native_magnitude(a: V3) -> f32 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
-}
-
 /// Unity's native `Quaternion.FromToRotation` (`FromToQuaternionSafe`), ported from the
 /// arm64 player's machine code: single-precision operations in this order, none fused.
 pub(crate) fn from_to_rotation(from: V3, to: V3) -> Q {
-    let nf = native_magnitude(from);
-    let nt = native_magnitude(to);
+    let nf = cs::native_magnitude(from);
+    let nt = cs::native_magnitude(to);
     if nf < 1e-5 || nt < 1e-5 {
         return [0.0, 0.0, 0.0, 1.0];
     }

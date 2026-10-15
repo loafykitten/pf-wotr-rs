@@ -25,8 +25,10 @@ survey and notes on other rewrites.
   - POC-6 render round 3 (`docs/poc6/render-round3.md`): realtime shadows; FLIP 0.1246. Next: light probes.
   - Nav (`docs/poc0/extraction.md` §9, `crates/wr-nav`): every path query exact, smoothing included (the native
     math ported from `UnityPlayer.dylib` and checked against it, `native_check.rs`). The sim's input is the area's nav
-    file (`cache/sim/nav/<guid>.wrnav`, written by `wr-import nav-pack`, also from `scripts/scene-cache.sh`). Next:
-    `UnitMovementAgent`.
+    file (`cache/sim/nav/<guid>.wrnav`, written by `wr-import nav-pack`, also from `scripts/scene-cache.sh`).
+  - The movement agent (`docs/poc5/movement.md`): observer `agent`, captures `poc5-tb-100` to `-103`; turn-based
+    `TickMovement` (`combat/agent.rs`) bit-identical on all 24,525 recorded ticks. Next: `PathTo` (orientation),
+    `OnPathComplete`, `UnitMoveController` in the driven replay.
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in
     parallel (recordings, POC-6 render comparisons, Metal captures of the original), never timing. Setup, sync and

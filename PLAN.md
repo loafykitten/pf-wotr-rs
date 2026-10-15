@@ -11,6 +11,16 @@ is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **The movement agent (twenty-second session, `docs/poc5/movement.md`): `TickMovement` exact against the game.**
+  WrathOracle's new observer `agent` (`CommandObsAgent.cs`, three gpt-6.1-sol review rounds) records the agent's state,
+  leaves, physics queries, path requests and completions; `poc5-tb-100` to `-103` (Manual_18, both fights) are clean.
+  `crates/wr-sim/src/combat/agent.rs` ports turn-based `TickMovement` (`CanMoveInTurnBased`, `SlowDown`, `Move`
+  without the navmesh clamp, `SetWaypoint`, the ends, `Stop`'s `ConnectToGroups`) with Mono's arithmetic and Unity's
+  managed vector math (`decompiled/UnityEngine.CoreModule`), and the native `Vector3.RotateTowards` (`wr-nav`, checked
+  against the player): rerun from each recorded state, **all 24,525 recorded turn-based ticks are bit-identical**, the
+  agent's own calls and its calls into the view in the recorded order (gpt-6.1-sol: the observer four rounds, the
+  model three).
+  Not yet in the driven replay: `PathTo` (needs orientation), `OnPathComplete`, `UnitMoveController` (next).
 - **Nav (twenty-second session, `docs/poc0/extraction.md` §9): every path query exact, smoothing included.** The
   funnel's `Quaternion.FromToRotation` is now a port of the arm64 player's own machine code (found through the icall
   table in `UnityPlayer.dylib`): single-precision magnitudes, Möller and Hughes' original `h = (1 - e) / |v|²`, double
@@ -243,7 +253,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): what the AI and the commands still
    read as inputs (group memory and visibility, the movement agent and pathing, animation, the Unity clock) mostly wait
    for their own ports (memory, nav: the searches and smoothing are exact, `crates/wr-nav` and the
-   nav files are in place, next is `UnitMovementAgent`); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
+   nav files are in place; `UnitMovementAgent.TickMovement` is ported and exact against the records, next its `PathTo`,
+   `OnPathComplete` and `UnitMoveController` in the driven replay: `docs/poc5/movement.md`, steps); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
    exercise the AI's movement simulation (`ScorePath`). The movement agent waits for the nav port. The UI's requests
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
@@ -262,6 +273,10 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
+- **Twenty-second session (2026-10-15):** captures `poc5-tb-100` to `-103` are the agent's (`-103` has the current observer; the checker
+  reads the older ones with what they lack taken as noted in `docs/poc5/movement.md`); `-98`/`-99` archived. `UnityEngine.CoreModule` is decompiled into
+  `decompiled/UnityEngine.CoreModule` (Vector2/Vector3/Mathf/Quaternion's managed code). The agent's check:
+  `cargo test --release -p wr-sim --lib every_recorded_tick -- --ignored --nocapture` (`WR_AGENT_CAPTURES` picks others).
 - **Twenty-first session (2026-10-15):** the regression baseline is `cache/regress/out-facthandlers` (identical to
   `out-camelia2` but Manual_10's coverage). `wr-combat replay` doesn't print executed handlers; a temporary print of
   `w.coverage.executed` is how round 13 counted them.

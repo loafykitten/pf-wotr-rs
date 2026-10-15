@@ -18,6 +18,9 @@ const FROM_TO: (usize, &str) = (0x5c4ea4, "ffc301d1fd7b06a9fd8301910004402d");
 const INVERSE: (usize, &str) = (0x5c32e8, "ff8302d1fd7b09a9fd430291e88400b0");
 const TRS: (usize, &str) = (0x5c4010, "4004402d0228201e2328211e4414412d");
 const EULER: (usize, &str) = (0x5bc874, "ed33bb6deb2b016de923026df44f03a9");
+/// `Vector3.RotateTowards_Injected`, the icall stub (its out parameter avoids the indirect
+/// result register the implementation uses).
+const ROTATE_TOWARDS: (usize, &str) = (0x81be34, "ffc300d1f44f01a9fd7b02a9fd830091");
 
 #[repr(C)]
 struct Quat([f32; 4]);
@@ -44,7 +47,7 @@ impl Player {
         let anchor = unsafe { libc::dlsym(h, sym.as_ptr()) } as usize;
         assert_ne!(anchor, 0, "{} not exported", ANCHOR.0);
         let p = Self { base: anchor - ANCHOR.1 };
-        for (off, bytes) in [(ANCHOR.1, ANCHOR.2), FROM_TO, INVERSE, TRS, EULER] {
+        for (off, bytes) in [(ANCHOR.1, ANCHOR.2), FROM_TO, INVERSE, TRS, EULER, ROTATE_TOWARDS] {
             // SAFETY: inside the loaded image's text segment.
             let have = unsafe { std::slice::from_raw_parts((p.base + off) as *const u8, 16) };
             let have: String = have.iter().map(|b| format!("{b:02x}")).collect();
@@ -86,6 +89,19 @@ impl Player {
             unsafe { std::mem::transmute(self.base + EULER.0) };
         let rad = deg.map(|x| x * 0.017_453_292_f32);
         fun(&rad, 4).0
+    }
+}
+
+impl Player {
+    /// `Vector3.RotateTowards_Injected(ref current, ref target, maxRadiansDelta,
+    /// maxMagnitudeDelta, out ret)`.
+    fn rotate_towards(&self, a: V3, b: V3, max_radians: f32, max_magnitude: f32) -> V3 {
+        // SAFETY: the icall stub's signature: two vector pointers, two floats, an out pointer.
+        let fun: extern "C" fn(*const V3, *const V3, f32, f32, *mut V3) =
+            unsafe { std::mem::transmute(self.base + ROTATE_TOWARDS.0) };
+        let mut out = [0.0f32; 3];
+        fun(&a, &b, max_radians, max_magnitude, &mut out);
+        out
     }
 }
 
@@ -207,5 +223,27 @@ fn native_math_matches_the_player() {
             "inverse({m:?})"
         );
     }
-    eprintln!("from_to {checked:?}, {n} matrices ({singular} singular): all bit-identical");
+    // RotateTowards as TickMovement calls it (2D directions as Vector3s, radians per tick, 1)
+    // and generally: unit and random lengths, near-parallel and antiparallel pairs, zero.
+    for i in 0..n {
+        let a = rng.v3(2.0);
+        let b = match i % 4 {
+            0 => rng.v3(2.0),
+            1 => [-a[0] + rng.comp(1e-3), -a[1] + rng.comp(1e-3), -a[2] + rng.comp(1e-3)],
+            2 => [a[0] + rng.comp(1e-3), a[1] + rng.comp(1e-3), a[2] + rng.comp(1e-3)],
+            _ => [rng.comp(1.0), rng.comp(1.0), 0.0],
+        };
+        let (a, b) = if i % 4 == 3 { ([a[0], a[1], 0.0], b) } else { (a, b) };
+        let max_radians = rng.comp(0.5);
+        let max_magnitude = if i % 2 == 0 { 1.0 } else { rng.comp(3.0) };
+        let want = p.rotate_towards(a, b, max_radians, max_magnitude);
+        assert_eq!(
+            bits(cs::rotate_towards(a, b, max_radians, max_magnitude)),
+            bits(want),
+            "RotateTowards({a:?}, {b:?}, {max_radians}, {max_magnitude}) = {want:?}"
+        );
+    }
+    eprintln!(
+        "from_to {checked:?}, {n} matrices ({singular} singular), {n} rotations: all bit-identical"
+    );
 }

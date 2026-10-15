@@ -78,6 +78,7 @@ internal static class PathSync
             Owed.Clear();
             _intercept = true;
         }
+        lock (Keys) Keys.Clear();
         Tape.Clear();
         StartTape.Clear();
         StartKeys.Clear();
@@ -168,6 +169,23 @@ internal static class PathSync
         catch (Exception e) { Health.Failed("path sync release", e); }
     }
 
+    // Every request's key in this window, by the Path object and its pathID (A* pools Path objects: a pooled one
+    // reused for a new request has another pathID).
+    private static readonly Dictionary<Path, (ushort id, string key)> Keys = new Dictionary<Path, (ushort, string)>(new RefEq());
+
+    private sealed class RefEq : IEqualityComparer<Path>
+    {
+        public bool Equals(Path a, Path b) => ReferenceEquals(a, b);
+        public int GetHashCode(Path p) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(p);
+    }
+
+    // The PathSync key of the request `p` currently is, if it was made in this window.
+    internal static string KeyOf(Path p)
+    {
+        if (p == null) return null;
+        lock (Keys) return Keys.TryGetValue(p, out var e) && e.id == p.pathID ? e.key : null;
+    }
+
     // The track of a live request (pathID guards against a pooled Path reused for a new request).
     private static Track Find(Path p)
     {
@@ -194,6 +212,7 @@ internal static class PathSync
             PerRequester[who] = n + 1;
             k = who + "#" + n;
         }
+        lock (Keys) Keys[path] = (path.pathID, k);
         var end = EndOf(path);
         var cbs = who == "?" ? CallbackNames(path) : null;
         Sched.Obs("path_start", j => { j.Prop("path", k); j.Prop("strict", strict); if (end.HasValue) j.Prop("e", end.Value); if (cbs != null) j.Prop("cb", cbs); });

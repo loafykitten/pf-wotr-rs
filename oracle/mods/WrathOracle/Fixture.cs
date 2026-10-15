@@ -308,6 +308,7 @@ internal static class Fidelity
         TurnTickObs.Install(h);
         CommandObs.Install(h);
         if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets", "impatience" });
+        if (CommandObs.AgOn) Observers.Add("agent");
         // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
         // units outside turn-based windows (aa_awake): declared when their patches installed.
         var failed = Health.FailedCount;

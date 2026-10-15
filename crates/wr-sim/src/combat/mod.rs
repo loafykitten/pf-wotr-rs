@@ -10,6 +10,7 @@
 //! - [`rules`]: combat rules.
 //! - [`weapon`]: weapons, dice, a unit's weapon slots.
 
+pub mod agent;
 pub mod ai;
 pub mod attack;
 pub mod commands;
@@ -66,6 +67,8 @@ pub struct UnitCombat {
     pub tgt: targets::UnitTargets,
     /// `CombatAiData`'s impatience state.
     pub imp: impatience::UnitImpatience,
+    /// The view's movement agent (`UnitMovementAgent`).
+    pub agent: agent::Agent,
 }
 
 /// A timer (UniRx `Observable.Timer`) that removes a buff when it fires

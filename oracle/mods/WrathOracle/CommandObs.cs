@@ -90,6 +90,7 @@ internal static partial class CommandObs
         _atk.Clear();
         _atkCfg.Clear();
         Uct.Clear();
+        ResetAgentWindow();
     }
 
     // ---- fields ----
@@ -1678,5 +1679,8 @@ internal static partial class CommandObs
 
         // The impatience controller (observer "impatience", CommandObsImpatience.cs).
         InstallImpatience(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+
+        // The movement agent (observer "agent", CommandObsAgent.cs).
+        InstallAgent(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
     }
 }
