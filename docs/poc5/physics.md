@@ -122,20 +122,21 @@ these vertical results: the origins lie inside the field's inflated bounds, so t
 `Scene` answers only what is established; otherwise a `QueryError` the caller reports:
 
 - `Unverified { shape }`: the ray may touch a box, mesh or other collider within `[0, max]`. The test is in `f64` on
-  the collider's geometry under its `localToWorldMatrix`, with a slack along the ray and around the edges of 1 mm
-  plus a millionth of the coordinates' and distance's magnitude (`f32` rounding in PhysX: a box 1 cm beyond a
-  1,000 km ray rounds into it) and of the game's own `f32` placement of the shape (a millionth of the translation's
-  and each scaled local coordinate's magnitude, which cancellation can leave far larger than the world coordinate),
-  plus, for a mesh's triangles, BV4's barycentric enlargement (`mGeomEpsilon`, 2^-22 of the largest local coordinate, as cooking
-  computes it) and a float-error allowance (the slack and 1e-5 of the edges, divided by the conditioning below) that
-  grows as the ray turns parallel to the triangle and as the triangle thins (where the two together pass a thousandth, or the triangle is degenerate in `f64`, PhysX's `f32`
-  cancellation can place a hit anywhere its midphase reaches, so the shape's own grown bounds decide: a mesh's grown by
-  every triangle's allowance and a hundredth of its extent, the pruner's 1.01 inflation and BV4's quantized nodes).
-  The record test runs its 57,321 queries in a few seconds (release). The native box check asserts this test counts every hit the player's
-  `raycast_box` reports (a million rays, grazing ones and rays ending at the hit included). Spheres, capsules and controllers count as the
-  sphere of radius `(r + h/2)` times the largest scale, convex meshes as their grown bounds. The importer refuses a
-  sheared transform (a rotated child of a non-uniformly scaled parent: its matrix-transformed shape needn't enclose
-  what Unity hands PhysX); none occurs here. PhysX's per-shape box raycast is ported and exact, but how Unity turns a
+  the collider's geometry under its `localToWorldMatrix`, with a slack along the ray and around the edges of 1 mm plus
+  a millionth of the coordinates' and distance's magnitude (`f32` rounding in PhysX: a box 1 cm beyond a 1,000 km ray
+  rounds into it) and of the game's own `f32` placement of the shape (a millionth of the translation's and each scaled
+  local coordinate's magnitude, which cancellation can leave far larger than the world coordinate), plus, for a mesh's
+  triangles, BV4's barycentric enlargement (`mGeomEpsilon`, 2^-22 of the largest local coordinate, as cooking computes
+  it) and a float-error allowance (the slack and 1e-5 of the edges, divided by the conditioning below) that grows as
+  the ray turns parallel to the triangle and as the triangle thins (where the two together pass a thousandth, or the
+  triangle is degenerate in `f64`, PhysX's `f32` cancellation can place a hit anywhere its midphase reaches, so the
+  shape's own grown bounds decide: a mesh's grown by every triangle's allowance and a hundredth of its extent, the
+  pruner's 1.01 inflation and BV4's quantized nodes). The record test runs its 57,321 queries in a few seconds
+  (release). The native box check asserts this test counts every hit the player's `raycast_box` reports (a million
+  rays, grazing ones and rays ending at the hit included). Spheres, capsules and controllers count as the sphere of
+  radius `(r + h/2)` times the largest scale, convex meshes as their grown bounds. The importer refuses a sheared
+  transform (a rotated child of a non-uniformly scaled parent: its matrix-transformed shape needn't enclose what Unity
+  hands PhysX); none occurs here. PhysX's per-shape box raycast is ported and exact, but how Unity turns a
   `BoxCollider` into a `PxBoxGeometry` and shape pose (centre, lossy scale, its tolerance for "unscaled") isn't
   verified, and the BVH34 mesh raycast (`BV4_RaycastSingle`'s `RayTriOverlapT` and its transforms) isn't ported.
 - `Unsupported`: a trigger collider in the mask (`queriesHitTriggers`), the `*_!Visual` layer ambiguity above, more
