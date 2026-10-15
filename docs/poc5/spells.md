@@ -132,9 +132,9 @@ with one such record put after t=2347's vision records replays valid.
   the input's spell (`Ability::memorized`) and is checked against it (`tgt_driver_after`).
 - `combat/replay/spells.rs`: a root `RuleCalculateAbilityParams` from `RuleCastSpell`'s constructor
   in `UnitUseAbility.OnAction` begins the sim's cast for the running `UnitUseAbility` of its
-  initiator (its snapshot checked: spell, spellbook and owner, level, source, no metamagic or
-  overrides); the next root `RuleCastSpell` from `OnAction` is the sim's cast (its spell, target,
-  cutscene and failure fields checked). Both are placed in the commands' phase. A root
+  initiator (its snapshot checked: spell and its caster, spellbook and owner, level, source, no
+  metamagic or overrides); the next root `RuleCastSpell` from `OnAction` is the sim's cast (its
+  spell, context and target, written as `RuleApplySpell`'s, cutscene and failure fields checked). Both are placed in the commands' phase. A root
   `RuleSpellResistanceCheck`, `RuleRollDice`, `RuleCanApplyBuff` or `RuleApplySpell` from
   `AbilityExecutionController.Tick` is the sim's own (placed in the new `Phase::Abilities`, which
   runs the processes' tick; one in a frame where the sim ticked none is reported); one of those
@@ -157,8 +157,8 @@ context's `Direction` (positions) isn't kept (no element of this spell reads it)
 
 `crates/wr-sim/tests/poc5_spells.rs` (ignored, real data): every `tb-cast` run valid with the cast
 computed (2 cast roots, 5 process roots), its end state equal; `tb-chain` T0-equal with only the
-combat log's knowledge event left; 17 damaged `tb-cast` recordings (the params' and the cast's
-snapshots, a missing params or cast root, the resistance check from another caller, a process root
+combat log's knowledge event left; 20 damaged `tb-cast` recordings (six of the params' and the
+cast's snapshots, a missing params or cast root, the resistance check from another caller, a process root
 of another class, the resistance d20, the params' DC, the buff's attach, four `RuleApplySpell`
 inputs, the driver's spell and slot, the cast's end chain), each reported or T0-unequal.
 `replay::tests`: a recorded reveal queues the unit as the game did; reveals the replay can't place

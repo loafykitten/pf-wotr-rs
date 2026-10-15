@@ -170,6 +170,7 @@ impl Driver<'_> {
             && f["Spellbook"]["blueprint"].as_str() == Some(sb.as_str())
             && f["Spellbook"]["owner"].as_str() == Some(caster.as_str())
             && f["AbilityData"]["$ability"].as_str() == Some(guid.as_str())
+            && f["AbilityData"]["caster"]["$unit"].as_str() == Some(caster.as_str())
             && f["m_SpellLevel"].as_i64() == Some(i64::from(a.spell_level(w)))
             && f["m_SpellSource"].as_i64() == Some(a.spell_source(w))
             && f["m_MetamagicData"].is_null()
@@ -186,18 +187,16 @@ impl Driver<'_> {
         Ok(())
     }
 
-    /// The pending cast's `RuleCastSpell`: its snapshot's spell and target the context's.
+    /// The pending cast's `RuleCastSpell`: its snapshot's spell, context and target the pending cast's.
     fn cast(&mut self, w: &mut World, r: &J) -> Result<(), String> {
         let i = w.combat.spells.pending.take().ok_or("no context before it")?;
         let ctx = w.combat.spells.context(i).cloned().ok_or("its context")?;
         let c = self.casting_command(w, r)?;
         let cutscene = w.combat.commands.get(c).is_some_and(|x| x.cutscene);
         let f = &r["fields"];
-        let guid = ctx.ability.spell.blueprint.to_string();
-        let target = &w.entity(ctx.target).unique_id;
-        let ok = f["Spell"]["$ability"].as_str() == Some(guid.as_str())
-            && f["SpellTarget"]["UnitRef"]["$unit"].as_str() == Some(target.as_str())
-            && f["SpellTarget"]["IsUnit"] == true
+        let inputs =
+            crate::combat::spells::spell_inputs(w, i, Some(ctx.target)).ok_or("its context")?;
+        let ok = ["Spell", "Context", "SpellTarget"].iter().all(|k| f[*k] == inputs[*k])
             && f["IsCutscene"] == false
             && f["ForceFail"] == false
             && f["SpellFailureChance"] == 0;

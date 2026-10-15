@@ -135,7 +135,7 @@ fn apply(recs: &[V], n: usize) -> usize {
         .expect("a RuleApplySpell")
 }
 
-const CASES: [(Want, Change); 17] = [
+const CASES: [(Want, Change); 20] = [
     // The params' snapshot isn't the command's spell.
     (Want::Report("a cast's ability params"), |recs| {
         let at = root(recs, PARAMS);
@@ -145,10 +145,22 @@ const CASES: [(Want, Change); 17] = [
         let at = root(recs, PARAMS);
         recs[at]["fields"]["Spellbook"]["blueprint"] = json!("00000000000000000000000000000001");
     }),
-    // The cast's target isn't the command's.
+    (Want::Report("a cast's ability params"), |recs| {
+        let at = root(recs, PARAMS);
+        recs[at]["fields"]["AbilityData"]["caster"]["$unit"] = json!("558A");
+    }),
+    // The cast's target, spell or context isn't the command's.
     (Want::Report("a RuleCastSpell"), |recs| {
         let at = root(recs, CAST_RULE);
         recs[at]["fields"]["SpellTarget"]["UnitRef"]["$unit"] = json!("5671");
+    }),
+    (Want::Report("a RuleCastSpell"), |recs| {
+        let at = root(recs, CAST_RULE);
+        recs[at]["fields"]["Spell"]["caster"]["$unit"] = json!("558A");
+    }),
+    (Want::Report("a RuleCastSpell"), |recs| {
+        let at = root(recs, CAST_RULE);
+        recs[at]["fields"]["Context"]["$context"] = json!("00000000000000000000000000000005");
     }),
     // A cast without its context (the params' root gone).
     (Want::Report("a RuleCastSpell"), |recs| {

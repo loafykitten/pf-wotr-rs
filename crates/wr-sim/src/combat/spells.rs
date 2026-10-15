@@ -715,6 +715,30 @@ impl RuleEvent for RuleCastSpell {
     rule_boilerplate!();
 }
 
+/// A cast's `Spell`, `Context` and `SpellTarget` (`target`) as WrathOracle writes them in a rule's
+/// snapshot (`RuleCastSpell`, `RuleApplySpell`); `None` without the context.
+#[must_use]
+pub fn spell_inputs(w: &World, ctx: u32, target: Option<EntityIdx>) -> Option<J> {
+    let c = w.combat.spells.context(ctx)?;
+    let caster = json!({ "$unit": w.entity(c.ability.caster).unique_id });
+    let context = c.mech.associated_blueprint.map(|g| g.to_string());
+    // `TargetWrapper(unit)`: `m_Point` left zero, no orientation.
+    let spell_target = target.map_or(J::Null, |t| {
+        json!({
+            "UnitRef": { "$unit": w.entity(t).unique_id },
+            "m_Point": [0.0, 0.0, 0.0],
+            "m_Orientation": null,
+            "IsUnit": true,
+            "IsOrientationSpecified": false,
+        })
+    });
+    Some(json!({
+        "Spell": { "$ability": c.ability.spell.blueprint.to_string(), "caster": caster },
+        "Context": { "$context": context, "caster": caster },
+        "SpellTarget": spell_target,
+    }))
+}
+
 /// `RuleApplySpell` (`OnTrigger` empty).
 #[derive(Debug)]
 pub struct RuleApplySpell {
@@ -738,25 +762,9 @@ impl RuleApplySpell {
         target: Option<EntityIdx>,
         after: bool,
     ) -> Self {
-        let inputs = w.combat.spells.context(ctx).map(|c| {
-            let caster = json!({ "$unit": w.entity(c.ability.caster).unique_id });
-            let context = c.mech.associated_blueprint.map(|g| g.to_string());
-            // `TargetWrapper(unit)`: `m_Point` left zero, no orientation.
-            let spell_target = target.map_or(J::Null, |t| {
-                json!({
-                    "UnitRef": { "$unit": w.entity(t).unique_id },
-                    "m_Point": [0.0, 0.0, 0.0],
-                    "m_Orientation": null,
-                    "IsUnit": true,
-                    "IsOrientationSpecified": false,
-                })
-            });
-            json!({
-                "Spell": { "$ability": c.ability.spell.blueprint.to_string(), "caster": caster },
-                "Context": { "$context": context, "caster": caster },
-                "SpellTarget": spell_target,
-                "Place": i32::from(after),
-            })
+        let inputs = spell_inputs(w, ctx, target).map(|mut o| {
+            o["Place"] = json!(i32::from(after));
+            o
         });
         Self { base: RuleBase::default(), ctx, initiator, target, after, inputs }
     }
