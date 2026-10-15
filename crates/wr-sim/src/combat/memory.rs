@@ -97,6 +97,8 @@ pub enum Change<K> {
     Removed(K),
     /// `Cleanup` removed it (WrathOracle's `mem_remove` by `Cleanup`).
     Cleaned(K),
+    /// `Clear()` of a memory holding this many keys (WrathOracle's `mem_clear`, when not empty).
+    Cleared(usize),
 }
 
 impl<K: Copy + Eq + Hash> Default for GroupMemory<K> {
@@ -122,11 +124,6 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
     /// From now on, `Add` and `Remove` log the keys they change.
     pub fn log_changes(&mut self) {
         self.log.get_or_insert_with(Vec::new);
-    }
-
-    /// From now on, nothing is logged (what was logged is dropped).
-    pub fn stop_logging(&mut self) {
-        self.log = None;
     }
 
     /// The changes logged since the last call.
@@ -196,6 +193,10 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
 
     /// `Clear()`.
     pub fn clear(&mut self) {
+        let n = self.units.len();
+        if let Some(log) = self.log.as_mut().filter(|_| n > 0) {
+            log.push(Change::Cleared(n));
+        }
         self.units_list_valid = false;
         self.clear_enemies();
         self.units_list.clear();
@@ -292,6 +293,30 @@ impl<K: Copy + Eq + Hash> GroupMemory<K> {
             }
             self.enemies_valid = true;
         }
+        &self.enemies
+    }
+
+    /// `Enemies`' fill done step by step by a caller whose reads can change this memory while it
+    /// fills (a `Group` read runs `UpdateGroup`, whose `Add` clears the enemy list being filled):
+    /// `None` while the cache is valid (the list as cached); else the keys to walk, the list
+    /// cleared. The caller pushes each key it keeps ([`Self::push_enemy`]) and ends the fill
+    /// ([`Self::end_enemies_fill`]).
+    pub fn begin_enemies_fill(&mut self) -> Option<Vec<K>> {
+        if self.enemies_valid {
+            return None;
+        }
+        self.enemies.clear();
+        Some(self.units.keys().collect())
+    }
+
+    /// `m_EnemiesList.Add(value)` during a fill.
+    pub fn push_enemy(&mut self, k: K) {
+        self.enemies.push(k);
+    }
+
+    /// `m_EnemiesListValid = true`: the fill's end; the list as filled.
+    pub fn end_enemies_fill(&mut self) -> &[K] {
+        self.enemies_valid = true;
         &self.enemies
     }
 

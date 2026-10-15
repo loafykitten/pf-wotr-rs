@@ -165,9 +165,6 @@ pub struct Outcome {
     pub mem_inputs: usize,
     pub mem_rows: usize,
     pub mem_fills: usize,
-    /// Caches filled by readers the sim doesn't run at a moment the recording doesn't establish,
-    /// taken (their keys in order, Enemies' each an enemy).
-    pub mem_fills_taken: usize,
     pub mem_changes: usize,
     /// The other models' reads of the memory checked against the recording's, by reader.
     pub mem_checked: BTreeMap<&'static str, usize>,
@@ -493,6 +490,8 @@ pub enum Phase {
     LeavePrefix,
     /// `UnitCombatLeaveController`.
     Leave,
+    /// `UnitReturnToConsciousController`: out of combat, each unit's group memory's `Enemies`.
+    Conscious,
     /// `UnitProneController`.
     Prone,
     /// `UnitHelplessController`.
@@ -507,7 +506,7 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 13] = [
+const WORK: [Phase; 14] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
@@ -517,6 +516,7 @@ const WORK: [Phase; 13] = [
     Phase::Buffs,
     Phase::Life,
     Phase::Leave,
+    Phase::Conscious,
     Phase::Helpless,
     Phase::Inspect,
     Phase::GameLog,
@@ -537,6 +537,7 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         Phase::Time | Phase::Commands | Phase::Projectiles | Phase::Fx | Phase::Life => m != PAUSE,
         Phase::Join | Phase::Prepare | Phase::LeavePrefix | Phase::Leave => m == DEFAULT,
         Phase::Memory => m == DEFAULT,
+        Phase::Conscious => m == DEFAULT || m == DIALOG || m == CUTSCENE,
         Phase::Groups | Phase::Move => m != PAUSE,
         Phase::Cooldowns => m == DEFAULT,
         Phase::Inspect => m == DEFAULT || m == DIALOG || m == CUTSCENE,
@@ -1379,6 +1380,19 @@ impl<'t> Driver<'t> {
         } else {
             None
         };
+        // A replay's `hash` records say whether the value was the tape's: checked against the
+        // record run's when the tape is the record run's trace.
+        d.mem.replay = ob.as_ref().is_some_and(|b| b["mode"] != "record");
+        d.mem.tape = (!std::ptr::eq(tape_trace, trace)
+            && tb.as_ref().is_some_and(|b| b["mode"] == "record"))
+        .then(|| {
+            tape_trace
+                .records
+                .iter()
+                .filter(|r| r["k"] == "obs" && r["ev"] == "hash")
+                .filter_map(|r| Some((r["u"].as_str()?.to_owned(), r["h"].as_i64()?)))
+                .collect()
+        });
         // The movement agent is the sim's with the `agent` observer and its synchronization
         // records (`agent_sync`: the states where real time ends, positions written outside the
         // agent, `PreviousPosition` at the start). An older capture (`agent` alone) replays with
@@ -1482,6 +1496,7 @@ impl<'t> Driver<'t> {
         self.tgt_frame_end(w);
         self.imp_frame_end(w);
         self.mem_frame_end(w);
+        self.mem_finish(w);
         self.out.mem_checked = std::mem::take(&mut w.combat.memory.checked);
         self.uc_finish(w);
         self.ags.ending = true;
@@ -1903,9 +1918,8 @@ impl Driver<'_> {
                     };
                     super::groups::leave_tick(w, gate);
                 }
+                Phase::Conscious => self.mem_return_to_conscious(w),
                 Phase::Sleeping => {
-                    // (`FogOfWarController` ticks before it: its read of the party's memory.)
-                    self.mem_fog_of_war(w);
                     // The prefix's rows were written for the previous snapshot's units.
                     self.pos.note_prefix(w, self.tick);
                     super::life::update_awake(w);

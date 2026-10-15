@@ -397,15 +397,19 @@ captures replay as before (`-109`, `-95`, `-96` unchanged).
   leaves: `apeace`, `ready` (fog of war), `near` (vision range, in the set's order), `pass`, `los`, `stl`, `seen`
   (the invisibility loop), the identity hashes (the run's `hash` records). Each `pass` row, each `end` row and every
   memory at the tick's entry and end is compared slot for slot with the sim's, and the memory's own `mem_add` /
-  `mem_remove` records with the sim's changes, in order, at every read. A difference is reported and the recorded
-  state taken.
+  `mem_remove` records with the sim's changes, in order, at every read (a group made during the tick logs its own,
+  every memory's changes being logged). A difference is reported and the recorded state taken. The rows are compared
+  with the last one recorded for the group's id, as WrathOracle's `LastMem` is kept (a group disposed and made again
+  under its id starts from its old row).
 - **Between ticks** the memory changes as the sim changes it: the readers' cache fills, `Remove` at a destruction,
-  the cache clears. Each `pre` row is checked: the dictionary must be the sim's. The fog of war's read is modelled
-  (`FogOfWarController`, before the sleeping units: in combat, `Player.Group.Memory.Enemies`). A cache filled by a
-  reader the sim doesn't run (the AI's ally lists `FillGroupFromMemory`, the agent's obstacles, the UI) is taken
-  when it equals the sim's own fill now ("verified", 23,295 over the 24 runs), or, failing that, when it can be a fill
-  at another moment: the memory's keys in their order, each an enemy for `Enemies` ("taken", 24: one a run, a stale
-  party list after a unit left the game). Anything else is reported.
+  `Clear` at a disposal, the cache clears. The memory's own records of its changes between ticks (`mem_add`,
+  `mem_remove`, `mem_clear` with its count) are matched with the sim's, in order, at each tick's entry and at the
+  window's end (393 changes matched in and between ticks over the 24 runs). Each `pre` row is checked: the dictionary
+  must be the sim's. `UnitReturnToConsciousController` is modelled (its own phase after the leave controller, in
+  Default, Dialog and Cutscene: out of combat, each unit of `State.Units` not in combat reads its group's
+  `Memory.Enemies`, filling it). A cache filled by a reader the sim doesn't run (the fog of war, whose early-outs
+  the recording doesn't establish; the AI's ally lists `FillGroupFromMemory`; the agent's obstacles; the UI) is
+  taken only when it equals the sim's own fill now (9,168 over the 24 runs); anything else is reported.
 - **The readers' reads are checks** (`memory::sim::check`: the sim's value used, the recorded one compared, a
   difference reported): the engagement's `Enemies` (313,953 over the 24 runs), the AI's `Enemies` (1,671) and
   `HasPlayerCharacterInMemory` (none in these fights), `UnitAttack`'s `Enemies` (42), the attack of opportunity's
@@ -414,16 +418,19 @@ captures replay as before (`-109`, `-95`, `-96` unchanged).
   controller reads the sim's memory (`Contains`, `UnitsList`, which it fills), its `leave_tick` rows checked against
   it (a list a reader the sim doesn't run filled taken as above).
 - **The queue.** `AddToMemory` from offensive actions and commands' acts runs on the sim's controller: each `mem_q`'s
-  `queued` is checked (`mem_queued_checked`).
+  `peaceful` (the target's `Faction.Peaceful`) and `queued` are checked (`mem_queued_checked`).
+- **Hashes.** A replay's `hash` records carry `tape`; with the record run's trace as the tape, a taped value must be
+  the record run's and an untaped one absent from it. A replay replayed on its own trace has only the flag checked.
 
 Counters: `wr-combat replay` prints `memory computed: ticks …, reads checked …, inputs …, states checked …, fills by
-unmodelled readers … (verified) … (taken), changes matched …; readers' reads checked {…}`. On every run of
+unmodelled readers verified …, changes matched …; readers' reads checked {…}`. On every run of
 `poc5-tb-111`, `-112`, `-113` and `-114` the replay is valid (equal T0 stream, nothing reported); per record run: ticks
 2,484 / 2,713, 3,007 / 1,992, 2,033 / 1,873, 2,883 / 2,656 (focus / nearest), 164,786 to 290,262 tick reads checked.
 `computed_memory_replays_are_valid_and_damage_is_reported` (`tests/poc5.rs`) replays `-111` and `-114`'s 12 runs and
-damages `-111` 16 ways (an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
-fill that can't be one, the frame, a hash, `queued`, a reader's `Enemies`, a flat-footed `Contains`, a leave row):
-each reported. The POC-5 suite and the agent's stay as they were.
+damages `-111` 21 ways (an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
+fill that can't be one, a pre row's `Enemies` or `UnitsList` missing an entry, a `mem_clear`'s count or the record
+itself, the frame, a hash, `queued`, `peaceful`, a reader's `Enemies`, a flat-footed `Contains`, a leave row) and a
+replay's hashes against the record run's tape 2 ways (a value, the flag): each reported. The POC-5 suite and the agent's stay as they were.
 
 Still inputs (the design's later steps): the ready groups and `IsInFogOfWar` (fog of war), the near units (vision
 range), line of sight, stealth and the invisibility loop, `Passive`, `AwakeTimer` (not tracked), the area's

@@ -5,11 +5,11 @@
 //! against their `mem_v` leaves and the rest (the ready groups, the units in vision range,
 //! `Passive`, line of sight, stealth, the invisibility loop, `AwakeTimer`) taken from them; the
 //! memory after each group's pass (`mem_s` `pass`) and at the tick's end (`end`) is checked, and
-//! the memory's own records of its changes (`mem_add`, `mem_remove`) against the sim's, in order.
-//! Between ticks the memory changes only as the sim changes it (its handlers, `Remove` at a
-//! destruction, the caches its readers fill): each `pre` row is checked, a cache filled by a
-//! reader the sim doesn't run (fog of war, the agent's obstacles, the UI) is taken only as a fill
-//! of what the memory holds.
+//! the memory's own records of its changes (`mem_add`, `mem_remove`, `mem_clear`) against the
+//! sim's, in order, inside the tick and between ticks. Between ticks the memory changes only as the
+//! sim changes it (its handlers, `Remove` at a destruction, `Clear` at a disposal, the caches its
+//! readers fill, `UnitReturnToConsciousController`'s read among them): each `pre` row is checked;
+//! a cache filled by a reader the sim doesn't run is taken only when it's the sim's own fill.
 
 use std::collections::HashMap;
 
@@ -33,12 +33,20 @@ pub(super) struct MemDriver {
     /// The memory is the sim's (the `memory` observer, with the impatience, command and turn
     /// records).
     pub on: bool,
-    /// A replay's pinned `Time.frameCount` is its own plus this (WrathOracle's `WallClock`).
+    /// A replay's pinned `Time.frameCount` is its own plus this (WrathOracle's `WallClock`);
+    /// `None` until a replay replayed on its own trace shows it.
     pub shift: Option<i64>,
+    /// A replay run (its `hash` records say whether the value was the tape's), and the record
+    /// run's hashes when its trace is supplied.
+    pub replay: bool,
+    pub tape: Option<HashMap<String, i64>>,
     /// The run's identity hashes (`hash`, on first use), by unit id.
     hashes: HashMap<String, i32>,
-    /// Each group's memory as last recorded (`mem_init`, `mem_s`).
-    last: HashMap<GroupIdx, MemoryLayout<EntityIdx>>,
+    /// Each group's memory as last recorded (`mem_init`, `mem_s`), by group id (as WrathOracle's
+    /// `LastMem`: it outlives a group disposed and made again).
+    last: HashMap<String, MemoryLayout<EntityIdx>>,
+    /// The memory's changes recorded since the last comparison (between ticks).
+    between: Changes,
     /// `mem_initq` records seen.
     initq: usize,
     /// A tick ran (the window's initial state is complete).
@@ -47,8 +55,8 @@ pub(super) struct MemDriver {
     tick_frame: Option<i64>,
 }
 
-/// The memory's changes as its records give them: (group, change).
-type Changes = Vec<(GroupIdx, Change<EntityIdx>)>;
+/// The memory's changes as its records give them: (group id, change).
+type Changes = Vec<(String, Change<EntityIdx>)>;
 
 /// Exactly these fields besides the envelope (`seq`, `k`, `t`, `ev`, and `f` for a leaf).
 fn has_fields(r: &J, payload: &[&str]) -> bool {
@@ -73,9 +81,40 @@ fn unit(w: &World, v: &J) -> Option<EntityIdx> {
     w.unit(e).is_some().then_some(e)
 }
 
-/// A memory record's group (a live group) and layout, in the sim's units, checked as recorded to be
-/// a dictionary's, then as the sim holds it.
-fn layout_of(w: &World, r: &J) -> Result<(GroupIdx, MemoryLayout<EntityIdx>), String> {
+/// A group's id as the memory records name it (`UnitGroupMemory.GroupId`).
+fn group_id(w: &World, g: GroupIdx) -> String {
+    w.combat.groups.get(g).id.clone().unwrap_or_else(|| "~fake".into())
+}
+
+/// The sim's changes since the last call, by group id.
+fn sim_changes(w: &mut World) -> Result<Changes, Desync> {
+    let c = sim::take_changes(w).map_err(Desync)?;
+    Ok(c.into_iter().map(|(g, x)| (group_id(w, g), x)).collect())
+}
+
+/// A memory change record (`mem_add`, `mem_remove`, `mem_clear`) of its writer's shape.
+fn change_of(w: &World, r: &J) -> Option<(String, Change<EntityIdx>)> {
+    let g = r["group"].as_str()?.to_owned();
+    let c = match r["ev"].as_str()? {
+        "mem_add" if has_fields(r, &["group", "u", "by"]) && r["by"].is_string() => {
+            Change::Added(unit(w, &r["u"])?)
+        }
+        "mem_remove" if has_fields(r, &["group", "u", "by"]) => match r["by"].as_str()? {
+            "Remove" => Change::Removed(unit(w, &r["u"])?),
+            "Cleanup" => Change::Cleaned(unit(w, &r["u"])?),
+            _ => return None,
+        },
+        "mem_clear" if has_fields(r, &["group", "n"]) => {
+            Change::Cleared(usize::try_from(r["n"].as_u64().filter(|n| *n > 0)?).ok()?)
+        }
+        _ => return None,
+    };
+    Some((g, c))
+}
+
+/// A memory record's group (a live group), its id and its layout, in the sim's units, checked as
+/// recorded to be a dictionary's, then as the sim holds it.
+fn layout_of(w: &World, r: &J) -> Result<(GroupIdx, String, MemoryLayout<EntityIdx>), String> {
     let id = r["g"].as_str().ok_or("a memory record without its group")?;
     let g = w
         .combat
@@ -126,12 +165,21 @@ fn layout_of(w: &World, r: &J) -> Result<(GroupIdx, MemoryLayout<EntityIdx>), St
         enemies: cache(&r["enemies"])?,
     };
     let m = GroupMemory::from_layout(raw).ok_or("a memory that isn't a dictionary's layout")?;
-    Ok((g, m.layout()))
+    Ok((g, id.to_owned(), m.layout()))
+}
+
+/// A memory the sim takes as recorded (its changes logged from now on).
+fn adopt(w: &mut World, g: GroupIdx, l: MemoryLayout<EntityIdx>) {
+    w.combat.groups.get_mut(g).mem = GroupMemory::from_layout(l).map(sim::logged);
 }
 
 /// A float written as C#'s round-trip string.
 fn float_of(r: &J, k: &str) -> Option<f32> {
     r[k].as_str()?.parse::<f32>().ok()
+}
+
+fn fresh() -> MemoryLayout<EntityIdx> {
+    GroupMemory::new().layout()
 }
 
 impl Driver<'_> {
@@ -151,23 +199,14 @@ impl Driver<'_> {
             "mem_initq" => self.mem_initq(w, r),
             "mem_tick" => return self.mem_tick(w, i),
             "hash" => self.mem_hash(w, r),
-            "mem_add" | "mem_remove" | "mem_clear" => {
-                // A change outside the tick (a handler's, a destruction's): the next tick's entry
-                // checks the memory; the record is of its writer's shape.
-                let ok = r["group"].is_string()
-                    && match ev {
-                        "mem_add" => has_fields(r, &["group", "u", "by"]) && r["by"].is_string(),
-                        "mem_remove" => {
-                            has_fields(r, &["group", "u", "by"])
-                                && matches!(r["by"].as_str(), Some("Remove" | "Cleanup"))
-                        }
-                        _ => {
-                            has_fields(r, &["group", "n"]) && r["n"].as_u64().is_some_and(|n| n > 0)
-                        }
-                    }
-                    && (ev == "mem_clear" || r["u"].is_string());
-                if !ok {
-                    w.coverage.unsupported("driven replay: memory: a memory change it can't read");
+            // A change outside the tick (a destruction's `Remove`, a disposal's `Clear`):
+            // matched with the sim's at the next tick's entry.
+            "mem_add" | "mem_remove" | "mem_clear" if self.mem.started || ev == "mem_clear" => {
+                match change_of(w, r) {
+                    Some(c) => self.mem.between.push(c),
+                    None => w
+                        .coverage
+                        .unsupported("driven replay: memory: a memory change it can't read"),
                 }
             }
             _ => w.coverage.unsupported(format!(
@@ -177,14 +216,57 @@ impl Driver<'_> {
         i + 1
     }
 
-    /// `hash`: a unit's identity hash (WrathOracle records it once a window, on first use).
+    /// The memory's changes between ticks: the recorded ones are the sim's, in order.
+    fn mem_between(&mut self, w: &mut World) {
+        let model = match sim_changes(w) {
+            Ok(m) => m,
+            Err(Desync(d)) => {
+                w.coverage.unsupported(format!("driven replay: memory: {d}"));
+                Vec::new()
+            }
+        };
+        let rec = std::mem::take(&mut self.mem.between);
+        self.out.mem_changes += rec.len();
+        if rec != model {
+            if std::env::var_os("WR_DEBUG_MEMORY").is_some() {
+                eprintln!(
+                    "DEBUG memory tick {} between: sim {model:?}, recording {rec:?}",
+                    self.tick
+                );
+            }
+            w.coverage.unsupported(
+                "driven replay: memory: the memory's changes between ticks differ from the sim's",
+            );
+        }
+    }
+
+    /// `hash`: a unit's identity hash (WrathOracle records it once a window, on first use; in a
+    /// replay with whether it was the record run's, checked against that run's when given).
     fn mem_hash(&mut self, w: &mut World, r: &J) {
-        let (Some(u), Some(h)) =
-            (r["u"].as_str(), r["h"].as_i64().and_then(|h| i32::try_from(h).ok()))
-        else {
+        let shape: &[&str] = if self.mem.replay { &["u", "h", "tape"] } else { &["u", "h"] };
+        let (true, Some(u), Some(h)) = (
+            has_fields(r, shape),
+            r["u"].as_str(),
+            r["h"].as_i64().and_then(|h| i32::try_from(h).ok()),
+        ) else {
             w.coverage.unsupported("driven replay: memory: a hash record it can't read");
             return;
         };
+        if self.mem.replay {
+            let taped = r["tape"].as_bool();
+            let ok = match &self.mem.tape {
+                Some(tape) => {
+                    let t = tape.get(u);
+                    taped == Some(t.is_some()) && t.is_none_or(|v| *v == i64::from(h))
+                }
+                None => taped.is_some(),
+            };
+            if !ok {
+                w.coverage.unsupported(
+                    "driven replay: memory: a replay's hash differs from the record run's tape",
+                );
+            }
+        }
         if self.mem.hashes.insert(u.to_owned(), h).is_some() {
             w.coverage.unsupported("driven replay: memory: a unit's hash recorded twice");
         }
@@ -202,11 +284,11 @@ impl Driver<'_> {
             return;
         }
         match layout_of(w, r) {
-            Ok((g, l)) => {
-                if self.mem.last.insert(g, l.clone()).is_some() {
+            Ok((g, id, l)) => {
+                if self.mem.last.insert(id, l.clone()).is_some() {
                     w.coverage.unsupported("driven replay: memory: a group's initial memory twice");
                 }
-                w.combat.groups.get_mut(g).mem = GroupMemory::from_layout(l);
+                adopt(w, g, l);
                 self.out.mem_rows += 1;
             }
             Err(e) => w.coverage.unsupported(format!("driven replay: memory: mem_init: {e}")),
@@ -233,10 +315,14 @@ impl Driver<'_> {
                 "driven replay: memory: a group without its initial memory (mem_init)",
             );
         }
+        // The window's state is the sim's from here: what changed before is in it.
+        let _ = sim::take_changes(w);
+        self.mem.between.clear();
     }
 
     /// A `leave_tick` group row's memory (the leave controller's prefix): the sim's dictionary keys
-    /// and cached `UnitsList`.
+    /// and cached `UnitsList` (one a reader the sim doesn't run filled since taken when it's the
+    /// sim's own fill).
     pub(super) fn mem_leave_row(&mut self, w: &mut World, g: GroupIdx, row: &groups::Memory) {
         let Some(m) = w.combat.groups.get(g).mem.as_ref() else {
             w.coverage.unsupported("driven replay: memory: a group without its memory");
@@ -245,7 +331,6 @@ impl Driver<'_> {
         let keys = sim::ids(w, &m.keys().collect::<Vec<_>>());
         let mut list = m.units_list_cache().map(|l| sim::ids(w, l));
         self.out.mem_rows += 1;
-        // A `UnitsList` a reader the sim doesn't run filled since the tick.
         if keys == row.dict
             && list.is_none()
             && let Some(want) = &row.list
@@ -290,6 +375,33 @@ impl Driver<'_> {
         }
     }
 
+    /// The window's end: the changes since the last tick are the sim's.
+    pub(super) fn mem_finish(&mut self, w: &mut World) {
+        if self.mem.on && self.mem.started {
+            self.mem_between(w);
+        }
+    }
+
+    /// `UnitReturnToConsciousController.Tick` (after the leave controller): out of combat, every
+    /// unit of `State.Units` not in combat reads its group's `Memory.Enemies` (`HasAlive`; filled
+    /// if invalid). Its own effect (`MakeUnitConscious`) isn't the memory's.
+    pub(super) fn mem_return_to_conscious(&mut self, w: &mut World) {
+        if !self.mem.on || w.combat.combat_active {
+            return;
+        }
+        for u in crate::scene::units_pool(w) {
+            if !crate::scene::enumerated_by_pool(w, u) || crate::combat::is_in_combat(w, u) {
+                continue;
+            }
+            if sim::enemies(w, u).is_none() {
+                w.coverage.unsupported(
+                    "driven replay: memory: UnitReturnToConsciousController reads a memory the sim doesn't have",
+                );
+                return;
+            }
+        }
+    }
+
     /// `mem_tick`: the controller's tick, run by the sim from its own memory, through
     /// `mem_tick_end`. Returns the next record's index.
     fn mem_tick(&mut self, w: &mut World, i: usize) -> usize {
@@ -307,6 +419,8 @@ impl Driver<'_> {
         }
         self.mem.started = true;
         self.out.mem_ticks += 1;
+        // The changes since the last tick.
+        self.mem_between(w);
         let (true, Some(gt), Some(frame), Some(q), Some(pending)) = (
             has_fields(r, &["gt", "frame", "q", "pending"]),
             r["gt"].as_i64(),
@@ -348,13 +462,7 @@ impl Driver<'_> {
         // The changes since the last record (`pre`), then every memory as last recorded.
         self.mem_pre_rows(w);
         self.mem_all_as_recorded(w, "at the tick's entry");
-        // The tick, its changes logged.
-        for g in w.combat.groups.list.clone() {
-            if let Some(m) = w.combat.groups.get_mut(g).mem.as_mut() {
-                m.log_changes();
-                m.take_changes();
-            }
-        }
+        let _ = sim::take_changes(w);
         let mut ctl = std::mem::take(&mut w.combat.memory.ctl);
         let mut mw = MemWorld {
             d: self,
@@ -367,11 +475,6 @@ impl Driver<'_> {
         let res = tick(&mut ctl, &mut mw).and_then(|()| mw.drain()).and_then(|()| mw.compare());
         drop(mw);
         w.combat.memory.ctl = ctl;
-        for g in w.combat.groups.list.clone() {
-            if let Some(m) = w.combat.groups.get_mut(g).mem.as_mut() {
-                m.stop_logging();
-            }
-        }
         let res = res.and_then(|()| self.mem_tick_end(w, gt));
         if let Err(Desync(d)) = res {
             if std::env::var_os("WR_DEBUG_MEMORY").is_some() {
@@ -380,13 +483,15 @@ impl Driver<'_> {
             w.coverage.unsupported(format!("driven replay: memory: {d}"));
             self.mem_resync(w);
         }
+        // What the tick changed is matched; the next changes are between ticks.
+        let _ = sim::take_changes(w);
         self.i
     }
 
     /// The `pre` rows after `mem_tick`: each group whose memory changed since its last record. The
-    /// dictionary must be the sim's; a cache the sim holds invalid and the recording valid is a
-    /// fill by a reader the sim doesn't run, taken when it equals the sim's own fill; anything else
-    /// is reported and the recorded memory taken.
+    /// memory must be the sim's; a cache the sim holds invalid and the recording valid is a fill by
+    /// a reader the sim doesn't run, taken when it's the sim's own fill; anything else is reported
+    /// and the recorded memory taken.
     fn mem_pre_rows(&mut self, w: &mut World) {
         let trace = self.trace;
         let mut seen = Vec::new();
@@ -399,28 +504,26 @@ impl Driver<'_> {
             } else {
                 Err("a pre row of another shape or frame".into())
             };
-            let (g, row) = match parsed {
+            let (g, id, row) = match parsed {
                 Ok(x) => x,
                 Err(e) => {
                     w.coverage.unsupported(format!("driven replay: memory: {e}"));
                     continue;
                 }
             };
-            let last =
-                self.mem.last.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
-            if seen.contains(&g) || row == last {
+            let last = self.mem.last.get(&id).cloned().unwrap_or_else(fresh);
+            if seen.contains(&id) || row == last {
                 w.coverage.unsupported("driven replay: memory: a pre row twice or unchanged");
             }
-            seen.push(g);
+            seen.push(id.clone());
             self.out.mem_rows += 1;
             let Some(sim) = w.combat.groups.get(g).mem.as_ref().map(GroupMemory::layout) else {
                 w.coverage.unsupported("driven replay: memory: a group without its memory");
                 continue;
             };
-            let same_dict = sim.slots == row.slots
+            let mut ok = sim.slots == row.slots
                 && sim.free_list == row.free_list
                 && sim.free_count == row.free_count;
-            let mut ok = same_dict;
             for enemies in [true, false] {
                 let (s, r) = if enemies {
                     (&sim.enemies, &row.enemies)
@@ -445,17 +548,15 @@ impl Driver<'_> {
                 w.coverage.unsupported(
                     "driven replay: memory: a memory between ticks differs from the sim's",
                 );
-                w.combat.groups.get_mut(g).mem = GroupMemory::from_layout(row.clone());
+                adopt(w, g, row.clone());
             }
-            self.mem.last.insert(g, row);
+            self.mem.last.insert(id, row);
         }
     }
 
     /// A cache (`Enemies`, or `UnitsList`) the sim holds invalid and the recording valid: a reader
-    /// the sim doesn't run filled it (the AI's ally lists, the agent's obstacles, the UI). Taken
-    /// when it's the sim's own fill now (counted as verified), or else when it can be a fill at
-    /// another moment (the units' `IsInGame` then isn't established): the memory's keys in their
-    /// order, and for `Enemies` each the group's enemy (counted apart). Anything else is refused.
+    /// the sim doesn't run filled it (the AI's ally lists, the fog of war, the agent's obstacles,
+    /// the UI). Taken when it's the sim's own fill now; anything else is refused.
     fn mem_fill(&mut self, w: &mut World, g: GroupIdx, enemies: bool, want: &[EntityIdx]) -> bool {
         let fill = if enemies {
             sim::enemies_of(w, g)
@@ -468,59 +569,20 @@ impl Driver<'_> {
             self.out.mem_fills += 1;
             return true;
         }
-        let Some(keys) = w.combat.groups.get(g).mem.as_ref().map(|m| m.keys().collect::<Vec<_>>())
-        else {
-            return false;
-        };
-        let mut keys = keys.into_iter();
-        let ordered = want.iter().all(|u| keys.any(|k| k == *u));
-        let all_enemies =
-            !enemies || want.iter().all(|&u| sim::is_enemy_unit(w, g, u) == Some(true));
-        if !(ordered && all_enemies) {
-            if std::env::var_os("WR_DEBUG_MEMORY").is_some() {
-                eprintln!(
-                    "DEBUG memory tick {} fill {} (enemies {enemies}): sim {fill:?}, recording {want:?}",
-                    self.tick,
-                    group_key(w, g)
-                );
-            }
-            return false;
+        if std::env::var_os("WR_DEBUG_MEMORY").is_some() {
+            eprintln!(
+                "DEBUG memory tick {} fill {} (enemies {enemies}): sim {fill:?}, recording {want:?}",
+                self.tick,
+                group_key(w, g)
+            );
         }
-        let Some(m) = w.combat.groups.get(g).mem.as_ref() else { return false };
-        let mut l = m.layout();
-        if enemies {
-            l.enemies = Some(want.to_vec());
-        } else {
-            l.units_list = Some(want.to_vec());
-        }
-        w.combat.groups.get_mut(g).mem = GroupMemory::from_layout(l);
-        self.out.mem_fills_taken += 1;
-        true
+        false
     }
 
-    /// `FogOfWarController.Tick` (before the sleeping units and the memory): in combat, its
-    /// revealers include the party memory's enemies (`Player.Group.Memory.Enemies`, filled if
-    /// invalid).
-    pub(super) fn mem_fog_of_war(&mut self, w: &mut World) {
-        if !self.mem.on || !w.combat.combat_active {
-            return;
-        }
-        let Some(g) = w.combat.groups.find(crate::combat::units::PLAYER_PARTY_GROUP) else {
-            w.coverage
-                .unsupported("driven replay: memory: the fog of war's party group isn't the sim's");
-            return;
-        };
-        if sim::enemies_of(w, g).is_none() {
-            w.coverage
-                .unsupported("driven replay: memory: the fog of war can't read the party's memory");
-        }
-    }
-
-    /// Every live group's memory is the one last recorded (or a new one's).
+    /// Every live group's memory is the one last recorded for its id (or a new one's).
     fn mem_all_as_recorded(&mut self, w: &mut World, when: &str) {
         for g in w.combat.groups.list.clone() {
-            let last =
-                self.mem.last.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
+            let last = self.mem.last.get(&group_id(w, g)).cloned().unwrap_or_else(fresh);
             let Some(sim) = w.combat.groups.get(g).mem.as_ref().map(GroupMemory::layout) else {
                 w.coverage.unsupported("driven replay: memory: a group without its memory");
                 continue;
@@ -536,7 +598,7 @@ impl Driver<'_> {
                 w.coverage.unsupported(format!(
                     "driven replay: memory: a memory differs from the recording's {when}"
                 ));
-                w.combat.groups.get_mut(g).mem = GroupMemory::from_layout(last);
+                adopt(w, g, last);
             }
         }
     }
@@ -555,22 +617,21 @@ impl Driver<'_> {
             }
             if obs(r, "mem_s").is_some() && r["at"] == "end" && has_fields(r, &ROW) {
                 self.i += 1;
-                let (g, row) = layout_of(w, r).map_err(Desync)?;
-                let last =
-                    self.mem.last.get(&g).cloned().unwrap_or_else(|| GroupMemory::new().layout());
-                if seen.contains(&g) || row == last {
+                let (g, id, row) = layout_of(w, r).map_err(Desync)?;
+                let last = self.mem.last.get(&id).cloned().unwrap_or_else(fresh);
+                if seen.contains(&id) || row == last {
                     return Err(Desync("an end row twice or unchanged".into()));
                 }
-                seen.push(g);
+                seen.push(id.clone());
                 self.out.mem_rows += 1;
                 let sim = w.combat.groups.get(g).mem.as_ref().map(GroupMemory::layout);
                 if sim.as_ref() != Some(&row) {
                     w.coverage.unsupported(
                         "driven replay: memory: a memory at the tick's end differs from the sim's",
                     );
-                    w.combat.groups.get_mut(g).mem = GroupMemory::from_layout(row.clone());
+                    adopt(w, g, row.clone());
                 }
-                self.mem.last.insert(g, row);
+                self.mem.last.insert(id, row);
                 continue;
             }
             if obs(r, "mem_tick_end").is_some() && has_fields(r, &["gt", "exc"]) {
@@ -607,9 +668,9 @@ impl Driver<'_> {
             self.i += 1;
             if obs(r, "mem_s").is_some() && has_fields(r, &ROW) {
                 match layout_of(w, r) {
-                    Ok((g, l)) => {
-                        w.combat.groups.get_mut(g).mem = GroupMemory::from_layout(l.clone());
-                        self.mem.last.insert(g, l);
+                    Ok((g, id, l)) => {
+                        adopt(w, g, l.clone());
+                        self.mem.last.insert(id, l);
                     }
                     Err(e) => w.coverage.unsupported(format!("driven replay: memory: {e}")),
                 }
@@ -652,29 +713,10 @@ struct MemWorld<'a, 't> {
 }
 
 impl<'t> MemWorld<'_, 't> {
-    /// The sim's changes since the last read.
-    fn sync(&mut self) -> Result<(), Desync> {
-        let mut changed = Vec::new();
-        for g in self.w.combat.groups.list.clone() {
-            if let Some(m) = self.w.combat.groups.get_mut(g).mem.as_mut() {
-                let c = m.take_changes();
-                if !c.is_empty() {
-                    changed.push((g, c));
-                }
-            }
-        }
-        if changed.len() > 1 {
-            return Err(Desync("the sim changed two memories between two reads".into()));
-        }
-        for (g, c) in changed {
-            self.model.extend(c.into_iter().map(|x| (g, x)));
-        }
-        Ok(())
-    }
-
     /// The recorded changes so far are the sim's, in order.
     fn compare(&mut self) -> Result<(), Desync> {
-        self.sync()?;
+        let model = sim_changes(self.w)?;
+        self.model.extend(model);
         if self.changes != self.model {
             return Err(Desync(format!(
                 "the memory's changes differ: the sim's {:?}, the recording's {:?}",
@@ -695,32 +737,21 @@ impl<'t> MemWorld<'_, 't> {
                 describe(r)
             )));
         }
-        let pair = |w: &World| -> Result<(GroupIdx, EntityIdx), Desync> {
-            let g = r["group"].as_str().and_then(|id| w.combat.groups.find(id));
-            match (has_fields(r, &["group", "u", "by"]), g, unit(w, &r["u"])) {
-                (true, Some(g), Some(u)) => Ok((g, u)),
-                _ => Err(Desync(format!("a memory change it can't read ({})", describe(r)))),
-            }
-        };
         match (r["k"].as_str(), r["ev"].as_str()) {
             (Some("obs"), Some("hash")) => self.d.mem_hash(self.w, r),
-            (Some("obs"), Some("mem_add")) => {
-                let (g, u) = pair(self.w)?;
-                self.changes.push((g, Change::Added(u)));
-            }
-            (Some("obs"), Some("mem_remove")) => {
-                let (g, u) = pair(self.w)?;
-                match r["by"].as_str() {
-                    Some("Remove") => self.changes.push((g, Change::Removed(u))),
-                    Some("Cleanup") => self.changes.push((g, Change::Cleaned(u))),
-                    _ => return Err(Desync("a removal it can't read".into())),
-                }
+            (Some("obs"), Some("mem_add" | "mem_remove")) => {
+                let c = change_of(self.w, r).ok_or_else(|| {
+                    Desync(format!("a memory change it can't read ({})", describe(r)))
+                })?;
+                self.changes.push(c);
             }
             // `UnitEntityData.Group` runs `UpdateGroup` (the sim's own, as it reads `Group`).
             (Some("obs"), Some("group_new" | "group_add" | "group_remove" | "group_dispose")) => {}
             // A sight cache's miss inside `group.HasLOS` (the line of sight the `los` leaf gives).
             (Some("obs"), Some("los")) => {}
-            _ => return Err(Desync(format!("a record inside the memory tick ({})", describe(r)))),
+            _ => {
+                return Err(Desync(format!("a record inside the memory tick ({})", describe(r))));
+            }
         }
         Ok(())
     }
@@ -1034,7 +1065,7 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
                 describe(r)
             )));
         }
-        let (rg, row) = layout_of(self.w, r).map_err(Desync)?;
+        let (rg, id, row) = layout_of(self.w, r).map_err(Desync)?;
         if rg != g {
             return Err(Desync("another group's pass".into()));
         }
@@ -1051,12 +1082,9 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
             self.w.coverage.unsupported(
                 "driven replay: memory: a memory after its pass differs from the sim's",
             );
-            let mut m = GroupMemory::from_layout(row.clone())
-                .ok_or_else(|| Desync("a pass row it can't take".into()))?;
-            m.log_changes();
-            self.w.combat.groups.get_mut(g).mem = Some(m);
+            adopt(self.w, g, row.clone());
         }
-        self.d.mem.last.insert(g, row);
+        self.d.mem.last.insert(id, row);
         Ok(())
     }
 }

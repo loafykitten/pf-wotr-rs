@@ -115,7 +115,9 @@ impl Groups {
     fn make(&mut self, id: Option<String>) -> GroupIdx {
         // A new group's memory is empty (`new UnitGroupMemory`).
         let memory = (!self.memory_unknown).then(Memory::default);
-        let mem = self.memory_computed.then(crate::combat::memory::GroupMemory::new);
+        let mem = self
+            .memory_computed
+            .then(|| crate::combat::memory::sim::logged(crate::combat::memory::GroupMemory::new()));
         self.arena.push(Group { id, memory, mem, ..Group::default() });
         GroupIdx(self.arena.len() - 1)
     }

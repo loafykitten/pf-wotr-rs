@@ -1240,3 +1240,36 @@ fn a_tick_whose_cleanup_fails_part_way_keeps_what_it_collected() {
     tick(&mut c, &mut f).unwrap();
     assert!(c.cleanup_pending.is_empty() && !f.mem[&9].contains(20));
 }
+
+#[test]
+fn a_clear_during_an_enemies_fill_drops_what_was_filled_before_it() {
+    // `Enemies` fills in place: a key's `Group` read runs `UpdateGroup`, whose `Add` clears the list
+    // part way (`ClearEnemies`); the fill goes on from there and the list is valid at its end.
+    let mut m = GroupMemory::from_entries(
+        [1, 2, 3].map(|k| (k, UnitInfo { last_detect_time: T0, visible: false })),
+    );
+    let keys = m.begin_enemies_fill().expect("invalid");
+    assert_eq!(keys, [1, 2, 3]);
+    m.push_enemy(1);
+    m.clear_enemies();
+    m.push_enemy(2);
+    m.push_enemy(3);
+    assert_eq!(m.end_enemies_fill(), [2, 3]);
+    assert_eq!(m.begin_enemies_fill(), None);
+    assert_eq!(m.enemies_cache(), Some(&[2, 3][..]));
+}
+
+#[test]
+fn the_log_has_each_new_key_removal_and_clear_with_its_count() {
+    let mut m = GroupMemory::new();
+    m.add(1, T0);
+    m.log_changes();
+    m.add(1, T0);
+    m.add(2, T0);
+    assert!(m.remove(1));
+    assert!(!m.remove(1));
+    m.clear();
+    m.clear();
+    assert_eq!(m.take_changes(), [Change::Added(2), Change::Removed(1), Change::Cleared(1)]);
+    assert!(m.take_changes().is_empty());
+}

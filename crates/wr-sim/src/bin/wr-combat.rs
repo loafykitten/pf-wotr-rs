@@ -287,13 +287,12 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.mem_adds, out.mem_act_adds
     );
     println!(
-        "memory computed: ticks {}, reads checked {}, inputs {}, states checked {}, fills by unmodelled readers {} (verified) {} (taken), changes matched {}; readers' reads checked {:?}",
+        "memory computed: ticks {}, reads checked {}, inputs {}, states checked {}, fills by unmodelled readers verified {}, changes matched {}; readers' reads checked {:?}",
         out.mem_ticks,
         out.mem_reads,
         out.mem_inputs,
         out.mem_rows,
         out.mem_fills,
-        out.mem_fills_taken,
         out.mem_changes,
         out.mem_checked
     );

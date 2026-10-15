@@ -6175,7 +6175,8 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
     }
     const M: &str = "driven replay: memory:";
     const S: &str = "memory: the sim's";
-    let cases: [(&str, Change); 16] = [
+    const D: &str = "driven replay:";
+    let cases: [(&str, Change); 21] = [
         // Inputs the memory follows: the sim's memory then differs from the recorded states.
         (M, |recs| {
             let at = pos(recs, |r| leaf(r, "los") && r["v"] == true);
@@ -6232,6 +6233,35 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
             let e = recs[at]["enemies"].as_array_mut().unwrap();
             e.push(json!("35fffa0a-06ba-4cba-be40-7914924be190"));
         }),
+        // A cache a reader the sim doesn't run filled: taken only as the sim's own fill.
+        (M, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "mem_s")
+                    && r["at"] == "pre"
+                    && r["enemies"].as_array().is_some_and(|e| !e.is_empty())
+            });
+            recs[at]["enemies"].as_array_mut().unwrap().pop();
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "mem_s")
+                    && r["at"] == "pre"
+                    && r["list"].as_array().is_some_and(|e| !e.is_empty())
+            });
+            recs[at]["list"].as_array_mut().unwrap().remove(0);
+        }),
+        // The memory's changes between ticks: a disposal's Clear and its count.
+        (M, |recs| {
+            let at = pos(recs, |r| ev(r, "mem_clear"));
+            recs[at]["n"] = json!(recs[at]["n"].as_u64().unwrap() + 1);
+        }),
+        (M, |recs| {
+            let at = pos(recs, |r| ev(r, "mem_clear"));
+            recs.remove(at);
+            for (n, r) in recs.iter_mut().enumerate() {
+                r["seq"] = json!(n);
+            }
+        }),
         (M, |recs| {
             let at = pos(recs, |r| ev(r, "mem_tick") && r["t"].as_i64() > Some(300));
             recs[at]["frame"] = json!(recs[at]["frame"].as_i64().unwrap() + 1);
@@ -6244,6 +6274,11 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
         (M, |recs| {
             let at = pos(recs, |r| ev(r, "mem_q"));
             flip(&mut recs[at], "queued");
+        }),
+        // The target's `Peaceful` AddToMemory read.
+        (D, |recs| {
+            let at = pos(recs, |r| ev(r, "mem_q") && r["queued"] == true);
+            flip(&mut recs[at], "peaceful");
         }),
         // The other models' reads of the memory.
         (S, |recs| {
@@ -6293,6 +6328,38 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
         if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
             missed.push(format!(
                 "case {i}: {want}: {:?}",
+                w.coverage.unsupported.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+    // A replay's hashes against the record run's tape: valid as recorded; a taped value that
+    // isn't the record run's, or one said not to be the tape's, is reported.
+    let (_, record) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let hash_cases: [Option<Change>; 3] = [
+        None,
+        Some(|recs| {
+            let at = pos(recs, |r| ev(r, "hash") && r["tape"] == true);
+            recs[at]["h"] = json!(recs[at]["h"].as_i64().unwrap() + 20);
+        }),
+        Some(|recs| {
+            let at = pos(recs, |r| ev(r, "hash") && r["tape"] == true);
+            flip(&mut recs[at], "tape");
+        }),
+    ];
+    for (i, change) in hash_cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "replay-1").expect("prepare");
+        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+        if let Some(change) = change {
+            change(&mut changed.records);
+        }
+        let out = replay::run_with_tape(&mut w, &changed, &record);
+        let reported = w.coverage.unsupported.keys().any(|k| k.starts_with(M));
+        if change.is_none() {
+            assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+            assert!(out.diff.equal, "{:?}", out.diff.first_difference);
+        } else if w.valid() || !reported {
+            missed.push(format!(
+                "hash case {i}: {:?}",
                 w.coverage.unsupported.keys().collect::<Vec<_>>()
             ));
         }

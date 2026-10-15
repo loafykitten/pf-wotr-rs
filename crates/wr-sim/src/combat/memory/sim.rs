@@ -64,22 +64,21 @@ pub fn with_memory<T>(
 }
 
 /// `Memory.Enemies` of group `g` (filled if invalid: `unit != null && unit.IsInGame &&
-/// Group.IsEnemy(unit)`, in enumeration order).
+/// Group.IsEnemy(unit)`, in enumeration order). The memory stays in the world while it fills: a
+/// unit's `Group` read runs `UpdateGroup`, whose `Add` clears this list part way, as in the game.
 pub fn enemies_of(w: &mut World, g: GroupIdx) -> Option<Vec<EntityIdx>> {
-    with_memory(w, g, |w, m| {
-        let mut ok = true;
-        let list = m
-            .enemies_by(|k| {
-                resolve(w, k).in_game()
-                    && is_enemy_unit(w, g, k).unwrap_or_else(|| {
-                        ok = false;
-                        false
-                    })
-            })
-            .to_vec();
-        ok.then_some(list)
-    })
-    .flatten()
+    fn mem(w: &mut World, g: GroupIdx) -> Option<&mut GroupMemory<EntityIdx>> {
+        w.combat.groups.get_mut(g).mem.as_mut()
+    }
+    let Some(keys) = mem(w, g)?.begin_enemies_fill() else {
+        return Some(mem(w, g)?.enemies_cache()?.to_vec());
+    };
+    for k in keys {
+        if resolve(w, k).in_game() && is_enemy_unit(w, g, k)? {
+            mem(w, g)?.push_enemy(k);
+        }
+    }
+    Some(mem(w, g)?.end_enemies_fill().to_vec())
 }
 
 /// `unit.Group.Memory.Enemies` (`Group` runs `UpdateGroup`).
@@ -137,6 +136,32 @@ pub fn check<T: PartialEq + Debug>(
         w.coverage.unsupported(format!("memory: the sim's {reader} differs from the recording's"));
     }
     c
+}
+
+/// A memory the sim keeps: its changes logged (WrathOracle records each `Add` of a new key,
+/// `Remove`, `Cleanup`'s removals and `Clear`: the replay matches them).
+#[must_use]
+pub fn logged(mut m: GroupMemory<EntityIdx>) -> GroupMemory<EntityIdx> {
+    m.log_changes();
+    m
+}
+
+/// Every memory's changes since the last call (disposed groups' too), in the order they were
+/// made when one memory changed; `Err` when several did (their order isn't kept).
+pub fn take_changes(w: &mut World) -> Result<Vec<(GroupIdx, super::Change<EntityIdx>)>, String> {
+    let mut changed = Vec::new();
+    for (i, grp) in w.combat.groups.arena.iter_mut().enumerate() {
+        if let Some(m) = grp.mem.as_mut() {
+            let c = m.take_changes();
+            if !c.is_empty() {
+                changed.push((GroupIdx(i), c));
+            }
+        }
+    }
+    if changed.len() > 1 {
+        return Err("the sim changed two memories between two reads".into());
+    }
+    Ok(changed.into_iter().flat_map(|(g, c)| c.into_iter().map(move |x| (g, x))).collect())
 }
 
 /// The units' ids.

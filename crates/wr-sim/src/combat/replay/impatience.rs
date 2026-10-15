@@ -20,11 +20,12 @@ const MEM_Q_OFFENSIVE: &str = "UnitMemoryController.AddToMemory<UnitMemoryContro
 const MEM_Q_ACT: &str = "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitCommandDidAct<UnitCommand.<Tick>b__230_0<SubscriptionManager`1.ExecuteActionInternal";
 
 /// A `mem_q` is the sim's call `want`: its observer and target, and (while the memory is the
-/// sim's) whether the queue took the pair.
+/// sim's) the target's `Peaceful` it read and whether the queue took the pair.
 fn is_call(w: &World, r: &J, want: Option<imp::MemoryCall>) -> bool {
     want.is_some_and(|c| {
         r["o"].as_str() == Some(w.entity(c.observer).unique_id.as_str())
             && r["tgt"].as_str() == Some(w.entity(c.target).unique_id.as_str())
+            && c.peaceful.is_none_or(|p| r["peaceful"].as_bool() == Some(p))
             && c.queued.is_none_or(|q| r["queued"].as_bool() == Some(q))
     })
 }

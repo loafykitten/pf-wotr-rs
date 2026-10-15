@@ -96,31 +96,31 @@ pub struct Impatience {
     pub memory_acts: Option<VecDeque<MemoryCall>>,
 }
 
-/// An `AddToMemory(observer, target)` call the sim made, and whether the memory's queue took the
-/// pair (`None` while the memory isn't the sim's).
+/// An `AddToMemory(observer, target)` call the sim made, the target's `Faction.Peaceful` it read
+/// and whether the memory's queue took the pair (both `None` while the memory isn't the sim's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryCall {
     pub observer: EntityIdx,
     pub target: EntityIdx,
+    pub peaceful: Option<bool>,
     pub queued: Option<bool>,
 }
 
 /// `UnitMemoryController.AddToMemory(observer, target)` on the sim's controller (the target's
 /// `Faction.Peaceful`, then the queue's dedup), when the memory is the sim's.
 fn add_to_memory(w: &mut World, observer: EntityIdx, target: EntityIdx) -> MemoryCall {
-    let queued = if w.combat.memory.on {
-        let Some(peaceful) = super::units::faction_peaceful(w, target) else {
-            w.coverage.unsupported("memory: AddToMemory of a target without a faction");
-            return MemoryCall { observer, target, queued: None };
-        };
-        let q = &mut w.combat.memory.ctl;
-        let before = q.units_for_add.len();
-        q.add_to_memory(observer, target, peaceful);
-        Some(q.units_for_add.len() > before)
-    } else {
-        None
+    let none = MemoryCall { observer, target, peaceful: None, queued: None };
+    if !w.combat.memory.on {
+        return none;
+    }
+    let Some(peaceful) = super::units::faction_peaceful(w, target) else {
+        w.coverage.unsupported("memory: AddToMemory of a target without a faction");
+        return none;
     };
-    MemoryCall { observer, target, queued }
+    let q = &mut w.combat.memory.ctl;
+    let before = q.units_for_add.len();
+    q.add_to_memory(observer, target, peaceful);
+    MemoryCall { peaceful: Some(peaceful), queued: Some(q.units_for_add.len() > before), ..none }
 }
 
 /// `unit.Memory.ContainsVisible(o)` (the impatience controller's): the sim's memory, while it's
