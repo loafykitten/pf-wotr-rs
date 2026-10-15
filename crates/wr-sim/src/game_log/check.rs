@@ -434,6 +434,21 @@ fn raise_point_ok(recs: &[J], i: usize) -> bool {
         }),
         Some("GameLogEventCombatStateChanged") => {
             let want = if f["InCombat"] == true { "combat_start" } else { "combat_end" };
+            // After the turn controller's handler's work (its record is written at the handler's
+            // start: `Clear`'s turn clear and navigation tags, the commands it cancels, the agents it\n            // stops follow).
+            let handler_work = next_other.is_some_and(|n| {
+                (n["k"] == "tb" && n["ev"] == "turn_clear")
+                    || n["k"] == "cmd"
+                    || n["ev"].as_str().is_some_and(|e| {
+                        e.starts_with("uc_")
+                            || e.starts_with("ag_call")
+                            || e == "ag_sync"
+                            || e == "nav_tags"
+                    })
+            });
+            if handler_work {
+                return false;
+            }
             recs[..i]
                 .iter()
                 .rev()

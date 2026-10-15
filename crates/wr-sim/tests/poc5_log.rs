@@ -89,7 +89,7 @@ const P: &str = "can't be placed";
 type Change = fn(&mut Vec<V>);
 
 /// The damaged recordings, each with the report it must make.
-const CASES: [(&str, Change); 53] = [
+const CASES: [(&str, Change); 54] = [
     // Messages.
     (L, |recs| {
         let at = nth(recs, "clog_msg", 3);
@@ -365,6 +365,24 @@ const CASES: [(&str, Change); 53] = [
         let cd = at + recs[at..].iter().position(|r| r["ev"] == "cd_prefix").unwrap_or(0);
         for (n, r) in pair.into_iter().enumerate() {
             recs.insert(cd + 1 + n, r);
+        }
+        renumber(recs);
+    }),
+    // The party's combat end before the turn controller's handler of it has finished.
+    (L, |recs| {
+        let at = recs
+            .iter()
+            .position(|r| {
+                r["ev"] == "clog_q"
+                    && r["e"] == "GameLogEventCombatStateChanged"
+                    && r["f"]["InCombat"] == false
+            })
+            .expect("a combat end");
+        let end = (0..at).rev().find(|&i| recs[i]["k"] == "tb" && recs[i]["ev"] == "combat_end");
+        let pair = [recs.remove(at), recs.remove(at)];
+        let to = end.map_or(at, |e| e + 1);
+        for (n, r) in pair.into_iter().enumerate() {
+            recs.insert(to + n, r);
         }
         renumber(recs);
     }),
