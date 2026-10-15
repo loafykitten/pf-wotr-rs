@@ -644,7 +644,7 @@ the roaming audit's id lookup and a lint.
 | `fixtures/captures/oracle/poc4-horgus-9` (Manual_19) | as `poc4-horgus-1`, with the same observers and `roam_producers`, `group_ticks` | record, replay-1, perturbed |
 | `fixtures/captures/oracle/poc4-horgus-8` (Manual_19) | as `poc4-horgus-1`, with the same observers (superseded by `-9`) | record, replay-1, perturbed |
 | `fixtures/captures/oracle/cert-22` (Manual_13, the certification plan) | `dialog-checks`, `dice`, `attack` | record, replay-1, perturbed |
-| `poc4-seelah-3`, `poc4-horgus-7`, `cert-21` | the same, without `zone_enter` (superseded; prune with Ember's say-so) | |
+| `poc4-seelah-3`, `poc4-horgus-7`, `cert-21` | the same, without `zone_enter` (superseded; these and `-4`/`-8` archived on the external volume) | |
 | `fixtures/captures/oracle/poc4-seelah-1` (Manual_13) | `seelah-a` (Athletics, then `1cfe1ed0…`), `seelah-b` (question `7ce19f7c…`, Knowledge World), `seelah-c` (Diplomacy) | record, replay-1, perturbed replays (a: +8 on d20 #7; b: +8/+14 on #13, +8 on #7; c: +8/+14 on #7) |
 | `fixtures/captures/oracle/poc4-horgus-6` (Manual_19) | as `poc4-horgus-1`, with `aa_awake`, `cs_action` and the draw producers | record, replay-1, perturbed (as below) |
 | `fixtures/captures/oracle/poc4-horgus-1` (Manual_19) | `horgus-check` (`905c535d…`, check `3ab56408…`, `d641426b…`, `7a580452…`), `horgus-alt` (`5422edfb…`, `db14014b…`, `905c535d…`, `e497fc46…`, `7a580452…`) | record, replay-1, perturbed (+7/+13 on d20 #3) |

@@ -215,8 +215,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 
 **Working notes for the next session:**
 - **Eighteenth session (2026-10-14):** captures `poc4-seelah-5`, `poc4-horgus-9` (with `roam_producers` and
-  `group_ticks`) and `cert-22`; `poc4-seelah-3`/`-4`, `poc4-horgus-7`/`-8`, `cert-21` are superseded (prune with
-  Ember's say-so; `cert-22`'s `dialog-checks` has no roaming and runs without the groups model, valid). The POC-4
+  `group_ticks`) and `cert-22`; `poc4-seelah-3`/`-4`, `poc4-horgus-7`/`-8`, `cert-21` are superseded (archived on the
+  external volume; `cert-22`'s `dialog-checks` has no roaming and runs without the groups model, valid). The POC-4
   suite and `scripts/regress.sh` use the new ones; the regression baseline is `cache/regress/out-round10`. The
   certification's real-time `attack` replay is one tick late in `cert-22` (as in `cert-16` and `-18`, not in `-21`):
   the known real-time frontier (no phase pin), not the new hooks. The combat replay still reports any game-mode change
@@ -252,9 +252,10 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   (`docs/booklab.md`). **Not available for now (Ember, 2026-10-13): plan for this Mac
   only.** Record here, one capture at a time (the game/GPU lock), and leave booklab's items (POC-6's captures of the
   original) until Ember says it's back.
-- **Disk (2026-10-13): about 52 GiB free**, `target/` 12 GB; Ember is freeing more. Work within it: `cargo clean` when
-  free space runs low (a day of builds grows `target/` to 64 GB), keep Metal traces short, and prune superseded
-  captures only with Ember's say-so (the list is below).
+- **Disk (2026-10-14):** `target/`, `cache/` and `fixtures/captures/` live on Ember's external SSD (symlinks; 2.5 TB
+  free), the internal disk has about 94 GiB free for the repo, `builds/` and the saves. Keep Metal traces short;
+  superseded captures move to the external volume's archive folder (`poc4-seelah-3`/`-4`, `poc4-horgus-7`/`-8` and
+  `cert-21` are there), deleted only by Ember.
 - Record through `scripts/oracle-record.sh LABEL SAVE PLAN [options]` (watchdog for startup and mid-run
   hangs, with retries; a failed try's leftover game is killed; waits for the game/GPU lock; refuses a locked screen; keeps the display awake with
   `caffeinate`). `displaysleep` is 120 min and a sleeping display locks the session, so for unattended

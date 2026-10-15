@@ -39,7 +39,7 @@ survey and notes on other rewrites.
 - **Toolchain:** Rust via Homebrew `rustup` (keg-only; PATH set in `~/.zshenv`; a shell
   started before that may need `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`).
   `scripts/check.sh` checks the main workspace; `scripts/check.sh spikes/<name>` a spike.
-  Disk: ~52 GiB free (2026-10-13; Ember is freeing more, work within it); `target/` grows fast (64 GB after a day of debug and release builds, from ~19 GB), so `cargo clean` when free space runs low (the next build takes a few minutes longer); a POC-5 worktree has its own; prune finished spikes' targets. A 5-minute Metal System Trace is ~22 GB, so keep traces short.
+  Disk (2026-10-14): `target/`, `cache/` and `fixtures/captures/` are symlinks onto Ember's external SSD volume (2.5 TB free; the location is in Claude's memory), so they can grow; the internal disk has ~94 GiB free and keeps the repo, `builds/` (the oracle build is an APFS clone, which only shares blocks on its own volume, and timing runs stay internal), `decompiled/` and the saves. Builds and recordings need the volume mounted. Superseded captures go to an archive folder on that volume (Ember deletes them). A POC-5 worktree has its own `target/` (internal unless linked too). A 5-minute Metal System Trace is ~22 GB, so keep traces short.
 - **Sister project, now separate:** `~/Developer/Wrath-Mac` is **pf-wotr-silicon** (the
   native arm64 build tooling and WrathPerf, made public-ready 2026-10-12). Since then
   **pf-wotr-rs doesn't use or touch it**: everything this project needs lives here. Game-side

@@ -1,8 +1,8 @@
 # Never commit game data, extracted assets, decompiled code or oracle captures.
-/target/
+/target
 /game-data/
-/cache/
-/fixtures/captures/
+/cache
+/fixtures/captures
 /fixtures/saves/
 /builds/
 /decompiled/
