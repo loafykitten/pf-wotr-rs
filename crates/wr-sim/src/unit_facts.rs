@@ -843,9 +843,9 @@ fn on_did_turn_on(w: &mut World, f: FactIdx) {
     if act(w, f).1 {
         return;
     }
-    if has_component(&bp, "IActivatableAbilitySpendResourceLogic")
-        || has_component(&bp, "ActivatableAbilityUnitCommand")
-    {
+    // `IActivatableAbilitySpendResourceLogic.OnAbilityTurnOn`: empty for its one implementer on
+    // toggles (`ActivatableAbilityResourceLogic`); a unit command's logic isn't ported.
+    if has_component(&bp, "ActivatableAbilityUnitCommand") {
         w.coverage.unsupported("ActivatableAbility: resource or unit-command components");
     }
     // `ActivateImmediately`: `ActivationType == Immediately` (0).
