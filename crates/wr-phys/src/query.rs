@@ -61,6 +61,8 @@ enum Prepared {
     Mesh {
         tris: Vec<[[f64; 3]; 3]>,
         eps: f64,
+        /// The game's `f32` placement against ours ([`conservative::transform_error`]).
+        err: f64,
         lo: [f64; 3],
         hi: [f64; 3],
     },
@@ -122,13 +124,26 @@ impl<'w> Scene<'w> {
                     // a hundredth of the mesh's extent (the pruner's 1.01 inflation, BV4's
                     // quantized node bounds).
                     let eps = f64::from(*geom_epsilon);
+                    let local = vertices
+                        .iter()
+                        .flatten()
+                        .fold(0.0f64, |acc, &x| acc.max(f64::from(x).abs()))
+                        * 3f64.sqrt();
+                    let err = conservative::transform_error(&m, local);
                     let extent = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max);
                     let grow = tris
                         .iter()
                         .map(|t| conservative::triangle_grow(*t, eps))
                         .fold(0.0, f64::max)
-                        + 0.01 * extent;
-                    Prepared::Mesh { tris, eps, lo: lo.map(|x| x - grow), hi: hi.map(|x| x + grow) }
+                        + 0.01 * extent
+                        + err;
+                    Prepared::Mesh {
+                        tris,
+                        eps,
+                        err,
+                        lo: lo.map(|x| x - grow),
+                        hi: hi.map(|x| x + grow),
+                    }
                 }
                 ShapeKind::Other { min, max, .. } => {
                     Prepared::Other { lo: f64x3(*min), hi: f64x3(*max) }
@@ -250,14 +265,14 @@ fn may_touch(p: &Prepared, o: [f64; 3], max: f64) -> bool {
         Prepared::Box { m, center, half } => {
             conservative::ray_hits_box(o, DOWN, max, m, *center, *half)
         }
-        Prepared::Mesh { tris, eps, lo, hi } => {
+        Prepared::Mesh { tris, eps, err, lo, hi } => {
             // An unsure triangle defers to the mesh's grown bounds (every node BV4 may test);
             // the prefilter is wide enough for every sure touch.
             let enclosed = conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0);
             let grow = conservative::UNSURE_SLACKS * conservative::slack(o, max);
             (enclosed || conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, grow))
                 && tris.iter().any(|t| {
-                    match conservative::ray_touches_triangle(o, DOWN, max, *t, *eps) {
+                    match conservative::ray_touches_triangle(o, DOWN, max, *t, *eps, *err) {
                         conservative::Touch::Yes => true,
                         conservative::Touch::Unsure => enclosed,
                         conservative::Touch::No => false,

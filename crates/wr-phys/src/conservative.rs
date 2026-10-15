@@ -105,7 +105,9 @@ pub fn ray_hits_box(
         let col = [m.0[4 * k], m.0[4 * k + 1], m.0[4 * k + 2]];
         2.0 * half[k] * dot(col, col).sqrt()
     };
-    let grow = 1e-2 * 2.0 * (world_edge(0) + world_edge(1) + world_edge(2));
+    let local = (0..3).map(|k| center[k].abs() + half[k].abs()).fold(0.0, f64::max) * 3f64.sqrt();
+    let shape_err = transform_error(m, local);
+    let grow = 1e-2 * 2.0 * (world_edge(0) + world_edge(1) + world_edge(2)) + shape_err;
     // The enclosure an unsure face defers to (PhysX's box hits lie on the box, within f32
     // rounding), and a prefilter wide enough for every sure touch.
     let enclosed = ray_hits_aabb(o, d, max, lo, hi, grow);
@@ -124,17 +126,17 @@ pub fn ray_hits_box(
     const FACES: [[usize; 4]; 6] =
         [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4], [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]];
     // Inside the box counts as a hit (PhysX reports distance 0 there).
-    if point_in_box(o, m, center, half) {
+    if point_in_box(o, m, center, half, shape_err) {
         return true;
     }
     let touch = |t: Touch| t == Touch::Yes || (t == Touch::Unsure && enclosed);
     FACES.iter().any(|f| {
-        touch(ray_touches_triangle(o, d, max, [c[f[0]], c[f[1]], c[f[2]]], 0.0))
-            || touch(ray_touches_triangle(o, d, max, [c[f[0]], c[f[2]], c[f[3]]], 0.0))
+        touch(ray_touches_triangle(o, d, max, [c[f[0]], c[f[1]], c[f[2]]], 0.0, shape_err))
+            || touch(ray_touches_triangle(o, d, max, [c[f[0]], c[f[2]], c[f[3]]], 0.0, shape_err))
     })
 }
 
-fn point_in_box(p: [f64; 3], m: &M4, center: [f64; 3], half: [f64; 3]) -> bool {
+fn point_in_box(p: [f64; 3], m: &M4, center: [f64; 3], half: [f64; 3], shape_err: f64) -> bool {
     // Solve m * l = p for the local point with the 3x3 part (Cramer's rule).
     let a = &m.0;
     let r = [p[0] - a[12], p[1] - a[13], p[2] - a[14]];
@@ -145,7 +147,13 @@ fn point_in_box(p: [f64; 3], m: &M4, center: [f64; 3], half: [f64; 3]) -> bool {
         return true;
     }
     let l = [dot(r, cross(c1, c2)) / det, dot(c0, cross(r, c2)) / det, dot(c0, cross(c1, r)) / det];
-    (0..3).all(|k| (l[k] - center[k]).abs() <= half[k].abs() + MARGIN + 1e-6 * l[k].abs())
+    // The placement's error, in local units along each column.
+    let tol = |k: usize| {
+        let c = [c0, c1, c2][k];
+        let n = dot(c, c).sqrt();
+        if n > 0.0 { (MARGIN + shape_err) / n } else { f64::INFINITY }
+    };
+    (0..3).all(|k| (l[k] - center[k]).abs() <= half[k].abs() + tol(k) + 1e-6 * l[k].abs())
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -185,6 +193,7 @@ pub fn ray_touches_triangle(
     max: f64,
     tri: [[f64; 3]; 3],
     bary_eps: f64,
+    shape_err: f64,
 ) -> Touch {
     let [a, b, c] = tri;
     let e1 = sub(b, a);
@@ -209,13 +218,25 @@ pub fn ray_touches_triangle(
     // PhysX's crossing point carries an error of order 1e-7 of the coordinates' and the
     // triangle's size (the slack covers the first), amplified by 1 / cond, along the ray and
     // across it alike; at most a thousand slacks (see [`UNSURE_SLACKS`]).
-    let margin = (slack(o, max) + 1e-5 * edges) / cond + 2.0 * bary_eps * edges;
+    let margin = (slack(o, max) + shape_err + 1e-5 * edges) / cond + 2.0 * bary_eps * edges;
     let t = dot(sub(a, o), n) / dot(d, n);
     if t < -margin || t > max + margin {
         return Touch::No;
     }
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
     if point_triangle_distance(p, a, b, c) <= margin { Touch::Yes } else { Touch::No }
+}
+
+/// How far the game's `f32` placement of a shape may stray from `m` applied in `f64` to
+/// local coordinates up to `local` in size: a millionth of the operands' magnitude (the
+/// translation and every column times the local size; cancellation between them can leave
+/// a world coordinate far smaller than its rounding).
+#[must_use]
+pub fn transform_error(m: &M4, local: f64) -> f64 {
+    let col = |j: usize| [m.0[4 * j], m.0[4 * j + 1], m.0[4 * j + 2]];
+    let t = col(3);
+    let norms: f64 = (0..3).map(|j| dot(col(j), col(j)).sqrt()).sum();
+    1e-6 * (dot(t, t).sqrt() + norms * local)
 }
 
 /// A prefilter on a shape's bounds grows by this many [`slack`]s on top of
@@ -304,10 +325,10 @@ mod tests {
         let tri = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
         let flipped = [tri[0], tri[2], tri[1]];
         let hits =
-            |o: [f64; 3], max: f64| ray_touches_triangle(o, DOWN, max, tri, 0.0) == Touch::Yes;
+            |o: [f64; 3], max: f64| ray_touches_triangle(o, DOWN, max, tri, 0.0, 0.0) == Touch::Yes;
         assert!(hits([0.2, 5.0, 0.2], 10.0));
         assert_eq!(
-            ray_touches_triangle([0.2, 5.0, 0.2], DOWN, 10.0, flipped, 0.0),
+            ray_touches_triangle([0.2, 5.0, 0.2], DOWN, 10.0, flipped, 0.0, 0.0),
             Touch::Yes,
             "either side"
         );
@@ -323,7 +344,10 @@ mod tests {
         // PhysX's BV4 test accepts u, v down to -mGeomEpsilon: 100 / 2^22 here, 1.41 mm outside.
         let tri = [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0], [100.0, 0.0, 0.0]];
         let eps = 100.0 / f64::from(1u32 << 22);
-        assert_eq!(ray_touches_triangle([50.001, 1.0, 50.001], DOWN, 10.0, tri, eps), Touch::Yes);
+        assert_eq!(
+            ray_touches_triangle([50.001, 1.0, 50.001], DOWN, 10.0, tri, eps, 0.0),
+            Touch::Yes
+        );
     }
 
     #[test]
@@ -335,19 +359,25 @@ mod tests {
             [1.0, f64::from(1.000_000_1f32), f64::from(0.999_999_9f32)],
         ];
         let o = [0.3, 1.0, f64::from(0.299_999_98f32)];
-        assert_eq!(ray_touches_triangle(o, DOWN, 100.0, tri, 2f64.powi(-21)), Touch::Unsure);
+        assert_eq!(ray_touches_triangle(o, DOWN, 100.0, tri, 2f64.powi(-21), 0.0), Touch::Unsure);
         // Collinear in f64 too: still counted where the ray meets its bounds.
         let line = [[0.0, 0.0, 0.0], [2.0, 2.0, 2.0], [1.0, 1.0, 1.0]];
-        assert_eq!(ray_touches_triangle(o, DOWN, 100.0, line, 0.0), Touch::Unsure);
-        assert_eq!(ray_touches_triangle([3.0, 1.0, 0.3], DOWN, 100.0, line, 0.0), Touch::Unsure);
+        assert_eq!(ray_touches_triangle(o, DOWN, 100.0, line, 0.0, 0.0), Touch::Unsure);
+        assert_eq!(
+            ray_touches_triangle([3.0, 1.0, 0.3], DOWN, 100.0, line, 0.0, 0.0),
+            Touch::Unsure
+        );
     }
 
     #[test]
     fn near_parallel_triangles_are_not_skipped() {
         // Nearly containing the vertical ray, crossed 1.5 m down; a long ray must still count.
         let tri = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [5e-13, 1.0, 0.0]];
-        assert_eq!(ray_touches_triangle([2.5e-13, 2.0, 0.25], DOWN, 1e7, tri, 0.0), Touch::Unsure);
-        assert_eq!(ray_touches_triangle([0.5, 2.0, 0.25], DOWN, 3.0, tri, 0.0), Touch::Unsure);
+        assert_eq!(
+            ray_touches_triangle([2.5e-13, 2.0, 0.25], DOWN, 1e7, tri, 0.0, 0.0),
+            Touch::Unsure
+        );
+        assert_eq!(ray_touches_triangle([0.5, 2.0, 0.25], DOWN, 3.0, tri, 0.0, 0.0), Touch::Unsure);
     }
 
     #[test]
@@ -363,6 +393,26 @@ mod tests {
         assert!(ray_hits_aabb([0.0, 5.0, 0.0], DOWN, 10.0, [-1.0; 3], [1.0; 3], 0.0));
         // f32 rounding at large magnitudes: a box 1 cm beyond a 1,000 km ray counts.
         assert!(ray_hits_box([0.0, 1e6, 0.0], DOWN, 1e6, &ID, [0.0, -1.01, 0.0], [1.0; 3]));
+        // Cancellation in the placement: the f32 centre lands at x = 0, the f64 one at 0.359.
+        let m = M4([
+            f64::from(0.123_456_78f32),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            -12_345_678.0,
+            0.0,
+            0.0,
+            1.0,
+        ]);
+        assert!(ray_hits_box([0.0, 1.0, 0.0], DOWN, 2.0, &m, [1e8, 0.0, 0.0], [0.5; 3]));
         assert!(!ray_hits_box([0.0, 5.0, 0.0], DOWN, 10.0, &ID, [5.0, 0.0, 0.0], h));
     }
 

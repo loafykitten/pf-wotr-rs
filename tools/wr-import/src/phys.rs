@@ -154,9 +154,14 @@ fn sphere_bounds(m: &[f32; 16], c: [f32; 3], r: f32) -> ([f32; 3], [f32; 3]) {
     (lo.map(|x| x - radius), hi.map(|x| x + radius))
 }
 
+/// World bounds of the local box `c ± e` under `m`, in `f64`, grown by the game's `f32`
+/// placement error (a millionth of the operands: the translation and each column times the
+/// local size) and rounded outwards to `f32`.
 fn world_bounds(m: &[f32; 16], c: [f32; 3], e: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-    let mut lo = [f32::INFINITY; 3];
-    let mut hi = [f32::NEG_INFINITY; 3];
+    let m = m.map(f64::from);
+    let (c, e) = (c.map(f64::from), e.map(f64::from));
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
     for corner in 0..8 {
         let p = [
             c[0] + if corner & 1 == 0 { -e[0] } else { e[0] },
@@ -169,7 +174,15 @@ fn world_bounds(m: &[f32; 16], c: [f32; 3], e: [f32; 3]) -> ([f32; 3], [f32; 3])
             hi[k] = hi[k].max(w);
         }
     }
-    (lo, hi)
+    let norm = |j: usize| (0..3).map(|k| m[4 * j + k].powi(2)).sum::<f64>().sqrt();
+    let local = (0..3).map(|k| c[k].abs() + e[k].abs()).fold(0.0, f64::max) * 3f64.sqrt();
+    let err = 1e-6 * (norm(3) + (norm(0) + norm(1) + norm(2)) * local);
+    let out = |x: f64, up: bool| {
+        let v = x as f32;
+        let pad = v.abs() * 2.4e-7 + 1e-6;
+        if up { v + pad } else { v - pad }
+    };
+    (lo.map(|x| out(x - err, false)), hi.map(|x| out(x + err, true)))
 }
 
 fn mesh_shape(
