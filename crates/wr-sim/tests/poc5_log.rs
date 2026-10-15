@@ -414,3 +414,45 @@ fn missing_or_wrong_combat_log_records_are_reported() {
     }
     assert!(missed.is_empty(), "{missed:#?}");
 }
+
+/// The combat end's events moved before `CombatController.Clear`'s navigation cleanup, on a fight
+/// whose cleanup starts with graph updates (`nav_guo`, `nav_update`) rather than its tags.
+#[test]
+#[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-115 capture"]
+fn combat_end_before_the_navigation_cleanup_is_reported() {
+    let (cap, fight, _) = CAPTURES[0];
+    let Some(dir) = fixture_in(cap, fight) else {
+        eprintln!("{cap}/{fight} not present: skipped");
+        return;
+    };
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+    let recs = &mut changed.records;
+    let at = recs
+        .iter()
+        .position(|r| {
+            r["ev"] == "clog_q"
+                && r["e"] == "GameLogEventCombatStateChanged"
+                && r["f"]["InCombat"] == false
+        })
+        .expect("a combat end");
+    let end = (0..at)
+        .rev()
+        .find(|&i| recs[i]["k"] == "tb" && recs[i]["ev"] == "combat_end")
+        .expect("its combat_end");
+    assert!(
+        recs[end + 1..at].iter().any(|r| r["ev"] == "nav_guo"),
+        "the fight's cleanup has graph updates before the log events"
+    );
+    let pair = [recs.remove(at), recs.remove(at)];
+    for (n, r) in pair.into_iter().enumerate() {
+        recs.insert(end + 1 + n, r);
+    }
+    renumber(recs);
+    let _ = replay::run_with_tape(&mut w, &changed, &trace);
+    assert!(
+        !w.valid() && w.coverage.unsupported.keys().any(|k| k.contains(L)),
+        "{:?}",
+        w.coverage.unsupported.keys().collect::<Vec<_>>()
+    );
+}
