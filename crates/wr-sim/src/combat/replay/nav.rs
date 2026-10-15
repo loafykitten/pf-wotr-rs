@@ -106,6 +106,9 @@ struct Computed {
     seek: Option<(bool, bool, bool)>,
     /// The modifiers' result recorded (`path_mod`).
     modded: bool,
+    /// The frame of its return (`Path.ReturnPath` runs the seeker, its modifiers and the
+    /// callbacks there, synchronously).
+    tick: i64,
 }
 
 impl Computed {
@@ -153,7 +156,7 @@ pub struct NavDriver {
     early: HashMap<String, Vec<(String, Option<Def>)>>,
     /// The last step the sim ran (`maxMoveLength`, its result, the simulator after it), not yet
     /// read by the AI.
-    last_step: Option<(EntityIdx, f32, bool, MovementSimulator)>,
+    last_step: Option<(i64, EntityIdx, f32, bool, MovementSimulator)>,
     /// The recorded `path_to`/`path_done` waiting for the sim's `PathTo`/`OnPathComplete`.
     path_to: Option<usize>,
     path_done: Option<usize>,
@@ -851,6 +854,7 @@ impl Driver<'_> {
             cs,
             seek: None,
             modded: false,
+            tick: self.tick,
         })
     }
 
@@ -871,6 +875,7 @@ impl Driver<'_> {
             .rsplit_once('#')
             .is_some_and(|(who, _)| self.ags.nav.seeker.get(who).map(String::as_str) == Some(key));
         let known = self.nav_known(key);
+        let tick = self.tick;
         let Some(c) = self.ags.nav.computed.get_mut(key) else {
             if !known {
                 Self::nav_unsupported(
@@ -880,6 +885,9 @@ impl Driver<'_> {
             }
             return;
         };
+        if c.tick != tick {
+            Self::nav_unsupported(w, format!("{key}: path_seek outside its return's frame"));
+        }
         match (r["accepted"].as_bool(), r["mods"].as_bool(), r["cb"].as_bool()) {
             (Some(a), Some(m), Some(cb))
                 if c.seek.is_none() && fields(r, &["path", "accepted", "mods", "cb"]) =>
@@ -909,12 +917,16 @@ impl Driver<'_> {
             return;
         }
         let known = self.nav_known(key);
+        let tick = self.tick;
         let Some(c) = self.ags.nav.computed.get_mut(key) else {
             if !known {
                 Self::nav_unsupported(w, format!("{key}: a path_mod of a path no request started"));
             }
             return;
         };
+        if c.tick != tick {
+            Self::nav_unsupported(w, format!("{key}: path_mod outside its return's frame"));
+        }
         let expected = c.seek.is_some_and(|(a, m, _)| a && m && !c.err) && !c.modded;
         let same =
             pts(&r["v"]).is_some_and(|v| same_pts(&v, &c.vector_path)) && fields(r, &["path", "v"]);
@@ -997,6 +1009,9 @@ impl Driver<'_> {
             return Err(Desync(format!("{key} delivered before its return (path_fin)")));
         }
         let Some(c) = self.ags.nav.computed.get(key) else { return Ok(None) };
+        if c.tick != self.tick {
+            return Err(Desync(format!("{key}: a callback outside its return's frame")));
+        }
         if !c.seek.is_some_and(|(a, _, cb)| a && cb) {
             return Err(Desync(format!(
                 "{key}: a callback the seeker doesn't make ({:?})",
@@ -1039,6 +1054,10 @@ impl Driver<'_> {
         let Some(c) = self.ags.nav.computed.get(&key) else {
             return Err(Desync(format!("ScorePath's path {key} isn't computed")));
         };
+        // (`BlockUntilCalculated`: returned in the AI's own frame.)
+        if c.tick != self.tick {
+            return Err(Desync(format!("ScorePath's path {key} returned in another frame")));
+        }
         let Some(v) = c.delivered() else {
             return Err(Desync(format!("ScorePath's path {key} before its modifiers")));
         };
@@ -1286,7 +1305,7 @@ impl Driver<'_> {
         match res {
             Ok(ret) => {
                 self.out.nav.sim_steps += 1;
-                self.ags.nav.last_step = Some((u, max, ret, sim.clone()));
+                self.ags.nav.last_step = Some((self.tick, u, max, ret, sim.clone()));
             }
             Err(d) => {
                 w.coverage.unsupported(format!("driven replay: agent: {}", d.0));
@@ -1339,6 +1358,8 @@ impl Driver<'_> {
     /// A frame's controllers have all run: the grid's events of the frame are the recording's,
     /// all paired.
     pub(super) fn nav_frame_done(&mut self, w: &mut World) {
+        // A step the AI didn't read in its frame isn't its.
+        self.ags.nav.last_step = None;
         if !self.ags.nav.paths {
             return;
         }
@@ -1462,9 +1483,14 @@ impl Driver<'_> {
         if !self.ag {
             return Ok(());
         }
-        let Some((u, m, ret, sim)) = self.ags.nav.last_step.take() else {
+        let Some((tick, u, m, ret, sim)) = self.ags.nav.last_step.take() else {
             return Err(Desync("ScorePath's simulation step without the sim's step".into()));
         };
+        if tick != self.tick {
+            return Err(Desync(
+                "ScorePath's simulation step: the sim's step is of another frame".into(),
+            ));
+        }
         // The step of the AI's own unit (`context.Unit.View.AgentASP`).
         if crate::combat::ai::context_unit(w) != Some(u) {
             return Err(Desync(format!(

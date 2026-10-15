@@ -302,7 +302,7 @@ the sim's grid (with `paths`; before, the record's), and the simulator after it 
 `ag_sim_end`. A simulation record outside a step is reported (in turn-based combat); in real time the steps are
 inputs and their physics checked. The AI still reads `ScorePath`'s step results from its own leaves (`msim`; the
 AI isn't driven through the step yet: `docs/poc5/ai-movement.md`), each now required to be the step the sim just ran
-for the AI's unit (`maxMoveLength`, the result and the simulator after it), and its grid reads (`ablk`, `GetNearest(p).node
+for the AI's unit in its frame (`maxMoveLength`, the result and the simulator after it), and its grid reads (`ablk`, `GetNearest(p).node
 .AllyBlocked`) the sim's grid's; every step's delta must be `0.1f` (both callers'); these captures' steps cover the shift, the cap at the
 movement left (`ReachedMaxDistance`), the approach radius entered (`SegmentCircleIntersection`, with line of sight),
 waypoint advances and the path's end.
@@ -349,7 +349,8 @@ prefix's `path_done`: error, count, end, `GetTotalLength()`; `PathTo`'s prefix `
 call; a prefix is used in its frame), FindPath's callback
 (`ag_findclr`) must be one the seeker makes, and the AI's `ScorePath` read (`uc_v path`) must be the sim's path of the AI's `FindPath`, or,
 when `FixPathIfTooShort` made a fake path, the sim's path must be one it replaces (fewer than two points, or two
-within 0.1 m in x and z; the fake path's points are an input). Every `nav_*`/`path_*` record must be of its frame,
+within 0.1 m in x and z; the fake path's points are an input). Every `nav_*`/`path_*` record must be of its frame, and a return's seeker, modifiers and callbacks (with the AI's
+read after `BlockUntilCalculated`) of the return's frame (`Path.ReturnPath` runs them synchronously),
 and a `path_fin`, `path_seek` or `path_mod` of a path no request started is reported; a critter's request
 (`path_critter`, `critter#n`: `CritterMoveAgent`, presentation) and a request started inside a span taken from the
 recording keep the recording's path. Captures without `paths` (up to `-113`) take the
@@ -397,7 +398,8 @@ The coverage line (`wr-combat replay`): `physics and paths: physics queries comp
 computed ... deliveries checked ... graph events matched ...`.
 
 `missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 61
-ways (its first replay once: the timer's refresh removed; `poc5-tb-118` four ways: the AI reading a step other
+ways (its first replay twice: the timer's refresh removed, a return moved a frame before its callback;
+`poc5-tb-123` once: the AI reading a step of the frame before; `poc5-tb-118` four ways: the AI reading a step other
 than the sim's, or another unit's, its steps' records removed, its grid read changed), each reported: the agent's, a simulation step's and a
 span's query (distance, point, collider and its sibling path, hit); a step's
 end (position, result, length), a grid read, a missing read or end, a stray simulation read, a line-of-sight

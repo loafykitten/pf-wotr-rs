@@ -1121,13 +1121,43 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
     ];
     damage_cases(&dir, &cases);
     // A replay's navigation timer runs on its recording's clock reads: its refresh is the sim's.
-    let replay: Vec<(&str, Change)> = vec![("driven replay: paths: ", |recs| {
-        let at = (1..recs.len())
-            .find(|j| ev(&recs[*j], "nav_tags") && ev(&recs[*j - 1], "turn_tick"))
-            .unwrap();
-        recs.remove(at);
-        renumber(recs);
-    })];
+    let replay: Vec<(&str, Change)> = vec![
+        ("driven replay: paths: ", |recs| {
+            let at = (1..recs.len())
+                .find(|j| ev(&recs[*j], "nav_tags") && ev(&recs[*j - 1], "turn_tick"))
+                .unwrap();
+            recs.remove(at);
+            renumber(recs);
+        }),
+        ("outside its return's frame", |recs| {
+            // A return and its seeker's records moved to the end of the frame before, its
+            // callback left (a replay's trace has no path_ret to tie them).
+            let fin = fin_of_done(recs);
+            let key = recs[fin]["path"].clone();
+            let done = of_path(recs, fin, "ag_done");
+            let tick = (0..fin).rev().find(|j| recs[*j]["k"] == "tick").unwrap();
+            let def = (tick..fin).find(|j| {
+                ev(&recs[*j], "ag_pathdef")
+                    && recs[*j]["path"] == key
+                    && recs[*j]["pending"] != true
+            });
+            let mut moved: Vec<usize> = def.into_iter().collect();
+            moved.extend((fin..done).filter(|j| {
+                matches!(recs[*j]["ev"].as_str(), Some("path_fin" | "path_seek" | "path_mod"))
+                    && recs[*j]["path"] == key
+            }));
+            let mut taken: Vec<V> = Vec::new();
+            for j in moved.iter().rev() {
+                let mut r = recs.remove(*j);
+                r["t"] = json!(r["t"].as_i64().unwrap() - 1);
+                taken.insert(0, r);
+            }
+            for (k, r) in taken.into_iter().enumerate() {
+                recs.insert(tick + k, r);
+            }
+            renumber(recs);
+        }),
+    ];
     damage_cases_of(&dir, "replay-1", &replay, true);
     // The AI's read of a simulation step the sim ran (`poc5-tb-118`, whose AI walks; its run is
     // invalid on ports of other streams, so only the new report counts).
@@ -1164,5 +1194,21 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             }),
         ];
         damage_cases_of(&chain, "record", &msim, false);
+    }
+    // A step of the frame before the AI's read (`poc5-tb-123`, its run invalid on other ports).
+    if let Some(chain) = fixture_in("poc5-tb-123", "tb-chain") {
+        let stale: Vec<(&str, Change)> = vec![("ScorePath's simulation step", |recs| {
+            let m = pos(recs, |r| ev(r, "uc_v") && r["f"] == "msim");
+            let at = (0..m).rev().find(|j| ev(&recs[*j], "ag_sim")).unwrap();
+            let end = span_end(recs, at, "ag_sim_end");
+            let tick = (0..at).rev().find(|j| recs[*j]["k"] == "tick").unwrap();
+            let span: Vec<V> = recs.drain(at..=end).collect();
+            for (k, mut r) in span.into_iter().enumerate() {
+                r["t"] = json!(r["t"].as_i64().unwrap() - 1);
+                recs.insert(tick + k, r);
+            }
+            renumber(recs);
+        })];
+        damage_cases_of(&chain, "record", &stale, false);
     }
 }
