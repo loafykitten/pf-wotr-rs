@@ -4828,6 +4828,7 @@ dependencies = [
  "wr-assets",
  "wr-nav",
  "wr-paths",
+ "wr-phys",
  "zip",
 ]
 
@@ -4855,6 +4856,19 @@ dependencies = [
 [[package]]
 name = "wr-paths"
 version = "0.1.0"
+
+[[package]]
+name = "wr-phys"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "libc",
+ "postcard",
+ "serde",
+ "serde_json",
+ "wr-paths",
+]
 
 [[package]]
 name = "wr-rules-data"

@@ -554,6 +554,36 @@ impl SceneData {
         out
     }
 
+    /// A GameObject's components in `m_Component` order: (class, decoded value).
+    #[must_use]
+    pub fn components_of(&self, go: i64) -> Vec<(&str, &Value)> {
+        self.gos.get(&go).map_or_else(Vec::new, |g| {
+            g.components
+                .iter()
+                .filter_map(|c| self.comps.get(c))
+                .map(|c| (c.class.as_str(), &c.value))
+                .collect()
+        })
+    }
+
+    /// The local transforms from the root down to `go` (the chain Unity composes).
+    #[must_use]
+    pub fn local_chain(&self, go: i64) -> Vec<Trs> {
+        let mut out = Vec::new();
+        let mut t = self.go_transform.get(&go).copied();
+        let mut visited = HashSet::new();
+        while let Some(tr) = t {
+            if !visited.insert(tr) {
+                break;
+            }
+            let Some((_, parent, _)) = self.transforms.get(&tr) else { break };
+            out.push(self.locals.get(&tr).copied().unwrap_or(Trs::IDENTITY));
+            t = *parent;
+        }
+        out.reverse();
+        out
+    }
+
     /// Counts components by class name.
     #[must_use]
     pub fn class_counts(&self) -> BTreeMap<String, usize> {

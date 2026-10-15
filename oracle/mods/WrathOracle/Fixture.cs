@@ -120,6 +120,8 @@ internal static class Fixture
             j.Key("rng_sites"); Rng.WriteSites(j, compact: true);
         });
         Rng.Checkpoint(); // the gap baseline: the window starts here
+        // The colliders and a probe of them (observer phys_probe; reads only).
+        if (Fidelity.Observers.Contains("phys_probe")) PhysProbe.Run();
         Main.Note($"fixture {Mode} {name} -> {PathNow}");
         PrePathSync.Flush(Time.frameCount);
         if (prePath != null && Sched.Replay) Sched.Invalidate(prePath);
@@ -309,6 +311,7 @@ internal static class Fidelity
         CommandObs.Install(h);
         if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets", "impatience" });
         if (CommandObs.AgOn) Observers.Add("agent");
+        if (PhysProbe.Installed) Observers.Add("phys_probe");
         // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
         // units outside turn-based windows (aa_awake): declared when their patches installed.
         var failed = Health.FailedCount;

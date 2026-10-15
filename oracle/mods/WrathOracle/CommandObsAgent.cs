@@ -26,7 +26,7 @@ namespace WrathOracle;
 //    the view's IsCommandsPreventMovement, MaxSpeed, FlyHeight, the cutscene's control of the unit, the gamepad
 //    setting), with the agent's unit; in UnitMoveController.TickUnit, the unit state's CanMove and CanRotate;
 //  - ag_phys: each physics query in UnitMovementAgentBase.Move (Physics.Raycast, PhysicUtils.HeuristicDiscCastDown)
-//    with its arguments and result, and the context: the tick ("tick", with the unit), ScorePath's simulation ("sim")
+//    with its arguments and result (and since phys_probe, the collider hit: col, PhysProbe.WriteId), and the context: the tick ("tick", with the unit), ScorePath's simulation ("sim")
 //    or another caller ("other");
 //  - ag_req / ag_req_end: PathTo and FindPath, their arguments, the state before and after, and the request made
 //    (RequestedPath's PathSync key and kind);
@@ -494,11 +494,12 @@ internal static partial class CommandObs
                 var ctx = PhysCtx(out var u);
                 var d = hitInfo.distance;
                 var pt = hitInfo.point;
+                var col = hit ? hitInfo.collider : null;
                 Sched.Obs("ag_phys", j =>
                 {
                     j.Prop("fn", "ray"); j.Prop("ctx", ctx); j.Prop("u", u); j.Prop("o", origin); j.Prop("d", direction);
                     j.Prop("max", maxDistance); j.Prop("mask", layerMask); j.Prop("hit", hit);
-                    if (hit) { j.Prop("dist", d); j.Prop("pt", pt); }
+                    if (hit) { j.Prop("dist", d); j.Prop("pt", pt); j.Key("col"); j.W.WriteStartObject(); PhysProbe.WriteId(j, col); j.W.WriteEndObject(); }
                 });
             }
         }
@@ -516,11 +517,12 @@ internal static partial class CommandObs
                 var ctx = PhysCtx(out var u);
                 var d = hitInfo.distance;
                 var pt = hitInfo.point;
+                var col = hit ? hitInfo.collider : null;
                 Sched.Obs("ag_phys", j =>
                 {
                     j.Prop("fn", "disc"); j.Prop("ctx", ctx); j.Prop("u", u); j.Prop("o", origin); j.Prop("r", radius);
                     j.Prop("max", maxDistance); j.Prop("mask", layerMask); j.Prop("hit", hit);
-                    if (hit) { j.Prop("dist", d); j.Prop("pt", pt); }
+                    if (hit) { j.Prop("dist", d); j.Prop("pt", pt); j.Key("col"); j.W.WriteStartObject(); PhysProbe.WriteId(j, col); j.W.WriteEndObject(); }
                 });
             }
         }

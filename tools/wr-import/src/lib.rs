@@ -11,6 +11,7 @@ pub mod families;
 pub mod nav;
 pub mod oracle_diff;
 pub mod pack;
+pub mod phys;
 pub mod prefabs;
 pub mod refs;
 pub mod report;
