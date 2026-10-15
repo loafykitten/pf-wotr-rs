@@ -25,6 +25,7 @@ pub mod initiative;
 pub mod inspect;
 pub mod life;
 pub mod loot;
+pub mod memory;
 pub mod movement;
 pub mod oracle;
 pub mod order;
