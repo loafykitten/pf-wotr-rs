@@ -58,6 +58,7 @@ internal static class Fixture
         CommandObs.ResetWindow();
         PathSync.ResetWindow();
         TurnBased.ResetWindow();
+        LogObs.ResetWindow();
         if (replay)
         {
             if (!File.Exists(record)) throw new FileNotFoundException("no recording to replay", record);
@@ -95,6 +96,8 @@ internal static class Fixture
             j.Arr("observers"); foreach (var o in Fidelity.Observers) j.W.WriteValue(o); j.EndArr();
             // The dialogue controller's custom speaker fields, which live as long as the game process.
             if (TextObs.Installed) { j.Key("dialog_speaker"); TextObs.WriteSpeakerState(j); }
+            // The combat log's dispatch tables, queue and context when the window opens (LogObs.cs).
+            if (LogObs.Installed) { j.Key("game_log"); LogObs.WriteSetup(j); }
             j.Prop("input_pin", InputPin.Describe());
             j.Arr("camera"); if (camera != null) foreach (var v in camera) j.W.WriteValue(v); j.EndArr();
             // The physics clock at window open: whether colliders sync to queries without a step, and the
@@ -346,6 +349,10 @@ internal static class Fidelity
         Observers.Add("paused_origins");
         try { TextObs.Install(h); Observers.Add("dialog_text"); }
         catch (Exception e) { Health.Failed("patch the dialogue text (dlg_history, dlg_text)", e); }
+        // The combat log's events, ticks and messages (clog_q, clog_tick, clog_msg; LogObs.cs).
+        failed = Health.FailedCount;
+        try { LogObs.Install(h); } catch (Exception e) { Health.Failed("patch the combat log", e); }
+        if (LogObs.Installed && Health.FailedCount == failed) Observers.Add("combat_log");
         OracleTime.Install(h);
         InstallSeconds = sw.Elapsed.TotalSeconds;
         Notes.Add($"install total {InstallSeconds:0.00} s");
