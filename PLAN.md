@@ -11,6 +11,32 @@ is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **Parallel streams (twenty-second session, Opus 5.5 (high) agents in git worktrees, `scripts/worktree-setup.sh`;
+  only the main session builds WrathOracle and records).** Merged, each reviewed by gpt-6.1-sol (high) to no findings:
+  - *The agent in the driven replay* (`combat/replay/agent.rs`): `poc5-tb-109` valid on all six runs with the agent
+    computed. A2 (hardening per `docs/poc5/movement-review-integration.md`, observer `agent_sync`: `ag_sync`, `ag_pos`,
+    captured in `poc5-tb-113`) is still running: `-113` is invalid only by its 22 `ag_sync` kinds until A2 lands.
+  - *Orientation* (`combat/orientation.rs`, `docs/poc5/orientation.md`): `LookRotation`/`ToEulerRad` native ports;
+    `LookAt`/`ForceLookAt` not ported (an `ag_look` observer proposed).
+  - *The AI's movement simulation* (`combat/ai_sim.rs`, `docs/poc5/ai-movement.md`): records `ag_sim`; the AI should
+    use it once a fixture has an enemy walk several steps.
+  - *Group memory* (`combat/memory.rs`, `docs/poc5/memory.md`): `UnitGroupMemory`'s bookkeeping, then slice H1:
+    `UnitMemoryController.Tick` exact on all 42,306 recorded ticks of `poc5-tb-111` to `-113`; the sim's `AddToMemory`
+    calls at offensive actions and command acts are matched against `mem_q`. Wiring the tick into the driven replay
+    (`Phase::Memory`): the doc's "H1: result".
+  - *Physics* (`crates/wr-phys`, `docs/poc5/physics.md`): PhysX 4.1's height-field and box raycasts, checked against
+    the player on a million rays each; all 57,321 recorded `ag_phys` queries of `poc5-tb-100` to `-105` bit-identical;
+    `wr-import phys-pack` writes `cache/sim/phys/<guid>.wrphys`. Boxes and meshes unverified (no recording reaches
+    one). Not yet behind `AgentInputs::raycast`/`disc_cast` (waits for A2). Observer `phys_probe`.
+  - *Turn-based paths* (`crates/wr-nav` `update.rs`/`astar.rs`, `combat/paths.rs`, `docs/poc5/paths.md`):
+    CombatController's grid blocking and erosion, `ABPathWithClearance`, the seeker's modifiers. Observer `paths`
+    (`poc5-tb-114`): all 129 requests exact, 87 with recorded line of sight; 440 deliveries, 1,206 graph events.
+    The nav file is format 2. The UI's path visualizer (the party's follows) isn't ported.
+  - *Manual_10's facts* (`docs/poc3/manual10-facts.md`): one-sided facts 35 -> 17, match rate 0.9987.
+  - Fixes: `Vector3 ==` stores its sum before comparing; the oracle's tape reader takes a gate only from a boolean `g`.
+  - Running: A2 and I (the combat log's text, observer `combat_log`, captures `poc5-tb-115` to `-117`).
+  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`), `-115` to
+    `-117` (+ `combat_log`; `-116` tb-hold, `-117` tb-solo). Sim regression unchanged (`cache/regress/out-post-d`).
 - **The movement agent (twenty-second session, `docs/poc5/movement.md`): `TickMovement` exact against the game.**
   WrathOracle's new observer `agent` (`CommandObsAgent.cs`, three gpt-6.1-sol review rounds) records the agent's state,
   leaves, physics queries, path requests and completions; `poc5-tb-100` to `-103` (Manual_18, both fights) are clean.
@@ -20,7 +46,7 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   against the player): rerun from each recorded state, **all 24,525 recorded turn-based ticks are bit-identical**, the
   agent's own calls and its calls into the view in the recorded order (gpt-6.1-sol: the observer four rounds, the
   model three).
-  Not yet in the driven replay: `PathTo` (needs orientation), `OnPathComplete`, `UnitMoveController` (next).
+  Then in the driven replay with `PathTo`, `OnPathComplete` and `UnitMoveController` (see the streams above).
 - **Nav (twenty-second session, `docs/poc0/extraction.md` §9): every path query exact, smoothing included.** The
   funnel's `Quaternion.FromToRotation` is now a port of the arm64 player's own machine code (found through the icall
   table in `UnityPlayer.dylib`): single-precision magnitudes, Möller and Hughes' original `h = (1 - e) / |v|²`, double
@@ -250,18 +276,20 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 - **POC-6:** realtime spot and point shadows (pack format v2: rerun `wr-import pack`), FLIP mean 0.1246.
 
 **Next, in order:**
-1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): what the AI and the commands still
-   read as inputs (group memory and visibility, the movement agent and pathing, animation, the Unity clock) mostly wait
-   for their own ports (memory, nav: the searches and smoothing are exact, `crates/wr-nav` and the
-   nav files are in place; `UnitMovementAgent.TickMovement` is ported and exact against the records, next its `PathTo`,
-   `OnPathComplete` and `UnitMoveController` in the driven replay: `docs/poc5/movement.md`, steps); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
-   exercise the AI's movement simulation (`ScorePath`). The movement agent waits for the nav port. The UI's requests
-   stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
-   five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
-   choices are recorded and valid: `-95`'s two and `-96`).
+1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`). The ports now exist; next is wiring
+   them into the driven replay, one at a time (each touches `combat/replay/*.rs`, so run them one after another, not
+   in parallel): A2's hardened agent (running); then the memory tick as `Phase::Memory` (`docs/poc5/memory.md`, "H1:
+   result"); then `wr-phys` behind `AgentInputs::raycast`/`disc_cast` and the turn-based paths (`combat/paths.rs`)
+   behind the agent's `PathTo`/`FindPath` (the player's `FindPath` results are recorded since `poc5-tb-114`). Still
+   inputs with no port: visibility, animation, the Unity clock, the UI's requests and its path visualizer. The
+   impatience draws need a fight that reaches a hard target; a fixture whose enemies start out of reach would exercise
+   the AI's movement simulation (`ScorePath`, `combat/ai_sim.rs`). More fights recorded on the current mod (a
+   critical, a spell, iterative attacks, an ally dying, a loot drop, a five-foot step, a full attack), with call sites
+   and the cooldown and tick hooks (POC-5's three fights with different choices are recorded and valid: `-95`'s two
+   and `-96`).
 2. POC-4 (`docs/poc4/dialogue.md`): every dialogue run is valid, Camelia's included (round 12, on Ember's Manual_20).
    Facts' handler interfaces: done (round 13). Left: looting when a
-   fixture needs it, the combat log's and UI's templates. The fixture saves' load tail
+   fixture needs it, the combat log's (stream I, running) and UI's templates. The fixture saves' load tail
    is closed (Manual_13 and Manual_18 load with nothing unsupported; Manual_19 reports only the `RandomTrack` gate, a
    recorded input in its runs); Manual_10's 224 kinds are item 3's.
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
