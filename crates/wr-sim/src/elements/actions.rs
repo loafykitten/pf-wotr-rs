@@ -12,6 +12,7 @@ use crate::world::World;
 
 pub const IMPLEMENTED: &[&str] = &[
     "Conditional",
+    "DealDamage",
     "GainExp",
     "GiveObjective",
     "SetObjectiveStatus",
@@ -125,9 +126,66 @@ pub fn run(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
             Ok(())
         }
         // `Kingmaker.Tutorial.Actions/ShowNewTutorial.cs`.
+        // `DealDamage.cs`: `Rulebook.Trigger(new RuleDealDamage(NoSource || !Source ? Target :
+        // Source, Target, Damage.CreateDamage()))` (the battle log and the effects are presentation).
+        "DealDamage" => {
+            let source = if a.bool("NoSource") || a.obj("Source").is_none() {
+                get_unit(w, owner, a.obj("Target"))?
+            } else {
+                get_unit(w, owner, a.obj("Source"))?
+            };
+            let target = get_unit(w, owner, a.obj("Target"))?;
+            let Some(d) = a.obj("Damage") else {
+                return Err(ElementError::Other("NullReferenceException: damage".into()));
+            };
+            // `CreateDamage` evaluates `EvaluatedBonus` first (it can draw: not ported).
+            if d.obj("EvaluatedBonus").is_some() {
+                return Err(unsupported(w, "action", "DealDamage (EvaluatedBonus)"));
+            }
+            if d.bool("CausedByCheckFail") {
+                return Err(unsupported(w, "action", "DealDamage (CausedByCheckFail)"));
+            }
+            // `TypeDescription.CreateDamage` dereferences the description, its `Physical` (for
+            // physical damage) and its `Common`: a null one throws before any rule.
+            let td = d.obj("TypeDescription");
+            if td.is_none_or(|t| {
+                (t.int("Type") == 0 && t.obj("Physical").is_none()) || t.obj("Common").is_none()
+            }) {
+                return Err(ElementError::Other(
+                    "NullReferenceException: damage type description".into(),
+                ));
+            }
+            let desc = crate::combat::attack::DamageDescription {
+                dice: crate::combat::weapon::DiceFormula::from_view(d.obj("Dice")),
+                bonus: d.i32("Bonus"),
+                type_desc: crate::combat::attack::DamageTypeDesc::from_view(
+                    d.obj("TypeDescription"),
+                ),
+                ..Default::default()
+            };
+            let mut damage = desc.create_damage(w);
+            damage.ignore_reduction = d.bool("IgnoreReduction");
+            damage.ignore_immunities = d.bool("IgnoreImmunities");
+            let mut rule = crate::combat::attack::RuleDealDamage::new(
+                source,
+                target,
+                vec![damage],
+                crate::combat::attack::AttackLink::default(),
+            );
+            crate::combat::rules::trigger_any(w, &mut rule, |_| None);
+            Ok(())
+        }
         "ShowNewTutorial" => {
-            if !a.objs("Evaluators").is_empty() {
-                return Err(unsupported(w, "action", "ShowNewTutorial (context evaluators)"));
+            // The evaluators fill the `TutorialContext` for `Trigger` (its exceptions caught),
+            // which only the stubbed trigger and UI read: skipping them is right only for
+            // evaluators without side effects (`RandomPartyUnit` draws, say): others are reported.
+            let evaluators = a.objs("Evaluators");
+            if !evaluators.is_empty() {
+                if !evaluators.iter().all(|e| View(e).obj("Evaluator").is_some_and(pure_evaluator))
+                {
+                    return Err(unsupported(w, "action", "ShowNewTutorial (context evaluators)"));
+                }
+                w.coverage.stub("ShowNewTutorial: context evaluators (the tutorial's trigger, UI)");
             }
             let Some(g) = a.guid("m_Tutorial") else {
                 return Err(ElementError::Other("NullReferenceException: tutorial".into()));
@@ -271,8 +329,20 @@ pub fn run(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
     }
 }
 
+/// An evaluator whose `GetValue` only reads (`CompanionInParty`, `PlayerCharacter`, and
+/// `AbilityEvaluator` with such a caster: it looks up the caster's abilities and known spells).
+pub(crate) fn pure_evaluator(v: View<'_>) -> bool {
+    match v.type_name() {
+        "CompanionInParty" | "PlayerCharacter" => true,
+        "AbilityEvaluator" => v.obj("Caster").is_some_and(pure_evaluator),
+        _ => false,
+    }
+}
+
 /// The innermost `MechanicsContext.Data` scope.
-fn mechanics_scope(w: &World) -> Option<(crate::world::FactIdx, Option<crate::world::EntityIdx>)> {
+pub(crate) fn mechanics_scope(
+    w: &World,
+) -> Option<(crate::world::FactIdx, Option<crate::world::EntityIdx>)> {
     w.ctx.iter().rev().find_map(|c| match c {
         super::Ctx::Mechanics { fact, target } => Some((*fact, *target)),
         _ => None,

@@ -7,10 +7,21 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-14, end of the nineteenth session): start here
+## Where things stand (2026-10-14, end of the twentieth session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-4 round 12 (twentieth session, `docs/poc4/dialogue.md`): Camelia, a dialogue started by a cutscene.** Last
+  session's `poc4-camelia-1` turned out to be Seelah's meeting (the walk enters her trigger first); Camelia's trigger also
+  lies behind `LootFirst`, which turns the party back until it loots a cloak. On a development capture,
+  `poc4-camelia-5` (Seelah's meeting, then a teleport into Camelia's zone), **all 4 runs are valid** with the whole T0
+  stream, end state and units equal. WrathOracle records `cs_dialog` and `cs_entry` (`cutscene_commands`) and the caller
+  chain of any mutation in Pause mode (`paused_origins`); the sim starts a cutscene's dialogue and skips commands where
+  the recording did, orders parallel tracks by the recording, makes the zone entries no step claims (other units, a
+  teleport) at their ticks, and ports Camelia's recruitment (identification, `AddUnitFactEquipment`, `CasterProperty`,
+  `Conditional`, `DealDamage`). Found and fixed: **`EtudesSystem` never received its events** (the save schema drops
+  handler interfaces): flags, recruits, party and quest changes now mark its conditions dirty (`ENTITY_HANDLERS`); no
+  other run changed. The original's combat log, in Pause mode, copies an item (a fact id): left out as UI (T2).
 - **POC-4 round 11 (nineteenth session, `docs/poc4/text.md`): text.** `crates/wr-text` ports the localization packs
   (read once from the install's JSON into our own memory-mapped format, `cache/text/<locale>.wrtext`: opens in 1.9 ms,
   the JSON takes 66 ms) and `TextTemplateEngine` (the scan equal to the decompiled loop run on Mono on 335,690 strings;
@@ -215,9 +226,10 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
    choices are recorded and valid: `-95`'s two and `-96`).
-2. POC-4 (`docs/poc4/dialogue.md`): every dialogue run is valid, its text included (round 11). Left: Camelia's
-   meeting (`poc4-camelia-1` recorded: the sim must start a dialogue from a foreground cutscene's `CommandStartDialog`
-   and classify that cutscene's commands and locks), the combat log's and UI's templates. The fixture saves' load tail
+2. POC-4 (`docs/poc4/dialogue.md`): every dialogue run is valid, Camelia's included (round 12, on a development
+   capture). Left: a regular Camelia fixture (a save just before her from Ember, or looting: a driver `loot` step and the
+   sim's container interaction, take-all and `PartyInventoryTrigger`), the facts' handler interfaces (the save schema's
+   gap: `ActivatableAbility` implements eight), the combat log's and UI's templates. The fixture saves' load tail
    is closed (Manual_13 and Manual_18 load with nothing unsupported; Manual_19 reports only the `RandomTrack` gate, a
    recorded input in its runs); Manual_10's 224 kinds are item 3's.
 3. Manual_10's 72 facts on one side only (after the extras' toggles: mounts and animal companions, monster mythic
@@ -229,6 +241,11 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
+- **Twentieth session (2026-10-14):** capture `poc4-camelia-5` (development: `teleport` after Seelah's meeting);
+  `poc4-camelia-1`, `-3`, `-4` and two aborted `-2` tries archived. The regression baseline is `cache/regress/out-camelia1`
+  (identical to `out-text2` plus the Camelia runs; `scripts/regress.sh` includes `poc4-camelia-5`). The WrathOracle build
+  installed has `cutscene_commands` and `paused_origins`. A mutation in Pause mode is UI or input: recordings keep player
+  input neutral, so a `Kingmaker.UI` frame in its origin marks the original's UI.
 - **Nineteenth session (2026-10-14):** captures `poc4-seelah-7`, `poc4-horgus-11`, `cert-24` (with `dialog_text`) and
   `poc4-camelia-1`; `poc4-seelah-5`/`-6`, `poc4-horgus-9`/`-10`, `cert-22`/`-23` superseded (archived). The POC-4 suite
   and `scripts/regress.sh` use the new ones; the regression baseline is `cache/regress/out-text2` (only the dialogue

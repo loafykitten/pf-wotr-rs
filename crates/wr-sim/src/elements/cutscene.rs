@@ -33,10 +33,18 @@
 //!   its recorded place, and every tick's mode is checked against the recording's.
 //! - A cutscene's `OnStopped` actions and a fade's in-fade actions are accepted when they are
 //!   presentation (a cutscene they start is classified in turn); anything else is reported.
-//! - Always reported: a command with an `EntryCondition` (`StartNextCommand` checks it and
-//!   applies `OnFail`), `CommandStartDialog` (the dialogue blocks its track and isn't started by the sim), a
-//!   cutscene started by a cutscene with T0 actions of its own, and a `CommandDismountSpan`
-//!   while any unit has a rider part.
+//! - With the recording's cutscene commands too (WrathOracle's `cs_dialog` and `cs_entry`), a
+//!   `CommandStartDialog` without a speaker or an evaluator is a T0 step: its
+//!   `StartDialogWithoutTarget` runs where the recording ran the command (the dialogue then
+//!   blocks the track, which only delays the track's later commands: their runs are recorded
+//!   too). A command whose `EntryCondition` fails with `SkipCommand` is skipped where the
+//!   recording checked it (its conditions can read positions). And T0 steps on parallel tracks
+//!   are accepted: each recorded run takes the first step left on its own track.
+//! - Otherwise reported: a command with an `EntryCondition` (`StartNextCommand` checks it and
+//!   applies `OnFail`), `CommandStartDialog` (the dialogue blocks its track and isn't started by
+//!   the sim).
+//! - Always reported: a cutscene started by a cutscene with T0 actions of its own, and a
+//!   `CommandDismountSpan` while any unit has a rider part.
 //! - Any other command or nested action makes the run invalid (unsupported).
 //!
 //! `CommandDelay.OnRun` draws from the global RNG (`Range(float,float)`); those draws are
@@ -88,15 +96,31 @@ const ACTIVATION_FIRST_TRACK: i64 = 1;
 const ACTIVATION_RANDOM_TRACK: i64 = 2;
 /// `Operation.Or`.
 const OP_OR: i64 = 1;
+/// `CommandBase.EntryFailResult.SkipCommand`.
+const ENTRY_SKIP_COMMAND: i64 = 2;
 
-/// A `CommandAction` action with T0 effects: the command blueprint and the action's index.
+/// A step with T0 effects: a `CommandAction` action, or (with the recording's cutscene commands)
+/// a `CommandStartDialog`'s start.
 #[derive(Debug, Clone)]
 pub struct T0Step {
     pub command: Rc<Blueprint>,
-    pub action: usize,
+    pub kind: StepKind,
     /// The command's occurrence in the closure's walk (a track can run one command blueprint
     /// twice: each run has its own steps).
     pub invocation: usize,
+    /// The track of the closure's walk the command is on.
+    pub track: usize,
+    /// The T0 tracks that finish before this one starts (through the gates between them).
+    pub after: Vec<usize>,
+}
+
+/// What a [`T0Step`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepKind {
+    /// The `CommandAction`'s action at this index.
+    Action(usize),
+    /// `CommandStartDialog.OnRun` (no speaker, no evaluator).
+    StartDialog,
 }
 
 /// What a cutscene's closure contains.
@@ -197,7 +221,25 @@ fn classify_in(w: &World, root: Guid, mut playing: Vec<Guid>) -> Classified {
             }
         }
     }
-    if !ordered {
+    // With the commands' runs recorded, the recording orders parallel tracks, as long as each
+    // recorded run names its track: a T0 command on several tracks doesn't.
+    if w.scene.recorded_commands {
+        let shared = t0_tracks.iter().enumerate().any(|(i, &a)| {
+            t0_tracks[i + 1..].iter().any(|&b| {
+                walk.tracks[a]
+                    .steps
+                    .iter()
+                    .any(|s| walk.tracks[b].steps.iter().any(|o| o.command.guid == s.command.guid))
+            })
+        });
+        if shared {
+            push_unique(
+                &mut out.unsupported,
+                "a T0 command on several tracks (its recorded runs don't name the track)".into(),
+            );
+        }
+    }
+    if !ordered && !w.scene.recorded_commands {
         push_unique(
             &mut out.unsupported,
             "T0 commands in parallel tracks (order is timing-dependent)".into(),
@@ -213,7 +255,19 @@ fn classify_in(w: &World, root: Guid, mut playing: Vec<Guid>) -> Classified {
             std::cmp::Ordering::Equal
         }
     });
-    out.t0_steps = order.into_iter().flat_map(|t| walk.tracks[t].steps.clone()).collect();
+    let before: Vec<(usize, Vec<usize>)> = order
+        .iter()
+        .map(|&t| (t, order.iter().copied().filter(|&a| a != t && reach(a, t)).collect()))
+        .collect();
+    out.t0_steps = before
+        .into_iter()
+        .flat_map(|(t, after)| {
+            walk.tracks[t].steps.iter().cloned().map(move |mut s| {
+                s.after.clone_from(&after);
+                s
+            })
+        })
+        .collect();
     out
 }
 
@@ -274,6 +328,20 @@ fn reaches(walk: &Walk, a: usize, b: usize) -> bool {
         }
     }
     false
+}
+
+/// A condition whose check only reads (the recorded result can stand for it: one that draws, a
+/// `DiceFormulaEvaluator` say, can't): `UnitInScriptZone` with a read-only unit evaluator and a
+/// scene map object, `FlagUnlocked`, `EtudeStatus`.
+fn pure_condition(v: View<'_>) -> bool {
+    match v.type_name() {
+        "UnitInScriptZone" => {
+            v.obj("Unit").is_some_and(super::actions::pure_evaluator)
+                && v.obj("ScriptZone").is_some_and(|z| z.type_name() == "MapObjectFromScene")
+        }
+        "FlagUnlocked" | "EtudeStatus" => true,
+        _ => false,
+    }
 }
 
 /// `CommandBase.HasConditions`: an `EntryCondition` with conditions.
@@ -385,7 +453,14 @@ fn command(
     };
     let ty = b.type_name();
     let v = b.view();
-    if has_entry_condition(v) {
+    // `StartNextCommand` checks the condition; `SkipCommand` skips the command, which the
+    // recorded checks place (`cs_entry`). The other results stop or drop the track.
+    if has_entry_condition(v)
+        && !(w.scene.recorded_commands
+            && v.int("OnFail") == ENTRY_SKIP_COMMAND
+            && v.obj("EntryCondition")
+                .is_some_and(|c| c.objs("Conditions").iter().all(|o| pure_condition(View(o)))))
+    {
         push_unique(
             &mut out.unsupported,
             "cutscene command with an EntryCondition (StartNextCommand's OnFail)".into(),
@@ -393,6 +468,8 @@ fn command(
     }
     walk.invocations += 1;
     let invocation = walk.invocations;
+    // The node is pushed after its commands.
+    let track = walk.tracks.len();
     if let Some(t1) = T1_COMMANDS.iter().find(|c| crate::content::is_a(b.obj.ty, c)) {
         out.t1_commands.push(t1);
         // `RunAway`: `UnitRunAway.DoRunAway` takes the unit out of the game or destroys it
@@ -460,10 +537,24 @@ fn command(
             if v.obj("Speaker").is_some() || v.obj("DialogEvaluator").is_some() {
                 out.unsupported.push("CommandStartDialog with speaker or evaluator".into());
             }
-            if let Some(d) = v.guid("m_Dialog") {
-                out.dialogs.push(d);
+            match v.guid("m_Dialog") {
+                Some(d) => out.dialogs.push(d),
+                // `OnRun` logs that no dialogue was found and finishes.
+                None => push_unique(
+                    &mut out.unsupported,
+                    "CommandStartDialog without a dialogue".into(),
+                ),
             }
             node.dialogs += 1;
+            if w.scene.recorded_commands {
+                node.steps.push(T0Step {
+                    command: b.clone(),
+                    kind: StepKind::StartDialog,
+                    invocation,
+                    track,
+                    after: Vec::new(),
+                });
+            }
         }
         "CommandAction" => {
             // A start of another cutscene draws its root gate inside the action list, before
@@ -495,7 +586,13 @@ fn command(
                 } else if at == "TranslocateUnit" && translocate_is_presentation(w, av) {
                     out.t1_actions.push("TranslocateUnit");
                 } else if T0_ACTIONS.contains(&at) {
-                    node.steps.push(T0Step { command: b.clone(), action: i, invocation });
+                    node.steps.push(T0Step {
+                        command: b.clone(),
+                        kind: StepKind::Action(i),
+                        invocation,
+                        track,
+                        after: Vec::new(),
+                    });
                 } else {
                     out.unsupported.push(format!("CommandAction action {at}"));
                 }
@@ -657,6 +754,18 @@ pub enum CutsceneEvent {
     /// `start` is the cutscene whose player's `Start` it ran inside (`StopCopies`), if any;
     /// `controller` whether it ran inside `CutsceneController.Tick`.
     Lock { cutscene: Guid, command: Guid, on: bool, start: Option<Guid>, controller: bool },
+    /// `CommandStartDialog.OnRun`: the player's cutscene and the command, placed as `Lock`.
+    Dialog { cutscene: Guid, command: Guid, start: Option<Guid>, controller: bool },
+    /// `CutscenePlayerTrackData.StartNextCommand`'s check of a command's `EntryCondition`: the
+    /// player's cutscene, the command, whether it held, its `OnFail`, placed as `Lock`.
+    Entry {
+        cutscene: Guid,
+        command: Guid,
+        passed: bool,
+        on_fail: i64,
+        start: Option<Guid>,
+        controller: bool,
+    },
 }
 
 /// A cutscene's progress as a recording observed it, per oracle tick, in order.
@@ -671,9 +780,13 @@ pub struct RecordedCutscene {
     pub started: Vec<Guid>,
     /// Each oracle tick's game mode (`GameModeType`), when the recording has the locks.
     pub modes: std::collections::BTreeMap<i64, i64>,
-    /// `ScriptZone.TryAddUnit`'s calls in order, when the recording has them (`zone_enter`):
-    /// the units' entries (movement is T1).
+    /// `ScriptZone.TryAddUnit`'s calls of the main character in order, when the recording has
+    /// them (`zone_enter`): its entries (movement is T1), each a `zone:` step's
+    /// ([`Self::claim_zone_steps`] keeps only the steps' own).
     pub zones: Option<std::collections::VecDeque<ZoneEntry>>,
+    /// The other calls by oracle tick, in order: entries no step makes, which the sim makes at
+    /// the zones' place in that tick (a cutscene or a teleport moved the unit: T1).
+    pub tick_zones: std::collections::BTreeMap<i64, Vec<ZoneEntry>>,
 }
 
 /// A recorded `ScriptZone.TryAddUnit`: the oracle tick, the zone's blueprint, and whether the
@@ -683,6 +796,10 @@ pub struct ZoneEntry {
     pub tick: i64,
     pub zone: Option<Guid>,
     pub main: bool,
+    /// The unit's recorded id.
+    pub unit: Option<String>,
+    /// The record's place among the recording's entries.
+    pub seq: usize,
 }
 
 impl RecordedCutscene {
@@ -703,6 +820,15 @@ impl RecordedCutscene {
         })
     }
 
+    /// Whether the recording also has the dialogue starts and entry checks of cutscene commands
+    /// (`cutscene_commands`).
+    #[must_use]
+    pub fn has_commands(records: &[serde_json::Value]) -> bool {
+        records.iter().find(|r| r["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "cutscene_commands"))
+        })
+    }
+
     /// # Errors
     ///
     /// A malformed record, or one before any tick.
@@ -712,6 +838,21 @@ impl RecordedCutscene {
         };
         let mut out = Self::default();
         let locks = Self::has_locks(records);
+        let commands = Self::has_commands(records);
+        // Where a command ran: inside a player's `Start` (that player's cutscene) or not, and
+        // whether inside `CutsceneController.Tick`.
+        let place = |r: &serde_json::Value| -> std::result::Result<(Option<Guid>, bool), String> {
+            if r["skipping"] != false && r["ev"] != "cs_entry" {
+                return Err(format!("{}: skipping {}", r["ev"], r["skipping"]));
+            }
+            let start = match &r["start"] {
+                serde_json::Value::Null => None,
+                _ => Some(guid(r, "start")?),
+            };
+            let controller =
+                r["controller"].as_bool().ok_or_else(|| format!("{}: controller", r["ev"]))?;
+            Ok((start, controller))
+        };
         let zones = records.iter().find(|r| r["k"] == "begin").is_some_and(|b| {
             b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "zone_enter"))
         });
@@ -719,6 +860,7 @@ impl RecordedCutscene {
             out.zones = Some(std::collections::VecDeque::new());
         }
         let mut tick = None;
+        let mut zone_seq = 0;
         for r in records {
             if r["k"] == "tick" {
                 let t = r["t"].as_i64().ok_or("a tick record without t")?;
@@ -766,6 +908,29 @@ impl RecordedCutscene {
                     }
                 }
                 Some("cs_lock") => return Err("cs_lock without the cutscene_lock observer".into()),
+                Some("cs_dialog") if commands => {
+                    let (start, controller) = place(r)?;
+                    CutsceneEvent::Dialog {
+                        cutscene: guid(r, "cutscene")?,
+                        command: guid(r, "command")?,
+                        start,
+                        controller,
+                    }
+                }
+                Some("cs_entry") if commands => {
+                    let (start, controller) = place(r)?;
+                    CutsceneEvent::Entry {
+                        cutscene: guid(r, "cutscene")?,
+                        command: guid(r, "command")?,
+                        passed: r["passed"].as_bool().ok_or("cs_entry: passed")?,
+                        on_fail: r["on_fail"].as_i64().ok_or("cs_entry: on_fail")?,
+                        start,
+                        controller,
+                    }
+                }
+                Some("cs_dialog" | "cs_entry") => {
+                    return Err(format!("{} without the cutscene_commands observer", r["ev"]));
+                }
                 Some("zone_enter") => {
                     let t = tick.ok_or("a zone record before any tick")?;
                     let zone = match &r["zone"] {
@@ -773,10 +938,16 @@ impl RecordedCutscene {
                         _ => Some(guid(r, "zone")?),
                     };
                     let main = r["main"].as_bool().ok_or("zone_enter: main")?;
-                    out.zones
-                        .as_mut()
-                        .ok_or("zone_enter without the zone_enter observer")?
-                        .push_back(ZoneEntry { tick: t, zone, main });
+                    let unit = r["unit"].as_str().map(str::to_owned);
+                    let zones =
+                        out.zones.as_mut().ok_or("zone_enter without the zone_enter observer")?;
+                    let e = ZoneEntry { tick: t, zone, main, unit, seq: zone_seq };
+                    zone_seq += 1;
+                    if main {
+                        zones.push_back(e);
+                    } else {
+                        out.tick_zones.entry(t).or_default().push(e);
+                    }
                     continue;
                 }
                 _ => continue,
@@ -785,6 +956,36 @@ impl RecordedCutscene {
             out.ticks.entry(t).or_default().push(ev);
         }
         Ok(out)
+    }
+}
+
+impl RecordedCutscene {
+    /// Keeps as step entries the main character's entries the `zone:` steps make: each step's
+    /// zone, in step order, the first entry of it after the previous step's. Every other entry
+    /// goes to [`Self::tick_zones`]. A step whose entry isn't found ends the claims (it and the
+    /// later steps find none: reported by the step).
+    pub fn claim_zone_steps(&mut self, steps: &[String]) {
+        let Some(zones) = self.zones.as_mut() else { return };
+        let mut all: Vec<ZoneEntry> = zones.drain(..).collect();
+        all.extend(std::mem::take(&mut self.tick_zones).into_values().flatten());
+        all.sort_by_key(|e| e.seq);
+        let mut claimed = vec![false; all.len()];
+        let mut from = 0;
+        for s in steps {
+            let Some(z) = s.strip_prefix("zone:").and_then(Guid::parse) else { continue };
+            let Some(i) = (from..all.len()).find(|&i| all[i].main && all[i].zone == Some(z)) else {
+                break;
+            };
+            claimed[i] = true;
+            from = i + 1;
+        }
+        for (e, c) in all.into_iter().zip(claimed) {
+            if c {
+                zones.push_back(e);
+            } else {
+                self.tick_zones.entry(e.tick).or_default().push(e);
+            }
+        }
     }
 }
 
@@ -840,25 +1041,57 @@ fn drain_queue(w: &mut World) {
                 recorded_action(w, cutscene, command);
             }
             CutsceneEvent::Lock { cutscene, command, on, start, controller } => {
-                // Inside a player's `Start` (`StopCopies` stopping a copy): at the sim's start
-                // of that cutscene. Inside the controller's tick: here. Elsewhere (a
-                // `StopCutscene` action, an area's unload): not placed, reported.
-                if let Some(s) = start {
-                    if !w.recorded_cs.as_ref().is_some_and(|r| r.started.contains(&s)) {
-                        return;
-                    }
-                } else if !controller {
-                    pop_queue(w);
-                    w.coverage.unsupported(
-                        "cutscene: a recorded lock outside the cutscene controller and a start",
-                    );
-                    continue;
+                // (`StopCopies` stops a copy inside a player's `Start`.)
+                match placed(w, start, controller, "lock") {
+                    Placed::Wait => return,
+                    Placed::Elsewhere => continue,
+                    Placed::Here => recorded_lock(w, cutscene, command, on),
                 }
-                pop_queue(w);
-                recorded_lock(w, cutscene, command, on);
+            }
+            CutsceneEvent::Dialog { cutscene, command, start, controller } => {
+                match placed(w, start, controller, "dialogue start") {
+                    Placed::Wait => return,
+                    Placed::Elsewhere => continue,
+                    Placed::Here => recorded_dialog(w, cutscene, command),
+                }
+            }
+            CutsceneEvent::Entry { cutscene, command, passed, on_fail, start, controller } => {
+                match placed(w, start, controller, "entry check") {
+                    Placed::Wait => return,
+                    Placed::Elsewhere => continue,
+                    Placed::Here => recorded_entry(w, cutscene, command, passed, on_fail),
+                }
             }
         }
     }
+}
+
+enum Placed {
+    /// Not yet: inside a start the sim hasn't made.
+    Wait,
+    /// Taken from the queue and reported.
+    Elsewhere,
+    /// Taken from the queue; the caller runs it.
+    Here,
+}
+
+/// Where a recorded command event runs: inside a player's `Start` at the sim's start of that
+/// cutscene, inside the controller's tick here; elsewhere (a `StopCutscene` action, an area's
+/// unload) it isn't placed (reported).
+fn placed(w: &mut World, start: Option<Guid>, controller: bool, what: &str) -> Placed {
+    if let Some(s) = start {
+        if !w.recorded_cs.as_ref().is_some_and(|r| r.started.contains(&s)) {
+            return Placed::Wait;
+        }
+    } else if !controller {
+        pop_queue(w);
+        w.coverage.unsupported(format!(
+            "cutscene: a recorded {what} outside the cutscene controller and a start"
+        ));
+        return Placed::Elsewhere;
+    }
+    pop_queue(w);
+    Placed::Here
 }
 
 /// `CommandLockControls.OnRun` (`on`: `TickAll`, then the lock) or `OnStop` (`PostponeAll`, then
@@ -911,6 +1144,40 @@ pub fn recorded_paused_tick(w: &mut World, tick: i64) {
     if w.recorded_cs.as_ref().is_some_and(|r| r.ticks.get(&tick).is_some_and(|e| !e.is_empty())) {
         w.coverage.unsupported("cutscene: a recorded cutscene event in Pause mode");
     }
+    if w.recorded_cs.as_ref().is_some_and(|r| r.tick_zones.contains_key(&tick)) {
+        w.coverage.unsupported("dialogue replay: a recorded zone entry in Pause mode");
+    }
+}
+
+/// `ScriptZoneController` in the oracle tick `tick`: the recorded entries no step makes (a
+/// cutscene or a teleport moved the unit; the sim doesn't move units), after a step's (`main`:
+/// a `zone:` step this tick, whose order with them isn't kept: reported). Each unit is the
+/// recording's id resolved as the awake inputs' are.
+pub fn recorded_unit_zones(w: &mut World, tick: i64, main: bool) {
+    let Some(entries) = w.recorded_cs.as_mut().and_then(|r| r.tick_zones.remove(&tick)) else {
+        return;
+    };
+    if main {
+        w.coverage.unsupported("dialogue replay: zone entries of several units in one tick");
+    }
+    if !matches!(w.player.mode, "Default" | "Cutscene") {
+        w.coverage.unsupported("ScriptZoneController: a recorded zone entry outside its modes");
+        return;
+    }
+    for e in entries {
+        let mut awake = w.recorded_awake.take();
+        let unit = match (&mut awake, &e.unit) {
+            (Some(a), Some(id)) => a.resolve(w, id),
+            _ => None,
+        };
+        w.recorded_awake = awake;
+        match (unit, e.zone) {
+            (Some(u), Some(z)) => crate::scene::enter_by_blueprint_unit(w, z, u),
+            _ => {
+                w.coverage.unsupported("dialogue replay: a recorded zone entry the sim can't make")
+            }
+        }
+    }
 }
 
 /// With recorded locks: the game mode the sim ticks in must be the recording's in each tick.
@@ -956,37 +1223,106 @@ fn gate_draw(w: &mut World, b: &Blueprint, started: i64) {
     }
 }
 
-fn recorded_action(w: &mut World, cutscene: Guid, command: Guid) {
-    let pending = w.scene.cutscene_pending.iter().position(|p| p.cutscene == cutscene);
-    let first = pending.and_then(|p| w.scene.cutscene_pending[p].steps.first().cloned());
-    match (pending, first) {
-        (Some(p), Some(f)) if f.command.guid == command => {
-            let lead = w.scene.cutscene_pending[p]
-                .steps
-                .iter()
-                .take_while(|s| s.invocation == f.invocation)
-                .count();
-            let run: Vec<T0Step> = w.scene.cutscene_pending[p].steps.drain(..lead).collect();
-            if w.scene.cutscene_pending[p].steps.is_empty() {
-                w.scene.cutscene_pending.remove(p);
-            }
-            w.scene.in_cutscene_step = true;
-            for step in run {
-                run_step(w, cutscene, &step);
-            }
-            w.scene.in_cutscene_step = false;
+/// The pending steps of the recorded run of `command` in `cutscene`, taken: the command's next
+/// invocation, which must be the first step left (with the recording's cutscene commands, the
+/// first left on its track: the recording orders parallel tracks). `Err(true)`: the command has
+/// pending steps but not there (out of order); `Err(false)`: it has none.
+fn take_run(
+    w: &mut World,
+    cutscene: Guid,
+    command: Guid,
+) -> std::result::Result<Vec<T0Step>, bool> {
+    let Some(p) = w.scene.cutscene_pending.iter().position(|p| p.cutscene == cutscene) else {
+        return Err(false);
+    };
+    let steps = &w.scene.cutscene_pending[p].steps;
+    // (The recording orders parallel tracks; the tracks the gates put before this one must be
+    // done.)
+    let head = if w.scene.recorded_commands {
+        steps.iter().position(|s| {
+            s.command.guid == command
+                && steps
+                    .iter()
+                    .find(|o| o.track == s.track)
+                    .is_some_and(|o| o.invocation == s.invocation)
+                && !steps.iter().any(|o| s.after.contains(&o.track))
+        })
+    } else {
+        steps.first().filter(|f| f.command.guid == command).map(|_| 0)
+    };
+    let Some(i) = head else {
+        return Err(steps.iter().any(|s| s.command.guid == command));
+    };
+    let invocation = steps[i].invocation;
+    let lead = steps[i..].iter().take_while(|s| s.invocation == invocation).count();
+    let run: Vec<T0Step> = w.scene.cutscene_pending[p].steps.drain(i..i + lead).collect();
+    if w.scene.cutscene_pending[p].steps.is_empty() {
+        w.scene.cutscene_pending.remove(p);
+    }
+    Ok(run)
+}
+
+fn run_steps(w: &mut World, cutscene: Guid, run: &[T0Step]) {
+    w.scene.in_cutscene_step = true;
+    for step in run {
+        run_step(w, cutscene, step);
+    }
+    w.scene.in_cutscene_step = false;
+}
+
+/// A recorded `CommandStartDialog.OnRun`: its step, taken as an action's.
+fn recorded_dialog(w: &mut World, cutscene: Guid, command: Guid) {
+    match take_run(w, cutscene, command) {
+        Ok(run) => run_steps(w, cutscene, &run),
+        Err(true) => w.coverage.unsupported("cutscene: a recorded T0 command run out of order"),
+        Err(false) if !w.scene.classified_cutscenes.contains(&cutscene) => w
+            .coverage
+            .unsupported("cutscene: a recorded command of a cutscene the sim didn't classify"),
+        Err(false) => {
+            w.coverage.unsupported("cutscene: a recorded dialogue start the sim has no step for");
         }
-        (Some(p), _)
-            if w.scene.cutscene_pending[p].steps.iter().any(|s| s.command.guid == command) =>
-        {
+    }
+}
+
+/// A recorded entry check: a failed `SkipCommand` check skips the command's pending steps, if it
+/// has any (a presentation command has none). A failed check of another kind (the track stops or
+/// is dropped: the classification reported it) and a result unlike the blueprint's `OnFail` are
+/// reported.
+fn recorded_entry(w: &mut World, cutscene: Guid, command: Guid, passed: bool, on_fail: i64) {
+    if !w.scene.classified_cutscenes.contains(&cutscene) {
+        w.coverage
+            .unsupported("cutscene: a recorded command of a cutscene the sim didn't classify");
+        return;
+    }
+    let blueprint = w.content.get(command).map(|b| b.view().int("OnFail"));
+    if blueprint != Some(on_fail) {
+        w.coverage.unsupported("cutscene: a recorded entry check unlike its command");
+        return;
+    }
+    if passed {
+        return;
+    }
+    if on_fail != ENTRY_SKIP_COMMAND {
+        w.coverage.unsupported("cutscene: a failed entry check that stops or drops its track");
+        return;
+    }
+    if let Err(true) = take_run(w, cutscene, command) {
+        w.coverage.unsupported("cutscene: a recorded T0 command run out of order");
+    }
+}
+
+fn recorded_action(w: &mut World, cutscene: Guid, command: Guid) {
+    match take_run(w, cutscene, command) {
+        Ok(run) => run_steps(w, cutscene, &run),
+        Err(true) => {
             w.coverage.unsupported("cutscene: a recorded T0 command run out of order");
         }
-        _ if !w.scene.classified_cutscenes.contains(&cutscene) => {
+        Err(false) if !w.scene.classified_cutscenes.contains(&cutscene) => {
             // A cutscene the sim never classified: its other commands weren't checked.
             w.coverage
                 .unsupported("cutscene: a recorded command of a cutscene the sim didn't classify");
         }
-        _ => {
+        Err(false) => {
             // Only a command whose every action is presentation (the cutscenes it starts or
             // stops classified in turn) can run without the sim's pending steps; any other, or
             // a missing one, is reported. The cutscenes it starts are started for their root
@@ -1049,11 +1385,21 @@ pub fn recorded_finish(w: &mut World, last_tick: i64) {
     if w.recorded_cs.as_ref().is_some_and(|r| r.ticks.range(last_tick + 1..).next().is_some()) {
         w.coverage.unsupported("cutscene: recorded cutscene events after the run's last tick");
     }
+    if w.recorded_cs.as_ref().is_some_and(|r| !r.tick_zones.is_empty()) {
+        w.coverage.unsupported("dialogue replay: a recorded zone entry the sim didn't make");
+    }
 }
 
 fn run_step(w: &mut World, cutscene: Guid, step: &T0Step) {
+    let index = match step.kind {
+        StepKind::Action(i) => i,
+        StepKind::StartDialog => {
+            start_dialog_command(w, cutscene, step.command.view());
+            return;
+        }
+    };
     let list = step.command.view().obj("Action");
-    let Some(a) = list.map(|l| l.objs("Actions")).and_then(|v| v.get(step.action).copied()) else {
+    let Some(a) = list.map(|l| l.objs("Actions")).and_then(|v| v.get(index).copied()) else {
         return;
     };
     let v = View(a);
@@ -1062,6 +1408,28 @@ fn run_step(w: &mut World, cutscene: Guid, step: &T0Step) {
     if let Err(e) = super::actions::run(w, &step.command, v) {
         w.log("error", format!("cutscene {cutscene}: action {ty}: {e:?}"));
         w.events.push("element_exception", json!({ "action": ty, "error": format!("{e:?}") }));
+    }
+}
+
+/// `CommandStartDialog.OnRun` without a speaker or an evaluator (the classification reports
+/// those): `StartDialogWithoutTarget(Dialog, SpeakerName)`. (Its `Finisher` only tells the track
+/// when the dialogue ends: the track's later commands have their recorded runs.)
+fn start_dialog_command(w: &mut World, cutscene: Guid, v: View<'_>) {
+    let Some(d) = v.guid("m_Dialog") else { return };
+    w.coverage.executed("cutscene command CommandStartDialog");
+    // The speaker name becomes a string as the start data is built: an exception there ends
+    // `OnRun`, which `StartCommand` catches (the track goes on, the dialogue not started).
+    let name = crate::text::localized_field(w, v, "SpeakerName");
+    match crate::dialog::start_dialog(w, d, None, None, name) {
+        Ok(()) => {}
+        Err(wr_text::TextError::Throws(e)) => {
+            w.log("error", format!("cutscene {cutscene}: CommandStartDialog: speaker name: {e}"));
+            w.coverage
+                .unsupported("cutscene: CommandStartDialog: an exception in its speaker name");
+        }
+        Err(e) => {
+            w.coverage.unsupported(format!("cutscene: CommandStartDialog (speaker name: {e})"))
+        }
     }
 }
 
@@ -1087,8 +1455,8 @@ pub fn run_pending(w: &mut World) {
 }
 
 /// `PlayCutscene.RunAction()` as a T1 event. A cutscene with `CommandStartDialog` is reported
-/// (its dialogue would block the track, and the sim doesn't start it): its T0 actions aren't
-/// queued.
+/// (its dialogue would block the track, and the sim doesn't start it) and its T0 actions aren't
+/// queued, unless the recording has the cutscene commands (the start is then a step).
 pub fn play(w: &mut World, _owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
     let Some(c) = a.guid("m_Cutscene") else {
         return Err(super::ElementError::Other("NullReferenceException: cutscene".into()));
@@ -1101,11 +1469,12 @@ pub fn play(w: &mut World, _owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
         w.coverage.stub(format!("cutscene action {t} (T1: positions, cutscene control)"));
     }
     settle_recorded(w, &cls);
-    recorded_start(w, c);
     for u in &cls.unsupported {
         w.coverage.unsupported(format!("cutscene: {u}"));
     }
-    if !cls.dialogs.is_empty() {
+    // With the commands' runs recorded, a dialogue start is a step; without, it's reported.
+    let dialogs = !cls.dialogs.is_empty() && !w.scene.recorded_commands;
+    if dialogs {
         w.coverage.unsupported(
             "cutscene: CommandStartDialog (the dialogue blocks its track; not started)",
         );
@@ -1114,9 +1483,11 @@ pub fn play(w: &mut World, _owner: &Rc<Blueprint>, a: View<'_>) -> Result<()> {
         "t1",
         json!({ "what": "cutscene_play", "cutscene": c.to_string(), "put_in_queue": a.bool("PutInQueue"), "start_dialogs": cls.dialogs.iter().map(ToString::to_string).collect::<Vec<_>>() }),
     );
-    if !cls.t0_steps.is_empty() && cls.dialogs.is_empty() {
+    // Queued before the start: the start's own recorded runs take their steps.
+    if !cls.t0_steps.is_empty() && !dialogs {
         w.scene.cutscene_pending.push(Pending { cutscene: c, steps: cls.t0_steps });
     }
+    recorded_start(w, c);
     Ok(())
 }
 

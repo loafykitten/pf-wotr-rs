@@ -277,7 +277,17 @@ fn run_fact_context_actions(w: &mut World, c: CompRef, list: &str) {
     // `(Fact as IFactContextOwner)?.RunActionInContext(list)`: the context's main target.
     in_fact_context(w, c.fact, owner, |w| {
         for a in actions {
-            run_context_action(w, View(a), owner, caster);
+            let v = View(a);
+            // `Conditional` is a game action: its conditions and branches run in the fact's
+            // scope (`ActionList.Run` logs an exception and goes on).
+            if v.type_name() == "Conditional" {
+                w.coverage.executed("action Conditional");
+                if let Err(e) = crate::elements::actions::run(w, &bp, v) {
+                    w.log("error", format!("action Conditional: {e:?}"));
+                }
+                continue;
+            }
+            run_context_action(w, v, owner, caster);
         }
     });
 }

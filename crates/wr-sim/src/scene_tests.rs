@@ -343,10 +343,11 @@ fn cutscene_t0_actions_follow_the_tracks_and_gates() {
         .t0_steps
         .iter()
         .map(|s| {
-            crate::content::View(
-                s.command.view().obj("Action").expect("list").objs("Actions")[s.action],
-            )
-            .type_name()
+            let crate::elements::cutscene::StepKind::Action(i) = s.kind else {
+                return "CommandStartDialog";
+            };
+            crate::content::View(s.command.view().obj("Action").expect("list").objs("Actions")[i])
+                .type_name()
         })
         .collect();
     assert_eq!(names, vec!["HideUnit", "Spawn"]);
@@ -366,10 +367,11 @@ fn step_names(cls: &crate::elements::cutscene::Classified) -> Vec<&'static str> 
     cls.t0_steps
         .iter()
         .map(|s| {
-            crate::content::View(
-                s.command.view().obj("Action").expect("list").objs("Actions")[s.action],
-            )
-            .type_name()
+            let crate::elements::cutscene::StepKind::Action(i) = s.kind else {
+                return "CommandStartDialog";
+            };
+            crate::content::View(s.command.view().obj("Action").expect("list").objs("Actions")[i])
+                .type_name()
         })
         .collect()
 }
@@ -1281,7 +1283,7 @@ fn a_started_cutscene_takes_its_root_draw_and_t0_commands_need_steps() {
 /// earlier one is pending is reported, and nothing runs.
 #[test]
 fn a_recorded_command_out_of_order_is_reported() {
-    use crate::elements::cutscene::{CutsceneEvent, Pending, RecordedCutscene, T0Step};
+    use crate::elements::cutscene::{CutsceneEvent, Pending, RecordedCutscene, StepKind, T0Step};
     let (mut w, _) = world();
     let a = command_action(&w, 0xD1, vec![action("Spawn")]);
     let b = command_action(&w, 0xD2, vec![action("Spawn")]);
@@ -1289,8 +1291,20 @@ fn a_recorded_command_out_of_order_is_reported() {
     w.scene.cutscene_pending.push(Pending {
         cutscene: Guid(0xD0),
         steps: vec![
-            T0Step { command: bp(a), action: 0, invocation: 1 },
-            T0Step { command: bp(b), action: 0, invocation: 2 },
+            T0Step {
+                command: bp(a),
+                kind: StepKind::Action(0),
+                invocation: 1,
+                track: 0,
+                after: Vec::new(),
+            },
+            T0Step {
+                command: bp(b),
+                kind: StepKind::Action(0),
+                invocation: 2,
+                track: 0,
+                after: Vec::new(),
+            },
         ],
     });
     let mut rec = RecordedCutscene::default();
@@ -1590,4 +1604,319 @@ fn a_recorded_pause_follows_the_games_admission_rules() {
     w.before_tick.push(crate::world::BeforeTick::StartMode("Dialog"));
     crate::runner::execute_before_tick(&mut w);
     assert_eq!((w.player.mode, w.player.modes_below.clone()), ("Dialog", vec!["Default"]));
+}
+
+/// With the recording's cutscene commands, T0 steps on parallel tracks are accepted: each
+/// recorded run takes the first step left on its own track, in the recorded order; a failed
+/// `SkipCommand` entry check drops its command's steps. A command shared by two tracks is
+/// reported (its runs don't name the track), and a run of a step that isn't first on its track
+/// is out of order.
+#[test]
+fn recorded_commands_order_parallel_tracks() {
+    use crate::elements::cutscene::{CutsceneEvent, Pending, RecordedCutscene};
+    let (mut w, _) = world();
+    w.scene.recorded_commands = true;
+    let a1 = command_action(&w, 0xA1, vec![action("Spawn")]);
+    let a2 = command_action(&w, 0xA2, vec![action("Spawn")]);
+    let b1 = command_action(&w, 0xB1, vec![action("Spawn")]);
+    let cond = Node::Object(Box::new(obj(
+        "Kingmaker.ElementsSystem.ConditionsChecker",
+        &[(
+            "Conditions",
+            Node::Seq(vec![Node::Object(Box::new(obj(
+                "Kingmaker.Designers.EventConditionActionSystem.Conditions.FlagUnlocked",
+                &[],
+            )))]),
+        )],
+    )));
+    let list = Node::Object(Box::new(obj(
+        "Kingmaker.ElementsSystem.ActionList",
+        &[("Actions", Node::Seq(vec![action("Spawn")]))],
+    )));
+    insert(
+        &w,
+        0xB2,
+        "Kingmaker.AreaLogic.Cutscenes.CommandAction",
+        &[("Action", list), ("EntryCondition", cond), ("OnFail", Node::Int(2))],
+    );
+    let b2 = Guid(0xB2);
+    let c = gate(&w, 0xC0, "Cutscene", vec![track(&[a1, a2], None), track(&[b1, b2], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(cls.unsupported.is_empty(), "{:?}", cls.unsupported);
+    assert_eq!(cls.t0_steps.len(), 4);
+    w.scene.classified_cutscenes.insert(c);
+    w.scene.cutscene_pending.push(Pending { cutscene: c, steps: cls.t0_steps });
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(
+        1,
+        vec![
+            CutsceneEvent::Action { cutscene: c, command: b1 },
+            CutsceneEvent::Action { cutscene: c, command: a1 },
+            CutsceneEvent::Entry {
+                cutscene: c,
+                command: b2,
+                passed: false,
+                on_fail: 2,
+                start: None,
+                controller: true,
+            },
+            CutsceneEvent::Action { cutscene: c, command: a2 },
+        ],
+    );
+    w.recorded_cs = Some(Box::new(rec));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    crate::elements::cutscene::recorded_tick_end(&mut w);
+    assert!(w.scene.cutscene_pending.is_empty(), "every step taken");
+    assert!(
+        !w.coverage.unsupported.keys().any(|k| k.contains("order")),
+        "{:?}",
+        w.coverage.unsupported
+    );
+
+    // Out of order on its own track.
+    let cls = crate::elements::cutscene::classify(&w, c);
+    w.scene.cutscene_pending.push(Pending { cutscene: c, steps: cls.t0_steps });
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(1, vec![CutsceneEvent::Action { cutscene: c, command: a2 }]);
+    w.recorded_cs = Some(Box::new(rec));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("out of order")));
+
+    // A command on two tracks.
+    let shared = gate(&w, 0xC1, "Cutscene", vec![track(&[a1], None), track(&[a1], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, shared);
+    assert!(cls.unsupported.iter().any(|u| u.contains("several tracks")), "{cls:?}");
+    // Without the recorded commands, parallel T0 tracks and the entry condition are reported.
+    w.scene.recorded_commands = false;
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(cls.unsupported.iter().any(|u| u.contains("parallel")), "{cls:?}");
+    assert!(cls.unsupported.iter().any(|u| u.contains("EntryCondition")), "{cls:?}");
+}
+
+/// `CommandStartDialog` is a step only with the recording's cutscene commands; without them a
+/// cutscene with one is reported. A failed entry check that stops its track is reported.
+#[test]
+fn a_cutscene_dialogue_start_needs_recorded_commands() {
+    use crate::elements::cutscene::{CutsceneEvent, RecordedCutscene, StepKind};
+    let (mut w, _) = world();
+    insert(
+        &w,
+        0xD9,
+        "Kingmaker.AreaLogic.Cutscenes.Commands.CommandStartDialog",
+        &[("m_Dialog", Node::BpRef(Guid(0xDA)))],
+    );
+    let c = gate(&w, 0xC2, "Cutscene", vec![track(&[Guid(0xD9)], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(cls.t0_steps.is_empty() && cls.dialogs == vec![Guid(0xDA)], "{cls:?}");
+    w.scene.recorded_commands = true;
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert_eq!(cls.t0_steps.len(), 1);
+    assert_eq!(cls.t0_steps[0].kind, StepKind::StartDialog);
+    w.scene.classified_cutscenes.insert(c);
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(
+        1,
+        vec![CutsceneEvent::Entry {
+            cutscene: c,
+            command: Guid(0xD9),
+            passed: false,
+            on_fail: 1,
+            start: None,
+            controller: true,
+        }],
+    );
+    w.recorded_cs = Some(Box::new(rec));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    // The blueprint's `OnFail` is 0: the record is unlike its command.
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("unlike its command")));
+}
+
+/// A recorded entry of a unit the sim has inside means the game saw an exit the sim doesn't
+/// model: reported, not entered again.
+#[test]
+fn a_recorded_reentry_is_reported() {
+    let (mut w, u, z) = zone_world(false, false);
+    w.scene.zones[z].blueprint = Some(Guid(0x2E));
+    crate::scene::enter_by_blueprint_unit(&mut w, Guid(0x2E), u);
+    assert_eq!(w.scene.zones[z].inside.len(), 1);
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    crate::scene::enter_by_blueprint_unit(&mut w, Guid(0x2E), u);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("already inside")));
+}
+
+/// `zone:` steps claim the main character's entries of their zones in order; every other entry
+/// (another unit's, or one no step makes) is made at its tick. A teleport without recorded zone
+/// entries is reported.
+#[test]
+fn zone_steps_claim_their_entries() {
+    use crate::elements::cutscene::{RecordedCutscene, ZoneEntry};
+    let e = |tick, zone: u128, main, seq| ZoneEntry {
+        tick,
+        zone: Some(Guid(zone)),
+        main,
+        unit: Some("u".into()),
+        seq,
+    };
+    let mut rec = RecordedCutscene {
+        zones: Some([e(5, 1, true, 0), e(9, 2, true, 2), e(12, 1, true, 3)].into()),
+        ..RecordedCutscene::default()
+    };
+    rec.tick_zones.insert(7, vec![e(7, 3, false, 1)]);
+    rec.claim_zone_steps(&[
+        "zone:00000000000000000000000000000001".into(),
+        "teleport:1,2,3".into(),
+    ]);
+    let claimed: Vec<i64> = rec.zones.as_ref().expect("zones").iter().map(|z| z.tick).collect();
+    assert_eq!(claimed, vec![5]);
+    let rest: Vec<(i64, usize)> =
+        rec.tick_zones.values().flatten().map(|z| (z.tick, z.seq)).collect();
+    assert_eq!(rest, vec![(7, 1), (9, 2), (12, 3)]);
+
+    let (mut w, _) = world();
+    let out = crate::runner::run(&mut w, &["teleport:1,2,3".to_owned()]);
+    assert!(out.failure.is_none());
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("teleport")));
+}
+
+/// With recorded commands, a command after a gate can't run while a T0 track the gate waits
+/// for still has steps: out of order.
+#[test]
+fn recorded_commands_keep_the_gates_order() {
+    use crate::elements::cutscene::{CutsceneEvent, Pending, RecordedCutscene};
+    let (mut w, _) = world();
+    w.scene.recorded_commands = true;
+    let a = command_action(&w, 0xA5, vec![action("Spawn")]);
+    let g1 = command_action(&w, 0xA6, vec![action("Spawn")]);
+    let b = command_action(&w, 0xA7, vec![action("Spawn")]);
+    let end = gate(&w, 0xA8, "Gate", vec![track(&[g1], None)], &[]);
+    let c = gate(&w, 0xA9, "Cutscene", vec![track(&[a], Some(end)), track(&[b], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(cls.unsupported.is_empty(), "{:?}", cls.unsupported);
+    w.scene.classified_cutscenes.insert(c);
+    w.scene.cutscene_pending.push(Pending { cutscene: c, steps: cls.t0_steps });
+    let mut rec = RecordedCutscene::default();
+    rec.ticks.insert(
+        1,
+        vec![
+            CutsceneEvent::Action { cutscene: c, command: b },
+            CutsceneEvent::Action { cutscene: c, command: g1 },
+        ],
+    );
+    w.recorded_cs = Some(Box::new(rec));
+    crate::elements::cutscene::recorded_tick(&mut w, 1);
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("out of order")));
+}
+
+/// `ShowNewTutorial`'s evaluators are skipped only when reading is all they do; one that draws
+/// (`RandomPartyUnit`) is reported.
+#[test]
+fn tutorial_evaluators_must_be_side_effect_free() {
+    let ev = |ty: &str| {
+        Node::Object(Box::new(obj(
+            "Kingmaker.Tutorial.Actions.TutorialContextDataEvaluator",
+            &[(
+                "Evaluator",
+                Node::Object(Box::new(obj(
+                    &format!("Kingmaker.Designers.EventConditionActionSystem.Evaluators.{ty}"),
+                    &[],
+                ))),
+            )],
+        )))
+    };
+    let show = |e: Node| {
+        obj(
+            "Kingmaker.Tutorial.Actions.ShowNewTutorial",
+            &[("m_Tutorial", Node::BpRef(Guid(0x7A))), ("Evaluators", Node::Seq(vec![e]))],
+        )
+    };
+    let (mut w, _) = world();
+    let owner = insert(&w, 0x7B, "Kingmaker.DialogSystem.Blueprints.BlueprintCue", &[]);
+    let a = show(ev("RandomPartyUnit"));
+    assert!(crate::elements::actions::run(&mut w, &owner, crate::content::View(&a)).is_err());
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("context evaluators")));
+    let (mut w, _) = world();
+    let owner = insert(&w, 0x7B, "Kingmaker.DialogSystem.Blueprints.BlueprintCue", &[]);
+    let a = show(ev("CompanionInParty"));
+    let _ = crate::elements::actions::run(&mut w, &owner, crate::content::View(&a));
+    assert!(!w.coverage.unsupported.keys().any(|k| k.contains("context evaluators")));
+}
+
+/// `DealDamage` with a null type description throws before any rule (`CreateDamage`).
+#[test]
+fn deal_damage_without_a_type_description_throws() {
+    let (mut w, u) = world();
+    w.main_character = Some(u);
+    let owner = insert(&w, 0x7C, "Kingmaker.DialogSystem.Blueprints.BlueprintCue", &[]);
+    let pc = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Evaluators.PlayerCharacter",
+        &[],
+    )));
+    let damage = Node::Object(Box::new(obj(
+        "Kingmaker.RuleSystem.Rules.Damage.DamageDescription",
+        &[("Bonus", Node::Int(4))],
+    )));
+    let a = obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Actions.DealDamage",
+        &[("NoSource", Node::Bool(true)), ("Target", pc), ("Damage", damage)],
+    );
+    let r = crate::elements::actions::run(&mut w, &owner, crate::content::View(&a));
+    assert!(
+        matches!(r, Err(crate::elements::ElementError::Other(ref e)) if e.contains("type description")),
+        "{r:?}"
+    );
+    assert!(!w.events.records.iter().any(|r| r.k == "rule"), "no rule");
+}
+
+/// A recorded entry check stands for the condition only when checking it only reads: one that
+/// may draw (`GreaterThan` over evaluators) is reported even with the recorded commands.
+#[test]
+fn only_read_only_entry_conditions_take_the_recorded_result() {
+    let (mut w, _) = world();
+    w.scene.recorded_commands = true;
+    let cond = Node::Object(Box::new(obj(
+        "Kingmaker.ElementsSystem.ConditionsChecker",
+        &[(
+            "Conditions",
+            Node::Seq(vec![Node::Object(Box::new(obj(
+                "Kingmaker.Designers.EventConditionActionSystem.Conditions.GreaterThan",
+                &[],
+            )))]),
+        )],
+    )));
+    insert(
+        &w,
+        0xE7,
+        "Kingmaker.AreaLogic.Cutscenes.CommandAction",
+        &[("EntryCondition", cond), ("OnFail", Node::Int(2))],
+    );
+    let c = gate(&w, 0xE8, "Cutscene", vec![track(&[Guid(0xE7)], None)], &[]);
+    let cls = crate::elements::cutscene::classify(&w, c);
+    assert!(cls.unsupported.iter().any(|u| u.contains("EntryCondition")), "{cls:?}");
+}
+
+/// `DealDamage` evaluates `EvaluatedBonus` before it dereferences the type description: with
+/// both, the bonus (unported) is what's reported.
+#[test]
+fn deal_damage_reports_the_evaluated_bonus_first() {
+    let (mut w, u) = world();
+    w.main_character = Some(u);
+    let owner = insert(&w, 0x7D, "Kingmaker.DialogSystem.Blueprints.BlueprintCue", &[]);
+    let pc = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Evaluators.PlayerCharacter",
+        &[],
+    )));
+    let bonus = Node::Object(Box::new(obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Evaluators.DiceFormulaEvaluator",
+        &[],
+    )));
+    let damage = Node::Object(Box::new(obj(
+        "Kingmaker.RuleSystem.Rules.Damage.DamageDescription",
+        &[("EvaluatedBonus", bonus)],
+    )));
+    let a = obj(
+        "Kingmaker.Designers.EventConditionActionSystem.Actions.DealDamage",
+        &[("NoSource", Node::Bool(true)), ("Target", pc), ("Damage", damage)],
+    );
+    assert!(crate::elements::actions::run(&mut w, &owner, crate::content::View(&a)).is_err());
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("EvaluatedBonus")));
 }

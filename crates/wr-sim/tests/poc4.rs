@@ -312,6 +312,45 @@ fn horgus_runs_are_valid() {
     }
 }
 
+/// Camelia (`poc4-camelia-5`, round 12): Seelah's meeting, then the main character teleported into
+/// `CameliaDialogueTrigger`, whose cutscene starts the dialogue (`CommandStartDialog`, placed by
+/// the recording's `cs_dialog`) after skipping a command whose entry condition failed
+/// (`cs_entry`), and Camelia recruited. Every run is valid: the ordered T0 stream equals the
+/// oracle's, the end state and the units match; the combat log's item copy (the original's UI,
+/// in Pause mode) is left out of the oracle's stream, once.
+#[test]
+#[ignore = "needs the game's blueprint pack, the fixture saves and the poc4-camelia-5 capture"]
+fn camelia_runs_are_valid() {
+    for name in ["camelia-a", "camelia-b"] {
+        for r in ["record", "replay-1"] {
+            let spec = root().join("crates/wr-sim/fixtures/poc4.json");
+            let d = root().join("fixtures/captures/oracle/poc4-camelia-5/fixtures").join(name);
+            let f = wr_sim::runner::run_fixture(&wr_sim::runner::FixtureOptions {
+                ability_params_empty: None,
+                spec: &spec,
+                fixture: name,
+                oracle: Some(&d),
+                run: r,
+                oracle_inputs: false,
+            })
+            .expect("fixture");
+            assert!(f.outcome.failure.is_none(), "{name} {r}: {:?}", f.outcome.failure);
+            let td = f.trace_diff.as_ref().expect("trace");
+            assert!(td.equal(), "{name} {r}: {td:?}");
+            assert!(f.valid(), "{name} {r}: {:?}", f.world.coverage.unsupported);
+            assert_eq!(td.ui_excluded.values().sum::<u64>(), 1, "{name} {r}: {:?}", td.ui_excluded);
+            assert_text_compared(&f, &format!("{name} {r}"));
+            let end = f.end_diff.as_ref().expect("end state");
+            for (k, c) in &end.categories {
+                assert_eq!(c.equal, c.total, "{name} {r}: {k} {:?}", c.diffs);
+            }
+            let units = f.units_diff.as_ref().expect("units");
+            assert!(units.match_rate > 0.9999, "{name} {r}: units {}", units.match_rate);
+            check_units(&f, &format!("{name} {r}"));
+        }
+    }
+}
+
 /// A recording without the cutscene locks (`poc4-seelah-2`) can't place the closing cutscene's
 /// `CommandLockControls` (its buffs tick and postpone, Cutscene mode): the run reports it.
 #[test]

@@ -198,7 +198,7 @@ internal static class Rules
     // The game methods below the rulebook's own, innermost first (FullName.Method, joined by " < ":
     // compiler-generated names hold '<' and '|' but no spaces); the oracle's and Harmony's frames
     // and Rulebook/RulebookEventContext are left out.
-    private static string Origin()
+    internal static string Origin()
     {
         try
         {

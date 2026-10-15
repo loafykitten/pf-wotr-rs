@@ -320,6 +320,9 @@ internal static class Fidelity
         ProducerObs.InstallZones(h);
         if (Health.FailedCount == failed) Observers.Add("zone_enter");
         failed = Health.FailedCount;
+        ProducerObs.InstallCommands(h);
+        if (Health.FailedCount == failed) Observers.Add("cutscene_commands");
+        failed = Health.FailedCount;
         AwakeObs.Install(h);
         if (Health.FailedCount == failed) Observers.Add("aa_awake");
         // Roaming's draw producers' caller and unit (roam_point), and the unit groups outside
@@ -331,6 +334,8 @@ internal static class Fidelity
         GroupObs.InstallTicks(h);
         if (Health.FailedCount == failed) Observers.Add("group_ticks");
         // The dialogue's history lines and display text (dlg_history, dlg_text).
+        // Mutations in Pause mode carry their caller chain (Hooks.Mut).
+        Observers.Add("paused_origins");
         try { TextObs.Install(h); Observers.Add("dialog_text"); }
         catch (Exception e) { Health.Failed("patch the dialogue text (dlg_history, dlg_text)", e); }
         OracleTime.Install(h);

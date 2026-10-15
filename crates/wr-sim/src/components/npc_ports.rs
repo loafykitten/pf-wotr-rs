@@ -42,8 +42,8 @@ pub fn register(r: &mut Registry) {
     r.register(Box::new(Port::new("AddUndetectableAlignment", all_hooks(), undetectable)));
     r.register(Box::new(Port::new(
         "AddUnitFactEquipment",
-        bits(&[Hook::ApplyPostLoadFixes]),
-        |w, c, h| enchantment_post_load_fix(w, c, h, "AddedFact", true),
+        bits(&[Hook::Activate, Hook::Deactivate, Hook::ApplyPostLoadFixes]),
+        add_unit_fact_equipment,
     )));
     r.register(Box::new(Port::new(
         "AddUnitFeatureEquipment",
@@ -119,6 +119,67 @@ fn undetectable(w: &mut World, c: CompRef, h: Hook) {
 }
 
 // ---- item enchantment components ------------------------------------------------------
+
+/// `AddUnitFactEquipment`: `OnActivate` adds the blueprint's fact to the wielder with the
+/// enchantment's context as its parent (`Owner.Wielder.AddFact(Blueprint, Context)`) and the
+/// item as its source; `OnDeactivate` removes it (`Wielder.RemoveFact(AddedFact)`); the post-load
+/// fix is [`enchantment_post_load_fix`]'s.
+fn add_unit_fact_equipment(w: &mut World, c: CompRef, h: Hook) {
+    match h {
+        Hook::ApplyPostLoadFixes => enchantment_post_load_fix(w, c, h, "AddedFact", true),
+        Hook::Activate => {
+            let Some(item) = w.fact(c.fact).owner.filter(|o| w.item(*o).is_some()) else { return };
+            let Some(wielder) = w.item(item).and_then(|i| i.wielder) else {
+                // `Owner.Wielder.AddFact`: a null wielder throws.
+                w.coverage.unsupported("AddUnitFactEquipment.OnActivate: no wielder");
+                return;
+            };
+            let Some(g) = with_settings(w, c, |v| v.guid("m_Blueprint")).flatten() else {
+                // `AddFact(null)` returns null; `null.SetSourceItem` throws.
+                w.coverage.unsupported("AddUnitFactEquipment.OnActivate: no blueprint");
+                return;
+            };
+            let Some(bp) = w.content.get(g) else {
+                w.coverage.unsupported("AddUnitFactEquipment.OnActivate: blueprint missing");
+                return;
+            };
+            if crate::unit_facts::kind_for(&bp).0 != crate::world::FactKind::Feature {
+                // A buff takes `AddBuff(blueprint, parentContext)`; other classes reject a parent
+                // context in the sim's `CreateFact`.
+                w.coverage
+                    .unsupported("AddUnitFactEquipment.OnActivate: a fact that isn't a feature");
+                return;
+            }
+            let parent = w.fact(c.fact).context.clone();
+            let f = crate::unit_facts::create_fact(w, &bp, wielder, parent.as_ref());
+            let Some(f) = crate::unit_facts::add(w, wielder, f) else {
+                w.coverage.unsupported("AddUnitFactEquipment.OnActivate: the fact wasn't added");
+                return;
+            };
+            w.component_mut(c).fact_refs.insert("AddedFact".to_owned(), vec![Some(f)]);
+            w.fact_mut(f).source_item = Some(item);
+        }
+        Hook::Deactivate => {
+            let added = w
+                .component(c)
+                .fact_refs
+                .get("AddedFact")
+                .and_then(|v| v.first().copied().flatten());
+            let wielder = w.fact(c.fact).owner.and_then(|o| w.item(o)).and_then(|i| i.wielder);
+            match (wielder, added) {
+                (Some(u), Some(f)) => crate::unit_facts::remove(w, u, f),
+                // `RemoveFact(null)` does nothing.
+                (Some(_), None) => {}
+                (None, _) => {
+                    w.coverage.unsupported("AddUnitFactEquipment.OnDeactivate: no wielder");
+                    return;
+                }
+            }
+            w.component_mut(c).fact_refs.insert("AddedFact".to_owned(), vec![None]);
+        }
+        _ => {}
+    }
+}
 
 /// `AddUnitFactEquipment.OnApplyPostLoadFixes` (an inactive enchantment forgets its fact)
 /// and `AddUnitFeatureEquipment.OnApplyPostLoadFixes`: the applied fact's source item is the

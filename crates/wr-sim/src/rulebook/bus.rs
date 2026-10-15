@@ -178,7 +178,19 @@ fn interfaces(w: &World, s: Sub) -> Vec<String> {
             .map(|t| wr_content::schema::ty(t).handlers.iter().map(|h| (*h).to_owned()).collect())
             .unwrap_or_default(),
         Sub::Fact(f) => save_ifaces(w.fact(f).clr),
-        Sub::Entity(e) => save_ifaces(w.entity(e).clr),
+        Sub::Entity(e) => {
+            let mut out = save_ifaces(w.entity(e).clr);
+            for (clr, ifaces) in ENTITY_HANDLERS {
+                if *clr == w.entity(e).clr {
+                    for i in *ifaces {
+                        if !out.iter().any(|o| o == i) {
+                            out.push((*i).to_owned());
+                        }
+                    }
+                }
+            }
+            out
+        }
         Sub::External(id) => w.bus.external.get(&id).map(|h| h.interfaces()).unwrap_or_default(),
         Sub::Runtime(c) => w
             .component(c)
@@ -192,6 +204,33 @@ fn interfaces(w: &World, s: Sub) -> Vec<String> {
             .unwrap_or_default(),
     }
 }
+
+/// The handler interfaces of the `EntityDataBase` classes that implement any, with the inherited
+/// ones (from the decompiled declarations): the save schema keeps only the interfaces that are
+/// serialized types, so it has none of these.
+const ENTITY_HANDLERS: &[(&str, &[&str])] = &[
+    ("AreaEffectEntityData", &["IAreaHandler", "IAreaPartHandler"]),
+    ("CutscenePlayerData", &["IAreaHandler"]),
+    ("DetailedTrapObjectData", &["IAreaHandler"]),
+    (
+        "EtudesSystem",
+        &[
+            "IUnlockHandler",
+            "IUnlockValueHandler",
+            "ICompanionChangeHandler",
+            "IPartyHandler",
+            "IAreaHandler",
+            "IQuestObjectiveHandler",
+            "ITimeOfDayChangedHandler",
+            "ISummonPoolHandler",
+            "IAreaPartHandler",
+        ],
+    ),
+    ("KingdomState", &["IChapterChangeHandler"]),
+    ("SimpleTrapObjectData", &["IAreaHandler"]),
+    ("TrapObjectData", &["IAreaHandler"]),
+    ("UnitEntityData", &["IAreaHandler"]),
+];
 
 /// Interfaces of a save-side CLR type (short name), from the save schema.
 fn save_ifaces(clr: &str) -> Vec<String> {

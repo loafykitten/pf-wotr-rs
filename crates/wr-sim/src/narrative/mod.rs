@@ -217,11 +217,20 @@ fn fact_id_in_use(w: &World, id: &str) -> bool {
     false
 }
 
-/// An event delivered to a narrative system entity subscribed on the bus. `EtudesSystem`'s
-/// handlers for flags, companions, the party, quest objectives and time of day all mark
-/// its conditions dirty (`EtudesSystem.cs`); other systems and interfaces aren't ported.
+/// An event delivered to an entity subscribed on the bus (its class's handlers): `true` when the
+/// sim ran it. `EtudesSystem` (`EtudesSystem.cs`): its handlers for flags, companions, the party,
+/// quest objectives and time of day mark its conditions dirty, except
+/// `HandleCapitalModeChanged`; of the summon pools' only `HandleLastUnitRemoved` does;
+/// `OnAreaDidLoad` does nothing. `UnitEntityData.OnAreaDidLoad` spawns the buffs' particle
+/// effects (presentation). `CutscenePlayerData.OnAreaDidLoad` stops or removes a cutscene with
+/// `StopCutsceneWhenExitingArea` (not ported). Anything else (an area unloading, an area part
+/// changing) isn't ported.
 pub fn entity_event(w: &mut World, e: EntityIdx, iface: &str) -> bool {
-    match (w.entity(e).clr, iface) {
+    let method = w.bus.call.last().map_or("", |c| c.0);
+    match (w.entity(e).clr, iface, method) {
+        ("EtudesSystem", "ICompanionChangeHandler", "HandleCapitalModeChanged")
+        | ("EtudesSystem", "ISummonPoolHandler", "HandleUnitAdded" | "HandleUnitRemoved")
+        | ("EtudesSystem", "IAreaHandler", "OnAreaDidLoad") => true,
         (
             "EtudesSystem",
             "IUnlockHandler"
@@ -230,9 +239,30 @@ pub fn entity_event(w: &mut World, e: EntityIdx, iface: &str) -> bool {
             | "IPartyHandler"
             | "IQuestObjectiveHandler"
             | "ITimeOfDayChangedHandler",
-        ) => {
+            _,
+        )
+        | ("EtudesSystem", "ISummonPoolHandler", "HandleLastUnitRemoved") => {
             w.player.conditions_dirty = true;
             true
+        }
+        ("UnitEntityData", "IAreaHandler", "OnAreaDidLoad") => {
+            w.coverage.stub("UnitEntityData.OnAreaDidLoad: the buffs' particle effects");
+            true
+        }
+        ("CutscenePlayerData", "IAreaHandler", "OnAreaDidLoad") => {
+            let stops = w
+                .scene
+                .cutscenes
+                .iter()
+                .find(|p| p.entity == e)
+                .and_then(|p| p.cutscene)
+                .and_then(|g| w.content.get(g))
+                .is_some_and(|b| {
+                    b.components_array()
+                        .iter()
+                        .any(|o| crate::content::is_a(o.ty, "StopCutsceneWhenExitingArea"))
+                });
+            !stops
         }
         _ => false,
     }

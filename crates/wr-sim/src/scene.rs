@@ -472,6 +472,9 @@ pub struct SceneState {
     /// The run also takes the cutscene lock's starts and stops from the recording
     /// (`CommandLockControls`: `UnitBuffsController.TickAll`/`PostponeAll`, Cutscene mode).
     pub recorded_locks: bool,
+    /// The run also takes cutscene commands' dialogue starts and entry checks from the
+    /// recording (`CommandStartDialog`, `EntryCondition`s that skip their command).
+    pub recorded_commands: bool,
     /// Random gates accepted for recorded draws: (the player's cutscene, the gate).
     pub random_gates_t1: std::collections::HashSet<(Guid, Guid)>,
     /// Cutscenes the sim classified (started, restored, or in their closures): a recorded
@@ -846,11 +849,23 @@ pub fn on_area_did_load(w: &mut World) {
 /// The `zone:` runner step: the main character enters the zone of blueprint `bp`.
 pub fn enter_by_blueprint(w: &mut World, bp: Guid) {
     let Some(mc) = w.main_character else { return };
+    enter_by_blueprint_unit(w, bp, mc);
+}
+
+/// [`enter_by_blueprint`] for any unit (one a cutscene moved, say). The entry is a recorded
+/// `TryAddUnit`, which the game calls only for a unit not inside: one the sim has inside left
+/// the zone in the game, and exits aren't modelled (reported).
+pub fn enter_by_blueprint_unit(w: &mut World, bp: Guid, u: EntityIdx) {
     let Some(zi) = w.scene.zone_by_blueprint(bp) else {
         w.coverage.unsupported("ScriptZone: no zone of that blueprint in the area state");
         return;
     };
-    tick_unit_inside(w, zi, mc);
+    if w.scene.zones[zi].inside.iter().any(|i| i.unit == u) {
+        w.coverage
+            .unsupported("ScriptZone: an entry of a unit already inside (exits aren't modelled)");
+        return;
+    }
+    tick_unit_inside(w, zi, u);
 }
 
 /// A map of zone entities by unique id, for tests.

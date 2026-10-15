@@ -93,7 +93,8 @@ pub fn fact_rank(w: &World, f: crate::world::FactIdx) -> i32 {
 }
 
 /// `ContextValue.Calculate(context)` for the value types whose inputs the context holds:
-/// `Simple`, `Rank`, `Shared`. Other types read properties and report unsupported.
+/// `Simple`, `Rank`, `Shared`, and `CasterProperty` for [`unit_property`]'s properties. Other
+/// types report unsupported.
 pub(crate) fn context_value(w: &mut World, c: CompRef, cv: Option<View<'_>>) -> i32 {
     let Some(cv) = cv else { return 0 };
     let ctx = w.fact(c.fact).context.clone();
@@ -101,8 +102,47 @@ pub(crate) fn context_value(w: &mut World, c: CompRef, cv: Option<View<'_>>) -> 
         0 => cv.i32("Value"),
         1 => ctx.map_or(0, |x| x.rank(cv.int("ValueRank"))),
         2 => ctx.map_or(0, |x| x.shared(cv.int("ValueShared"))),
+        3 => {
+            // `caster = context?.MaybeCaster`; a null caster logs and gives 0.
+            let caster = ctx.and_then(|x| x.caster).and_then(|id| w.by_id.get(&id).copied());
+            let Some(u) = caster.filter(|u| w.unit(*u).is_some()) else {
+                w.log("error", "Can't evaluate ContextValue (type: CasterProperty)");
+                return 0;
+            };
+            unit_property(w, u, cv.int("Property"))
+        }
         t => {
             w.coverage.unsupported(format!("ContextValue.Calculate: ValueType {t}"));
+            0
+        }
+    }
+}
+
+/// `UnitPropertyExtension.GetInt(property, unit)` for the attributes (`StatStrength`..`StatCharisma`:
+/// the modified value; `StatBonusStrength`..`StatBonusCharisma`: the bonus) and `None`; the
+/// other properties are reported.
+pub(crate) fn unit_property(w: &mut World, u: EntityIdx, property: i64) -> i32 {
+    use crate::stats::types::StatType;
+    const ATTRIBUTES: [StatType; 6] = [
+        StatType::Strength,
+        StatType::Dexterity,
+        StatType::Constitution,
+        StatType::Intelligence,
+        StatType::Wisdom,
+        StatType::Charisma,
+    ];
+    match property {
+        0 => 0,
+        4..=9 => {
+            w.stats(u).v(ATTRIBUTES[usize::try_from(property - 4).unwrap_or(0)]).modified_value
+        }
+        10..=15 => crate::stats::ops::attribute_bonus(
+            w,
+            u,
+            ATTRIBUTES[usize::try_from(property - 10).unwrap_or(0)],
+        ),
+        p => {
+            w.coverage.unsupported(format!("UnitProperty.GetInt: property {p}"));
             0
         }
     }

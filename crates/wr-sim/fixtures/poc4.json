@@ -39,13 +39,17 @@
   },
   "camelia-a": {
    "save": "Manual_13",
-   "steps": ["zone:d34daae626f91364ca0775f047057508", "waitdialog",
+   "steps": ["zone:69c8d5fe0e4a02f42b70a3b067925bb7", "waitdialog",
+             "dialogrun:9cd8308b0fc6506459bf1e98456b94bf,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "run:120", "teleport:80,36.5,152", "waitdialog",
              "dialogrun:691061ff298ee00459d486d5784d3d7f",
              "wait:120"]
   },
   "camelia-b": {
    "save": "Manual_13",
-   "steps": ["zone:d34daae626f91364ca0775f047057508", "waitdialog",
+   "steps": ["zone:69c8d5fe0e4a02f42b70a3b067925bb7", "waitdialog",
+             "dialogrun:9cd8308b0fc6506459bf1e98456b94bf,1cfe1ed04f4016e4fb6aaa5d9a08e140",
+             "run:120", "teleport:80,36.5,152", "waitdialog",
              "dialogrun:35d480d928e845a40a0661de241ceb79,712417ce7cc82544b8902dc52e097651,691061ff298ee00459d486d5784d3d7f",
              "wait:120"]
   }

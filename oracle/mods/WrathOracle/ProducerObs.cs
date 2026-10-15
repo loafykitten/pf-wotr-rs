@@ -34,6 +34,12 @@ namespace WrathOracle;
 // a copy there) and whether inside CutsceneController.Tick (controller).
 // And (InstallZones) each ScriptZone.TryAddUnit (zone_enter: the zone's blueprint, the unit, whether
 // it is the main character), whose tick follows from movement (T1): a replay enters zones then.
+// And (InstallCommands) when a cutscene's CommandStartDialog runs (cs_dialog: the command, its
+// player's cutscene, where it ran as cs_lock), which starts its dialogue at a time the sim can't
+// compute, and each entry condition a track checks before starting a command (cs_entry: the command,
+// its player's cutscene, whether it held, the command's OnFail, where it ran as cs_lock), whose
+// conditions can read positions (UnitInScriptZone): a replay starts the dialogue and skips or runs
+// the command then.
 // Fields only (the references' GUIDs, not their blueprints); nothing here draws or changes state.
 internal static class ProducerObs
 {
@@ -114,6 +120,120 @@ internal static class ProducerObs
     public static void InstallZones(Harmony h)
     {
         Patch(h, typeof(ScriptZone), "TryAddUnit", nameof(ZonePrefix), new[] { typeof(UnitEntityData) });
+    }
+
+    // When a cutscene's CommandStartDialog runs (cs_dialog), and each entry condition a track checks
+    // before it starts a command (cs_entry), both cutscene timing or positions the sim can't compute.
+    public static void InstallCommands(Harmony h)
+    {
+        Patch(h, typeof(CommandStartDialog), "OnRun", nameof(DialogPrefix), new[] { typeof(CutscenePlayerData), typeof(bool) });
+        Patch(h, typeof(CutscenePlayerTrackData), "StartCommand", nameof(StartCommandPrefix), new[] { typeof(bool) });
+        try
+        {
+            var next = AccessTools.Method(typeof(CutscenePlayerTrackData), "StartNextCommand", new[] { typeof(bool) }) ?? throw new MissingMethodException("CutscenePlayerTrackData.StartNextCommand");
+            h.Patch(next, prefix: new HarmonyMethod(typeof(ProducerObs), nameof(NextPrefix)), finalizer: new HarmonyMethod(typeof(ProducerObs), nameof(NextFinalizer)));
+        }
+        catch (Exception e)
+        {
+            Health.Failed("patch CutscenePlayerTrackData.StartNextCommand", e);
+        }
+    }
+
+    // A CommandStartDialog's start, with where it ran (as cs_lock's start and controller).
+    public static void DialogPrefix(CommandStartDialog __instance, CutscenePlayerData player, bool skipping)
+    {
+        if (!Trace.Active || !Trace.OnMainThread) return;
+        try
+        {
+            var guid = __instance.AssetGuid.ToString();
+            var cutscene = player?.Cutscene;
+            var start = _starting == null ? null : _starting.Cutscene == null ? "" : _starting.Cutscene.AssetGuid.ToString();
+            var controller = _inController > 0;
+            Trace.Emit("obs", j =>
+            {
+                j.Prop("ev", "cs_dialog");
+                j.Prop("command", guid);
+                j.Prop("cutscene", cutscene == null ? null : cutscene.AssetGuid.ToString());
+                j.Prop("start", start);
+                j.Prop("controller", controller);
+                j.Prop("skipping", skipping);
+            });
+        }
+        catch (Exception e) { Trace.HookFailed("cs_dialog", e); }
+    }
+
+    // StartNextCommand's frames (innermost last): the track, the command it is about to check (taken
+    // before the call: a failed FinishTrack check moves CommandIndex past the end), and whether the
+    // frame's StartCommand ran, that is, whether the entry condition held. Written once per check:
+    // when StartCommand starts (before the command's own records), or when the frame ends without
+    // it (the condition failed).
+    private static readonly List<CutscenePlayerTrackData> NextFrames = new List<CutscenePlayerTrackData>();
+    private static readonly List<CommandBase> NextCommands = new List<CommandBase>();
+    private static readonly List<bool> NextStarted = new List<bool>();
+
+    public static void NextPrefix(CutscenePlayerTrackData __instance)
+    {
+        CommandBase next = null;
+        try
+        {
+            // Fields and plain getters: Track reads the gate's started tracks.
+            var commands = __instance.Track?.Commands;
+            var i = __instance.CommandIndex + 1;
+            if (commands != null && i >= 0 && i < commands.Count) next = commands[i];
+        }
+        catch (Exception e) { Trace.HookFailed("cs_entry", e); }
+        NextFrames.Add(__instance);
+        NextCommands.Add(next);
+        NextStarted.Add(false);
+    }
+
+    public static void StartCommandPrefix(CutscenePlayerTrackData __instance)
+    {
+        var n = NextFrames.Count - 1;
+        if (n < 0 || NextFrames[n] != __instance || NextStarted[n]) return;
+        NextStarted[n] = true;
+        Entry(__instance, NextCommands[n], true);
+    }
+
+    public static Exception NextFinalizer(Exception __exception, CutscenePlayerTrackData __instance)
+    {
+        var n = NextFrames.Count - 1;
+        if (n >= 0)
+        {
+            var started = NextStarted[n];
+            var command = NextCommands[n];
+            NextFrames.RemoveAt(n);
+            NextCommands.RemoveAt(n);
+            NextStarted.RemoveAt(n);
+            if (!started && __exception == null) Entry(__instance, command, false);
+        }
+        return __exception;
+    }
+
+    private static void Entry(CutscenePlayerTrackData track, CommandBase command, bool passed)
+    {
+        if (!Trace.Active || !Trace.OnMainThread) return;
+        try
+        {
+            // Plain getters (HasConditions reads the checker's list).
+            if (command == null || !command.HasConditions) return;
+            var guid = command.AssetGuid.ToString();
+            var onFail = (int)command.OnFail;
+            var cutscene = track.StartGate?.Player?.Cutscene;
+            var start = _starting == null ? null : _starting.Cutscene == null ? "" : _starting.Cutscene.AssetGuid.ToString();
+            var controller = _inController > 0;
+            Trace.Emit("obs", j =>
+            {
+                j.Prop("ev", "cs_entry");
+                j.Prop("command", guid);
+                j.Prop("cutscene", cutscene == null ? null : cutscene.AssetGuid.ToString());
+                j.Prop("passed", passed);
+                j.Prop("on_fail", onFail);
+                j.Prop("start", start);
+                j.Prop("controller", controller);
+            });
+        }
+        catch (Exception e) { Trace.HookFailed("cs_entry", e); }
     }
 
     private static void Patch(Harmony h, Type t, string method, string prefix, Type[] args = null)

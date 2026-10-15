@@ -190,6 +190,7 @@ AUDITED_T1_SITES = (
     "Kingmaker.AreaLogic.Cutscenes.Commands.CommandDelay|OnRun(",
     "Kingmaker.AreaLogic.Cutscenes.Commands.CommandUnitPlayCutsceneAnimation|OnRun(",
     "Kingmaker.Controllers.Units.UnitAnimationController|Activate(",
+    "Kingmaker.Controllers.Units.FollowersFormationController|PrepareFormation(",
     "Kingmaker.Controllers.Units.UnitRoamingController|RollNextPoint(",
     "Kingmaker.View.Roaming.RoamingWaypointData|SelectIdleTime(",
     "Kingmaker.UnitLogic.Commands.Base.UnitCommand|TickApproaching(",

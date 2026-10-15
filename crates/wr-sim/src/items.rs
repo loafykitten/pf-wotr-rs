@@ -1009,8 +1009,8 @@ fn on_item_added(w: &mut World, col: usize, item: EntityIdx, suppress: bool) {
         bus::raise_global_call(w, "IItemsCollectionHandler", "HandleItemsAdded", None);
         w.bus.item.pop();
     }
-    if is_player_inventory(w, col) && !w.item(item).is_some_and(|i| i.is_identified) {
-        w.coverage.unsupported("ItemEntity.TryIdentify");
+    if is_player_inventory(w, col) {
+        crate::rules::identify::try_identify_by_party(w, item);
     }
 }
 

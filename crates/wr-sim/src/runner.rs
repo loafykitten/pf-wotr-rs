@@ -93,6 +93,7 @@ const AUDITED_T1_SITES: &[&str] = &[
     "Kingmaker.AreaLogic.Cutscenes.Commands.CommandDelay|OnRun(",
     "Kingmaker.AreaLogic.Cutscenes.Commands.CommandUnitPlayCutsceneAnimation|OnRun(",
     "Kingmaker.Controllers.Units.UnitAnimationController|Activate(",
+    "Kingmaker.Controllers.Units.FollowersFormationController|PrepareFormation(",
     "Kingmaker.Controllers.Units.UnitRoamingController|RollNextPoint(",
     "Kingmaker.View.Roaming.RoamingWaypointData|SelectIdleTime(",
     "Kingmaker.UnitLogic.Commands.Base.UnitCommand|TickApproaching(",
@@ -372,6 +373,8 @@ pub fn tick(w: &mut World, zone: Option<Guid>) {
         }
         enter_script_zone(w, z);
     }
+    // Other units' recorded entries (a cutscene moved them).
+    crate::elements::cutscene::recorded_unit_zones(w, t, zone.is_some());
     // 4. DialogController (Dialog mode).
     if w.player.mode == "Dialog" {
         crate::dialog::tick(w);
@@ -527,7 +530,9 @@ fn run_step(
 ) -> Result<()> {
     let guid = |s: &str| Guid::parse(s).with_context(|| format!("bad GUID {s}"));
     match name {
-        "wait" => {
+        // `run:N` resumes whenever the game pauses itself (`Driver.Run`): its Pause comes and
+        // goes with the recording's modes ([`crate::elements::cutscene::recorded_pause`]).
+        "wait" | "run" => {
             let n: u32 = arg.unwrap_or("1").parse()?;
             for _ in 0..n {
                 tick(w, None);
@@ -615,6 +620,15 @@ fn run_step(
                 answered += 1;
             }
         }
+        // A teleport is T1: the zone entries it causes are the recording's, made at their ticks
+        // ([`crate::elements::cutscene::recorded_unit_zones`]).
+        "teleport" => {
+            // Without the recording's zone entries its consequences would be lost.
+            if w.recorded_cs.as_ref().is_none_or(|r| r.zones.is_none()) {
+                w.coverage.unsupported("dialogue replay: a teleport without recorded zone entries");
+            }
+            w.events.push("input", json!({ "step": format!("teleport:{}", arg.unwrap_or("")) }));
+        }
         other => bail!("step {other} isn't supported by the runner (T1 steps are given as zone:)"),
     }
     Ok(())
@@ -692,6 +706,9 @@ pub struct Stream {
     pub unmodelled: std::collections::BTreeMap<String, u64>,
     /// Why the recording isn't a valid comparison target ([`oracle_health`]).
     pub health_problems: Vec<String>,
+    /// Mutations the original's UI made in Pause mode (their recorded caller chain has a
+    /// `Kingmaker.UI` frame; UI plumbing is T2) left out, by kind and the UI frame.
+    pub ui_excluded: std::collections::BTreeMap<String, u64>,
 }
 
 /// Whether the recording's `begin` record declares the observation family `name`.
@@ -1021,6 +1038,14 @@ pub fn oracle_stream(records: &[Value]) -> Stream {
                     },
                 }
             }
+            // In Pause mode no controller ticks: with player input neutral, a mutation made under
+            // a `Kingmaker.UI` frame is the original's UI at work (it builds items to show them,
+            // say), not the simulation.
+            "mut" if let Some(f) = ui_frame(r) => {
+                *s.ui_excluded
+                    .entry(format!("{}: {f}", r["what"].as_str().unwrap_or("?")))
+                    .or_default() += 1;
+            }
             _ => {
                 if let Some(v) = normalize(r) {
                     s.items.push(v);
@@ -1029,6 +1054,17 @@ pub fn oracle_stream(records: &[Value]) -> Stream {
         }
     }
     s
+}
+
+/// The outermost `Kingmaker.UI` frame of a mutation's recorded caller chain (WrathOracle's
+/// `origin`, written in Pause mode: innermost first, joined by " < ").
+fn ui_frame(r: &Value) -> Option<String> {
+    r["origin"]
+        .as_str()?
+        .split(" < ")
+        .filter(|f| f.starts_with("Kingmaker.UI."))
+        .last()
+        .map(str::to_owned)
 }
 
 fn draw_value(v: DrawValue) -> Value {
@@ -1175,6 +1211,8 @@ pub struct TraceDiff {
     pub rules: StreamDiff,
     pub draws: StreamDiff,
     pub t1_excluded: std::collections::BTreeMap<String, u64>,
+    /// The oracle's mutations its UI made in Pause mode, left out ([`Stream::ui_excluded`]).
+    pub ui_excluded: std::collections::BTreeMap<String, u64>,
     /// Oracle sim draws at sites the sim doesn't model: fails the comparison.
     pub unmodelled_draws: std::collections::BTreeMap<String, u64>,
     /// The recording's health problems: any fails the comparison.
@@ -1226,6 +1264,7 @@ pub fn compare_streams(ours: &Stream, oracle: &Stream, ids: &RuntimeIds) -> Trac
         ),
         draws: diff_stream(&filtered(ours, &kind(&["draw"])), &filtered(oracle, &kind(&["draw"]))),
         t1_excluded: oracle.t1_excluded.clone(),
+        ui_excluded: oracle.ui_excluded.clone(),
         unmodelled_draws: oracle.unmodelled.clone(),
         oracle_health_problems: oracle.health_problems.clone(),
     }
@@ -1440,6 +1479,8 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
     let recorded_cutscenes = crate::elements::cutscene::RecordedCutscene::present(&records);
     let recorded_locks =
         recorded_cutscenes && crate::elements::cutscene::RecordedCutscene::has_locks(&records);
+    let recorded_commands =
+        recorded_cutscenes && crate::elements::cutscene::RecordedCutscene::has_commands(&records);
     let path = wr_save::report::find_save(&save)?;
     let s = crate::hydrate::Save::read(&path)?;
     let content = Rc::new(crate::content::Content::open_default()?);
@@ -1452,6 +1493,7 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
             ability_params_empty: o.ability_params_empty,
             recorded_cutscenes,
             recorded_locks,
+            recorded_commands,
             ..crate::hydrate::Options::default()
         },
     )?;
@@ -1489,7 +1531,10 @@ pub fn run_fixture(o: &FixtureOptions<'_>) -> Result<FixtureRun> {
                     .collect(),
             );
             match crate::elements::cutscene::RecordedCutscene::of(&records) {
-                Ok(r) => w.recorded_cs = Some(Box::new(r)),
+                Ok(mut r) => {
+                    r.claim_zone_steps(&steps);
+                    w.recorded_cs = Some(Box::new(r));
+                }
                 Err(e) => w
                     .coverage
                     .unsupported(format!("dialogue replay: a malformed cutscene record ({e})")),

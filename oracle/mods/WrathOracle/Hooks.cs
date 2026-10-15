@@ -293,16 +293,20 @@ internal static class Hooks
 
     // ---------------- mutations ----------------
 
+    // A mutation in Pause mode (no controller ticks there: UI or input code made it) carries its
+    // caller chain (origin, as a root rule's), declared as paused_origins.
     private static void Mut(string what, Action<Json> body)
     {
         if (!Trace.Active || !Trace.OnMainThread) return;
         try
         {
+            var origin = Game.Instance?.CurrentMode == GameModeType.Pause ? Rules.Origin() : null;
             Trace.Emit("mut", j =>
             {
                 j.Prop("what", what);
                 j.Prop("rule", Rules.CurrentRuleId);
                 j.Prop("h", Rules.CurrentHandlerId);
+                if (origin != null) j.Prop("origin", origin);
                 body(j);
             });
         }

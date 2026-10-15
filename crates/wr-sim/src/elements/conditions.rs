@@ -43,6 +43,31 @@ pub const IMPLEMENTED: &[&str] = &[
 /// `Condition.CheckCondition()` (before `Not`).
 pub fn check_condition(w: &mut World, owner: &Rc<Blueprint>, c: View<'_>) -> Result<bool> {
     match c.type_name() {
+        // `ContextConditionCasterHasFact.cs`: the context's caster (`MaybeCaster`) has the fact.
+        // A `ContextCondition` reads the innermost `MechanicsContext.Data` scope.
+        "ContextConditionCasterHasFact" => {
+            let Some((fact, _)) = super::actions::mechanics_scope(w) else {
+                return Err(unsupported(
+                    w,
+                    "condition",
+                    "ContextConditionCasterHasFact (no context)",
+                ));
+            };
+            let caster = w
+                .fact(fact)
+                .context
+                .as_ref()
+                .and_then(|x| x.caster.clone())
+                .and_then(|id| w.by_id.get(&id).copied());
+            let Some(u) = caster else {
+                w.log("error", "Caster is missing");
+                return Ok(false);
+            };
+            let g = c.guid("m_Fact");
+            Ok(g.is_some_and(|g| {
+                w.entity(u).facts.list.iter().any(|f| w.fact(*f).blueprint == Some(g))
+            }))
+        }
         // `EtudeStatus.cs`.
         "EtudeStatus" => {
             let Some(g) = c.guid("m_Etude") else {

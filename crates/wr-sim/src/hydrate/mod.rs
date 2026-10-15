@@ -1031,6 +1031,9 @@ pub struct Options {
     /// The recording also has the cutscene locks (`CommandLockControls` is accepted with its
     /// buff tick and postpone replayed instead of reported).
     pub recorded_locks: bool,
+    /// The recording also has the cutscene commands' dialogue starts and entry checks
+    /// (`CommandStartDialog` and skipping `EntryCondition`s are accepted, placed by it).
+    pub recorded_commands: bool,
 }
 
 /// `AbilityParams.Empty`'s starting value from a command-line argument: an object
@@ -1182,6 +1185,7 @@ pub fn hydrate(
     let mut w = World::new(content.clone(), registry);
     w.scene.recorded_cutscenes = opts.recorded_cutscenes;
     w.scene.recorded_locks = opts.recorded_locks;
+    w.scene.recorded_commands = opts.recorded_commands;
     if let Some((cl, rb)) = opts.ability_params_empty {
         w.empty_params = crate::world::EmptyAbilityParams::supplied(cl, rb);
     }

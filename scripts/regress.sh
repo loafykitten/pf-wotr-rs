@@ -19,7 +19,7 @@ hyd Manual_13 "$C/state-manual13-after-load.json"
 hyd Manual_19 "$C/manual19-dump-2/state-manual19-after-load.json"
 gunzip -c "$C/state-manual10-after-load.json.gz" > "$S/state-manual10.json"
 hyd Manual_10 "$S/state-manual10.json"
-for cap in poc4-seelah-7 poc4-horgus-11 cert-24; do
+for cap in poc4-seelah-7 poc4-horgus-11 cert-24 poc4-camelia-5; do
   for fx in "$C/$cap"/fixtures/*/; do
     fx=$(basename "$fx"); [ "$fx" = attack ] || [ "$fx" = dice ] && continue
     for t in "$C/$cap/fixtures/$fx"/*.trace.jsonl.gz; do

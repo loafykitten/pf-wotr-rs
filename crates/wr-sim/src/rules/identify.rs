@@ -86,6 +86,39 @@ pub fn try_identify(w: &mut World, unit: EntityIdx, item: EntityIdx) {
     crate::combat::rules::trigger_any(w, &mut rule, |_| None);
 }
 
+/// `ItemEntity.TryIdentify()` (the player inventory's `OnItemAdded`): each party member tries
+/// (in capital mode the remote companions and the main character: reported); an item still not
+/// identified raises `IIdentifyHandler.OnFailedToIdentify`, whose handlers (the game log, the
+/// tutorials' triggers, two trickster features) the sim doesn't run: one subscribed is reported.
+pub fn try_identify_by_party(w: &mut World, item: EntityIdx) {
+    if w.item(item).is_none_or(|i| i.is_identified) {
+        return;
+    }
+    if w.player.capital_party_mode {
+        w.coverage.unsupported("ItemEntity.TryIdentify: capital party mode");
+        return;
+    }
+    for u in crate::narrative::party::party(w) {
+        try_identify(w, u, item);
+    }
+    if w.item(item).is_some_and(|i| !i.is_identified) && failed_handlers_unknown(w) {
+        w.coverage.unsupported("IIdentifyHandler.OnFailedToIdentify: a subscriber");
+    }
+}
+
+/// Whether an `IIdentifyHandler` subscriber's `OnFailedToIdentify` may do something: the
+/// `TutorialTriggerNewItem` family's does nothing (the game log's is presentation, outside the
+/// bus).
+fn failed_handlers_unknown(w: &World) -> bool {
+    let Some(l) = w.bus.global.get("IIdentifyHandler") else { return false };
+    l.list.iter().flatten().any(|s| match s {
+        crate::rulebook::bus::Sub::Component(c) => {
+            !w.component(*c).ty().is_some_and(|t| crate::content::is_a(t, "TutorialTriggerNewItem"))
+        }
+        _ => true,
+    })
+}
+
 /// The id of the player inventory's external handler.
 const PLAYER_INVENTORY: u32 = 0x5049_4e56;
 
