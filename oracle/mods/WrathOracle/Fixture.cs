@@ -181,6 +181,7 @@ internal static class Fixture
     public static string End()
     {
         if (!Trace.Active) return null;
+        DeathFxPin.Flush(); // records still held go into the trace before it ends
         Rng.Checkpoint(); // unrecorded steps since the last hooked draw count too
         var tapeLen = Rng.TapeLength;
         var tapePos = Rng.TapeLength - Rng.TapeLeftover;

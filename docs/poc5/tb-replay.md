@@ -527,7 +527,9 @@ established: the traces don't record the impulse, and `GetDismemberType` drew no
   coroutine started), `dsm` and `limbs` (`ShouldDismember`'s and `CanDismemberLimbsApart`'s results inside it) and
   `type` (`GetDismemberType`'s), null where not reached. Each `DismemberUnitFX.Init` is noted as `dismember` (`u`,
   `ingame`: whether `Init` adds the buff). A replay checks raw ids with the root rules' binding (below), and a
-  recorded death that threw (`exc`) or is `ambiguous` makes the recording unfollowable.
+  recorded death that threw (`exc`) or is `ambiguous` makes the recording unfollowable. A record made while a rule is
+  open (an effect spawned at once inside a rule, as `SummonedUnitBuff`'s removal can) is written when no rule is open
+  (the next tick's start, or the window's close), with its own tick as `at`: readers place records by rule spans.
 - **Replay**: inside `HandleDeath`, `ShouldDismember` and `CanDismemberLimbsApart` return the recording's results.
   `GetDismemberType` runs natively, its draw (if any) from the tape, and its type must be the recording's. The death
   must be the recording's (same key, recorded tick plus the offset, same `start`). Each `Init` must be the recording's

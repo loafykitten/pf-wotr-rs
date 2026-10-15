@@ -59,6 +59,7 @@ internal static class DeathFxPin
         Tape.Clear();
         InitTape.Clear();
         PerUnit.Clear();
+        Held.Clear();
         _view = null; _now = _rec = null;
         RecordedOn = false;
         Deaths = Pinned = Inits = 0;
@@ -72,7 +73,9 @@ internal static class DeathFxPin
     {
         var ev = (string)o["ev"];
         if (ev != "death_fx" && ev != "dismember") return;
-        var t = o["t"]?.Type == JTokenType.Integer ? (int)o["t"] : -1;
+        // Its tick: "at" when the record was written later (made inside a rule, Note), else its own.
+        var at = o["at"];
+        var t = at != null ? (at.Type == JTokenType.Integer ? (int)at : -1) : o["t"]?.Type == JTokenType.Integer ? (int)o["t"] : -1;
         bool? B(string f) => o[f]?.Type == JTokenType.Boolean ? (bool)o[f] : (bool?)null;
         bool BoolOrNull(string f) => o[f]?.Type == JTokenType.Boolean || o[f]?.Type == JTokenType.Null;
         // A death the recording couldn't key or finish isn't followable.
@@ -138,7 +141,7 @@ internal static class DeathFxPin
         if (now == null || !On) return __exception;
         try
         {
-            Sched.Obs("death_fx", j =>
+            Note("death_fx", j =>
             {
                 j.Prop("p", now.K); j.Prop("id", now.Id); j.Prop("start", now.Start); j.Prop("dsm", now.Dsm); j.Prop("limbs", now.Limbs); j.Prop("type", now.Type);
                 if (now.Ambiguous) j.Prop("ambiguous", true);
@@ -172,6 +175,25 @@ internal static class DeathFxPin
             if (x != null && x.UniqueId != null && x.UniqueId.Length > 8 && !Sched.StartUnits.Contains(x.UniqueId) && ReferenceEquals(x.Blueprint, bp)) made++;
         ambiguous = made != 1;
         return Rules.StableId(u);
+    }
+
+    // A record made while a rule is open (an effect spawned at once inside a rule: SummonedUnitBuff's removal, the
+    // spawn controller inactive) waits until no rule is open (Flush: each tick's start, the window's close), with
+    // its tick as "at": readers place records relative to rule spans, and these aren't part of the rule.
+    private static readonly List<(string ev, Action<Json> body, int tick)> Held = new List<(string, Action<Json>, int)>();
+
+    private static void Note(string ev, Action<Json> body)
+    {
+        if (Rules.OpenRules == 0 && Held.Count == 0) { Sched.Obs(ev, body); return; }
+        Held.Add((ev, body, Trace.Tick));
+    }
+
+    public static void Flush()
+    {
+        if (Held.Count == 0 || Rules.OpenRules > 0 || !Sched.On) return;
+        var list = Held.ToArray();
+        Held.Clear();
+        foreach (var (ev, body, tick) in list) Sched.Obs(ev, j => { body(j); j.Prop("at", tick); });
     }
 
     private static string F(bool? b) => b.HasValue ? (b.Value ? "true" : "false") : "-";
@@ -229,7 +251,7 @@ internal static class DeathFxPin
             var ingame = unit.Data != null && unit.Data.IsInGame;
             var now = Trace.Tick;
             Inits++;
-            Sched.Obs("dismember", j => { j.Prop("u", id); j.Prop("id", raw); j.Prop("ingame", ingame); if (ambiguous) j.Prop("ambiguous", true); });
+            Note("dismember", j => { j.Prop("u", id); j.Prop("id", raw); j.Prop("ingame", ingame); if (ambiguous) j.Prop("ambiguous", true); });
             if (!Sched.Replay) return;
             var rec = InitTape.FirstOrDefault(r => !r.Seen && r.U == id);
             if (ambiguous) Sched.Invalidate($"dismember effect on {id} at tick {now}: a unit made in the window, with another of its blueprint made too (no identity to follow)");

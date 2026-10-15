@@ -200,7 +200,8 @@ internal static class Sched
         var ini = o["initiator"];
         string id = null;
         var ok = o["t"]?.Type == JTokenType.Integer && o["class"]?.Type == JTokenType.String;
-        if (ini == null || ini.Type == JTokenType.Null) { }
+        if (ini == null) ok = false; // the field is required (null: no initiator)
+        else if (ini.Type == JTokenType.Null) { }
         else if (ini is JObject u && u["$unit"]?.Type == JTokenType.String) id = (string)u["$unit"];
         else ok = false;
         if (!ok) { Invalidate("recording's root rule record lacks or mistypes its tick, class or initiator"); return; }
