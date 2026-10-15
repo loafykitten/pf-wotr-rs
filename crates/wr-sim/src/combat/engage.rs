@@ -686,7 +686,8 @@ fn aoo_body<I: EngInputs>(
     let c = inp.eng_new_run(w, set, &b, false, f.disengaging)?;
     uc::run(w, inp, set, c, false, false)?;
     inp.nested_run_end(w, set, c)?;
-    // (`IAttackOfOpportunityHandler`: the game log's.)
+    // `IAttackOfOpportunityHandler`: the game log's.
+    crate::game_log::attack_of_opportunity(w, u, t);
     let before = w.unit(u).map(|x| x.combat.cooldown).unwrap_or_default();
     let n = count(w, u)?;
     if set_count(w, u, n - 1)? {

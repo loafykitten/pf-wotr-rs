@@ -255,6 +255,12 @@ pub fn gain_party_experience(w: &mut World, gained: i32, gain: GainType) {
         }
     }
     crate::rulebook::bus::raise_global(w, "IPartyGainExperienceHandler", None);
+    // The game log's handler (`GameLogEventPartyGainExperience`), raised when the event's
+    // experience (`flag ? gained : each`) is positive.
+    let event_exp = if flag { gained } else { each };
+    if event_exp > 0 {
+        crate::game_log::party_gain_experience(w, event_exp);
+    }
 }
 
 fn is_finally_dead(w: &World, u: EntityIdx) -> bool {

@@ -213,7 +213,57 @@ pub trait Env {
         unsupported("date: the calendar")
     }
 
-    /// Any other template (the combat log's, the kingdom's, the UI's, tutorials'): its
+    /// `GameLogContext`'s unit field: `None` for null. `LogHelper.GetUnitName` writes
+    /// `<no unit>` for a null one.
+    ///
+    /// # Errors
+    ///
+    /// When unsupported.
+    fn log_unit(&mut self, field: LogUnitField) -> Result<Option<LogUnit>, TextError> {
+        let _ = field;
+        unsupported("the combat log's units (GameLogContext)")
+    }
+
+    /// `GameLogContext.SourceFact?.Name` (`None` for a null fact or a null name).
+    ///
+    /// # Errors
+    ///
+    /// When unsupported.
+    fn log_source_fact_name(&mut self) -> Result<Option<String>, TextError> {
+        unsupported("GameLogContext.SourceFact")
+    }
+
+    /// `GameLogContext`'s string field (`None` for null).
+    ///
+    /// # Errors
+    ///
+    /// When unsupported.
+    fn log_str(&mut self, field: LogStrField) -> Result<Option<String>, TextError> {
+        let _ = field;
+        unsupported("the combat log's strings (GameLogContext)")
+    }
+
+    /// `GameLogContext`'s `int` field.
+    ///
+    /// # Errors
+    ///
+    /// When unsupported.
+    fn log_int(&mut self, field: LogIntField) -> Result<i32, TextError> {
+        let _ = field;
+        unsupported("the combat log's numbers (GameLogContext)")
+    }
+
+    /// `GameLogContext`'s roll field (`None` for null).
+    ///
+    /// # Errors
+    ///
+    /// When unsupported.
+    fn log_roll(&mut self, field: LogRollField) -> Result<Option<LogRoll>, TextError> {
+        let _ = field;
+        unsupported("the combat log's rolls (GameLogContext)")
+    }
+
+    /// Any other template (the kingdom's, the UI's, tutorials'): its
     /// output, given the tag as registered (lower case).
     ///
     /// # Errors
@@ -255,7 +305,152 @@ enum Template {
     Empty,
     /// `PcConsoleTemplate`: the first parameter.
     PcConsole,
+    /// The combat log's templates (`LogTemplate*`), reading `GameLogContext`.
+    Log(LogTag),
     Other,
+}
+
+/// The combat log's templates (`Kingmaker.TextTools/LogTemplate*.cs`), each reading one of
+/// `GameLogContext`'s fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogTag {
+    Target,
+    Formula,
+    Source,
+    Text,
+    TextWithTags,
+    Description,
+    Count,
+    CountForm,
+    Roll,
+    D20,
+    D100,
+    Modifier,
+    Dc,
+    ChanceDc,
+    RollChance,
+    AttackNumber,
+    AttacksCount,
+    Round,
+}
+
+/// A unit as `LogHelper.GetUnitName` shows it: `CharacterName` and
+/// `ColorUtility.ToHtmlStringRGB(Blueprint.Color)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogUnit {
+    pub name: String,
+    pub color_rgb: String,
+}
+
+impl LogUnit {
+    /// `LogHelper.GetUnitName`: `<b><color=#RRGGBB>name</color></b>`.
+    #[must_use]
+    pub fn rich(&self) -> String {
+        format!("<b><color=#{}>{}</color></b>", self.color_rgb, self.name)
+    }
+}
+
+/// `GameLogContext`'s unit fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogUnitField {
+    SourceUnit,
+    Target,
+}
+
+/// `GameLogContext`'s string fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogStrField {
+    Text,
+    TextWithTags,
+    Description,
+    Formula,
+}
+
+/// `GameLogContext`'s `int` fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogIntField {
+    Count,
+    Roll,
+    Modifier,
+    Dc,
+    ChanceDc,
+    RollChance,
+    AttackNumber,
+    AttacksCount,
+    RoundNumber,
+}
+
+/// `GameLogContext`'s roll fields (`D20`, `D100`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogRollField {
+    D20,
+    D100,
+}
+
+/// A `RuleRollDice` as `LogHelper.GetRollDescription` reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRoll {
+    /// `Result`.
+    pub result: i32,
+    /// `RollHistory` (`None`: null).
+    pub history: Option<Vec<i32>>,
+    /// `ReplacedOne`.
+    pub replaced_one: bool,
+    /// `ReplaceOneWithMax`.
+    pub replace_one_with_max: bool,
+    /// `Rerolls`: each reroll's source blueprint's `Name` when it is a `BlueprintUnitFact`
+    /// (`None` for another source); `None` for a null list.
+    pub rerolls: Option<Vec<Option<String>>>,
+}
+
+impl LogRoll {
+    /// `LogHelper.GetRollDescription`.
+    #[must_use]
+    pub fn description(&self) -> String {
+        let history = match &self.history {
+            Some(h) if h.len() != 1 => h,
+            _ => {
+                return if self.replaced_one {
+                    "<s>1</s> 20".to_owned()
+                } else {
+                    self.result.to_string()
+                };
+            }
+        };
+        let mut s = String::new();
+        let mut first = true;
+        let mut marked = false;
+        for &item in history {
+            let (open, close) = if item == self.result && !marked {
+                marked = true;
+                ("<b><u>", "</u></b>")
+            } else {
+                ("", "")
+            };
+            if !first {
+                s.push_str(", ");
+            }
+            first = false;
+            if self.replace_one_with_max && item == 1 {
+                s.push_str(open);
+                s.push_str("<s>1</s> 20");
+                s.push_str(close);
+            } else {
+                s.push_str(open);
+                s.push_str(&item.to_string());
+                s.push_str(close);
+            }
+        }
+        if let Some(r) = &self.rerolls {
+            let text: String = r.iter().flatten().map(String::as_str).collect();
+            if !text.is_empty() {
+                s.push_str(" [");
+                s.push_str(&text);
+                s.push(']');
+            }
+        }
+        s
+    }
 }
 
 /// The registered tags, lower case (`AddTemplate` lower-cases them).
@@ -283,28 +478,28 @@ const TAGS: &[(&str, Template)] = &[
     ("mf_granddiplomat", Template::LeaderMaleFemale),
     ("mf_magister", Template::LeaderMaleFemale),
     ("mf_general", Template::LeaderMaleFemale),
-    ("target", Template::Other),
-    ("formula", Template::Other),
-    ("source", Template::Other),
-    ("text", Template::Other),
-    ("text_with_tags", Template::Other),
-    ("description", Template::Other),
-    ("count", Template::Other),
-    ("count_form", Template::Other),
-    ("roll", Template::Other),
-    ("d20", Template::Other),
-    ("d100", Template::Other),
-    ("mod", Template::Other),
-    ("dc", Template::Other),
-    ("chance_dc", Template::Other),
-    ("roll_chance", Template::Other),
+    ("target", Template::Log(LogTag::Target)),
+    ("formula", Template::Log(LogTag::Formula)),
+    ("source", Template::Log(LogTag::Source)),
+    ("text", Template::Log(LogTag::Text)),
+    ("text_with_tags", Template::Log(LogTag::TextWithTags)),
+    ("description", Template::Log(LogTag::Description)),
+    ("count", Template::Log(LogTag::Count)),
+    ("count_form", Template::Log(LogTag::CountForm)),
+    ("roll", Template::Log(LogTag::Roll)),
+    ("d20", Template::Log(LogTag::D20)),
+    ("d100", Template::Log(LogTag::D100)),
+    ("mod", Template::Log(LogTag::Modifier)),
+    ("dc", Template::Log(LogTag::Dc)),
+    ("chance_dc", Template::Log(LogTag::ChanceDc)),
+    ("roll_chance", Template::Log(LogTag::RollChance)),
     ("slotname", Template::Other),
     ("wielder", Template::Other),
     ("rations", Template::Other),
     ("recipe", Template::Other),
-    ("attack_number", Template::Other),
-    ("attacks_count", Template::Other),
-    ("round", Template::Other),
+    ("attack_number", Template::Log(LogTag::AttackNumber)),
+    ("attacks_count", Template::Log(LogTag::AttacksCount)),
+    ("round", Template::Log(LogTag::Round)),
     ("claimed_villages_count", Template::Other),
     ("claimed_towns_count", Template::Other),
     ("claimed_cities_count", Template::Other),
@@ -406,7 +601,53 @@ fn generate(
         Template::LeaderMaleFemale | Template::Empty => String::new(),
         Template::LineBreak => "\n".to_owned(),
         Template::PcConsole => params.first().cloned().unwrap_or_default(),
+        Template::Log(l) => log_template(l, params, env)?,
         Template::Other => env.other(tag, capitalized, params)?,
+    })
+}
+
+/// The combat log's templates (`LogTemplate*.Generate`, `LogHelper`): a null string appends
+/// nothing (`StringBuilder.Append(null)`).
+fn log_template(l: LogTag, params: &[String], env: &mut dyn Env) -> Result<String, TextError> {
+    let unit = |env: &mut dyn Env, f| -> Result<String, TextError> {
+        Ok(env.log_unit(f)?.map_or_else(|| "<no unit>".to_owned(), |u| u.rich()))
+    };
+    let int = |env: &mut dyn Env, f| -> Result<String, TextError> { Ok(env.log_int(f)?.to_string()) };
+    let roll = |env: &mut dyn Env, f| -> Result<String, TextError> {
+        // A null roll: `LogHelper` logs an error and writes "".
+        Ok(env.log_roll(f)?.map(|r| r.description()).unwrap_or_default())
+    };
+    Ok(match l {
+        LogTag::Target => unit(env, LogUnitField::Target)?,
+        LogTag::Source => match env.log_unit(LogUnitField::SourceUnit)? {
+            Some(u) => u.rich(),
+            None => env.log_source_fact_name()?.unwrap_or_default(),
+        },
+        LogTag::Text => env.log_str(LogStrField::Text)?.unwrap_or_default(),
+        LogTag::Description => env.log_str(LogStrField::Description)?.unwrap_or_default(),
+        LogTag::Formula => env.log_str(LogStrField::Formula)?.unwrap_or_default(),
+        LogTag::TextWithTags => match env.log_str(LogStrField::TextWithTags)? {
+            Some(t) => process(&t, env)?,
+            None => return Err(TextError::Throws("{text_with_tags}: Process(null)".into())),
+        },
+        LogTag::Count => int(env, LogIntField::Count)?,
+        LogTag::CountForm => {
+            let i = usize::from(env.log_int(LogIntField::Count)? != 1);
+            params.get(i).cloned().unwrap_or_default()
+        }
+        LogTag::Roll => int(env, LogIntField::Roll)?,
+        LogTag::Modifier => int(env, LogIntField::Modifier)?,
+        LogTag::Dc => int(env, LogIntField::Dc)?,
+        LogTag::ChanceDc => int(env, LogIntField::ChanceDc)?,
+        LogTag::RollChance => int(env, LogIntField::RollChance)?,
+        LogTag::AttacksCount => int(env, LogIntField::AttacksCount)?,
+        LogTag::Round => int(env, LogIntField::RoundNumber)?,
+        LogTag::AttackNumber => {
+            // `((int)GameLogContext.AttackNumber + 1).ToString()`, unchecked.
+            env.log_int(LogIntField::AttackNumber)?.wrapping_add(1).to_string()
+        }
+        LogTag::D20 => roll(env, LogRollField::D20)?,
+        LogTag::D100 => roll(env, LogRollField::D100)?,
     })
 }
 

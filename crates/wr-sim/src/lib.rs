@@ -28,6 +28,7 @@ pub mod entity;
 pub mod events;
 pub mod facts;
 pub mod feature_param;
+pub mod game_log;
 pub mod hydrate;
 pub mod item;
 pub mod items;

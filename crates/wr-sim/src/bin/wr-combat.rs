@@ -299,6 +299,19 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.ag_rows,
         out.ag_inputs
     );
+    if let Some(c) = &out.clog {
+        println!(
+            "combat log [oracle, sim]: queued {:?}, ticks {:?}, messages {:?}; messages equal {}, tooltips equal {}, tooltips not made {}, inputs {:?}, differences {}",
+            c.queued,
+            c.ticks,
+            c.messages,
+            c.messages_equal,
+            c.tips_equal,
+            c.tips_not_ported,
+            c.inputs,
+            c.differences
+        );
+    }
     println!("kinds [oracle, sim]: {:?}", out.diff.kinds);
     println!(
         "turn order (sort events, overrides/sequences taken from the recording): {:?}",

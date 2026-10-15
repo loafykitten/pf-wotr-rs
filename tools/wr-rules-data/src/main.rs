@@ -26,6 +26,7 @@ use wr_sim::difficulty::{
     DifficultyPreset, DifficultyPresetAsset, DifficultyPresetsList, RULES_DATA_SCHEMA, RulesData,
     StatsAdjustmentPreset,
 };
+use wr_sim::game_log::strings::{LOG_STRINGS_SCHEMA, LogStrings};
 use wr_sim::text::{SHARED_STRINGS_SCHEMA, SharedStrings};
 
 #[derive(Parser, Debug)]
@@ -37,6 +38,9 @@ struct Cli {
     /// The shared strings' output (default `cache/sim/shared-strings.json`).
     #[arg(long)]
     shared_strings_out: Option<PathBuf>,
+    /// The log strings' output (default `cache/sim/log-strings.json`).
+    #[arg(long)]
+    log_strings_out: Option<PathBuf>,
 }
 
 /// `BlueprintRoot`.
@@ -70,12 +74,15 @@ fn main() -> Result<()> {
         other => bail!("m_DifficultyList is {other:?}, expected an asset index"),
     };
     ensure!(asset_index >= 0, "m_DifficultyList is null");
+    // `LocalizedTexts`' string containers (each an asset index).
+    let containers = localized_texts_containers(&root)?;
 
     // 2. blueprint.assets: find BlueprintReferencedAssets and follow the index.
     let assets = bundles.join("blueprint.assets");
     let bundle = Bundle::open(&assets)?;
     let mut found: Option<(String, DifficultyPresetsList, i64)> = None;
     let mut shared: Option<SharedStrings> = None;
+    let mut log: Option<LogStrings> = None;
     for node in &bundle.header.nodes {
         if node.path.ends_with(".resS") || node.path.ends_with(".resource") {
             continue;
@@ -103,6 +110,7 @@ fn main() -> Result<()> {
         let Some(refs) = referenced else { continue };
         let entries = refs.get("m_Entries").and_then(Value::as_array).context("m_Entries")?;
         shared = Some(shared_strings(&f, entries, &node.path, &script)?);
+        log = Some(log_strings(&f, entries, &containers, &node.path)?);
         let idx = usize::try_from(asset_index)?;
         let entry = entries.get(idx).context("asset index out of range")?;
         let p = entry.get("Asset").and_then(Value::as_pptr).context("entry Asset")?;
@@ -138,6 +146,18 @@ fn main() -> Result<()> {
         shared.keys.len(),
         entries_count(&shared),
         spath.display()
+    );
+    let log = log.context("no log strings")?;
+    let lpath = cli.log_strings_out.unwrap_or_else(LogStrings::default_path);
+    if let Some(d) = lpath.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&lpath, serde_json::to_string_pretty(&log)?)?;
+    eprintln!(
+        "log strings: {} of {} LocalizedTexts containers -> {}",
+        log.containers.len(),
+        containers.len(),
+        lpath.display()
     );
     eprintln!(
         "DifficultyPresetsList: {} presets, {} stats-adjustment presets -> {}",
@@ -214,6 +234,107 @@ fn shared_strings(
     source.insert("entries".into(), serde_json::json!(entries.len()));
     source.insert("entries_in_other_files".into(), serde_json::json!(elsewhere));
     Ok(SharedStrings { schema: SHARED_STRINGS_SCHEMA.into(), source, keys })
+}
+
+/// `BlueprintRoot.LocalizedTexts`' fields that are single Unity objects (the string
+/// containers), with their `BlueprintReferencedAssets` index.
+fn localized_texts_containers(root: &wr_content::node::Object) -> Result<Vec<(String, i32)>> {
+    let field = |o: &wr_content::node::Object, name: &str| -> Option<Node> {
+        let t = wr_content::schema::ty(o.ty);
+        t.fields.iter().position(|f| f.name == name).map(|i| o.fields[i].clone())
+    };
+    let Some(Node::Object(lt)) = field(root, "LocalizedTexts") else {
+        bail!("BlueprintRoot.LocalizedTexts missing")
+    };
+    let t = wr_content::schema::ty(lt.ty);
+    let mut out = Vec::new();
+    for (i, f) in t.fields.iter().enumerate() {
+        if let Node::AssetIndex(ix) = &lt.fields[i]
+            && *ix >= 0
+        {
+            out.push((f.name.to_owned(), *ix));
+        }
+    }
+    ensure!(out.iter().any(|(n, _)| n == "GameLog"), "LocalizedTexts.GameLog isn't an asset index");
+    Ok(out)
+}
+
+/// A `LocalizedString`'s actual key: `m_Key`, or the end of its `Shared` chain (at most 50 steps).
+fn actual_key(f: &SerializedFile<'_>, s: &Value) -> Result<String> {
+    let mut s = s.clone();
+    let mut steps = 0;
+    loop {
+        let next = s.get("Shared").and_then(Value::as_pptr).filter(|q| q.path_id != 0);
+        let Some(q) = next.filter(|_| steps < 50) else { break };
+        ensure!(q.file_id == 0, "a shared string in another file");
+        let o = f.object(q.path_id).context("shared asset")?;
+        s = f.read(o)?.get("String").context("SharedStringAsset.String")?.clone();
+        steps += 1;
+    }
+    Ok(s.str_at("m_Key").unwrap_or_default().to_owned())
+}
+
+/// A decoded Unity value as JSON, each `LocalizedString` (an object with `m_Key` and `Shared`)
+/// reduced to `{"$key": actual key}`, references as `{"$pptr": [file, path]}`.
+fn container_json(f: &SerializedFile<'_>, v: &Value) -> Result<serde_json::Value> {
+    use serde_json::{Value as J, json};
+    Ok(match v {
+        Value::Bool(b) => J::Bool(*b),
+        Value::Int(i) => json!(i),
+        Value::UInt(u) => json!(u),
+        Value::Float(x) => json!(x),
+        Value::Double(x) => json!(x),
+        Value::Str(s) => J::String(s.clone()),
+        Value::Bytes(_) => J::Null,
+        Value::Array(a) => J::Array(a.iter().map(|x| container_json(f, x)).collect::<Result<_>>()?),
+        Value::Object(_) if v.get("m_Key").is_some() && v.get("Shared").is_some() => {
+            json!({"$key": actual_key(f, v)?})
+        }
+        Value::Object(fields) => {
+            if let Some(p) = v.as_pptr()
+                && fields.len() == 2
+            {
+                return Ok(json!({"$pptr": [p.file_id, p.path_id]}));
+            }
+            let mut m = serde_json::Map::new();
+            for (k, x) in fields {
+                if matches!(k.as_str(), "m_GameObject" | "m_Enabled" | "m_Script") {
+                    continue;
+                }
+                m.insert(k.clone(), container_json(f, x)?);
+            }
+            J::Object(m)
+        }
+    })
+}
+
+/// Every `LocalizedTexts` container in this file, as JSON.
+fn log_strings(
+    f: &SerializedFile<'_>,
+    entries: &[Value],
+    containers: &[(String, i32)],
+    file: &str,
+) -> Result<LogStrings> {
+    let mut out = BTreeMap::new();
+    for (name, ix) in containers {
+        let entry = entries.get(usize::try_from(*ix)?).with_context(|| format!("{name}: index"))?;
+        let p = entry.get("Asset").and_then(Value::as_pptr).with_context(|| format!("{name}: Asset"))?;
+        if p.file_id != 0 || p.path_id == 0 {
+            continue;
+        }
+        let o = f.object(p.path_id).with_context(|| format!("{name}: object"))?;
+        let v = f.read(o)?;
+        out.insert(name.clone(), container_json(f, &v)?);
+    }
+    ensure!(out.contains_key("GameLog"), "GameLogStrings isn't in {file}");
+    let mut source = BTreeMap::new();
+    source.insert("bundle".into(), serde_json::json!("Bundles/blueprint.assets"));
+    source.insert("serialized_file".into(), serde_json::json!(file));
+    source.insert(
+        "asset_indices".into(),
+        serde_json::json!(containers.iter().cloned().collect::<BTreeMap<_, _>>()),
+    );
+    Ok(LogStrings { schema: LOG_STRINGS_SCHEMA.into(), source, containers: out })
 }
 
 fn int(v: &Value, k: &str) -> Result<i64> {
