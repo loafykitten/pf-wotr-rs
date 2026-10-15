@@ -334,6 +334,16 @@ fn terrain_shape(
         Some(Value::Array(a)) => a.len(),
         _ => 0,
     };
+    // Tree colliders: Unity adds the tree prototypes' colliders as shapes of the terrain's actor
+    // (not scene components), so a terrain with trees and tree colliders on is refused.
+    let trees = td
+        .path("m_DetailDatabase.m_TreeInstances")
+        .and_then(Value::as_array)
+        .map(<[Value]>::len)
+        .with_context(|| format!("{name}: no m_DetailDatabase.m_TreeInstances"))?;
+    if trees != 0 && bool_of(v, "m_EnableTreeColliders") != Some(false) {
+        bail!("{name}: {trees} trees with tree colliders on (their shapes aren't imported)");
+    }
     if holes != 0 {
         bail!("{name}: the terrain has a holes map (hole materials aren't modelled)");
     }

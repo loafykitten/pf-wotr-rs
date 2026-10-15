@@ -156,11 +156,13 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-/// Does the ray touch the triangle (either side)? Conservative: a margin of `MARGIN` metres
-/// along the ray, and around the edges `MARGIN` plus, relative to the edges' lengths, PhysX's
-/// barycentric enlargement `bary_eps` (a mesh's `mGeomEpsilon`) and the float error of a
-/// crossing point, which grows as the ray turns parallel to the plane. Within a thousandth of a
-/// radian of parallel, any overlap of the segment with the triangle's grown bounds counts.
+/// Does the ray touch the triangle (either side)? Conservative: a margin along the ray and
+/// around the edges of the [`slack`] plus, relative to the edges' lengths, PhysX's barycentric
+/// enlargement `bary_eps` (a mesh's `mGeomEpsilon`) and the float error of the crossing point,
+/// which grows as the ray turns parallel to the plane and as the triangle gets thin (its
+/// determinant cancels). Where the two together pass a thousandth, or the triangle is
+/// degenerate in `f64` (PhysX's `f32` determinant needn't vanish), any overlap of the
+/// segment with the triangle's grown bounds counts.
 #[must_use]
 pub fn ray_hits_triangle(
     o: [f64; 3],
@@ -172,22 +174,28 @@ pub fn ray_hits_triangle(
     let [a, b, c] = tri;
     let e1 = sub(b, a);
     let e2 = sub(c, a);
+    let e3 = sub(c, b);
     let n = cross(e1, e2);
     let nn = dot(n, n).sqrt();
-    let edges = dot(e1, e1).sqrt() + dot(e2, e2).sqrt() + dot(sub(c, b), sub(c, b)).sqrt();
-    if nn == 0.0 || !nn.is_finite() {
-        // Degenerate: PhysX rejects it (det below its epsilon); a NaN or inf one counts.
-        return !nn.is_finite();
+    let lens = [dot(e1, e1).sqrt(), dot(e2, e2).sqrt(), dot(e3, e3).sqrt()];
+    let edges = lens[0] + lens[1] + lens[2];
+    if !nn.is_finite() || !edges.is_finite() {
+        return true;
     }
-    let sin = dot(d, n).abs() / nn;
-    if sin < 1e-3 {
+    let longest = lens[0].max(lens[1]).max(lens[2]);
+    // The ray's angle to the plane, and the triangle's thinness (1 for a right isosceles
+    // triangle's scale, 0 for a sliver).
+    let sin = if nn > 0.0 { dot(d, n).abs() / nn } else { 0.0 };
+    let shape = if longest > 0.0 { nn / (longest * longest) } else { 0.0 };
+    let cond = sin * shape.min(1.0);
+    if cond < 1e-3 {
         let lo = [0, 1, 2].map(|k| a[k].min(b[k]).min(c[k]));
         let hi = [0, 1, 2].map(|k| a[k].max(b[k]).max(c[k]));
         return ray_hits_aabb(o, d, max, lo, hi, triangle_grow(tri, bary_eps));
     }
-    // PhysX's crossing point carries an error of order 1e-7 of the triangle's size, which the
-    // ray's angle amplifies by 1 / sin, along the ray and across it alike.
-    let margin = slack(o, max) + (2.0 * bary_eps + 1e-5 / sin) * edges;
+    // PhysX's crossing point carries an error of order 1e-7 of the triangle's size, amplified
+    // by 1 / cond, along the ray and across it alike.
+    let margin = slack(o, max) + (2.0 * bary_eps + 1e-5 / cond) * edges;
     let t = dot(sub(a, o), n) / dot(d, n);
     if t < -margin || t > max + margin {
         return false;
@@ -293,6 +301,22 @@ mod tests {
         let tri = [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0], [100.0, 0.0, 0.0]];
         let eps = 100.0 / f64::from(1u32 << 22);
         assert!(ray_hits_triangle([50.001, 1.0, 50.001], DOWN, 10.0, tri, eps));
+    }
+
+    #[test]
+    fn slivers_count_by_their_bounds() {
+        // The player's BV4_RaycastSingle hits this nearly collinear triangle at 0.5.
+        let tri = [
+            [0.0, 0.0, 0.0],
+            [2.0, 2.0, 2.0],
+            [1.0, f64::from(1.000_000_1f32), f64::from(0.999_999_9f32)],
+        ];
+        let o = [0.3, 1.0, f64::from(0.299_999_98f32)];
+        assert!(ray_hits_triangle(o, DOWN, 100.0, tri, 2f64.powi(-21)));
+        // Collinear in f64 too: still counted where the ray meets its bounds.
+        let line = [[0.0, 0.0, 0.0], [2.0, 2.0, 2.0], [1.0, 1.0, 1.0]];
+        assert!(ray_hits_triangle(o, DOWN, 100.0, line, 0.0));
+        assert!(!ray_hits_triangle([3.0, 1.0, 0.3], DOWN, 100.0, line, 0.0));
     }
 
     #[test]
