@@ -6,14 +6,14 @@ anything**: it's the handoff, with the goal, the fidelity contract, decisions, f
 measured so far, and the proof-of-concept milestones. `docs/research/` holds the code
 survey and notes on other rewrites.
 
-- **Current status (2026-10-14, twentieth session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
+- **Current status (2026-10-15, twenty-first session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
   certification) passed**. Ember's fixture saves exist: `Manual_18_WR_FirstBattle`,
   `Manual_19_WR_PreHorgus` and `Manual_20_WR_PreCamelia` (read-only copies in `fixtures/saves/`, gitignored).
   Where each workstream stands, with its handoff:
   - POC-4 (`docs/poc4/dialogue.md`, round 12; text: `docs/poc4/text.md`): every dialogue run is valid end to end,
     its text included (`crates/wr-text`), on `poc4-seelah-7` (12 runs), `poc4-horgus-11` (6), `cert-24` (3) and
     `poc4-camelia-6` (4: Camelia's cutscene-started dialogue and recruitment, from Ember's `Manual_20_WR_PreCamelia`;
-    `poc4-camelia-5` is a development capture with a teleport). Next: the facts' handler interfaces.
+    `poc4-camelia-5` is a development capture with a teleport). Facts' handler interfaces: done (round 13). Next: PLAN's list.
   - POC-5 (`docs/poc5/combat.md`, `docs/poc5/commands.md` round 14 slice G): every run of `poc5-tb-95` and `-96` valid (three fights with different choices: the pass as worded)
     with cooldowns, turns, the commands' lifecycle, `UnitAttack`, the approach, the AI, the engagement controller,
     units' `LastTarget`/`ManualTarget` and the impatience controller computed (`combat/commands/*.rs`, `combat/ai.rs`,

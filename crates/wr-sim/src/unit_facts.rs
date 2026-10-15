@@ -512,22 +512,225 @@ fn on_fact_will_detach(w: &mut World, u: EntityIdx, f: FactIdx) {
     fact_collection_updated(w);
 }
 
-/// `ActivatableAbility.HandleBuffDidAdded`/`HandleBuffDidRemoved` for one subscribed
-/// ability (`ActivatableAbility.cs:731–745`): the first is empty; the second, if the buff is
-/// the ability's applied buff and the ability is started, turns it off and stops it.
-pub fn activatable_buff_event(w: &mut World, a: FactIdx) {
-    let Some((method, _)) = w.bus.call.last().copied() else { return };
-    if method != "HandleBuffDidRemoved" {
+/// `ActivatableAbility`'s `EventBus` handlers (`ActivatableAbility.cs:412–480`, `:731–745`,
+/// `:899–913`) for one subscribed ability, the method and its arguments read from the bus;
+/// whether `iface`'s method is one it implements.
+pub fn activatable_event(w: &mut World, a: FactIdx, iface: &str) -> bool {
+    let Some((method, unit)) = w.bus.call.last().copied() else { return false };
+    let cmd = w.bus.command.last().copied();
+    match (iface, method) {
+        ("IUnitBuffHandler", "HandleBuffDidAdded")
+        | ("IUnitCombatHandler", "HandleUnitLeaveCombat")
+        | ("IApplyAbilityEffectHandler", "OnAbilityEffectApplied" | "OnTryToApplyAbilityEffect") => {
+        }
+        ("IUnitBuffHandler", "HandleBuffDidRemoved") => {
+            let Some(Some(buff)) = w.bus.call_fact.last().copied() else { return false };
+            if let Some((_, true, Some(b))) = w.fact(a).activatable
+                && b == buff
+            {
+                set_is_on(w, a, false);
+                if act(w, a).1 {
+                    stop(w, a);
+                }
+                w.fact_mut(a).deactivate_next_round = false;
+            }
+        }
+        ("IUnitCombatHandler", "HandleUnitJoinCombat") => {
+            let Some(bp) = ability_bp(w, a) else { return true };
+            let v = bp.view();
+            // `ActivateOnCombatStarts && m_IsOn && !IsStarted && unit == Owner.Unit &&
+            // ActivateImmediately`.
+            let (on, started, _) = act(w, a);
+            if v.bool("DeactivateIfCombatEnded")
+                && v.int("ActivationType") == 0
+                && on
+                && !started
+                && unit.is_some()
+                && unit == w.fact(a).owner
+            {
+                try_start(w, a);
+            }
+        }
+        ("IApplyAbilityEffectHandler", "OnAbilityEffectAppliedToTarget") => {
+            // `IsWaitingForTarget && context.Ability.Fact == SelectTargetAbility`: targeted
+            // toggles aren't modelled.
+            if ability_bp(w, a).is_some_and(|b| b.view().bool("IsTargeted")) && act(w, a).0 {
+                w.coverage.unsupported(
+                    "ActivatableAbility.OnAbilityEffectAppliedToTarget: a targeted toggle",
+                );
+            }
+        }
+        ("IUnitRunCommandHandler", "HandleUnitRunCommand") => {
+            let Some(c) = cmd else { return false };
+            activatable_run_command(w, a, c);
+        }
+        ("IUnitCommandActHandler", "HandleUnitCommandDidAct") => {
+            let Some(c) = cmd else { return false };
+            activatable_command_did_act(w, a, c);
+        }
+        ("IUnitCommandEndHandler", "HandleUnitCommandDidEnd") => {
+            let Some(c) = cmd else { return false };
+            activatable_command_did_end(w, a, c);
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// `ActivatableAbilityUnitCommand.Type` of the ability's blueprint (`GetComponent`), if it has
+/// one.
+fn unit_command_type(bp: &Blueprint) -> Option<i64> {
+    bp.components_array()
+        .into_iter()
+        .find(|o| is_a(o.ty, "ActivatableAbilityUnitCommand"))
+        .map(|o| crate::content::View(o).int("Type"))
+}
+
+/// `HandleUnitRunCommand(command)`: a command of its unit-command type, run by its owner,
+/// turns it off (unless the command activates this ability).
+fn activatable_run_command(w: &mut World, a: FactIdx, cmd: crate::rulebook::bus::CommandArg) {
+    if !act(w, a).0 || cmd.executor != w.fact(a).owner {
         return;
     }
-    let Some(Some(buff)) = w.bus.call_fact.last().copied() else { return };
-    if let Some((_, true, Some(b))) = w.fact(a).activatable
-        && b == buff
+    let Some(bp) = ability_bp(w, a) else { return };
+    if unit_command_type(&bp) != Some(i64::from(cmd.ty)) {
+        return;
+    }
+    if cmd.activate_ability {
+        w.coverage.unsupported("ActivatableAbility.HandleUnitRunCommand: UnitActivateAbility");
+        return;
+    }
+    set_is_on(w, a, false);
+}
+
+/// `HandleUnitCommandDidAct(command)`: an ability activated with a unit command that is on and
+/// not started turns off when its owner acts with another command of its type.
+fn activatable_command_did_act(w: &mut World, a: FactIdx, cmd: crate::rulebook::bus::CommandArg) {
+    let (on, started, _) = act(w, a);
+    if cmd.executor != w.fact(a).owner || !on {
+        return;
+    }
+    let Some(bp) = ability_bp(w, a) else { return };
+    if unit_command_type(&bp).is_some_and(|t| t != i64::from(cmd.ty))
+        || started
+        || bp.view().int("ActivationType") != 1
     {
-        set_is_on(w, a, false);
-        if w.fact(a).activatable.is_some_and(|x| x.1) {
-            stop(w, a);
+        return;
+    }
+    if cmd.activate_ability {
+        w.coverage.unsupported("ActivatableAbility.HandleUnitCommandDidAct: UnitActivateAbility");
+        return;
+    }
+    set_is_on(w, a, false);
+}
+
+/// `HandleUnitCommandDidEnd(command)`: acts only on a `UnitActivateAbility`.
+fn activatable_command_did_end(w: &mut World, a: FactIdx, cmd: crate::rulebook::bus::CommandArg) {
+    let (on, started, _) = act(w, a);
+    if !on || started || cmd.executor != w.fact(a).owner || !cmd.activate_ability {
+        return;
+    }
+    if ability_bp(w, a).is_some_and(|b| b.view().int("ActivationType") == 1) {
+        w.coverage.unsupported("ActivatableAbility.HandleUnitCommandDidEnd: UnitActivateAbility");
+    }
+}
+
+/// `ActivatableAbility`'s initiator rule handlers (`ActivatableAbility.cs:614–672`) for one
+/// subscribed ability; whether it handles `rule` at `step`.
+pub fn activatable_rule(
+    w: &mut World,
+    a: FactIdx,
+    rule: &mut dyn crate::rulebook::RuleEvent,
+    step: crate::rulebook::bus::RuleStep,
+) -> bool {
+    use crate::combat::attack::{
+        RuleAttackWithWeapon, RuleAttackWithWeaponResolve, RuleDealDamage,
+    };
+    use crate::rulebook::bus::RuleStep;
+    let about = match step {
+        RuleStep::AboutToTrigger => true,
+        RuleStep::DidTrigger => false,
+        _ => return false,
+    };
+    // `m_IsOn && ActivateOnUnitAction && ActivateOnUnitActionType == action`.
+    let on_unit_action = |w: &World, action: i64| {
+        act(w, a).0
+            && ability_bp(w, a).is_some_and(|b| {
+                b.view().int("ActivationType") == 2
+                    && b.view().int("m_ActivateOnUnitAction") == action
+            })
+    };
+    match rule.chain()[0] {
+        "RuleAttackWithWeapon" => {
+            let Some(r) = rule.as_any().downcast_mut::<RuleAttackWithWeapon>() else {
+                return false;
+            };
+            if about {
+                if on_unit_action(w, 0) {
+                    try_start(w, a);
+                    w.fact_mut(a).deactivate_next_round = false;
+                    w.fact_mut(a).time_to_next_round = 0.0;
+                }
+            } else if !r.weapon.is_ranged() {
+                activatable_on_attack(w, a, Spend::Attack);
+            }
         }
+        "RuleDealDamage" => {
+            let Some(r) = rule.as_any().downcast_mut::<RuleDealDamage>() else { return false };
+            // `Reason.Rule is RuleAttackWithWeapon`: a weapon attack's damage
+            // (`CreateRuleDealDamage` sets `Reason = this`).
+            if !about && r.link.weapon_attack {
+                activatable_on_attack(w, a, Spend::Hit);
+                // `AttackRoll.IsCriticalConfirmed && !FortificationNegatesCriticalHit`
+                // (fortification is reported by the roll).
+                if r.link.roll_seq.is_some() && r.link.is_critical_confirmed {
+                    activatable_on_attack(w, a, Spend::Crit);
+                }
+            }
+        }
+        "RuleAttackWithWeaponResolve" => {
+            let Some(r) = rule.as_any().downcast_mut::<RuleAttackWithWeaponResolve>() else {
+                return false;
+            };
+            if !about && !r.weapon_melee {
+                activatable_on_attack(w, a, Spend::Attack);
+            }
+        }
+        "RuleCastSpell" => {
+            if about && on_unit_action(w, 1) {
+                try_start(w, a);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Which of `OnAttack`, `OnHit` and `OnCrit`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spend {
+    Attack,
+    Hit,
+    Crit,
+}
+
+/// `OnAttack`/`OnHit`/`OnCrit`: a started ability's resource logic
+/// (`IActivatableAbilitySpendResourceLogic`, not ported: reported), then a stop when it can't
+/// go on and deactivates immediately (`OnAttack` also when it isn't active).
+fn activatable_on_attack(w: &mut World, a: FactIdx, spend: Spend) {
+    let (on, started, _) = act(w, a);
+    if !on || !started {
+        return;
+    }
+    let Some(bp) = ability_bp(w, a) else { return };
+    let available = is_available(w, &bp);
+    if available && has_component(&bp, "IActivatableAbilitySpendResourceLogic") {
+        w.coverage
+            .unsupported("ActivatableAbility: IActivatableAbilitySpendResourceLogic on an attack");
+    }
+    let inactive = spend == Spend::Attack && !w.fact(a).is_active;
+    if (inactive || !available) && bp.view().bool("DeactivateImmediately") {
+        stop(w, a);
     }
 }
 
@@ -571,13 +774,23 @@ pub fn set_is_on(w: &mut World, f: FactIdx, value: bool) {
     if value {
         on_did_turn_on(w, f);
     } else {
-        // `OnDidTurnOff`: stops at the end of the round (`m_ShouldBeDeactivatedInNextRound`)
-        // or immediately (`DeactivateImmediately`).
-        let immediately = ability_bp(w, f).is_some_and(|b| b.view().bool("DeactivateImmediately"));
-        if immediately {
+        // `OnDidTurnOff`: `m_Target = null` (targets aren't modelled), `ReadyToStart = false`;
+        // a started ability stops now if it deactivates immediately, else its next round does
+        // (`OnNewRound`, as it is off), and in turn-based combat its
+        // `DeactivateImmediatelyIfNoAttacksThisRound` components act (not ported: reported).
+        w.fact_mut(f).ready_to_start = false;
+        if !started {
+            return;
+        }
+        let Some(bp) = ability_bp(w, f) else { return };
+        if bp.view().bool("DeactivateImmediately") {
             stop(w, f);
-        } else {
-            w.coverage.unsupported("ActivatableAbility.OnDidTurnOff: deferred stop");
+        } else if w.combat.turn_based
+            && has_component(&bp, "DeactivateImmediatelyIfNoAttacksThisRound")
+        {
+            w.coverage.unsupported(
+                "ActivatableAbility.OnDidTurnOff: DeactivateImmediatelyIfNoAttacksThisRound",
+            );
         }
     }
 }

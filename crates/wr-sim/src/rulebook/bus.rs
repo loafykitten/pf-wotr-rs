@@ -120,6 +120,23 @@ pub struct EventBus {
     /// The collection (its identity) and item of the `IItemsCollectionHandler` event being
     /// raised, innermost last.
     pub item: Vec<(usize, EntityIdx)>,
+    /// The command of the `IUnitRunCommandHandler`, `IUnitCommandActHandler` or
+    /// `IUnitCommandEndHandler` event being raised, innermost last.
+    pub command: Vec<CommandArg>,
+}
+
+/// What a command event's handlers read of the command (`UnitCommand`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandArg {
+    pub executor: Option<EntityIdx>,
+    /// `Type` (`combat::commands::ty`).
+    pub ty: u8,
+    /// `command is UnitActivateAbility`.
+    pub activate_ability: bool,
+    /// `Result` (`combat::commands::res`).
+    pub result: u8,
+    pub acted: bool,
+    pub finished: bool,
 }
 
 impl std::fmt::Debug for EventBus {
@@ -177,7 +194,19 @@ fn interfaces(w: &World, s: Sub) -> Vec<String> {
             .ty()
             .map(|t| wr_content::schema::ty(t).handlers.iter().map(|h| (*h).to_owned()).collect())
             .unwrap_or_default(),
-        Sub::Fact(f) => save_ifaces(w.fact(f).clr),
+        Sub::Fact(f) => {
+            let mut out = save_ifaces(w.fact(f).clr);
+            for (clr, ifaces) in FACT_HANDLERS {
+                if *clr == w.fact(f).clr {
+                    for i in *ifaces {
+                        if !out.iter().any(|o| o == i) {
+                            out.push((*i).to_owned());
+                        }
+                    }
+                }
+            }
+            out
+        }
         Sub::Entity(e) => {
             let mut out = save_ifaces(w.entity(e).clr);
             for (clr, ifaces) in ENTITY_HANDLERS {
@@ -230,6 +259,28 @@ const ENTITY_HANDLERS: &[(&str, &[&str])] = &[
     ("SimpleTrapObjectData", &["IAreaHandler"]),
     ("TrapObjectData", &["IAreaHandler"]),
     ("UnitEntityData", &["IAreaHandler"]),
+];
+
+/// The handler interfaces of the `EntityFact` classes that implement any (from the decompiled
+/// declarations; `UnitFact` and `EntityFact` implement none): the save schema has none of these
+/// either.
+const FACT_HANDLERS: &[(&str, &[&str])] = &[
+    (
+        "ActivatableAbility",
+        &[
+            "IUnitCommandActHandler",
+            "IUnitCommandEndHandler",
+            "IUnitRunCommandHandler",
+            "IInitiatorRulebookHandler<RuleAttackWithWeapon>",
+            "IInitiatorRulebookHandler<RuleCastSpell>",
+            "IInitiatorRulebookHandler<RuleDealDamage>",
+            "IInitiatorRulebookHandler<RuleAttackWithWeaponResolve>",
+            "IUnitCombatHandler",
+            "IUnitBuffHandler",
+            "IApplyAbilityEffectHandler",
+        ],
+    ),
+    ("KingdomMoraleFlag", &["IKingdomDayHandler"]),
 ];
 
 /// Interfaces of a save-side CLR type (short name), from the save schema.
@@ -414,8 +465,10 @@ fn deliver_event_inner(w: &mut World, s: Sub, iface: &str) {
         }
         Sub::Runtime(_) => {}
         Sub::Fact(f) => {
-            if w.fact(f).clr == "ActivatableAbility" && iface == "IUnitBuffHandler" {
-                crate::unit_facts::activatable_buff_event(w, f);
+            if w.fact(f).clr == "ActivatableAbility"
+                && crate::unit_facts::activatable_event(w, f, iface)
+            {
+                w.coverage.executed(format!("ActivatableAbility.{iface}"));
             } else {
                 w.coverage.unsupported(format!("{}: {iface}", w.fact(f).clr));
             }
@@ -506,6 +559,19 @@ pub fn raise_global_fact(
     w.bus.call.pop();
 }
 
+/// `EventBus.RaiseEvent((iface h) => h.method(command))` to global subscribers, the command
+/// visible to handlers in [`EventBus::command`].
+pub fn raise_global_command(
+    w: &mut World,
+    iface: &'static str,
+    method: &'static str,
+    cmd: CommandArg,
+) {
+    w.bus.command.push(cmd);
+    raise_global_call(w, iface, method, None);
+    w.bus.command.pop();
+}
+
 /// `EventBus.RaiseEvent<iface>(unit, …)` to a unit's subscribers.
 pub fn raise_unit(w: &mut World, unit: EntityIdx, iface: &'static str) {
     run_list(
@@ -558,7 +624,15 @@ fn deliver_rule_inner(w: &mut World, s: Sub, rule: &mut dyn RuleEvent, step: Rul
             }
         }
         Sub::Runtime(_) => {}
-        Sub::Fact(f) => w.coverage.unsupported(format!("{}: {}", w.fact(f).clr, rule.chain()[0])),
+        Sub::Fact(f) => {
+            if w.fact(f).clr == "ActivatableAbility"
+                && crate::unit_facts::activatable_rule(w, f, rule, step)
+            {
+                w.coverage.executed(format!("ActivatableAbility.{}", rule.chain()[0]));
+            } else {
+                w.coverage.unsupported(format!("{}: {}", w.fact(f).clr, rule.chain()[0]));
+            }
+        }
         Sub::Entity(e) => {
             w.coverage.unsupported(format!("{}: {}", w.entity(e).clr, rule.chain()[0]))
         }

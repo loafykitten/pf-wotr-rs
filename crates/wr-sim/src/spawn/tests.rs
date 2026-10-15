@@ -378,3 +378,126 @@ fn malformed_awake_records_are_rejected() {
     assert!(matches!(of(vec![tick(0)]), Ok(None)), "no records: no input");
     assert!(matches!(of(vec![tick(0), set]), Ok(Some(_))));
 }
+
+/// An `ActivatableAbility` subscribes to the handler interfaces it declares (the save schema
+/// has none of them): its event and initiator rule lists.
+#[test]
+fn a_toggle_subscribes_to_its_handler_interfaces() {
+    let (mut w, u) = registry_world();
+    let f = toggle_unit(&mut w, 320, &[], (true, true));
+    crate::rulebook::bus::subscribe_fact(&mut w, f);
+    for iface in ["IUnitBuffHandler", "IUnitCombatHandler", "IUnitRunCommandHandler"] {
+        assert!(w.bus.global[iface].list.contains(&Some(Sub::Fact(f))), "{iface}");
+    }
+    for rule in ["RuleAttackWithWeapon", "RuleDealDamage", "RuleAttackWithWeaponResolve"] {
+        assert!(w.bus.rule_initiator[&u][rule].list.contains(&Some(Sub::Fact(f))), "{rule}");
+    }
+    crate::rulebook::bus::unsubscribe_fact(&mut w, f);
+    assert!(!subscribers(&w).contains(&Sub::Fact(f)));
+}
+
+fn unit_command(ty: i64) -> Node {
+    Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbilityUnitCommand",
+        &[("Type", Node::Enum(ty))],
+    )))
+}
+
+/// `HandleUnitRunCommand`: its owner's command of its unit-command type turns the toggle off;
+/// a started one that doesn't deactivate immediately stops at its round (`OnDidTurnOff`).
+#[test]
+fn a_command_of_its_type_turns_a_toggle_off() {
+    use crate::rulebook::bus::{CommandArg, raise_global_command};
+    let arg = |executor, ty| CommandArg {
+        executor: Some(executor),
+        ty,
+        activate_ability: false,
+        result: 0,
+        acted: false,
+        finished: false,
+    };
+    let (mut w, u) = registry_world();
+    let other = new_unit(&mut w, "other");
+    let f =
+        toggle_unit(&mut w, 321, &[("Components", Node::Seq(vec![unit_command(1)]))], (true, true));
+    w.fact_mut(f).ready_to_start = true;
+    crate::rulebook::bus::subscribe_fact(&mut w, f);
+    // A move command, and another unit's standard one: nothing.
+    raise_global_command(&mut w, "IUnitRunCommandHandler", "HandleUnitRunCommand", arg(u, 3));
+    raise_global_command(&mut w, "IUnitRunCommandHandler", "HandleUnitRunCommand", arg(other, 1));
+    assert_eq!(w.fact(f).activatable.map(|a| (a.0, a.1)), Some((true, true)));
+    raise_global_command(&mut w, "IUnitRunCommandHandler", "HandleUnitRunCommand", arg(u, 1));
+    assert_eq!(w.fact(f).activatable.map(|a| (a.0, a.1)), Some((false, true)));
+    assert!(!w.fact(f).ready_to_start);
+    assert!(w.coverage.unsupported.is_empty(), "{:?}", w.coverage.unsupported);
+}
+
+/// `HandleUnitJoinCombat`: a toggle that activates on combat start, on and not started, starts
+/// when its owner joins combat (not another unit).
+#[test]
+fn joining_combat_starts_a_toggle_that_activates_on_combat_start() {
+    use crate::rulebook::bus::raise_global_call;
+    let (mut w, u) = registry_world();
+    let other = new_unit(&mut w, "other");
+    let f =
+        toggle_unit(&mut w, 322, &[("DeactivateIfCombatEnded", Node::Bool(true))], (true, false));
+    crate::rulebook::bus::subscribe_fact(&mut w, f);
+    w.unit_mut(u).expect("unit").combat.in_combat = true;
+    raise_global_call(&mut w, "IUnitCombatHandler", "HandleUnitJoinCombat", Some(other));
+    assert_eq!(w.fact(f).activatable.map(|a| a.1), Some(false));
+    raise_global_call(&mut w, "IUnitCombatHandler", "HandleUnitJoinCombat", Some(u));
+    assert_eq!(w.fact(f).activatable.map(|a| a.1), Some(true));
+    assert!(w.coverage.unsupported.is_empty(), "{:?}", w.coverage.unsupported);
+}
+
+/// `OnEventDidTrigger(RuleAttackWithWeaponResolve)`: a ranged attack's resolve is the toggle's
+/// `OnAttack`, which stops a started toggle that isn't active and deactivates immediately; a
+/// melee one's isn't.
+#[test]
+fn a_ranged_resolve_stops_an_inactive_toggle_that_deactivates_immediately() {
+    use crate::combat::attack::RuleAttackWithWeaponResolve;
+    for (melee, started_after) in [(true, true), (false, false)] {
+        let (mut w, u) = registry_world();
+        let f =
+            toggle_unit(&mut w, 323, &[("DeactivateImmediately", Node::Bool(true))], (true, true));
+        w.fact_mut(f).is_active = false;
+        let mut r = RuleAttackWithWeaponResolve {
+            base: crate::rulebook::RuleBase::default(),
+            initiator: u,
+            target: u,
+            damage: None,
+            attack_hit: false,
+            weapon_melee: melee,
+            source_id: None,
+        };
+        assert!(crate::unit_facts::activatable_rule(&mut w, f, &mut r, RuleStep::AboutToTrigger));
+        assert_eq!(w.fact(f).activatable.map(|a| a.1), Some(true));
+        assert!(crate::unit_facts::activatable_rule(&mut w, f, &mut r, RuleStep::DidTrigger));
+        assert_eq!(w.fact(f).activatable.map(|a| a.1), Some(started_after), "melee {melee}");
+        assert!(w.coverage.unsupported.is_empty(), "{:?}", w.coverage.unsupported);
+    }
+}
+
+/// `HandleUnitCommandDidAct`: a toggle activated with a unit command, on and not started, turns
+/// off when its owner acts with a command that doesn't activate it; a `UnitActivateAbility`
+/// command (not run by the sim) reports instead of acting.
+#[test]
+fn acting_with_another_command_turns_a_with_command_toggle_off() {
+    use crate::rulebook::bus::{CommandArg, raise_global_command};
+    for (activate_ability, on_after, reported) in [(false, false, false), (true, true, true)] {
+        let (mut w, u) = registry_world();
+        let f = toggle_unit(&mut w, 324, &[("ActivationType", Node::Enum(1))], (true, false));
+        crate::rulebook::bus::subscribe_fact(&mut w, f);
+        let arg = CommandArg {
+            executor: Some(u),
+            ty: 1,
+            activate_ability,
+            result: 3,
+            acted: true,
+            finished: false,
+        };
+        raise_global_command(&mut w, "IUnitCommandActHandler", "HandleUnitCommandDidAct", arg);
+        assert_eq!(w.fact(f).activatable.map(|a| a.0), Some(on_after), "{activate_ability}");
+        assert_eq!(!w.coverage.unsupported.is_empty(), reported, "{:?}", w.coverage.unsupported);
+    }
+}

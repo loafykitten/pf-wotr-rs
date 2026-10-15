@@ -659,6 +659,9 @@ fn on_ended<I: Inputs>(w: &mut World, inp: &mut I, c: u32, raise: bool) -> R<()>
     cmd_mut(w, c)?.s.finished = true;
     // `(NeedEquipWeapons && DidRun && !SimulatingClick) & raiseEvent`: the getter is evaluated first.
     answer(w, inp, "nequip", c)?;
+    if raise {
+        raise_command(w, c, "IUnitCommandEndHandler", "HandleUnitCommandDidEnd")?;
+    }
     // `EndInTbm`: `CurrentTurn?.RemoveRunningCommand(this)`.
     if current_turn(w).is_some() {
         let before = w.combat.commands.running.len();
@@ -1024,6 +1027,7 @@ fn tick<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<()> {
             let x = cmd_mut(w, c)?;
             x.s.result = ret;
             x.s.acted = true;
+            raise_command(w, c, "IUnitCommandActHandler", "HandleUnitCommandDidAct")?;
         }
     }
     let s = &cmd(w, c)?.s;
@@ -1720,6 +1724,22 @@ pub fn run<I: Inputs>(
     } else {
         on_run_base(w, inp, c)?;
     }
+    raise_command(w, c, "IUnitRunCommandHandler", "HandleUnitRunCommand")
+}
+
+/// `EventBus.RaiseEvent` of a command event to the subscribers the bus holds (facts' and
+/// components'; the controllers' handlers are modelled where they act).
+fn raise_command(w: &mut World, c: u32, iface: &'static str, method: &'static str) -> R<()> {
+    let x = cmd(w, c)?;
+    let arg = crate::rulebook::bus::CommandArg {
+        executor: x.s.executor.as_deref().and_then(|id| w.by_id.get(id)).copied(),
+        ty: x.s.ty,
+        activate_ability: x.is("UnitActivateAbility"),
+        result: x.s.result,
+        acted: x.s.acted,
+        finished: x.s.finished,
+    };
+    crate::rulebook::bus::raise_global_command(w, iface, method, arg);
     Ok(())
 }
 

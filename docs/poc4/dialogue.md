@@ -724,6 +724,40 @@ after the null type description (C# evaluates it first) and entry conditions tha
 taking the recorded result (now only `UnitInScriptZone` with read-only evaluators, `FlagUnlocked`
 and `EtudeStatus` do). All fixed, with tests.
 
+## Round 13: facts' handler interfaces (2026-10-15, twenty-first session) [M]
+
+- **The gap.** Like the entities (round 12), facts took their interfaces from the save schema,
+  which keeps none of the handler interfaces: no fact ever subscribed to the event bus. Of the
+  `EntityFact` classes only `ActivatableAbility` (ten: three command events, four initiator
+  rule handlers, `IUnitCombatHandler`, `IUnitBuffHandler`, `IApplyAbilityEffectHandler`) and
+  `KingdomMoraleFlag` (`IKingdomDayHandler`) declare any [C]; `rulebook/bus.rs` `FACT_HANDLERS`
+  now lists them. `ActivatableAbility.HandleBuffDidRemoved` had been ported but was unreachable.
+- **Ported** (`unit_facts::activatable_event`, `activatable_rule`): every handler of the class,
+  read from the C#: the buff removal (now also clearing `m_ShouldBeDeactivatedInNextRound`),
+  `HandleUnitJoinCombat` (a toggle that activates on combat start starts), the run, act and
+  end command handlers, `OnAbilityEffectAppliedToTarget`, the rule handlers (`TryStart` on an
+  attack or a cast for `ActivateOnUnitAction`, `OnAttack` for a melee attack and a ranged
+  resolve, `OnHit`/`OnCrit` for a weapon attack's damage). And `OnDidTurnOff` as written: it
+  was a blanket "deferred stop" report, but the game only clears `ReadyToStart` and leaves the
+  stop to the next round's tick (already ported) unless the toggle deactivates immediately.
+  Reported, not ported: `UnitActivateAbility` commands, targeted toggles, spend-resource
+  components, `DeactivateImmediatelyIfNoAttacksThisRound`.
+- **Command events.** The commands model raised none of `IUnitRunCommandHandler`,
+  `IUnitCommandActHandler`, `IUnitCommandEndHandler`; it now does where the C# does (after
+  `OnRun` in `UnitCommands.Run`, after `OnAction`, in `OnEnded` when `raiseEvent`, before
+  `EndInTbm`), carrying the command (`bus::CommandArg`). The controllers' handlers stay where
+  they were modelled; a component with these interfaces (`FastBombs`) reports.
+- **Result:** `scripts/regress.sh` identical to `out-camelia2` (every dialogue run, every sheet)
+  except Manual_10's two `OnDidTurnOff` reports, gone; each load now delivers thousands of
+  buff events to the toggles (Manual_10: 825,861). The POC-5 suite passes: in all four current
+  fights (`-95`'s two, `-96`, `-97`) every handler is delivered (about 36,000 command runs in
+  `-95`, the rules on every attack) and every run stays valid; the only handler that reaches
+  past its gates is `OnAttack`/`OnHit` on two started toggles (`InspiredRageAllyToggleSwitch`,
+  `RapidShotToggleAbility`), which have no resource logic and don't deactivate, as in the game.
+  Five tests in `spawn/tests.rs`. Review: gpt-6.1-sol (high) found nothing against the C#; its
+  test gaps (the fail-closed reports, the command act) got a test, and the attack's resets and
+  the commands lifecycle's event order are covered by the POC-5 suite only.
+
 ## Recordings (local, gitignored)
 
 | Capture | Fixtures | Runs |
@@ -760,8 +794,8 @@ non-perturbed runs' `begin` records (cosmetic, oracle side).
 2. See round 5's next steps.
 3. The load-time long tail per save (`coverage.json`), and placeholder spawning's pre-cast buffs
    (`ShieldOfFaithBuff` above: `IsFromSpell` and inactive in the oracle).
-4. Camelia's meeting: valid on Ember's Manual_20 (round 12). Left: facts' handler interfaces
-   (the save schema's gap, round 12); looting (a driver `loot` step and the sim's container
+4. Camelia's meeting: valid on Ember's Manual_20 (round 12). Facts' handler interfaces: done
+   (round 13). Left: looting (a driver `loot` step and the sim's container
    interaction, take-all and `PartyInventoryTrigger`) when a fixture needs it. `crates/wr-text`: done (round 11); left: the combat log's,
    kingdom's and UI templates.
 

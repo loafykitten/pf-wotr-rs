@@ -7,10 +7,18 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-14, end of the twentieth session): start here
+## Where things stand (2026-10-15, end of the twenty-first session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **POC-4 round 13 (twenty-first session, `docs/poc4/dialogue.md`): facts' handler interfaces.** No fact had ever
+  subscribed to the event bus (the save schema drops handler interfaces, as it did for `EtudesSystem`):
+  `rulebook/bus.rs` `FACT_HANDLERS` gives `ActivatableAbility` its ten (and `KingdomMoraleFlag` its one), every
+  `ActivatableAbility` handler is ported from the C# (`unit_facts::activatable_event`, `activatable_rule`, and
+  `OnDidTurnOff`, which was a blanket report), and the commands model now raises the run, act and end command events
+  where the game does. Regression identical except Manual_10's two `OnDidTurnOff` reports, gone; every POC-4 and
+  POC-5 run stays valid with the handlers delivered (the fights reach `OnAttack`/`OnHit` on Inspired Rage and Rapid
+  Shot, no-ops as in the game). gpt-6.1-sol (high): no findings.
 - **POC-4 round 12 (twentieth session, `docs/poc4/dialogue.md`): Camelia, a dialogue started by a cutscene.** Last
   session's `poc4-camelia-1` turned out to be Seelah's meeting (the walk enters her trigger first); Camelia's trigger also
   lies behind `LootFirst`, which turns the party back until it loots a cloak. Ember made `Manual_20_WR_PreCamelia`
@@ -227,7 +235,7 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different
    choices are recorded and valid: `-95`'s two and `-96`).
 2. POC-4 (`docs/poc4/dialogue.md`): every dialogue run is valid, Camelia's included (round 12, on Ember's Manual_20).
-   Left: the facts' handler interfaces (the save schema's gap: `ActivatableAbility` implements eight), looting when a
+   Facts' handler interfaces: done (round 13). Left: looting when a
    fixture needs it, the combat log's and UI's templates. The fixture saves' load tail
    is closed (Manual_13 and Manual_18 load with nothing unsupported; Manual_19 reports only the `RandomTrack` gate, a
    recorded input in its runs); Manual_10's 224 kinds are item 3's.
@@ -240,6 +248,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    get only the input pin, not the phase or idle pins.
 
 **Working notes for the next session:**
+- **Twenty-first session (2026-10-15):** the regression baseline is `cache/regress/out-facthandlers` (identical to
+  `out-camelia2` but Manual_10's coverage). `wr-combat replay` doesn't print executed handlers; a temporary print of
+  `w.coverage.executed` is how round 13 counted them.
 - **Twentieth session (2026-10-14):** Ember's save `Manual_20_WR_PreCamelia` (in `fixtures/saves/`, read-only; dump
   `manual20-dump-1`); captures `poc4-camelia-6` (walk-in) and `poc4-camelia-5` (development: `teleport` after Seelah's
   meeting); `poc4-camelia-1`, `-3`, `-4` and two aborted `-2` tries archived. The regression baseline is
