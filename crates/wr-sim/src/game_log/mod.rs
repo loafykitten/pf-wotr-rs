@@ -1371,12 +1371,28 @@ impl Env for LogEnv<'_> {
         crate::text::WorldEnv { w: self.w }.player_is_king()
     }
 
+    // `NameTemplate` and `RaceTemplate` (`text::WorldEnv`'s), their names converted in the log's
+    // scope too.
     fn name(&mut self) -> Result<String, TextError> {
-        crate::text::WorldEnv { w: self.w }.name()
+        let w = self.w;
+        let u = w
+            .dialog
+            .acting_unit
+            .or(w.main_character)
+            .ok_or_else(|| TextError::Throws("{name}: no main character".into()))?;
+        names::character_name(w, u)
     }
 
     fn race_name(&mut self) -> Result<String, TextError> {
-        crate::text::WorldEnv { w: self.w }.race_name()
+        let w = self.w;
+        let mc = w
+            .main_character
+            .ok_or_else(|| TextError::Throws("{race}: no main character".into()))?;
+        let race = w
+            .unit(mc)
+            .and_then(|u| u.progression.race)
+            .ok_or_else(|| TextError::Throws("{race}: no race".into()))?;
+        names::blueprint_text(w, race, "m_DisplayName")
     }
 
     fn narrator_color(&mut self) -> Result<Color32, TextError> {

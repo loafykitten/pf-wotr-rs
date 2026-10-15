@@ -87,7 +87,7 @@ const C: &str = "driven replay: commands:";
 type Change = fn(&mut Vec<V>);
 
 /// The damaged recordings, each with the report it must make.
-const CASES: [(&str, Change); 49] = [
+const CASES: [(&str, Change); 51] = [
     // Messages.
     (L, |recs| {
         let at = nth(recs, "clog_msg", 3);
@@ -318,6 +318,24 @@ const CASES: [(&str, Change); 49] = [
         let at = first_q(recs, "GameLogEventPartyGainExperience");
         let o = recs[at]["origin"].as_str().unwrap_or("").replace("GainPartyExperience", "Other");
         recs[at]["origin"] = json!(o);
+    }),
+    // An attack of opportunity's event after the count's decrement; the party's combat state's
+    // before the turn controller's handler of the same raise.
+    (L, |recs| {
+        let at = first_q(recs, "GameLogEventAttackOfOpportunity");
+        let r = recs.remove(at);
+        recs.insert(at + 1, r);
+        renumber(recs);
+    }),
+    (L, |recs| {
+        let at = first_q(recs, "GameLogEventCombatStateChanged");
+        let tb = (0..at).rev().find(|&i| recs[i]["k"] == "tb" && recs[i]["ev"] == "combat_start");
+        let pair = [recs.remove(at), recs.remove(at)];
+        let to = tb.unwrap_or(at);
+        for (n, r) in pair.into_iter().enumerate() {
+            recs.insert(to + n, r);
+        }
+        renumber(recs);
     }),
 ];
 

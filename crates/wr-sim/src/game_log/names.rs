@@ -28,6 +28,16 @@ fn loc(w: &World, v: View<'_>, field: &str) -> Result<String, TextError> {
     }
 }
 
+/// A blueprint's `LocalizedString` field, converted in the log's scope.
+///
+/// # Errors
+///
+/// A missing blueprint, or as the conversion.
+pub fn blueprint_text(w: &World, g: wr_content::Guid, field: &str) -> Result<String, TextError> {
+    let b = bp(w, g)?;
+    loc(w, b.view(), field)
+}
+
 /// `UnitDescriptor.CharacterName` (`crate::text::character_name`), its localized names converted
 /// in the log's scope.
 ///

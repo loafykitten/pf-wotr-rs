@@ -392,6 +392,62 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
     })
 }
 
+/// Where the game raises a non-rule event, against the records around it (`recs[i]`, a `clog_q`),
+/// for the kinds whose raise point the trace shows:
+/// - an attack of opportunity's (`UnitCombatState.AttackOfOpportunity`) right after the command's
+///   `Run` (its `cmd` run of `UnitAttackOfOpportunity`, the same units) and before the count's
+///   decrement (`cd_write` from its setter) or, without one, the observer's `eng_aoo` of it;
+/// - a party's experience (`Player.GainPartyExperience`) right after its last member's experience
+///   (`mut` xp);
+/// - `GameLogEventPartyCombatState` right after `GameLogEventCombatStateChanged` of the same
+///   state (the next subscriber of the same raise), which comes after the turn controller's
+///   handler of that raise (its `tb` `combat_start`/`combat_end`, the last of the frame).
+fn raise_point_ok(recs: &[J], i: usize) -> bool {
+    let r = &recs[i];
+    let prev = i.checked_sub(1).map(|j| &recs[j]);
+    let not_log =
+        |x: &&J| !(x["k"] == "obs" && x["ev"].as_str().is_some_and(|e| e.starts_with("clog_")));
+    let prev_other = recs[..i].iter().rev().find(not_log);
+    let next_other = recs[i + 1..].iter().find(not_log);
+    let f = &r["f"];
+    match r["e"].as_str() {
+        Some("GameLogEventAttackOfOpportunity") => {
+            let (a, t) = (&f["Attacker"]["$unit"], &f["Target"]["$unit"]);
+            prev.is_some_and(|p| {
+                p["k"] == "cmd"
+                    && p["ev"] == "run"
+                    && p["class"] == "UnitAttackOfOpportunity"
+                    && p["unit"]["$unit"] == *a
+                    && p["target"]["$unit"] == *t
+            }) && next_other.is_some_and(|n| {
+                (n["ev"] == "cd_write"
+                    && n["u"] == *a
+                    && n["writer"] == "UnitCombatState.set_AttackOfOpportunityCount")
+                    || (n["ev"] == "eng_aoo" && n["u"] == *a && n["tgt"] == *t)
+            })
+        }
+        Some("GameLogEventPartyGainExperience") => {
+            prev_other.is_some_and(|p| p["k"] == "mut" && p["what"] == "xp")
+        }
+        Some("GameLogEventPartyCombatState") => prev.is_some_and(|p| {
+            p["ev"] == "clog_q" && p["e"] == "GameLogEventCombatStateChanged" && p["f"] == *f
+        }),
+        Some("GameLogEventCombatStateChanged") => {
+            let want = if f["InCombat"] == true { "combat_start" } else { "combat_end" };
+            recs[..i]
+                .iter()
+                .rev()
+                .take_while(|x| x["k"] != "tick")
+                .find(|x| {
+                    x["k"] == "tb"
+                        && matches!(x["ev"].as_str(), Some("combat_start" | "combat_end"))
+                })
+                .is_some_and(|x| x["ev"] == want)
+        }
+        _ => true,
+    }
+}
+
 /// A record's fields, exactly.
 fn keys_are(r: &J, want: &[&str]) -> bool {
     r.as_object().is_some_and(|o| o.len() == want.len() && want.iter().all(|k| o.contains_key(*k)))
@@ -548,7 +604,7 @@ pub fn compare(
     // sim had written.
     let mut rec_muts = Vec::new();
     let mut n_muts = 0_usize;
-    for r in recs {
+    for (i, r) in recs.iter().enumerate() {
         if r["k"] == "mut" && r.as_object().is_some_and(super::counted_mut) {
             n_muts += 1;
         }
@@ -585,6 +641,9 @@ pub fn compare(
             });
             if !placed {
                 diff(w, &mut s, format!("a {} event raised elsewhere ({origin})", r["e"]));
+            }
+            if !raise_point_ok(recs, i) {
+                diff(w, &mut s, format!("a {} event out of its raise (seq {})", r["e"], r["seq"]));
             }
             rec_muts.push(Some(n_muts));
         } else if r["k"] == "obs" && r["ev"] == "clog_q" {
