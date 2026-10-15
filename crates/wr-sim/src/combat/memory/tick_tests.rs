@@ -959,7 +959,7 @@ impl Check<'_> {
 /// The runs to check: `WR_MEMTICK_CAPTURES` (comma-separated labels), both fights, the record and
 /// two replays.
 fn captures() -> Vec<PathBuf> {
-    let labels = std::env::var("WR_MEMTICK_CAPTURES").unwrap_or_else(|_| "poc5-tb-110".into());
+    let labels = std::env::var("WR_MEMTICK_CAPTURES").unwrap_or_else(|_| "poc5-tb-111".into());
     let mut out = Vec::new();
     for label in labels.split(',') {
         let root =
@@ -1054,6 +1054,56 @@ fn every_recorded_memory_tick_reruns_to_the_recorded_memory() {
     }
     eprintln!("total: {totals:?}");
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// The capture's records damaged one way at a time: each is caught.
+#[test]
+#[ignore = "needs the memory observer's captures (WR_MEMTICK_CAPTURES)"]
+fn a_damaged_capture_is_caught() {
+    let label = std::env::var("WR_MEMTICK_CAPTURES").unwrap_or_else(|_| "poc5-tb-111".into());
+    let label = label.split(',').next().unwrap_or_default().to_owned();
+    let path = wr_paths::repo_root()
+        .join("fixtures/captures/oracle")
+        .join(label)
+        .join("fixtures/tb-focus/record.trace.jsonl.gz");
+    let recs = Trace::load(&path).expect("capture").records;
+    let errors = |v: &[Value]| {
+        let mut c = Check::new(v, HashMap::new(), 0, false);
+        c.run();
+        c.errors
+    };
+    assert_eq!(errors(&recs), Vec::<String>::new());
+    let pos = |f: &dyn Fn(&Value) -> bool| recs.iter().position(f).expect("a record to damage");
+    let leaf = |r: &Value, f: &str| r["ev"] == "mem_v" && r["f"] == f;
+    type Damage = Box<dyn Fn(&mut Vec<Value>)>;
+    let los = pos(&|r| leaf(r, "los") && r["v"] == true);
+    let near = pos(&|r| leaf(r, "near") && r["v"].as_array().is_some_and(|a| a.len() > 2));
+    let grp = pos(&|r| leaf(r, "grp"));
+    let gdt = pos(&|r| leaf(r, "gdt"));
+    let pass = pos(&|r| r["ev"] == "mem_s" && r["at"] == "pass");
+    let wake = pos(&|r| leaf(r, "wake"));
+    let q = pos(&|r| r["ev"] == "mem_q");
+    let add = pos(&|r| r["ev"] == "mem_add" && r["t"].as_i64() > Some(0));
+    let unit = pos(&|r| leaf(r, "unit") && r["v"].is_string());
+    let cases: Vec<(&str, Damage)> = vec![
+        ("line of sight flipped", Box::new(move |v| v[los]["v"] = json!(false))),
+        ("near units reversed", Box::new(move |v| v[near]["v"].as_array_mut().unwrap().reverse())),
+        ("a group read changed", Box::new(move |v| v[grp]["v"] = json!("~fake"))),
+        ("a long frame", Box::new(move |v| v[gdt]["v"] = json!("0.5"))),
+        ("a pass's detect time", Box::new(move |v| v[pass]["slots"][0][1] = json!(0))),
+        ("a wake's result", Box::new(move |v| v[wake]["a"] = json!("7"))),
+        (
+            "a queued flag flipped",
+            Box::new(move |v| v[q]["queued"] = json!(!v[q]["queued"].as_bool().unwrap())),
+        ),
+        ("an addition not recorded", Box::new(move |v| drop(v.remove(add)))),
+        ("a unit gone", Box::new(move |v| v[unit]["v"] = json!(null))),
+    ];
+    for (what, damage) in cases {
+        let mut v = recs.clone();
+        damage(&mut v);
+        assert!(!errors(&v).is_empty(), "{what}: not caught");
+    }
 }
 
 // ---- the check itself, on records made by hand ----
