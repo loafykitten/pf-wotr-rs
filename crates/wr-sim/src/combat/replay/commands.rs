@@ -364,6 +364,7 @@ impl Driver<'_> {
                 if !own {
                     self.imp_due(w)?;
                 }
+                self.mem_due(w);
                 // Each record is of the frame it's made in.
                 if r["t"].as_i64() != Some(self.tick) {
                     let d = describe(r);

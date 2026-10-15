@@ -865,6 +865,19 @@ impl Driver<'_> {
         Ok(())
     }
 
+    /// A command act's `AddToMemory` calls come at the act, before the lifecycle's next record:
+    /// any still unmatched there is missing (reported, the calls dropped).
+    pub(super) fn mem_due(&self, w: &mut World) {
+        if let Some(q) = w.combat.impatience.memory_acts.as_mut().filter(|q| !q.is_empty()) {
+            q.clear();
+            if !self.uc_skipping {
+                w.coverage.unsupported(
+                    "driven replay: memory: a command act's AddToMemory missing before the lifecycle's next record",
+                );
+            }
+        }
+    }
+
     /// The controller's draw record at `site` (`Range(0, 100)`, or `Range(0f, max)`), the very
     /// next record, checked as `Rng` writes it.
     fn imp_draw_record_at(&mut self, w: &mut World, site: CallSite, max: Option<f32>) -> R<usize> {

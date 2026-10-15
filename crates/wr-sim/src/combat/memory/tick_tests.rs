@@ -368,8 +368,9 @@ impl<'a> TickWorld<'_, 'a> {
 
     /// The next record the tick asks for (a structural one is left in place).
     fn next(&mut self, what: &str) -> Result<&'a Value, Desync> {
-        self.sync()?;
+        // The changes the recording shows before this record are the model's before this read.
         self.drain()?;
+        self.compare_changes()?;
         let recs: &'a [Value] = self.c.recs;
         let r = recs.get(self.c.i).ok_or_else(|| Desync(format!("{what}: the recording ends")))?;
         if structural(r) || r["t"].as_i64() != Some(self.c.t) {
@@ -1410,6 +1411,20 @@ fn a_damaged_window_is_caught() {
             Box::new(move |v| {
                 let r = v.remove(removal);
                 v.insert(near, r);
+            }),
+        ),
+        (
+            "a Cleanup removal before its unit's read",
+            Box::new(move |v| {
+                let r = v.remove(removal);
+                v.insert(unit, r);
+            }),
+        ),
+        (
+            "an addition before its line of sight",
+            Box::new(move |v| {
+                let r = v.remove(add);
+                v.insert(los, r);
             }),
         ),
         ("a mem_q without its callers", Box::new(move |v| v[q]["by"] = json!(null))),

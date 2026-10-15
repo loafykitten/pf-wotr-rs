@@ -5979,7 +5979,23 @@ fn missing_or_wrong_memory_additions_are_reported() {
     }
     const C: &str = "driven replay: commands:";
     const M: &str = "driven replay: memory:";
-    let cases: [(&str, Change); 14] = [
+    let cases: [(&str, Change); 15] = [
+        // An act's two calls moved to the end of their frame.
+        (M, |recs| {
+            let at = recs
+                .iter()
+                .position(|r| {
+                    r["ev"] == "mem_q"
+                        && r["by"].as_str().is_some_and(|b| b.contains("HandleUnitCommandDidAct"))
+                })
+                .unwrap();
+            let pair = [recs.remove(at), recs.remove(at)];
+            let next = at + recs[at..].iter().position(|r| r["k"] == "tick").unwrap();
+            for (n, r) in pair.into_iter().enumerate() {
+                recs.insert(next + n, r);
+            }
+            renumber(recs);
+        }),
         // An act's call copied where no command acts (after a memory tick of its frame).
         (M, |recs| {
             let at = recs

@@ -315,9 +315,9 @@ their hashes, 36 units forgotten, 48 additions recorded and matched, 90 pairs qu
 33,732 changes between ticks adopted. The window's initial memories: 12 groups, no freed slot, the party's enemies
 cache valid. The later captures with the observer check clean too: with `-112` and `-113` (other fights, other
 observers added), 18 runs, 42,306 ticks, 125,982 group passes, 630,204 near units, 130,407 friends' phases, 120
-`Cleanup` removals and 165 additions in order. Damage tests: 41 hand-made cases (a leaf flipped, reordered or of
+`Cleanup` removals and 165 additions in order. Damage tests: 43 hand-made cases (a leaf flipped, reordered or of
 another frame, a hash on its phase, a long frame, a pass's slot, free list or detect time, an addition or removal
-missing, doubled, swapped (two groups' too), moved before the reads or of another kind, a memory cleared in the
+missing, doubled, swapped (two groups' too), moved before the reads (its own read too) or of another kind, a memory cleared in the
 tick, a row twice or unchanged, the queue, a caller missing, `Wake`, the frame, `mem_initq`, a frame without its
 tick, the tape), recovery after a desync, and 9 cases on the capture (`a_damaged_capture_is_caught`): each caught.
 Commands: `WR_MEMTICK_CAPTURES=poc5-tb-111,poc5-tb-112,poc5-tb-113 cargo test --release -p wr-sim --lib
@@ -340,13 +340,13 @@ handler (the rule's two units, either way), and `imp_span` matches each with the
 handler and its exact caller chain; all in before the impatience subscriber's `bother` record; a call left over or
 missing reported). A command's act does the same (`HandleUnitCommandDidAct`: a players' enemy's command on a unit
 of the player's faction; `impatience::memory_command_did_act`, called by the commands model at the act): its calls
-are queued there and each `mem_q` outside a rule must be the next one (shape, frame, units, exact callers); any
+are queued there and each `mem_q` outside a rule must be the next one (shape, frame, units, exact callers), all in before the lifecycle's next record; any
 other is reported. Whether a call queued is the memory queue's, not wired: taken as recorded. Valid on every run
 (the offensive actions' and the acts' calls matched per run): `poc5-tb-111` (16+6, 14+4), `-112` (14+2, 20+6),
 `-109`, `-95`, `-96`; on `-113` every call matches (8+2, 14+4), its runs invalid only on A2's `ag_sync` records,
 whose replay side isn't on `poc` yet. `missing_or_wrong_memory_additions_are_reported` (`tests/poc5.rs`) damages
-`-111` 14 ways (swapped, missing, doubled, another shape, thrown, another caller or route, after the impatience
-record, outside the span, another unit, out of the handler, an act's call where no command acts or of another
+`-111` 15 ways (swapped, missing, doubled, another shape, thrown, another caller or route, after the impatience
+record, outside the span, another unit, out of the handler, an act's calls moved past their command's tick, where no command acts or of another
 producer), each reported. The handler's other effects (`LastSurpriseActionTime`, a neutral target's
 `AttackFactions`) aren't modelled, as before.
 
