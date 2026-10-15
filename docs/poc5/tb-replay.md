@@ -368,6 +368,110 @@ Recordings that count: **`poc5-tb-51`, `-52`, `-53`** (turn-based) and **`cert-1
 `8fa7cc6`. Recordings made before `8fa7cc6` don't replay on it (physics and camera headers, the fixture's attack
 path); `poc5-tb-40` to `-50` are kept as the evidence above.
 
+## Projectile arrival and critter paths (2026-10-15, stream L)
+
+`poc5-tb-119/tb-lizard` (Manual_18, plan `poc5-tb6`) recorded cleanly, but both replays were invalidated. A
+gpt-6.1-sol investigation found two independent causes; each claim below was checked against the traces and
+the code before the fix. Code: `ProjPin.cs` (new), `PathSync.cs`, `PrePathSync.cs`, and their wiring in
+`Sched.cs`, `Rng.cs` (the tape) and `Fixture.cs` (end record, observers, the replay's checks).
+
+### Projectile arrival is pinned (`ProjPin.cs`, observer `proj_arrival`)
+
+[M] Anevia's killing arrow (`RuleAttackWithWeapon` 526, attack roll 529, 5198 on the fly 529A) launched at tick
+6918 in all three runs with the same snapshot (launch position equal to the last bit), but hit
+(`Projectile.OnHit`: `RuleAttackWithWeaponResolve` 537, the damage 538) at 6938 in the recording and 6937 in both
+replays, one flight step fewer (`PassedTime` 0.3333 against 0.3167). The same damage draw followed a tick early,
+the fight ended a tick early (`tbfight_done` 6940 against 6939), and the scheduler's tolerance (`Sched.Tol` 2)
+carried the one-tick lead (`max_tick_offset` 1, two offset changes) until a UI gate at 9898 brought it back.
+`poc5-tb-50` had the same kind of shift once, a tick late. [C] `Projectile.Tick` moves toward
+`GetTargetPoint()`, the target unit's hit bone (an animated transform) plus an offset, at the blueprint's speed
+times the frame's delta, and sets `IsHit` within 0.1 m (or at its maximum range); `ProjectileHitController.Tick`,
+later in the same game tick, calls `OnHit` for a projectile that hit this frame, and `OnHit`'s trigger or callback
+makes the rules. Bone poses differ by millimetres to centimetres between runs (T1, Ember 2026-10-11), so the
+number of steps a flight takes can differ by one. [I] Animation's absolute-clock arithmetic is the likely source
+of the pose difference; the captures don't sample the bone per flight tick, so that is not established.
+
+[C] Everything the game derives from a flight goes through `IsHit`: `OnHit` (`HitThisFrame` is `IsHit` with no
+time after the hit), `ProjectileController.HasLaunchedProjectile` (holds `TurnController`'s turn end) and
+`HasActive`, `OnTheWay` (the impatience controller), the cleanup (`Destroyed`). Nothing in the rules reads
+`CorePosition`, `PassedTime` or `Progress`. So the pin is the tick at which `IsHit` becomes true; the flight
+itself (positions, the view) stays native.
+
+- **Recording** (changes nothing): every projectile added to the controller in a turn-based window
+  (`ProjectileController.AddProjectile`, postfix) is keyed `<launcher unit>#<n>`, n counting that launcher's
+  launches in the window (`pt#<n>` for a launcher that isn't a unit), and noted: `proj_launch` (`p` the key,
+  `rule` the open rule's id, `roll` the attack roll's rule id, `trig` the on-hit trigger's class or null, `cb`
+  whether it has a callback, `tgt` the target unit or null, `bp` the blueprint, `res` the attack result), then
+  `proj_hit` at the tick `IsHit` became true (`fl` ticks since the launch, `wall`). A projectile from a point with
+  no attack roll, no on-hit trigger and no callback (the decorative `ProjectileSpawner`, `FxProjectileLauncher`)
+  is presentation: `proj_launch` with `pres`, never pinned. The fields are read, not resolved through getters
+  that cache (`UnitRef.Id`, not `UnitRef.Entity`).
+- **Replay**: a launch must be the recording's: same key and the same contents, within `Sched.Tol` of the
+  recorded tick plus the offset so far. Its hit is due the recorded number of ticks after this replay's own
+  launch (as `PathSync` dates deliveries from requests). Before then a hit the native flight makes is taken
+  back right after `Projectile.Tick` (`IsHit`, and `IsHitWall` if that tick set it, through their backing fields),
+  before anything reads them; on the due tick `IsHit` is set if the flight hasn't arrived. A recorded projectile
+  that never hit in its window doesn't hit in the replay's. The replay's `proj_hit` says what the pin did
+  (`held`: native hits taken back, `forced`).
+- **Invalid**: a launch the recording didn't make, or made with other contents or at another tick; a recorded
+  launch that didn't happen by the window's end; a due hit that didn't happen (the projectile cleared or not
+  ticked: checked after every `ProjectileHitController.Tick`); `OnHit` on another tick than the hit; a projectile
+  launched before the window hitting inside it (unpinned); a recording without `proj_arrival` in its observers.
+- End record (turn-based windows): `projectiles_tracked`, `projectile_hits_held`, `projectile_hits_forced`.
+
+Why this pin and not another [I]: taping the target point per flight tick would keep the native arithmetic but
+not its result, since the launch position (a launcher bone) differs between runs too (T1); pinning animation
+clocks is broader and not shown to be enough. A held hit leaves the arrow at its target for the held ticks, a
+forced one ends the flight up to one step (0.4 m for an arrow) short: presentation only. For the Rust port the
+arrival tick is an input, like an A* delivery: the recording's flight length in ticks (`proj_hit`'s `fl`).
+
+### Critters' path requests are presentation (`PathSync.cs`, `PrePathSync.cs`, observer `critter_paths`)
+
+[M] The invalidating request `?#0` (record t=10021, replay-1 t=9947, replay-2 t=10503, three different end points)
+comes right after four presentation draws in every run: sites 192 to 195, `Kingmaker.Visual.Critters.Rabbit`'s
+`Think` coroutine (`Random.value`, `insideUnitCircle`, two `Range`), unforced and unequal. [C] `Rabbit.Think`
+picks a roam point with exactly those draws and calls `CritterMoveAgent.PathTo`, which asks its own `Seeker` (on a
+`_navigation` child `CritterMoveAgent.Init` makes) for a path, if `AstarPath.ProcessorQueueLegth` is at most 2.
+The coroutine also runs on `Time.frameCount % 5`, a static spawn counter, idle deadlines from `Time.time` and the
+camera's distance (it sleeps beyond 25 m). A rabbit isn't a unit, so `PathSync.RequesterKey` found no
+`UnitEntityView` above the `Seeker`, named it `?` and kept it strict: every run checked an untaped decorative
+choice against the recording. No unit reads a critter's state; a critter reads the units (`MaybeRunAway`).
+
+- **Identification, positive** (`PathSync.CritterOf`, `IsCritterRequest`): the path's callback is a `Seeker`
+  whose parent object carries a `CritterMoveAgent` holding that `Seeker` as its `m_Seeker`, with no unit view or
+  unit movement agent above it, and, at the request (`AstarPath.StartPath`, inside `Seeker.StartPath`), the
+  callback that `Seeker` will hand the path to (`tmpPathCallback`) is that critter's own `OnPathComplete`. Fields
+  and components are read, nothing called.
+- **Excluded, in recordings and replays alike**: such a request is noted (`path_critter`: `path` = `critter#<n>`,
+  n counting critters' requests in the window, `e`), keyed for the path observers (`path_fin`, `path_seek`,
+  `path_mod` name it), and delivered natively: no start check, no delivery tape (no `path_ret`), not held,
+  not owed, not in `paths_tracked` (end record: `paths_critter`). Before the window (`PrePathSync`) a critter's
+  request is neither noted nor held. Every other requester the lookup can't name stays `?` and strict.
+- **The shared queues.** Critters' paths go through the same A* processing queue and return queue as the units'.
+  [C] Their callbacks (`Seeker.OnPathComplete`, `CritterMoveAgent.OnPathComplete`) change only the critter, the
+  seeker's own path and the path pool (which `Path` object a later request reuses; `PathSync` tells requests apart
+  by `pathID`), so where a critter's delivery falls among the units' within one `ReturnPaths` call changes nothing
+  a unit reads. The replay's check of a call that delivers tracked paths while untracked ones are already queued
+  (no recorded order between them) therefore leaves positively identified critter paths out
+  (`QueuedUntracked`); any other untracked path still invalidates. What critters can change is the order in which
+  the workers finish the units' paths (a worker busy with a critter's search): the recording's drain delivered the
+  units' paths of one call in the order its workers finished them, and the replay used to release its held
+  paths in its own finish order. Now paths due at one call are delivered in the recording's order (the order of
+  its `path_ret` records; before the window, of its `pre_path` "ret" notes), whatever order this replay's workers
+  finished them in. Before this change any two unit paths finishing in another order could reorder their
+  callbacks unnoticed (the check was by tick and call only).
+- Not handled [I]: a unit's request still queued (not yet taken by a worker) when the main thread blocks the
+  queue for a graph update in the same frame is searched on the updated graph, one already taken on the old
+  graph: a wall-clock race any concurrent search takes part in, critters' among them, which no strict check of
+  critters' requests ever covered. Turn-based combat's grid updates run at a turn's start through a synchronous
+  `FlushGraphUpdates`; no capture shows the race.
+- A recording without `critter_paths` in its observers isn't replayable on this build (its critters' requests
+  are `?`): the replay is invalid at once.
+
+### Results
+
+Pending: the main session's captures of `poc5-tb6` (`tb-lizard`) and `poc5-tb` (`tb-nearest`, `tb-focus`).
+
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
 **Everything above describes the earlier mod (`c7117fd` to `ba96d22`), whose recordings do not observe the unmodified game

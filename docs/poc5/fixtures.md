@@ -149,12 +149,21 @@ Also exercised for the first time [M]: the AI's `ScorePath` five-foot-step branc
 (`ag_sim` of 527A), a crit threat against a flying target (t=4085). Not reached: an AI simulation of more than one step,
 a hard target (`cnt` at most 1).
 
-### `poc5-tb-119/tb-lizard`: the game's replays aren't tick-exact
+### `poc5-tb-119/tb-lizard`: the game's replays weren't tick-exact (fixed in the oracle, stream L)
 
-The record run is clean (12,288 ticks, 749 rules), but both replays are invalidated by the oracle itself, with no
-draw mismatch: path request `?#0` (a requester outside the tracked agents, in the third fight, which starts at t=9352
-with a surprise round) goes elsewhere and at another tick (record: t=10021 to (100.63, 46.11, 97.98); replay-1:
-t=9947 to (102.32, 46.11, 114.11); replay-2: t=10503 to (99.20, 46.10, 98.80)), leaving 227 and 204 tape entries
-unused. So the replays have drifted before that, between the second fight's end (t=6940) and the third fight's start:
-the real-time walk up the ramp across the `Earthquake_3` zone. Not investigated further; until the oracle pins what
-drifts there, `tb-lizard` isn't a fixture the driven replay can use, and `tb-chain` covers its first part.
+The record run is clean (12,288 ticks, 749 rules), but both replays were invalidated by the oracle itself, with no
+draw mismatch, at path request `?#0` (record t=10021, replay-1 t=9947, replay-2 t=10503, each to another end point),
+leaving 227 and 204 tape entries unused. The guess above it (a drift on the walk up the ramp across `Earthquake_3`)
+was wrong: the fights number four (combat starts at t=170, 2609, 4260 and 9352), the ramp walk comes before the
+third, and its two cutscene commands are tick-equal in every run [M]. Two independent causes
+(`docs/poc5/tb-replay.md`, "Projectile arrival and critter paths"):
+
+- **Projectile arrival** [M]: Anevia's killing arrow on the fly 529A, launched at t=6918 in every run with the
+  same snapshot, hit at t=6938 in the recording and 6937 in both replays (the target's bone pose, T1), so the third
+  fight ended a tick early; the scheduler's tolerance carried the one-tick offset to t=9898. The oracle now pins
+  each projectile's arrival tick (`ProjPin.cs`).
+- **The invalidation itself** [M, C]: `?#0` was a rabbit's path (`Kingmaker.Visual.Critters.Rabbit`, its
+  `CritterMoveAgent`), chosen with presentation draws, checked as a strict request. Critters' requests are now
+  identified and delivered natively, owed nothing.
+
+Results on the fixed oracle: pending (the main session records).

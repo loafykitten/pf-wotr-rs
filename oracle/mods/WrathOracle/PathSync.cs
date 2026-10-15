@@ -26,12 +26,24 @@ namespace WrathOracle;
 // (DeliverNow, as the drain delivers each path), so nothing that arrives during the drain can be
 // delivered early and the native drain keeps its own time slice for untracked paths. If a due path hasn't finished,
 // the call waits for it (a bounded wait, never while the graph work-item lock is held, which blocks
-// the workers, and never without worker threads). Any departure invalidates the replay: a path due
+// the workers, and never without worker threads). Paths due at the same call are delivered in the
+// recording's order (the order of its path_ret records), not in the order this replay's workers finished
+// them. Any departure invalidates the replay: a path due
 // but not finished in time, a request the recording didn't make (or to another end point) or one it
 // made that the replay didn't, a recorded delivery that didn't happen by the window's end (of a strict
 // request, or of a lenient one the replay matched; lenient requests it didn't match are native). Paths are
 // identified by their pathID (unique per request), since A* pools Path objects. Held paths go back
 // to the game when the window ends. The callbacks are the game's own.
+//
+// Critters' paths are none of this (docs/poc5/tb-replay.md, "Projectile arrival and critter paths"). A
+// critter (Kingmaker.Visual.Critters: a rabbit) asks for paths through its CritterMoveAgent's own Seeker,
+// on a coroutine driven by presentation draws (sites of Kingmaker.Visual.Critters, untaped), the frame
+// number, the camera's distance and the A* queue's length [C]; no unit reads a critter's state. Such a
+// request, identified positively (CritterOf), is noted ("path_critter", key "critter#<n>") and delivered
+// natively in recordings and replays alike: no start check, no delivery tape, not counted in
+// paths_tracked, and not "untracked" for the check of a call that delivers tracked paths (QueuedUntracked):
+// its callback changes only the critter and the seeker's own path, so where it falls among the units'
+// deliveries of a call changes nothing they read. Every other unidentified requester stays strict.
 internal static class PathSync
 {
     // Held: handed over by the worker and held; Released: put into the return queue at its due call;
@@ -43,7 +55,8 @@ internal static class PathSync
     private static readonly List<Track> Owed = new List<Track>();
     // Recorded deliveries by request ordinal: tick, call within the tick, and the request's tick (-1 in
     // recordings before path_start; then the delivery tick moves with the gate offset instead).
-    private struct Ret { public int Tick, Call, Req; }
+    // Seq: the delivery's place in the recording (its path_ret's order in the trace).
+    private struct Ret { public int Tick, Call, Req, Seq; }
     private static readonly Dictionary<string, Ret> Tape = new Dictionary<string, Ret>();
     // Recorded requests' end points by ordinal, which a replay's requests must match (else the ordinals
     // name different requests and delivery scheduling is meaningless).
@@ -53,8 +66,10 @@ internal static class PathSync
     private const float EndTolerance = 0.25f;
     private static readonly List<Track> HeldOrder = new List<Track>();
     private static readonly Dictionary<string, int> PerRequester = new Dictionary<string, int>();
-    private static int _count, _callTick = -1, _callIdx, _recordedTracked = -1, _delivered;
-    public static long Waited, Timeouts, Tracked;
+    private static int _count, _callTick = -1, _callIdx, _recordedTracked = -1, _delivered, _critters;
+    public static long Waited, Timeouts, Tracked, Critters;
+    // The recording declared observer critter_paths (its critters' requests are keyed apart, not "?").
+    public static bool RecordedCritters;
     private const int LimitMs = 100;
 
     private static readonly FieldInfo QueueField = AccessTools.Field(AccessTools.TypeByName("Pathfinding.PathReturnQueue"), "pathReturnQueue");
@@ -88,14 +103,16 @@ internal static class PathSync
         _callTick = -1;
         _recordedTracked = -1;
         _delivered = 0;
+        _critters = 0;
         _offThread = 0;
-        Waited = Timeouts = Tracked = 0;
+        Waited = Timeouts = Tracked = Critters = 0;
+        RecordedCritters = false;
     }
 
     public static void AddTape(string k, int tick, int call, int req)
     {
         if (Tape.ContainsKey(k)) Sched.Invalidate($"recording delivers path {k} twice");
-        Tape[k] = new Ret { Tick = tick, Call = call, Req = req };
+        Tape[k] = new Ret { Tick = tick, Call = call, Req = req, Seq = Tape.Count };
     }
 
     public static void AddStartTape(string k, UnityEngine.Vector3? end, bool strict)
@@ -146,6 +163,51 @@ internal static class PathSync
         }
         catch (Exception e) { Health.Failed("path requester", e); }
         return "?";
+    }
+
+    // ---- critters ----
+
+    private static readonly AccessTools.FieldRef<Kingmaker.Visual.Critters.CritterMoveAgent, Seeker> CritterSeeker =
+        AccessTools.FieldRefAccess<Kingmaker.Visual.Critters.CritterMoveAgent, Seeker>("m_Seeker");
+    private static readonly AccessTools.FieldRef<Seeker, OnPathDelegate> SeekerCallback = AccessTools.FieldRefAccess<Seeker, OnPathDelegate>("tmpPathCallback");
+    // The fields the identification reads resolved (observer critter_paths).
+    public static bool CritterIdOk => CritterSeeker != null && SeekerCallback != null;
+
+    // The critter whose own Seeker this path calls back, or null. Positively: the path's callback is a Seeker
+    // whose parent object carries a CritterMoveAgent holding that Seeker as its m_Seeker (CritterMoveAgent.Init
+    // puts it on its "_navigation" child), with no unit view or unit movement agent above it. Reads fields and
+    // components only. Main thread.
+    internal static Kingmaker.Visual.Critters.CritterMoveAgent CritterOf(Path p)
+    {
+        var cb = p?.callback;
+        if (cb == null || !CritterIdOk) return null;
+        foreach (var d in cb.GetInvocationList())
+            if (d.Target is Seeker sk && sk)
+            {
+                var parent = sk.transform.parent;
+                if (!parent) return null;
+                var agent = parent.GetComponent<Kingmaker.Visual.Critters.CritterMoveAgent>();
+                if (!agent || !ReferenceEquals(CritterSeeker(agent), sk)) return null;
+                if (sk.GetComponentInParent<Kingmaker.View.UnitEntityView>() || sk.GetComponentInParent<Kingmaker.View.UnitMovementAgent>()) return null;
+                return agent;
+            }
+        return null;
+    }
+
+    // A request a critter is making now (AstarPath.StartPath, under Seeker.StartPath): its Seeker is a critter's
+    // (CritterOf) and the callback that Seeker will hand the path to is that critter's own OnPathComplete
+    // (CritterMoveAgent.PathTo).
+    internal static bool IsCritterRequest(Path p)
+    {
+        try
+        {
+            var agent = CritterOf(p);
+            if (agent == null) return false;
+            var next = SeekerCallback(CritterSeeker(agent));
+            return next != null && ReferenceEquals(next.Target, agent) && next.Method?.Name == "OnPathComplete"
+                   && next.Method.DeclaringType == typeof(Kingmaker.Visual.Critters.CritterMoveAgent);
+        }
+        catch (Exception e) { Health.Failed("path requester (critter)", e); return false; }
     }
 
     internal static UnityEngine.Vector3? EndOf(Path p) => p is ABPath ab ? ab.originalEndPoint : (UnityEngine.Vector3?)null;
@@ -204,6 +266,17 @@ internal static class PathSync
         // A request from another thread (its requester can't be read off the main thread): noted, and it
         // invalidates a replay (Sched is main-thread only, so at the next ReturnPaths or the close).
         if (!Trace.OnMainThread) { Interlocked.Increment(ref _offThread); return; }
+        if (IsCritterRequest(path))
+        {
+            // Presentation: noted, delivered natively, owed nothing (above).
+            string ck;
+            lock (Outstanding) ck = "critter#" + _critters++;
+            lock (Keys) Keys[path] = (path.pathID, ck);
+            Critters++;
+            var cend = EndOf(path);
+            Sched.Obs("path_critter", j => { j.Prop("path", ck); if (cend.HasValue) j.Prop("e", cend.Value); });
+            return;
+        }
         var who = RequesterKey(path, out var strict);
         string k;
         lock (Outstanding)
@@ -358,17 +431,19 @@ internal static class PathSync
             List<Track> release;
             lock (Outstanding)
             {
-                // In the order they finished, as the original queue would hold them.
+                // In the recording's order (the order its paths finished in), not this replay's workers'.
                 release = HeldOrder.FindAll(t => due.Contains(t));
+                release.Sort((a, b) => Tape[a.K].Seq.CompareTo(Tape[b.K].Seq));
                 foreach (var t in release)
                 {
                     HeldOrder.Remove(t);
                     t.Released = true;
                 }
             }
-            // The recording tracked every request of its window, so it has no order between tracked and
-            // untracked deliveries of one call; a replay call that has both can't follow it and leaves it.
-            var queued = QueuedCount(__instance);
+            // The recording tracked every request of its window but critters', so it has no order between
+            // tracked and untracked deliveries of one call; a replay call that has both can't follow it and
+            // leaves it. Critters' paths don't count (their place among the units' changes nothing).
+            var queued = QueuedUntracked(__instance);
             if (release.Count > 0 && queued > 0)
                 Sched.Invalidate($"path {release[0].K} due at tick {Trace.Tick} call {_callIdx} shares the call with {queued} untracked path(s) already queued (order not recorded)");
             foreach (var t in release)
@@ -387,11 +462,17 @@ internal static class PathSync
     private static readonly MethodInfo AdvanceStateMethod = AccessTools.Method(typeof(Path), "Pathfinding.IPathInternals.AdvanceState");
     private static readonly FieldInfo ClaimedBy = AccessTools.Field(AccessTools.TypeByName("Pathfinding.PathReturnQueue"), "pathsClaimedSilentlyBy");
 
-    internal static int QueuedCount(object returnQueue)
+    // Paths already in the return queue that nobody tracks, critters' left out (main thread).
+    internal static int QueuedUntracked(object returnQueue)
     {
         var q = QueueField?.GetValue(returnQueue) as Queue<Path>;
         if (q == null) return 0;
-        lock (q) return q.Count;
+        Path[] items;
+        lock (q) items = q.ToArray();
+        var n = 0;
+        foreach (var p in items)
+            if (p == null || CritterOf(p) == null) n++;
+        return n;
     }
 
     internal static string DeliverNow(object returnQueue, Path p)

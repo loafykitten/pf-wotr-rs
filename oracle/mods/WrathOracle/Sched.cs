@@ -148,6 +148,7 @@ internal static class Sched
     {
         if (_gates == null || Invalid != null) return;
         PathSync.CheckComplete();
+        ProjPin.CheckComplete();
         WallClock.CheckComplete();
         if (Invalid != null) return;
         if (_gatePos < _gates.Count) Invalidate($"replay ended with {_gates.Count - _gatePos} recorded gates unused (next: {_gates[_gatePos].Ev} '{_gates[_gatePos].D}' at tick {_gates[_gatePos].T})");
@@ -177,6 +178,8 @@ internal static class Sched
                 IdlePin.Add((string)o["u"], new IdlePin.State { Time = (float)(double)o["time"], Random = (float)(double)o["random"], Curve = (string)o["curve"] ?? "?", Playing = (bool?)o["playing"] ?? false });
             // Path keys are "<requester>#<n>" (recordings before that numbered all requests; they no longer replay).
             if ((string)o["ev"] == "path_ret") PathSync.AddTape((string)o["path"], (int)o["t"], (int)o["c"], (int?)o["req"] ?? -1);
+            // Projectile launches and hits (ProjPin.cs).
+            ProjPin.TapeRecord(o);
             if ((string)o["ev"] == "path_start")
                 PathSync.AddStartTape((string)o["path"], o["e"] is JArray e && e.Count == 3 ? new UnityEngine.Vector3((float)e[0], (float)e[1], (float)e[2]) : (UnityEngine.Vector3?)null, (bool?)o["strict"] ?? true);
             // Gates carry "g": true; other records use "g" for other things (the memory observer: a group id).
