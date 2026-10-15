@@ -170,7 +170,9 @@ pub fn sort_units(w: &mut World, reason: &str) {
     let mut idx: Vec<usize> = (0..n).collect();
     let mut fallback = false;
     let mut decided = 0;
+    super::ties::begin_call(w, TieCmp::Turn);
     crate::csharp::sort::introsort(&mut idx, n, &mut |&x, &y| {
+        super::ties::compared(w, TieCmp::Turn);
         let c = match tb_compare(w, &infos[x], inits[x], &infos[y], inits[y]) {
             Cmp::Less => -1,
             Cmp::Greater => 1,

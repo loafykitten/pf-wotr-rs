@@ -110,8 +110,10 @@ pub fn prepare_flush(w: &mut World) {
     let cap = crate::csharp::sort::grown_capacity(list.len());
     let mut fallback = false;
     let mut decided = 0;
+    super::ties::begin_call(w, super::ties::TieCmp::Prepare);
     crate::csharp::sort::introsort(&mut list, cap, &mut |a, b| {
         use super::ties::{Tie, TieCmp, decide};
+        super::ties::compared(w, TieCmp::Prepare);
         let ai = w.unit(*a).map(|x| x.combat.initiative).unwrap_or_default();
         let bi = w.unit(*b).map(|x| x.combat.initiative).unwrap_or_default();
         match super::order::prepare_compare(w, *a, ai, *b, bi) {
