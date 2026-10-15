@@ -381,11 +381,25 @@ internal static class TurnBased
                 if (why == null && step == "tbcast_impossible")
                 {
                     // The recording found the cast impossible, its target perhaps gone: the replay decides again
-                    // with the same target (or none) and must reach the same input.
-                    var id = RefId(rec["target"]);
+                    // with the same target (or none) and must reach the same input for the same reason (IssueCast
+                    // checks the recorded `why`). The target field must be there: a unit reference or null.
+                    var t = rec["target"];
+                    var id = RefId(t);
+                    if (t == null || (t.Type != Newtonsoft.Json.Linq.JTokenType.Null && id == null))
+                    {
+                        Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} has a malformed target");
+                        yield break;
+                    }
                     target = id != null ? FindUnit(id) : null;
                 }
-                else if (why == null && (attack || cast))
+                else if (why == null && cast)
+                {
+                    // A cast's target needn't be in combat (an ally out of it): in the game, as the spell allows.
+                    target = FindUnit(RefId(rec["target"]));
+                    if (target == null) why = "target not found";
+                    else if (!CastTargetPresent(target)) why = "target not in the game";
+                }
+                else if (why == null && attack)
                 {
                     target = FindUnit(RefId(rec["target"]));
                     if (target == null) why = "target not found";
@@ -558,6 +572,10 @@ internal static class TurnBased
         return null;
     }
 
+    // A cast's target as the click handler can take it: in the game (CanPoint and the spell's CanTarget decide the
+    // rest: visibility, death, the spell's own restrictions); unlike an attack's, it needn't be in combat.
+    private static bool CastTargetPresent(UnitEntityData u) => u != null && u.IsInGame;
+
     private static string SpellbookGuid(AbilityData spell) => spell.Spellbook != null ? Snap.Guid(spell.Spellbook.Blueprint) : null;
 
     // A fixture error: thrown while recording, the fixture left while replaying.
@@ -600,13 +618,15 @@ internal static class TurnBased
             return CastError($"cast/{guid}: the pointer isn't the default one in its default mode");
         string why = null;
         if (target == null) why = "target not found";
-        else if (!Alive(target)) why = "target not alive";
+        else if (!CastTargetPresent(target)) why = "target not in the game";
         else if (!InputPin.CanPoint(target)) why = "target can't be pointed at";
         else if (!found.Slot.IsPossibleActive()) why = "action bar slot inactive";
         else if (!spell.CanTarget(new TargetWrapper(target))) why = "spell can't target it";
         if (why != null)
         {
             impossible = true;
+            if (rec != null && Str(rec["why"]) != why)
+                return CastError($"cast/{guid}: recorded impossible because {Str(rec["why"]) ?? "(no reason)"}, now because {why}");
             Input("tbcast_impossible", j =>
             {
                 j.Key("unit"); Snap.UnitRef(j, unit);
