@@ -1683,15 +1683,12 @@ fn base_will_unequip(w: &mut World, e: EntityIdx) {
 /// the new unit's `Initialize` isn't yet), and an item leaving its slot is hidden.
 #[must_use]
 pub fn slot_item_resolves(w: &World, item: EntityIdx) -> bool {
-    !w.unregistered_items.contains(&item)
+    // Registered: by its id (`EntityService.Unregister` at disposal drops it), and not a loaded
+    // item still waiting for its `PrePostLoad`.
+    w.by_id.get(&w.entity(item).unique_id) == Some(&item)
+        && !w.entity(item).is_disposed
+        && !w.unregistered_items.contains(&item)
         && !w.item(item).is_some_and(|i| i.remove_from_slot_in_progress)
-}
-
-/// [`slot_item_resolves`] for an item in `u`'s body: none does while a placeholder's saved body
-/// is pending (`Unit::body_pending`: its items are post-loaded only after the new unit's
-/// `Initialize`).
-fn body_item_resolves(w: &World, u: EntityIdx, item: EntityIdx) -> bool {
-    !w.unit(u).is_some_and(|x| x.body_pending) && slot_item_resolves(w, item)
 }
 
 /// `HandSlot.HasItem` of the current hands set's primary or secondary hand.
@@ -1707,7 +1704,7 @@ pub fn hand_maybe_weapon(w: &mut World, u: EntityIdx, primary: bool) -> Option<E
     let set = w.unit(u).map_or(0, |x| x.body.current_hand_set);
     let hand = if primary { "PrimaryHand" } else { "SecondaryHand" };
     let raw = find_slot(w, u, &format!("HandsEquipmentSets[{set}].{hand}")).and_then(|s| s.item);
-    if raw.is_some_and(|i| !body_item_resolves(w, u, i)) {
+    if raw.is_some_and(|i| !slot_item_resolves(w, i)) {
         return w.unit(u).and_then(|x| x.body.empty_hand);
     }
     let h = if primary {
@@ -1733,7 +1730,7 @@ pub fn limb_slots(w: &World, u: EntityIdx) -> Vec<(bool, Option<EntityIdx>)> {
         .limbs
         .iter()
         .map(|s| {
-            let item = s.item.filter(|i| body_item_resolves(w, u, *i));
+            let item = s.item.filter(|i| slot_item_resolves(w, *i));
             let weapon = match item {
                 Some(i) if s.active => Weapon::of(w, i).map(|_| i),
                 _ => unit.body.empty_hand,

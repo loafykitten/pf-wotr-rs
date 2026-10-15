@@ -877,10 +877,14 @@ pub fn is_available(w: &mut World, f: FactIdx) -> bool {
 
 /// The fact's blueprint components of a type (`SelectComponentsWithRuntime<T>`: the enabled
 /// ones), in order.
-fn components_of<'a>(bp: &'a Blueprint, ty: &str) -> Vec<&'a wr_content::node::Object> {
-    bp.components_array()
+fn components_of(w: &mut World, f: FactIdx, ty: &str) -> Vec<(Rc<Blueprint>, usize)> {
+    // `BlueprintFact.CollectComponents()` (`ComponentsList`s expanded), the enabled ones.
+    w.blueprint_components(f)
         .into_iter()
-        .filter(|o| is_a(o.ty, ty) && crate::content::View(o).int("m_Flags") & 1 == 0)
+        .filter(|(b, i)| {
+            let o = b.components_array()[*i];
+            is_a(o.ty, ty) && crate::content::View(o).int("m_Flags") & 1 == 0
+        })
         .collect()
 }
 
@@ -891,10 +895,9 @@ fn owner_has_fact(w: &World, u: EntityIdx, g: wr_content::Guid) -> bool {
 
 /// `IsAvailableByResources`: every `ActivatableAbilityResourceLogic` allows it.
 pub fn is_available_by_resources(w: &mut World, f: FactIdx) -> bool {
-    let Some(bp) = ability_bp(w, f) else { return true };
     let Some(u) = w.fact(f).owner.filter(|o| w.unit(*o).is_some()) else { return true };
-    for o in components_of(&bp, "ActivatableAbilityResourceLogic") {
-        if !resource_logic_available(w, f, u, crate::content::View(o)) {
+    for (b, i) in components_of(w, f, "ActivatableAbilityResourceLogic") {
+        if !resource_logic_available(w, f, u, crate::content::View(b.components_array()[i])) {
             return false;
         }
     }
@@ -962,8 +965,8 @@ pub fn is_available_by_restrictions(w: &mut World, f: FactIdx) -> bool {
         return false;
     }
     let started = act(w, f).1;
-    for o in components_of(&bp, "ActivatableAbilityRestriction") {
-        let v = crate::content::View(o);
+    for (b, i) in components_of(w, f, "ActivatableAbilityRestriction") {
+        let v = crate::content::View(b.components_array()[i]);
         if started && v.bool("IgnoreIfStarted") {
             continue;
         }
@@ -1102,10 +1105,9 @@ pub fn try_start(w: &mut World, f: FactIdx) {
     // `IActivatableAbilitySpendResourceLogic.OnStart`: `ActivatableAbilityResourceLogic` spends
     // for `TurnOn`, `Start` and the once-per spend types (not ported: reported).
     // (`SpendResource` returns at once when free because of a fact.)
-    if let Some(bp) = ability_bp(w, f)
-        && let Some(u) = owner
-        && components_of(&bp, "ActivatableAbilityResourceLogic").iter().any(|o| {
-            let v = crate::content::View(o);
+    if let Some(u) = owner
+        && components_of(w, f, "ActivatableAbilityResourceLogic").iter().any(|(b, i)| {
+            let v = crate::content::View(b.components_array()[*i]);
             matches!(v.int("SpendType"), 1 | 2 | 10..=12) && !free_because_of_fact(w, u, v)
         })
     {

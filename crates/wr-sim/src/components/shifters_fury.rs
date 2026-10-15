@@ -110,8 +110,8 @@ pub fn part_turn_on(w: &mut World, u: EntityIdx) {
     }
 }
 
-/// The part's removal when its owner is disposed (`EntityPartsManager.Dispose`: `TurnOff` if the
-/// owner is on, then `EntityPart.Dispose`, which unsubscribes unconditionally).
+/// The part's removal (`EntityPartsManager.Remove`/`Dispose`: `TurnOff` if the owner is on, then
+/// `EntityPart.Dispose`, which unsubscribes unconditionally).
 pub fn part_dispose(w: &mut World, u: EntityIdx) {
     if w.entity(u).is_turned_on {
         part_turn_off(w, u);
@@ -153,12 +153,7 @@ fn shifters_fury(w: &mut World, c: CompRef, h: Hook) {
         Hook::Deactivate if part(w, u).is_some() => {
             remove_existing_items(w, u);
             w.entity_mut(u).parts.retain(|p| p.clr != PART);
-            if w.entity(u).is_turned_on {
-                part_turn_off(w, u);
-            }
-            if let Some(x) = w.unit_mut(u) {
-                x.shifters_fury = None;
-            }
+            part_dispose(w, u);
         }
         _ => {}
     }

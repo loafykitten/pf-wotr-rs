@@ -86,8 +86,7 @@ In load order:
   `m_ItemRef.Entity` through `EntityService`, where a loaded item is registered only by its
   `PrePostLoad`. A placeholder's saved body is post-loaded in `SetupUnit` (`BeforeAttachView`),
   after the new unit's `Initialize` activated its facts, so during it the body's slots are empty
-  and the empty-hand weapon answers (`HandSlot.HasWeapon` is `MaybeWeapon != null`; the sim's
-  `Unit::body_pending` marks that window). The sim's hydrated entities were all resolvable; loaded items
+  and the empty-hand weapon answers (`HandSlot.HasWeapon` is `MaybeWeapon != null`). The sim's hydrated entities were all resolvable; loaded items
   are now unregistered until `pre_post_load` (`World::unregistered_items`), and the new code reads
   slots through `items::hand_maybe_weapon`, `hand_has_weapon`, `limb_slots`. The combat code's own
   slot reads (`combat/weapon.rs`) don't use them yet (other streams own that directory).

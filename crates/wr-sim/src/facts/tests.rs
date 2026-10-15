@@ -873,3 +873,29 @@ fn a_toggle_spending_a_resource_on_start_is_reported() {
         w.coverage.unsupported
     );
 }
+
+/// `ItemSlot.MaybeItem` resolves an item through `EntityService`: a loaded item once its
+/// `PrePostLoad` registered it, not after its disposal unregistered it.
+#[test]
+fn slot_items_resolve_only_while_registered() {
+    let (mut w, _u) = registry_world();
+    let e = w.add_entity(crate::world::Entity {
+        unique_id: "item-1".into(),
+        clr: "ItemEntityWeapon",
+        kind: crate::world::EntityKind::Item(Box::default()),
+        facts: crate::world::FactsManager::default(),
+        parts: Vec::new(),
+        is_turned_on: false,
+        post_load_executed: false,
+        is_in_game: true,
+        subscribed: false,
+        disposing: false,
+        is_disposed: false,
+    });
+    w.unregistered_items.insert(e);
+    assert!(!crate::items::slot_item_resolves(&w, e), "loaded, not yet registered");
+    crate::entity::pre_post_load(&mut w, e);
+    assert!(crate::items::slot_item_resolves(&w, e));
+    w.by_id.remove("item-1");
+    assert!(!crate::items::slot_item_resolves(&w, e), "unregistered");
+}
