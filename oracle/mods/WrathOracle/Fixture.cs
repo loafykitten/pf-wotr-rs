@@ -369,6 +369,10 @@ internal static class Fidelity
         failed = Health.FailedCount;
         try { LogObs.Install(h); } catch (Exception e) { Health.Failed("patch the combat log", e); }
         if (LogObs.Installed && Health.FailedCount == failed) Observers.Add("combat_log");
+        // The inspection controller's reveals (insp_reveal; InspectObs.cs).
+        failed = Health.FailedCount;
+        InspectObs.Install(h);
+        if (InspectObs.Installed && Health.FailedCount == failed) Observers.Add("inspect_reveal");
         OracleTime.Install(h);
         InstallSeconds = sw.Elapsed.TotalSeconds;
         Notes.Add($"install total {InstallSeconds:0.00} s");
