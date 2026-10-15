@@ -27,6 +27,9 @@ use crate::csharp::{CsDict, RawSlot, TimeSpan};
 /// that wasn't detected again.
 pub const FORGET_AFTER: TimeSpan = TimeSpan(90_000_000);
 
+/// `UnitCondition.Invisible`.
+pub const INVISIBLE: i32 = 7;
+
 /// A failure the game would throw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemError {

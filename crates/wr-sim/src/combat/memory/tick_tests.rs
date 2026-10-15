@@ -12,9 +12,6 @@ use serde_json::{Value, json};
 use super::*;
 use crate::combat::oracle::Trace;
 
-/// `UnitCondition.Invisible`.
-const INVISIBLE: i64 = 7;
-
 /// `GameModeType.Default`: the only mode `UnitMemoryController` is registered in.
 const DEFAULT_MODE: i64 = 1;
 
@@ -520,7 +517,7 @@ impl MemoryWorld<u32, u32> for TickWorld<'_, '_> {
     fn invisible(&mut self, u: u32) -> Result<bool, Desync> {
         let r = self.leaf("inv", &["u", "c", "v"])?;
         self.about(r, "u", u)?;
-        if r["c"].as_i64() != Some(INVISIBLE) {
+        if r["c"].as_i64() != Some(i64::from(INVISIBLE)) {
             return Err(Desync(format!("a condition other than Invisible ({r})")));
         }
         bool_of(r, "v")

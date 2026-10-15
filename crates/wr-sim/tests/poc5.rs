@@ -5947,3 +5947,100 @@ fn missing_or_wrong_impatience_records_are_reported() {
     }
     assert!(missed.is_empty(), "{missed:#?}");
 }
+
+/// The fight with the `memory` observer: its offensive actions' `AddToMemory` calls (`mem_q`) sit in
+/// `OffensiveActionsController`'s did handler of each `RuleAttackRoll`.
+const MEMORY: (&str, &str) = ("poc5-tb-111", "tb-nearest");
+
+/// Every run of the `memory` observer's capture is valid, its offensive actions' `AddToMemory`
+/// calls each the sim's; every way of losing, changing, adding or moving one is reported.
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18 and the poc5-tb-111 capture"]
+fn missing_or_wrong_memory_additions_are_reported() {
+    use serde_json::Value as V;
+    let Some(dir) = fixture_in(MEMORY.0, MEMORY.1) else {
+        eprintln!("{MEMORY:?} not present: skipped");
+        return;
+    };
+    for run in ["record", "replay-1", "replay-2"] {
+        let (out, w) = replay::run_fixture(SAVE, &dir, run).expect("replay");
+        assert!(w.valid(), "{run}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+        assert!(out.diff.equal, "{run}: {:?}", out.diff.first_difference);
+        assert_eq!(out.mem_adds, 16, "{run}");
+    }
+    type Change = fn(&mut Vec<V>);
+    fn mem_q(recs: &[V]) -> usize {
+        recs.iter().position(|r| r["k"] == "obs" && r["ev"] == "mem_q").expect("a mem_q")
+    }
+    fn renumber(recs: &mut [V]) {
+        for (n, r) in recs.iter_mut().enumerate() {
+            r["seq"] = json!(n);
+        }
+    }
+    const C: &str = "driven replay: commands:";
+    const M: &str = "driven replay: memory:";
+    let cases: [(&str, Change); 9] = [
+        // The observer's and the target's addition swapped.
+        (M, |recs| {
+            let at = mem_q(recs);
+            let (o, t) = (recs[at]["o"].clone(), recs[at]["tgt"].clone());
+            recs[at]["o"] = t;
+            recs[at]["tgt"] = o;
+        }),
+        (M, |recs| {
+            let at = mem_q(recs);
+            recs.remove(at);
+            renumber(recs);
+        }),
+        (M, |recs| {
+            let at = mem_q(recs);
+            let r = recs[at].clone();
+            recs.insert(at, r);
+            renumber(recs);
+        }),
+        (M, |recs| {
+            let at = mem_q(recs);
+            recs[at]["extra"] = json!(1);
+        }),
+        (M, |recs| {
+            let at = mem_q(recs);
+            recs[at]["exc"] = json!(true);
+        }),
+        (M, |recs| {
+            let at = mem_q(recs);
+            recs[at]["by"] = json!(
+                "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitCommandDidAct"
+            );
+        }),
+        (M, |recs| {
+            let at = mem_q(recs);
+            recs[at]["queued"] = json!(null);
+        }),
+        // Another unit, or out of its handler.
+        (C, |recs| {
+            let at = mem_q(recs);
+            recs[at]["tgt"] = json!("5198");
+        }),
+        (C, |recs| {
+            let at = mem_q(recs);
+            let end = at + recs[at..].iter().position(|r| r["k"] == "h_end").unwrap();
+            let r = recs.remove(at);
+            recs.insert(end, r);
+            renumber(recs);
+        }),
+    ];
+    let mut missed = Vec::new();
+    for (i, (want, change)) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+        change(&mut changed.records);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
+            missed.push(format!(
+                "case {i}: {want}: {:?}",
+                w.coverage.unsupported.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}

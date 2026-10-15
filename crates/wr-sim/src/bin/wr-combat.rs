@@ -282,6 +282,7 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         "impatience: entries {}, states checked {}, handlers matched {}, draws {}",
         out.imp_entries, out.imp_states, out.imp_handlers, out.imp_draws
     );
+    println!("memory: offensive actions' AddToMemory calls matched {}", out.mem_adds);
     println!(
         "agent: entries {}, states checked {}, units ticked {}, requests checked {}, draws {}; inputs {:?}",
         out.ag_entries, out.ag_states, out.ag_ticks, out.ag_requests, out.ag_draws, out.ag_inputs

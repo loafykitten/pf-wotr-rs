@@ -7,6 +7,8 @@
 //! queued operation and checks the unit's state; inside a rule's span they're taken after the
 //! sim fires the rule.
 
+use std::collections::VecDeque;
+
 use serde_json::Value as J;
 
 use super::Driver;
@@ -396,6 +398,12 @@ impl Driver<'_> {
                     "driven replay: an impatience record without the impatience observer",
                 );
             }
+            if self.trace.records[start..=end].iter().any(|r| r["k"] == "obs" && r["ev"] == "mem_q")
+            {
+                w.coverage.unsupported(
+                    "driven replay: a memory addition (mem_q) in a rule without the impatience observer",
+                );
+            }
             return;
         }
         // The rules seen (id: class, initiator, target) and the open handlers (class, rule, phase).
@@ -437,6 +445,55 @@ impl Driver<'_> {
                     w.coverage.unsupported(
                         "driven replay: impatience: the controller's draw inside a rule",
                     );
+                }
+                // The memory controller's `AddToMemory` in an offensive action's handler
+                // (`OffensiveActionsController`'s did handler of a `RuleAttackRoll`): the sim's
+                // next call, of its writer's shape. Whether it queued is the memory queue's,
+                // which isn't wired: taken as recorded.
+                Some("obs") if r["ev"] == "mem_q" => {
+                    let rule = handlers.last().and_then(|(class, rule, phase)| {
+                        (class == "Kingmaker.Controllers.OffensiveActionsController"
+                            && phase == "did")
+                            .then(|| rules.get(rule))
+                            .flatten()
+                            .filter(|(rc, ..)| rc.rsplit('.').next() == Some("RuleAttackRoll"))
+                    });
+                    let unit = |v: &J| v.get("$unit").cloned().unwrap_or(J::Null);
+                    let pair = (r["o"].clone(), r["tgt"].clone());
+                    let shape = super::engage::fields(
+                        r,
+                        &["o", "tgt", "peaceful", "queued", "exc", "by"],
+                    ) && r["t"].as_i64() == Some(self.tick)
+                        && r["exc"] == false
+                        && r["peaceful"].is_boolean()
+                        && r["queued"].is_boolean()
+                        && r["by"].as_str().is_some_and(|b| {
+                            b.starts_with(
+                                "UnitMemoryController.AddToMemory<UnitMemoryController.HandleUnitMakeOffensiveAction<",
+                            )
+                        });
+                    let placed = rule.is_some_and(|(_, a, t)| {
+                        pair == (unit(a), unit(t)) || pair == (unit(t), unit(a))
+                    });
+                    let want =
+                        w.combat.impatience.memory_adds.as_mut().and_then(VecDeque::pop_front);
+                    let sim = want.map(|(o, t)| {
+                        (
+                            J::from(w.entity(o).unique_id.clone()),
+                            J::from(w.entity(t).unique_id.clone()),
+                        )
+                    });
+                    if shape && placed && sim.as_ref() == Some(&pair) {
+                        self.out.mem_adds += 1;
+                    } else {
+                        w.coverage.unsupported(format!(
+                            "driven replay: memory: an AddToMemory the sim didn't make, or out of its handler ({})",
+                            describe(r)
+                        ));
+                        if let Some(q) = w.combat.impatience.memory_adds.as_mut() {
+                            q.clear();
+                        }
+                    }
                 }
                 Some("obs") if r["ev"].as_str().is_some_and(|e| e.starts_with("imp_")) => {
                     let placed = handlers.last().is_some_and(|(class, rule, phase)| {
@@ -497,6 +554,16 @@ impl Driver<'_> {
                 "driven replay: impatience: a rule handler's record missing from its rule's span",
             );
             w.combat.impatience.queue.clear();
+        }
+        if w.combat.impatience.memory_adds.as_ref().is_some_and(|q| !q.is_empty()) {
+            if !self.uc_skipping {
+                w.coverage.unsupported(
+                    "driven replay: memory: an AddToMemory missing from its rule's span",
+                );
+            }
+            if let Some(q) = w.combat.impatience.memory_adds.as_mut() {
+                q.clear();
+            }
         }
     }
 
@@ -646,6 +713,11 @@ impl Driver<'_> {
             w.coverage.unsupported(
                 "driven replay: an impatience handler record the recording doesn't have",
             );
+        }
+        if let Some(q) = w.combat.impatience.memory_adds.as_mut().filter(|q| !q.is_empty()) {
+            q.clear();
+            w.coverage
+                .unsupported("driven replay: memory: an AddToMemory the recording doesn't have");
         }
         self.imp_prepare_ready = None;
         if !self.imp_prepared.is_empty() || self.imp_prepare_tail.take().is_some() {

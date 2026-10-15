@@ -86,6 +86,35 @@ pub struct Impatience {
     /// Each `UnitAttack`'s attack rolls (`AllAttacks[i].Rule.AttackRoll`), by command, as its
     /// attack rules fire.
     pub rolls: HashMap<u32, Vec<u64>>,
+    /// The memory controller's `AddToMemory(observer, target)` calls an offensive action makes
+    /// (`UnitMemoryController.HandleUnitMakeOffensiveAction`, the other subscriber of the event),
+    /// not yet matched with their `mem_q` records; `None` without WrathOracle's `memory` observer
+    /// (docs/poc5/memory.md).
+    pub memory_adds: Option<VecDeque<(EntityIdx, EntityIdx)>>,
+}
+
+/// `UnitMemoryController.HandleUnitMakeOffensiveAction(unit, target)`'s `AddToMemory` calls, as
+/// the event raises it (`OffensiveActionsController`'s gates passed: both units in the game): the
+/// unit remembers the target unless it's invisible to it, then the target the unit. The queue
+/// itself is the memory model's (`combat/memory.rs`), not wired: each call's record is matched.
+/// Reported: the target's `UnitAggroFilter` (its `OnAggroAction` runs first), an invisible target
+/// (see-invisibility and blindsense aren't ported).
+fn memory_offensive_action(w: &mut World, unit: EntityIdx, target: EntityIdx) {
+    if w.combat.impatience.memory_adds.is_none() {
+        return;
+    }
+    let bp = w.unit(target).and_then(|x| x.blueprint).and_then(|g| w.content.get(g));
+    if bp.is_some_and(|b| crate::unit_facts::has_component(&b, "UnitAggroFilter")) {
+        w.coverage.unsupported("memory: an offensive action on a target with a UnitAggroFilter");
+    }
+    if crate::unit_state::has_condition(w, target, crate::combat::memory::INVISIBLE) {
+        w.coverage.unsupported("memory: an offensive action on an invisible target");
+        return;
+    }
+    if let Some(q) = w.combat.impatience.memory_adds.as_mut() {
+        q.push_back((unit, target));
+        q.push_back((target, unit));
+    }
 }
 
 /// What the controller's code reads outside the sim, its draws and its checks.
@@ -348,6 +377,7 @@ pub fn rule_did_trigger(w: &mut World, rule: &mut dyn crate::rulebook::RuleEvent
             w.coverage.unsupported("impatience: an offensive action of a rider or a mount");
             return;
         }
+        memory_offensive_action(w, a, t);
         let cond = super::is_in_combat(w, t) && super::units::is_enemy(w, t, a);
         w.combat.impatience.queue.push_back(Op::Bother { u: t, b: a, cond, damage: false });
     }
