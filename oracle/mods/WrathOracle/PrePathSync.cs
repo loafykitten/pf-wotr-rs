@@ -26,13 +26,15 @@ namespace WrathOracle;
 // 0.25 m) is held when the worker hands it over and released into the return queue at the recorded number
 // of frames after this replay's own request, at the recorded call, waiting for the worker if it isn't done
 // (bounded, never while the graph lock blocks the workers), and delivered by itself before the native drain
-// (PathSync.DeliverNow), which keeps its time slice. Requests the recording didn't make are
-// delivered natively. At the window's start, any recorded delivery that didn't happen at its frame and
-// call invalidates the replay.
+// (PathSync.DeliverNow), which keeps its time slice; paths due at one call go in the recording's order.
+// Requests the recording didn't make are delivered natively. At the window's start, any recorded delivery
+// that didn't happen at its frame and call invalidates the replay. Critters' requests (PathSync.CritterOf)
+// are presentation: neither noted nor held, delivered natively, and not counted as untracked paths of a call.
 internal static class PrePathSync
 {
     private sealed class Track { public string K; public int ReqFrame; public Path P; public ushort Id; public bool Held, Released, Done; }
-    private struct Rec { public int Req, Ret, Call; public Vector3? End; }
+    // Seq: the delivery's place in the recording (its "ret" note's order).
+    private struct Rec { public int Req, Ret, Call, Seq; public Vector3? End; }
 
     private static readonly Dictionary<string, Rec> Tape = new Dictionary<string, Rec>();
     // _armed: a tape was loaded at "prepare"; _replay: this interval reproduces it (set at its idle frame).
@@ -57,7 +59,7 @@ internal static class PrePathSync
         _problem = null;
         if (recordTrace == null || !System.IO.File.Exists(recordTrace)) return;
         var starts = new Dictionary<string, (int dt, Vector3? end)>();
-        var rets = new Dictionary<string, (int dt, int call)>();
+        var rets = new Dictionary<string, (int dt, int call, int seq)>();
         using (var f = System.IO.File.OpenRead(recordTrace))
         using (var gz = new System.IO.Compression.GZipStream(f, System.IO.Compression.CompressionMode.Decompress))
         using (var r = new System.IO.StreamReader(gz, System.Text.Encoding.UTF8))
@@ -71,11 +73,11 @@ internal static class PrePathSync
                 if (key == null) continue;
                 var what = (string)o["what"];
                 if (what == "start") starts[key] = ((int)o["dt"], o["e"] is JArray e && e.Count == 3 ? new Vector3((float)e[0], (float)e[1], (float)e[2]) : (Vector3?)null);
-                else if (what == "ret") rets[key] = ((int)o["dt"], (int?)o["c"] ?? 1);
+                else if (what == "ret") rets[key] = ((int)o["dt"], (int?)o["c"] ?? 1, rets.Count);
             }
         }
         foreach (var kv in starts)
-            if (rets.TryGetValue(kv.Key, out var ret)) Tape[kv.Key] = new Rec { Req = kv.Value.dt, Ret = ret.dt, Call = ret.call, End = kv.Value.end };
+            if (rets.TryGetValue(kv.Key, out var ret)) Tape[kv.Key] = new Rec { Req = kv.Value.dt, Ret = ret.dt, Call = ret.call, Seq = ret.seq, End = kv.Value.end };
         _armed = true;
     }
 
@@ -174,6 +176,7 @@ internal static class PrePathSync
     {
         if (!_active || path == null) return;
         if (!Trace.OnMainThread) { if (_replay) Problem("a path was requested off the main thread before the window"); return; }
+        if (PathSync.IsCritterRequest(path)) return; // presentation: native
         var who = PathSync.RequesterKey(path, out _);
         var end = PathSync.EndOf(path);
         string k;
@@ -250,6 +253,7 @@ internal static class PrePathSync
         lock (Tracks)
         {
             release = HeldOrder.FindAll(t => due.Contains(t));
+            release.Sort((a, b) => Tape[a.K].Seq.CompareTo(Tape[b.K].Seq)); // the recording's order
             foreach (var t in release)
             {
                 HeldOrder.Remove(t);
@@ -258,8 +262,8 @@ internal static class PrePathSync
         }
         // Delivered by themselves before the native drain, which keeps its time slice for untracked paths.
         // The recording's order between tracked and untracked paths of one call isn't known: a call with both
-        // can't follow it.
-        var queued = PathSync.QueuedCount(owner);
+        // can't follow it (critters' paths left out, as in the window).
+        var queued = PathSync.QueuedUntracked(owner);
         if (release.Count > 0 && queued > 0)
             Problem($"pre-window path {release[0].K} due at frame {Time.frameCount} call {_callIdx} shares the call with {queued} untracked path(s) already queued (order not recorded)");
         foreach (var t in release)

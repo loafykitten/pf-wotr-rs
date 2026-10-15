@@ -57,6 +57,7 @@ internal static class Fixture
         GroupObs.ResetWindow();
         CommandObs.ResetWindow();
         PathSync.ResetWindow();
+        ProjPin.ResetWindow();
         TurnBased.ResetWindow();
         LogObs.ResetWindow();
         if (replay)
@@ -134,6 +135,11 @@ internal static class Fixture
         // with the recording's.
         if (Sched.Replay)
         {
+            // The pins need the recording's records: projectile arrivals, and critters' requests keyed apart.
+            if (ProjPin.Installed && !ProjPin.RecordedOn)
+                Sched.Invalidate("the recording has no projectile arrivals (observer proj_arrival): re-record");
+            if (PathSync.CritterIdOk && !PathSync.RecordedCritters)
+                Sched.Invalidate("the recording keys critters' path requests as unidentified (no observer critter_paths): re-record");
             var rec = Sched.RecCamera;
             if (rec == null || camera == null || rec.Length != camera.Length)
                 Sched.Invalidate("camera at the window's start: the recording has none (re-record)");
@@ -209,6 +215,10 @@ internal static class Fixture
                 j.Prop("paths_tracked", PathSync.Tracked);
                 j.Prop("path_waits", PathSync.Waited);
                 j.Prop("path_wait_timeouts", PathSync.Timeouts);
+                j.Prop("paths_critter", PathSync.Critters);
+                j.Prop("projectiles_tracked", ProjPin.Tracked);
+                j.Prop("projectile_hits_held", ProjPin.HeldBack);
+                j.Prop("projectile_hits_forced", ProjPin.Forced);
             }
             if (replay)
             {
@@ -307,6 +317,7 @@ internal static class Fidelity
         TurnBased.Install(h);
         WallClock.Install(h);
         PathSync.Install(h);
+        ProjPin.Install(h);
         InputPin.Install(h);
         Observe.Install(h);
         GroupObs.Install(h);
@@ -319,6 +330,11 @@ internal static class Fidelity
         if (CommandObs.MemOn) Observers.Add("memory");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
         if (CommandObs.PathsOn) Observers.Add("paths");
+        // Projectile arrival pinned (proj_launch, proj_hit; ProjPin.cs), critters' path requests keyed apart
+        // (path_critter; PathSync.cs).
+        if (ProjPin.Installed) Observers.Add("proj_arrival");
+        if (PathSync.CritterIdOk) Observers.Add("critter_paths");
+        else Health.Failed("critter path identification", new MissingFieldException("CritterMoveAgent.m_Seeker or Seeker.tmpPathCallback"));
         // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
         // units outside turn-based windows (aa_awake): declared when their patches installed.
         var failed = Health.FailedCount;

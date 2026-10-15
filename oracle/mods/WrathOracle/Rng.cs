@@ -282,6 +282,12 @@ internal static class Rng
                 {
                     var o = JObject.Parse(line);
                     foreach (var s in (JArray)o["rng_sites"] ?? new JArray()) keys[(int)s[0]] = (string)s[1];
+                    // The observers the recording declared that its replay's pins need (Fixture.Begin checks them).
+                    if (Sched.Window && o["observers"] is JArray obs)
+                    {
+                        ProjPin.RecordedOn = obs.Any(x => x.Type == JTokenType.String && (string)x == "proj_arrival");
+                        PathSync.RecordedCritters = obs.Any(x => x.Type == JTokenType.String && (string)x == "critter_paths");
+                    }
                     if (Sched.Window && o["time0"] != null)
                     {
                         Sched.RecFrame = (int)o["frame"];
