@@ -150,6 +150,9 @@ pub struct TurnCtl {
     pub ai_due: bool,
     /// `SavedCommandPath_ForSave`: the path a command's approach last followed (`TickApproaching`).
     pub saved_command_path: Option<Vec<[f32; 3]>>,
+    /// The last `ContinueActing`'s `CheckAndClearWantsToMoveInTurnBased()` cleared the agent's
+    /// `m_NoMoreTurnBasedMovementForUinterruptableCommand` (the replay's agent applies it).
+    pub cleared_no_more: bool,
 }
 
 /// `TurnController.Prepare`'s status: a controllable rider prepares, any other acts; it waits for
@@ -282,6 +285,7 @@ pub struct ActingState {
 ///
 /// An input it reads isn't recorded (the counters may have changed then).
 pub fn continue_acting(t: &mut TurnCtl, i: &ActingInput, s: &ActingState) -> Result<bool, Missing> {
+    t.cleared_no_more = false;
     let busy = i.running || i.get_up;
     if i.panicked
         && s.meters_five_foot > 0.0
@@ -305,6 +309,8 @@ pub fn continue_acting(t: &mut TurnCtl, i: &ActingInput, s: &ActingState) -> Res
             t.counters.stuck = 0;
         }
         let wants = i.wants_to_move && !i.no_more_movement;
+        // (Evaluated only when not busy and without motion: it clears the flag it reads.)
+        t.cleared_no_more = !busy && !i.motion && i.wants_to_move && i.no_more_movement;
         if !busy && !i.motion && !wants {
             // `float val = base / divider * PlayerTimeScale * DebugTimeScale`: Mono evaluates the
             // expression wide and rounds once, at the store.

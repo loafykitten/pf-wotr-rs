@@ -287,8 +287,17 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.mem_adds, out.mem_act_adds
     );
     println!(
-        "agent: entries {}, states checked {}, units ticked {}, requests checked {}, draws {}; inputs {:?}",
-        out.ag_entries, out.ag_states, out.ag_ticks, out.ag_requests, out.ag_draws, out.ag_inputs
+        "agent: entries {}, commands' calls {}, states checked {}, units ticked {}, requests checked {}, draws {}, synchronizations {}, getters checked {}, rows checked {}; inputs {:?}",
+        out.ag_entries,
+        out.ag_command_calls,
+        out.ag_states,
+        out.ag_ticks,
+        out.ag_requests,
+        out.ag_draws,
+        out.ag_syncs,
+        out.ag_reads,
+        out.ag_rows,
+        out.ag_inputs
     );
     println!("kinds [oracle, sim]: {:?}", out.diff.kinds);
     println!(

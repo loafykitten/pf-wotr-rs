@@ -35,6 +35,9 @@ pub trait MoveInputs: AgentInputs {
     fn paused(&mut self, w: &mut World) -> R<bool>;
     /// The unit has a mount's or rider's part (`UnitPartSaddled`: not modelled).
     fn saddled_unit(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
+    /// `unit.View.Or(null)?.MovementAgent != null` (a `UnitMovementAgent`: no other kind is
+    /// modelled).
+    fn has_agent(&mut self, w: &mut World, u: EntityIdx) -> R<bool>;
 }
 
 fn bad<T>(what: impl Into<String>) -> R<T> {
@@ -52,6 +55,9 @@ pub fn tick_unit(w: &mut World, u: EntityIdx, inp: &mut dyn MoveInputs) -> R<()>
     let Some(unit) = w.unit_mut(u) else { return bad("TickUnit of an entity that isn't a unit") };
     let previous = unit.position;
     unit.combat.prev_position = previous;
+    if !inp.has_agent(w, u)? {
+        return Ok(());
+    }
     let moving = agent::is_really_moving(w, u, inp)?;
     let flag = moving && inp.can_move(w, u)?;
     if agent::is_really_moving(w, u, inp)? && !inp.can_move(w, u)? {

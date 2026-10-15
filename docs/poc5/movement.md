@@ -176,6 +176,93 @@ between is a desync):
   their records; `ag_tick`'s turn fields (`turn`, `cur`, `acting`, `combat`, `dontint`) are checks of the sim's
   turn and commands state.
 
+## The driven replay: hardening (2026-10-15/16, stream A2)
+
+gpt-6.1-sol's review of the first integration (`docs/poc5/movement-review-integration.md`, 18 findings) is worked
+through; `crates/wr-sim/src/combat/replay/agent.rs` was rewritten around it. [M] unless tagged.
+
+**The capability.** The driven agent needs WrathOracle's `agent_sync` (declared in the begin record since
+`poc5-tb-113`, `CommandObsAgent.cs`, three gpt-6.1-sol rounds on the observer): `ag_sync`, every agent's state where
+real time ends (at `CombatController.HandleCombatStart`, else at a frame's start or before the first agent record
+once `IsInTurnBasedCombat()` turned true, read without its `CanChangeWeaponSet` side effect); `ag_pos`, a unit's
+position stored by `UnitEntityData.Position`'s setter outside `UnitMoveController.TickUnit` and
+`UnitPlaceOnGroundController.TickUnit` (roaming moves a sleeping unit with `unit.Position += ...`), with the caller
+chain; `ag_init`'s `prev` (`PreviousPosition`) and `desired`. A capture declaring `agent_sync` requires its initial
+states and the impatience/targets/engage/AI/commands/turn chain (else reported); one with `agent` alone
+(`poc5-tb-100` to `-109`) replays with the agent's records taken as before. `WR_AGENT_DRIVEN` forces the driven
+agent on such a capture for diagnosis (synthesizing the boundary from the last recorded states; reported, never
+valid).
+
+**What the sim runs now** (each finding's number in brackets):
+- The boundary [1]: real-time spans stay taken from the recording; from then until an `ag_sync` the agents aren't
+  the sim's, and turn-based agent activity (an entry, a commands' call or read, `ContinueActing`'s reads) is
+  reported. A synchronization is accepted only after real time (a real-time entry or frame, a combat start) and must
+  cover every agent, with `AllAgents` as the sim's.
+- The commands' calls [2] run the agent (`Driver::ag_command_call`): `View.MoveTo` runs `PathTo` with the sim's
+  destination agent (the target view's `AgentASP`) and the call's arguments, checked field by field against `ag_req`;
+  `FollowPrecomputedPath` gets a new `ForcedPath` of the command's points (its error false, its definition checked:
+  `CompleteState` Complete, the points, a name the observer never used before) [7]; `View.StopMoving` runs `Stop`.
+  Top-level agent calls remain only for callers the sim doesn't run, counted by caller: `TickOnUnit`'s `StopMoving`
+  of a unit without commands (its view gates aren't recorded for it; for a unit the commands tick it's a desync),
+  `EnterProneState` (whose `ObstaclesHelper.RemoveFromGroup` after the `Stop` is now applied: the
+  `TickUnit`-end state check found it), `TryCancelCommands`, `HandleCombatEnd`. A top-level `PathTo` in turn-based
+  combat is a desync (its caller isn't recorded; every one the fights make is the commands').
+- The getters [3]: the commands' `moving` (`View.IsMoving()`), `rmoving` (`IsReallyMoving`, its `IsDone` read
+  pulled first) and `wants` are the sim's agent's, checked against their leaves; `tt_ca`'s `wants`, `nomore` and
+  `motion` likewise, and `CheckAndClearWantsToMoveInTurnBased`'s clear (only when not busy and without motion) is
+  applied to the agent (`TurnCtl::cleared_no_more`). `cd_move`'s delta out is the cooldowns' computed one.
+- Positions [4] change only through the sim's code, `ag_ground` (physics, an input) and `ag_pos` (counted by caller);
+  a `TickUnit`'s recorded position must be the sim's. Observation rows [10] (`obs u`, written or unchanged) are
+  checked against the sim's positions and, in turn-based combat, `IsMoving()`.
+- `FindPath` [5] is ported (`agent::find_path`: the in-flight gates, the clearance unless avoidance is off,
+  `ConstructTags`, the `ABPathWithClearance` with a `LosPathConditionForGrid` or `MaxDistanceEndingCondition`); its
+  arguments are the AI's (inputs), its states before and after checked; only `m_RequestedFindPath` is written.
+- Request keys [6] are computed: `PathSync`'s `<requester>#<n>` counts every `path_start` of the window; the sim's
+  request pulls its `path_start` (key, end point, strict flag) inside the call. A delivery (`ag_done` at the top)
+  needs its `path_ret` in a recording (a replay's trace has none) and is of a request of the window, once.
+- `UnitMoveController` [8]: each frame's batch is the awake units in `State.AwakeUnits`' order (dead ones too), none
+  while `WaitingForUI`; a `TickUnit` out of turn, missing or extra is reported (the recording's last, cut frame
+  aside). `ag_ctl`'s `prev` [16] and `ag_ctl_end`'s whole state [9] are checked.
+- Checks tightened: `canmovetb`'s answer and delta [11]; `DontInterruptInTurnBasedMode` from the commands model's
+  `Commands.Move` [12] (and `PathTo`'s `move` read: delay and roaming); `cur` and `acting` separately [17]; booleans
+  required to be booleans [18]; a leaf's unit is the innermost `TickMovement`'s or `null` (not "any"); `AllAgents`
+  indices of `ag_init`, `ag_sync` and `ag_enable` [14]; a `SlowDown` draw outside the agent is reported [13].
+
+**Result.** On `poc5-tb-113` (Manual_18, both fights, record and two replays) **every run is valid with the agent
+driven**: per run `tb-nearest` 19,294 entries, 276 commands' calls run, 18,013 states checked, 7,443 units ticked,
+13 requests and 2 draws checked, 1 synchronization, 4,348 getters checked (the commands', the turn controller's,
+`MoveTo`'s points, the constructed paths' `IsDone`), 13,012 rows checked; `tb-focus` 22,748 entries, 565 calls,
+21,626 states, 8,809 ticks, 17 requests, 3,587 getters, 14,525 rows. Still inputs (by kind, `tb-nearest`'s record):
+the real-time entries (2,714), `TickOnUnit`'s stops of units without commands (9,121), `IsDone` (2,726: when A*
+hands a path back), `DesiredOrientation` (7,443: `LookAt` isn't ported), the gates and reads the agent makes of
+the unit and its view (`CanMove` 1,094, `CanRotate` 7,985, the animation 1,071, commands 1,071, `MaxSpeed`
+1,090, `FlyHeight` 546, corpulence, cells, speed, fudge), physics (546 queries), path contents and deliveries,
+`FindPath`'s arguments (11), the obstacle group (10) and `IsProne` (from the `Stop`'s own end state), one roaming
+position. `poc5-tb-109`, `-111` and `-112` (and older) replay valid without the driven agent: they lack `agent_sync`. The agent checkers
+(`every_recorded_*`) and the POC-5 suite pass.
+
+`crates/wr-sim/tests/poc5_agent.rs` (`missing_or_wrong_agent_records_are_reported`, ignored: the capture) damages
+`poc5-tb-113/tb-nearest` 69 ways (the capability, the initial states and their indices and fields, the
+synchronization: missing, partial, reordered, unreadable, changed, repeated mid-fight, in real time; `TickUnit`'s
+position, `prev`, fields, end state, a missing, swapped or `WaitingForUI` tick; `CanMoveInTurnBased`; the turn
+state; strict booleans; `SlowDown` draws extra or missing; `AllAgents`; request keys, ends, arguments, `FindPath`'s
+request and start; the callback; a delivery without `path_ret`; the commands' `ForcedPath`, its request's defaults, definition, completion and `IsDone`; deliveries
+(`path_ret`) duplicated, without a callback, at the recording's end, with a wrong request frame; FindPath's
+callbacks of unrequested paths; a position write inside `TickUnit`; rows;
+the commands' and the turn controller's getters; `ag_pos` missing or wrong; the ground step; a view callback; an
+extra `PathTo`; a record of another frame); each is reported, against the undamaged run's reports.
+
+Reviews: gpt-6.1-sol (high), the observer three rounds (the cutscene return, the side-effecting predicate, a path
+definition ordered after the snapshot); the replay six rounds: a synchronization accepted mid-fight, a constructed
+path's completion `err`; a unit target's `MoveTo` point (now the target's simulated position for the classes whose
+`GetTargetPoint` is the base one: no turn-based capture case yet), the constructed path's contents and `IsDone`, a
+split snapshot block; FindPath callbacks' provenance, a real-time frame without entries, the constructed request's
+defaults; position writes inside the controller, deliveries' pairing and uniqueness, carried requests; the last
+frame's delivery, the request frame. Round 6 found nothing.
+
+Left: `UnitCommands.InterruptMove` from `TickUnit` (reported where reached), `LookAt`/`DesiredOrientation`, the
+units' `ControlledByDirector` (reported in a cutscene), mounts, real time.
+
 ## Steps
 
 1. `agent` observer; record `tb-nearest` and `tb-focus`. **Done** (`poc5-tb-100` to `-103`; `-103` is current).

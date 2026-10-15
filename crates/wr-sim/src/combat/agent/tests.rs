@@ -446,6 +446,18 @@ impl AgentInputs for Recorded<'_> {
         }
         Ok(out)
     }
+    fn can_move_end(&mut self, _: &mut World, _: EntityIdx, result: bool, dt: f32) -> R<()> {
+        // `CanMoveInTurnBased`'s postfix: its answer and the delta it leaves.
+        let r = self
+            .recs
+            .iter()
+            .find(|r| r["ev"] == "ag_v" && r["f"] == "canmovetb")
+            .ok_or_else(|| Desync("no canmovetb record".into()))?;
+        if r["v"].as_bool() != Some(result) || f(&r["dt"]).to_bits() != dt.to_bits() {
+            self.errors.push(format!("CanMoveInTurnBased({result}, {dt}): the recording's is {r}"));
+        }
+        Ok(())
+    }
     fn cutscene_active(&mut self, _: &mut World, _: EntityIdx) -> R<bool> {
         let held = b(&self.take_leaf("csctl")?["v"]);
         Ok(held && b(&self.take_leaf("csactive")?["v"]))
@@ -513,7 +525,15 @@ impl AgentInputs for Recorded<'_> {
         }
         Ok(())
     }
-    fn done_start(&mut self, _: &mut World, _: EntityIdx, path: &str, forced: bool) -> R<()> {
+    fn done_start(
+        &mut self,
+        _: &mut World,
+        _: EntityIdx,
+        path: &AgentPath,
+        forced: bool,
+        _: bool,
+    ) -> R<()> {
+        let path = path.key.as_str();
         let r = self.take_ev("ag_done")?;
         if r["path"].as_str() != Some(path) || r["forced"].as_bool() != Some(forced) {
             return Err(Desync(format!(
@@ -666,7 +686,7 @@ impl AgentInputs for Recorded<'_> {
         let r = self.take_leaf("move")?.clone();
         Ok(b(&r["v"]).then(|| (f(&r["delay"]), b(&r["roaming"]))))
     }
-    fn request_key(&mut self, _: &mut World, _: EntityIdx) -> R<String> {
+    fn request_key(&mut self, _: &mut World, _: EntityIdx, _: V3) -> R<String> {
         self.key
             .clone()
             .ok_or_else(|| Desync("PathTo made a request; the recording has none".into()))
@@ -1040,7 +1060,7 @@ fn request_diff(ours: &PathRequest, rq: &Value) -> Vec<String> {
     cmp("clearance", bits(&ours.clearance), bits(&v3(&rq["clear"])));
     cmp("tags", ours.tags.to_string(), rq["tags"].to_string());
     cmp("graph mask", ours.graph_mask.to_string(), rq["gmask"].to_string());
-    cmp("approach", bits(&ours.approach), bits(&f(&rq["ar"])));
+    cmp("approach", bits(&ours.approach.unwrap_or(f32::NAN)), bits(&f(&rq["ar"])));
     cmp("los", ours.los.to_string(), rq["los"].to_string());
     cmp("ignore", bits(&ours.ignore_blocker), bits(&f(&rq["ibr"])));
     cmp("max distance", bits(&ours.max_distance), bits(&f(&rq["maxd"])));
