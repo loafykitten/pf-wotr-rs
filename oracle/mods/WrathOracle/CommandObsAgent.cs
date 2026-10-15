@@ -36,7 +36,14 @@ namespace WrathOracle;
 //    FollowPrecomputedPath, with the caller chain (origin) and the state after;
 //  - ag_init: at the window's first tick, every agent of UnitMovementAgentBase.AllAgents in order (enabled), then every
 //    other unit's agent (disabled views), with its state,
-//    the unit's position and m_Orientation (paths it holds are defined first, ag_pathdef);
+//    the unit's position (m_Position), m_Orientation, PreviousPosition and DesiredOrientation (paths it holds are
+//    defined first, ag_pathdef);
+//  - ag_sync: the same snapshot where real time ends (CombatController.HandleCombatStart; else at a frame's start or
+//    before the first agent record once IsInTurnBasedCombat() turned true), so a replay doesn't run turn-based code
+//    from a state real-time code left unobserved (declared "agent_sync");
+//  - ag_pos: UnitEntityData.Position's setter storing a new position outside UnitMoveController.TickUnit and
+//    UnitPlaceOnGroundController.TickUnit (roaming while asleep, a teleport), with the position before, the value and
+//    the caller chain (declared "agent_sync");
 //  - ag_ctl / ag_ctl_end: UnitMoveController.TickUnit, the unit's position before; its position and orientation after;
 //  - ag_v corp, cells, fudge, speedmps, navnode, move: PathTo's, FindPath's and ConstructTags' reads (corpulence, size in
 //    cells, the command's LOS fudge radius, CurrentSpeedMps, the nearest navmesh node, the move command's delay and roaming);
@@ -235,6 +242,9 @@ internal static partial class CommandObs
         // A path's points are the worker's while it computes them: they're copied only once it has handed the path back
         // (PipelineState past Processing) or for one never queued (Created); a pending path is noted once, and defined
         // at a later reference.
+        // (Where real time just ended, the snapshot first: its own references define what they hold before it, and
+        // this definition isn't reserved before the snapshot's.)
+        if (AgObserved()) AgCheckTb(false);
         var state = p.PipelineState;
         var safe = state == PathState.Created || state > PathState.Processing;
         if (AgObserved() && !safe && !PathDefined.Contains(key) && PathPending.Add(key))
@@ -291,12 +301,17 @@ internal static partial class CommandObs
     private static readonly AccessTools.FieldRef<List<UnitMovementAgentBase>> AllAgentsField =
         AccessTools.StaticFieldRefAccess<List<UnitMovementAgentBase>>(AccessTools.Field(typeof(UnitMovementAgentBase), "AllAgents"));
 
-    private static void AgInit()
+    private static void AgInit() => AgSnapshot("ag_init");
+
+    // Every agent's state (ag_init at the window's first tick, ag_sync where real time ends: AgCheckTb):
+    // AllAgents (the enabled agents, in their order), then every other unit's agent (a disabled view's:
+    // UnitMoveController still ticks its unit).
+    private static void AgSnapshot(string ev)
     {
         try
         {
-            // AllAgents (the enabled agents, in their order), then every other unit's agent (a disabled view's:
-            // UnitMoveController still ticks its unit).
+            // (First: the snapshot's own path definitions go through AgObs.)
+            _agTb = Hooks.InTurnBasedCombat();
             var all = AllAgentsField().ToList();
             var index = 0;
             var seen = new HashSet<UnitMovementAgentBase>();
@@ -304,38 +319,99 @@ internal static partial class CommandObs
             {
                 var i = index++;
                 seen.Add(b);
-                AgInitOne(b, i, true);
+                AgInitOne(ev, b, i, true);
             }
             foreach (var unit in StateDump.AllUnits(Kingmaker.Game.Instance))
             {
                 var b = unit?.View != null ? unit.View.MovementAgent : null;
                 if (b == null || seen.Contains(b)) continue;
                 seen.Add(b);
-                AgInitOne(b, -1, false);
+                AgInitOne(ev, b, -1, false);
             }
         }
-        catch (Exception e) { Trace.HookFailed("observe ag_init", e); }
+        catch (Exception e) { Trace.HookFailed("observe " + ev, e); }
     }
 
-    private static void AgInitOne(UnitMovementAgentBase b, int i, bool enabled)
+    private static void AgInitOne(string ev, UnitMovementAgentBase b, int i, bool enabled)
     {
         if (!(b is UnitMovementAgent a))
         {
             var kind = b != null ? b.GetType().Name : "null";
-            Sched.Obs("ag_init", j => { j.Prop("i", i); j.Prop("enabled", enabled); j.Prop("kind", kind); });
+            Sched.Obs(ev, j => { j.Prop("i", i); j.Prop("enabled", enabled); j.Prop("kind", kind); });
             return;
         }
         var u = UnitOfAgent(a);
         var view = a.Unit != null ? a.Unit.UniqueId : null;
         var data = a.Unit != null ? a.Unit.EntityData : null;
-        Vector3? pos = data != null ? data.Position : (Vector3?)null;
+        Vector3? pos = data != null ? PositionField(data) : (Vector3?)null;
         float? orient = data != null ? OrientationField(data) : (float?)null;
+        // PreviousPosition (written only by UnitMoveController.TickUnit) and DesiredOrientation: auto-properties.
+        Vector3? prev = data != null ? data.PreviousPosition : (Vector3?)null;
+        float? desired = data != null ? data.DesiredOrientation : (float?)null;
         var s = Snap(a);
-        Sched.Obs("ag_init", j =>
+        Sched.Obs(ev, j =>
         {
             j.Prop("i", i); j.Prop("enabled", enabled); j.Prop("kind", "UnitMovementAgent"); j.Prop("u", u); j.Prop("view", view);
-            NullableVec(j, "upos", pos); NullableFloat(j, "orient", orient); WriteState(j, s);
+            NullableVec(j, "upos", pos); NullableFloat(j, "orient", orient); NullableVec(j, "prev", prev);
+            NullableFloat(j, "desired", desired); WriteState(j, s);
         });
+    }
+
+    // ---- where real time ends (CombatController.IsInTurnBasedCombat() turns true): every agent's state then, as ag_init
+    // writes it (ag_sync), so a replay takes the state real-time code (not ported) left instead of an output of
+    // turn-based code. Written at CombatController.HandleCombatStart (registered after TurnBased's postfix, so it
+    // follows the "combat_start" record), at a frame's start (GameMode.Tick's prefix, after Observe's rows) and before
+    // any agent record, whenever the predicate is true and the agent code observed last ran in real time (combat
+    // resumed after a cutscene, the mode switched on mid-combat) ----
+
+    // IsInTurnBasedCombat() as of the last snapshot or check: the mode the agent code observed since ran in.
+    private static bool _agTb;
+
+    private static void AgCheckTb(bool combatStart)
+    {
+        try
+        {
+            if (!AgObserved()) return;
+            var tb = Hooks.InTurnBasedCombat();
+            if (tb && (combatStart || !_agTb)) AgSnapshot("ag_sync");
+            _agTb = tb;
+        }
+        catch (Exception e) { Trace.HookFailed("observe ag_sync", e); }
+    }
+
+    public static void AgSyncPostfix() => AgCheckTb(true);
+
+    public static void AgFramePrefix() => AgCheckTb(false);
+
+    // Every agent record: the snapshot first when real time just ended.
+    private static void AgObs(string ev, Action<Json> body)
+    {
+        AgCheckTb(false);
+        Sched.Obs(ev, body);
+    }
+
+    // ---- a unit's position written outside UnitMoveController.TickUnit and UnitPlaceOnGroundController.TickUnit (their
+    // writes are ag_ctl_end's and ag_ground's): UnitEntityData.Position's setter, when it stores (`m_Position != value`,
+    // Vector3's operator), with the position before, the value and the caller chain (roaming while asleep, a teleport) ----
+
+    private static readonly AccessTools.FieldRef<UnitEntityData, Vector3> PositionField =
+        AccessTools.FieldRefAccess<UnitEntityData, Vector3>("m_Position");
+
+    private static UnitEntityData _groundUnit;
+
+    public static void AgPosPrefix(UnitEntityData __instance, Vector3 value)
+    {
+        try
+        {
+            if (!AgObserved() || __instance == null) return;
+            if (ReferenceEquals(_ctlUnit, __instance) || ReferenceEquals(_groundUnit, __instance)) return;
+            var before = PositionField(__instance);
+            if (!(before != value)) return;
+            var u = __instance.UniqueId;
+            var origin = Origin();
+            AgObs("ag_pos", j => { j.Prop("u", u); j.Prop("pos", before); j.Prop("v", value); j.Prop("origin", origin); });
+        }
+        catch (Exception e) { Trace.HookFailed("observe ag_pos", e); }
     }
 
     // ---- TickMovement ----
@@ -351,14 +427,14 @@ internal static partial class CommandObs
             // The turn state CanMoveInTurnBased reads (pure getters), for checking the sim's.
             var data = __instance.Unit != null ? __instance.Unit.EntityData : null;
             var combat = data != null && data.IsInCombat;
-            var tb = global::TurnBased.Controllers.CombatController.IsInTurnBasedCombat();
+            var tb = Hooks.InTurnBasedCombat();
             var turn = Kingmaker.Game.Instance.TurnBasedCombatController?.CurrentTurn;
             var cur = data != null && data.IsCurrentUnit();
             var acting = turn != null && turn.IsActing;
             // CanMoveInTurnBased's `Commands.Move?.DontInterruptInTurnBasedMode` (a field; Move is a pure getter).
             var move = data?.Commands?.Move;
             bool? dontint = move == null ? (bool?)null : move.DontInterruptInTurnBasedMode;
-            Sched.Obs("ag_tick", j =>
+            AgObs("ag_tick", j =>
             {
                 j.Prop("u", u); j.Prop("dt", deltaTime); j.Prop("combat", combat); j.Prop("tb", tb); j.Prop("turn", turn != null);
                 j.Prop("cur", cur); j.Prop("acting", acting); j.Prop("dontint", dontint); WriteState(j, s);
@@ -374,7 +450,7 @@ internal static partial class CommandObs
             if (!AgObserved()) return;
             var u = UnitOfAgent(__instance);
             var s = Snap(__instance);
-            Sched.Obs("ag_tick_end", j => { j.Prop("u", u); j.Prop("ret", __result); WriteState(j, s); });
+            AgObs("ag_tick_end", j => { j.Prop("u", u); j.Prop("ret", __result); WriteState(j, s); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_tick_end", e); }
     }
@@ -412,7 +488,7 @@ internal static partial class CommandObs
             if (!AgObserved()) return;
             var u = UnitOfAgent(__instance);
             var copy = sim;
-            Sched.Obs("ag_sim", j => { j.Prop("u", u); j.Prop("dt", deltaTime); j.Prop("max", maxMoveLength); WriteSim(j, ref copy, true); });
+            AgObs("ag_sim", j => { j.Prop("u", u); j.Prop("dt", deltaTime); j.Prop("max", maxMoveLength); WriteSim(j, ref copy, true); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_sim", e); }
     }
@@ -424,7 +500,7 @@ internal static partial class CommandObs
             if (!AgObserved()) return;
             var u = UnitOfAgent(__instance);
             var copy = sim;
-            Sched.Obs("ag_sim_end", j => { j.Prop("u", u); j.Prop("ret", __result); WriteSim(j, ref copy, false); });
+            AgObs("ag_sim_end", j => { j.Prop("u", u); j.Prop("ret", __result); WriteSim(j, ref copy, false); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_sim_end", e); }
     }
@@ -436,7 +512,7 @@ internal static partial class CommandObs
         {
             if (!AgObserved()) return;
             var u = UnitOfAgent(__instance);
-            Sched.Obs("ag_v", j => { j.Prop("f", "canmovetb"); j.Prop("u", u); j.Prop("v", __result); j.Prop("dt", deltaTime); });
+            AgObs("ag_v", j => { j.Prop("f", "canmovetb"); j.Prop("u", u); j.Prop("v", __result); j.Prop("dt", deltaTime); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_v canmovetb", e); }
     }
@@ -453,7 +529,7 @@ internal static partial class CommandObs
             var u = AgUnit();
             // A read inside the movement simulation (ag_sim .. ag_sim_end) says so.
             var sim = AgCtx.Count > 0 && AgCtx[AgCtx.Count - 1].ctx == "sim";
-            Sched.Obs("ag_v", j => { j.Prop("f", f); j.Prop("u", u); if (sim) j.Prop("ctx", "sim"); v(j); });
+            AgObs("ag_v", j => { j.Prop("f", f); j.Prop("u", u); if (sim) j.Prop("ctx", "sim"); v(j); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_v " + f, e); }
     }
@@ -650,7 +726,7 @@ internal static partial class CommandObs
         {
             if (!AgObserved() || _ctlUnit == null) return;
             var u = _ctlUnit.UniqueId;
-            Sched.Obs("ag_v", j => { j.Prop("f", f); j.Prop("u", u); j.Prop("v", v); });
+            AgObs("ag_v", j => { j.Prop("f", f); j.Prop("u", u); j.Prop("v", v); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_v " + f, e); }
     }
@@ -677,7 +753,7 @@ internal static partial class CommandObs
                 var d = hitInfo.distance;
                 var pt = hitInfo.point;
                 var col = hit ? hitInfo.collider : null;
-                Sched.Obs("ag_phys", j =>
+                AgObs("ag_phys", j =>
                 {
                     j.Prop("fn", "ray"); j.Prop("ctx", ctx); j.Prop("u", u); j.Prop("o", origin); j.Prop("d", direction);
                     j.Prop("max", maxDistance); j.Prop("mask", layerMask); j.Prop("hit", hit);
@@ -700,7 +776,7 @@ internal static partial class CommandObs
                 var d = hitInfo.distance;
                 var pt = hitInfo.point;
                 var col = hit ? hitInfo.collider : null;
-                Sched.Obs("ag_phys", j =>
+                AgObs("ag_phys", j =>
                 {
                     j.Prop("fn", "disc"); j.Prop("ctx", ctx); j.Prop("u", u); j.Prop("o", origin); j.Prop("r", radius);
                     j.Prop("max", maxDistance); j.Prop("mask", layerMask); j.Prop("hit", hit);
@@ -730,8 +806,8 @@ internal static partial class CommandObs
             var s = Snap(__instance);
             var tile = TileHandler.LastUpdateFrame;
             var frame = Time.frameCount;
-            var tb = global::TurnBased.Controllers.CombatController.IsInTurnBasedCombat();
-            Sched.Obs("ag_req", j =>
+            var tb = Hooks.InTurnBasedCombat();
+            AgObs("ag_req", j =>
             {
                 j.Prop("fn", "pathto"); j.Prop("u", u); WriteId(j, "c", c); j.Prop("p", destination); j.Prop("r", approachRadius);
                 j.Prop("mr", maxApproachRadius); j.Prop("xz", distanceXZ); j.Prop("da", da); j.Prop("dself", dself);
@@ -749,8 +825,8 @@ internal static partial class CommandObs
             if (!AgObserved()) return;
             var u = UnitOfAgent(__instance);
             var s = Snap(__instance);
-            var tb = global::TurnBased.Controllers.CombatController.IsInTurnBasedCombat();
-            Sched.Obs("ag_req", j =>
+            var tb = Hooks.InTurnBasedCombat();
+            AgObs("ag_req", j =>
             {
                 j.Prop("fn", "find"); j.Prop("tb", tb); j.Prop("u", u); j.Prop("p", destination); NullableFloat(j, "r", approachRadius);
                 j.Prop("los", needLOS); j.Prop("ibr", ignoreBlockerRadius); WriteState(j, s);
@@ -773,7 +849,7 @@ internal static partial class CommandObs
             var s = Snap(a);
             var p = fn == "FindPath" ? ret : AgRequested(a);
             var info = PathInfo(p);
-            Sched.Obs("ag_req_end", j => { j.Prop("u", u); j.Prop("fn", fn == "FindPath" ? "find" : "pathto"); info(j); WriteState(j, s); });
+            AgObs("ag_req_end", j => { j.Prop("u", u); j.Prop("fn", fn == "FindPath" ? "find" : "pathto"); info(j); WriteState(j, s); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_req_end", e); }
     }
@@ -830,7 +906,7 @@ internal static partial class CommandObs
             var data = __instance.Unit != null ? __instance.Unit.EntityData : null;
             var combat = data != null && data.IsInCombat;
             var s = Snap(__instance);
-            Sched.Obs("ag_done", j =>
+            AgObs("ag_done", j =>
             {
                 j.Prop("u", u); j.Prop("path", key); j.Prop("kind", kind); j.Prop("forced", forcedPath); j.Prop("cur", current);
                 j.Prop("err", err); j.Prop("cs", state); j.Prop("combat", combat);
@@ -848,7 +924,7 @@ internal static partial class CommandObs
             if (!AgObserved()) return;
             var u = UnitOfAgent(__instance);
             var s = Snap(__instance);
-            Sched.Obs("ag_done_end", j => { j.Prop("u", u); WriteState(j, s); });
+            AgObs("ag_done_end", j => { j.Prop("u", u); WriteState(j, s); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_done_end", e); }
     }
@@ -880,7 +956,7 @@ internal static partial class CommandObs
             // The state at a FollowPrecomputedPath's or ForcePath's start (the AI's FindPath callback can change it
             // unobserved before).
             var st = path != null ? Snap(__instance) : null;
-            Sched.Obs("ag_call", j =>
+            AgObs("ag_call", j =>
             {
                 j.Prop("fn", fn); j.Prop("u", u); j.Prop("origin", origin); j.Prop("i", index);
                 path?.Invoke(j);
@@ -898,7 +974,7 @@ internal static partial class CommandObs
             var u = UnitOfAgent(__instance);
             var fn = __originalMethod.Name;
             var s = Snap(__instance);
-            Sched.Obs("ag_call_end", j => { j.Prop("fn", fn); j.Prop("u", u); WriteState(j, s); });
+            AgObs("ag_call_end", j => { j.Prop("fn", fn); j.Prop("u", u); WriteState(j, s); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_call_end", e); }
     }
@@ -914,7 +990,7 @@ internal static partial class CommandObs
             var view = __instance.Unit != null ? __instance.Unit.UniqueId : null;
             var on = __originalMethod.Name == "OnEnable";
             var i = AllAgentsField().IndexOf(__instance);
-            Sched.Obs("ag_enable", j => { j.Prop("u", u); j.Prop("view", view); j.Prop("on", on); j.Prop("i", i); });
+            AgObs("ag_enable", j => { j.Prop("u", u); j.Prop("view", view); j.Prop("on", on); j.Prop("i", i); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_enable", e); }
     }
@@ -930,7 +1006,7 @@ internal static partial class CommandObs
             var u = UnitOfAgent(__instance);
             var key = PathRef(p);
             var held = PathRef(AgRequestedFind(__instance));
-            Sched.Obs("ag_findclr", j => { j.Prop("u", u); j.Prop("path", key); j.Prop("held", held); });
+            AgObs("ag_findclr", j => { j.Prop("u", u); j.Prop("path", key); j.Prop("held", held); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_findclr", e); }
     }
@@ -946,7 +1022,7 @@ internal static partial class CommandObs
             var u = unit.UniqueId;
             var pos = unit.Position;
             var prev = unit.PreviousPosition;
-            Sched.Obs("ag_ctl", j => { j.Prop("u", u); j.Prop("pos", pos); j.Prop("prev", prev); });
+            AgObs("ag_ctl", j => { j.Prop("u", u); j.Prop("pos", pos); j.Prop("prev", prev); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_ctl", e); }
     }
@@ -964,7 +1040,7 @@ internal static partial class CommandObs
             // The agent's state after the tick (UpdateVelocity included).
             var agent = unit.View != null ? unit.View.AgentASP : null;
             var st = agent != null ? Snap(agent) : null;
-            Sched.Obs("ag_ctl_end", j =>
+            AgObs("ag_ctl_end", j =>
             {
                 j.Prop("u", u); j.Prop("pos", pos); j.Prop("orient", orient); NullableVec(j, "vpos", view);
                 if (st != null) WriteState(j, st);
@@ -1001,7 +1077,7 @@ internal static partial class CommandObs
                 _cgFirst = false;
                 var u = UnitOf(_cgAgent);
                 var mem = g?.Memory != null;
-                Sched.Obs("ag_v", j => { j.Prop("f", "gmem"); j.Prop("u", u); j.Prop("v", mem); });
+                AgObs("ag_v", j => { j.Prop("f", "gmem"); j.Prop("u", u); j.Prop("v", mem); });
             }
         }
         catch (Exception e) { Trace.HookFailed("observe ag_v gmem", e); }
@@ -1020,7 +1096,7 @@ internal static partial class CommandObs
             var fn = __originalMethod.Name;
             Vector3? dest = __args.Length > 0 && __args[0] is Vector3 v ? v : (Vector3?)null;
             int? index = __args.Length > 0 && __args[0] is int i ? i : (int?)null;
-            Sched.Obs("ag_cb", j => { j.Prop("fn", fn); j.Prop("u", u); NullableVec(j, "dest", dest); j.Prop("i", index); });
+            AgObs("ag_cb", j => { j.Prop("fn", fn); j.Prop("u", u); NullableVec(j, "dest", dest); j.Prop("i", index); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_cb", e); }
     }
@@ -1032,7 +1108,7 @@ internal static partial class CommandObs
             if (!AgObserved()) return;
             var u = __instance != null ? __instance.EntityData?.UniqueId : null;
             var fn = __originalMethod.Name;
-            Sched.Obs("ag_cb_end", j => { j.Prop("fn", fn); j.Prop("u", u); });
+            AgObs("ag_cb_end", j => { j.Prop("fn", fn); j.Prop("u", u); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_cb_end", e); }
     }
@@ -1051,7 +1127,7 @@ internal static partial class CommandObs
             var o = OrientationField(__instance);
             var desired = __instance.DesiredOrientation;
             var ctl = ReferenceEquals(_ctlUnit, __instance);
-            Sched.Obs("ag_rot", j => { j.Prop("u", u); j.Prop("ctl", ctl); j.Prop("o", o); j.Prop("desired", desired); j.Prop("max", maxAngle); });
+            AgObs("ag_rot", j => { j.Prop("u", u); j.Prop("ctl", ctl); j.Prop("o", o); j.Prop("desired", desired); j.Prop("max", maxAngle); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_rot", e); }
     }
@@ -1061,12 +1137,14 @@ internal static partial class CommandObs
     public static void AgGroundPrefix(UnitEntityData data, out Vector3? __state)
     {
         __state = null;
+        _groundUnit = data;
         try { if (AgObserved() && data != null) __state = data.Position; }
         catch (Exception e) { Trace.HookFailed("observe ag_ground", e); }
     }
 
     public static void AgGroundFinalizer(UnitEntityData data, Vector3? __state)
     {
+        _groundUnit = null;
         try
         {
             if (!AgObserved() || data == null || !__state.HasValue) return;
@@ -1074,7 +1152,7 @@ internal static partial class CommandObs
             var before = __state.Value;
             var after = data.Position;
             var inCtl = ReferenceEquals(_ctlUnit, data);
-            Sched.Obs("ag_ground", j => { j.Prop("u", u); j.Prop("ctl", inCtl); j.Prop("pos", before); j.Prop("after", after); });
+            AgObs("ag_ground", j => { j.Prop("u", u); j.Prop("ctl", inCtl); j.Prop("pos", before); j.Prop("after", after); });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_ground", e); }
     }
@@ -1218,12 +1296,26 @@ internal static partial class CommandObs
         foreach (var n in new[] { "OnMovementInterrupted", "OnMovementComplete", "OnMovementWaypointUpdate" })
             patch(M(typeof(UnitEntityView), n), nameof(AgCbPrefix), nameof(AgCbPostfix), null);
         AgOn = Health.FailedCount == failed;
+        // Declared apart ("agent_sync"): the state where real time ends and the positions written outside the
+        // controller (a replay requires them with it, and replays older captures without the driven agent).
+        failed = Health.FailedCount;
+        patch(M(typeof(global::TurnBased.Controllers.CombatController), "HandleCombatStart"), null, nameof(AgSyncPostfix), null);
+        patch(AccessTools.Method(typeof(Kingmaker.GameModes.GameMode), nameof(Kingmaker.GameModes.GameMode.Tick)), nameof(AgFramePrefix), null, null);
+        var setPosition = typeof(UnitEntityData)
+            .GetProperty(nameof(UnitEntityData.Position), BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)
+            ?.GetSetMethod(true);
+        if (setPosition == null) Fail("UnitEntityData.Position has no setter of its own");
+        else patch(setPosition, nameof(AgPosPrefix), null, null);
+        AgSyncOn = AgOn && Health.FailedCount == failed;
     }
+
+    internal static bool AgSyncOn;
 
     internal static void ResetAgentWindow()
     {
         AgCtx.Clear();
         _ctlUnit = null;
+        _groundUnit = null;
         _pathIds = new ConditionalWeakTable<Path, PathBox>();
         _nextPath = 0;
         PathDefined.Clear();

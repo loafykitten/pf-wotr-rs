@@ -312,6 +312,7 @@ internal static class Fidelity
         CommandObs.Install(h);
         if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets", "impatience" });
         if (CommandObs.AgOn) Observers.Add("agent");
+        if (CommandObs.AgSyncOn) Observers.Add("agent_sync");
         if (CommandObs.MemOn) Observers.Add("memory");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
         // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
