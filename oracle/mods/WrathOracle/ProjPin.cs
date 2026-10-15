@@ -24,9 +24,11 @@ namespace WrathOracle;
 // keyed "<launcher unit>#<n>" (n: that launcher's launches in the window; "pt" for a launcher that isn't a
 // unit) and noted at launch ("proj_launch": the open rule, the attack roll's rule, the on-hit trigger's
 // class, whether it has a callback, the target unit, the blueprint, the attack result) and at the tick its
-// IsHit became true ("proj_hit"). A projectile from a point with no attack roll, no on-hit trigger and no
-// callback (decorative spawners: ProjectileSpawner, FxProjectileLauncher) is presentation: noted with
-// "pres", never pinned.
+// IsHit became true ("proj_hit"). A projectile the two decorative launchers make (ProjectileSpawner.Fire:
+// a scene's ambient spawner, random targets, always a miss; FxProjectileLauncher.LaunchProjectile: a scene
+// effect on a game-time or real-time delay) is presentation, identified by its launch inside them: noted with
+// "pres", never pinned. Every other projectile is pinned, an ability's too (AbilityDeliverProjectile, Touch,
+// Chain, Ricochet... poll IsHit, and set the attack roll and range after the launch).
 // Replay: a launch must be the recording's (same key and contents, within the scheduler's tolerance of
 // the recorded tick); its hit is due the recorded number of ticks after this replay's own launch. Before
 // then a hit the native flight makes is taken back (IsHit, and IsHitWall if that tick set it, cleared
@@ -49,7 +51,7 @@ internal static class ProjPin
         public bool OnHit, IsForced;
     }
 
-    private sealed class Rec { public int Launch, Hit = -1; public string Desc; public bool Matched; }
+    private sealed class Rec { public int Launch, Hit = -1; public string Desc; public bool Matched, Wall; public float Passed; }
 
     private static readonly Dictionary<Projectile, Track> Tracks = new Dictionary<Projectile, Track>(new RefEq<Projectile>());
     private static readonly List<Track> Pending = new List<Track>(); // replay: a due hit not made yet
@@ -59,6 +61,7 @@ internal static class ProjPin
 
     private static readonly AccessTools.FieldRef<Projectile, bool> IsHitRef = AccessTools.FieldRefAccess<Projectile, bool>("<IsHit>k__BackingField");
     private static readonly AccessTools.FieldRef<Projectile, bool> IsHitWallRef = AccessTools.FieldRefAccess<Projectile, bool>("<IsHitWall>k__BackingField");
+    private static readonly AccessTools.FieldRef<Projectile, float> PassedDistanceRef = AccessTools.FieldRefAccess<Projectile, float>("PassedDistance");
     private static readonly AccessTools.FieldRef<Projectile, Kingmaker.RuleSystem.Rules.RuleAttackRoll> AttackRollRef =
         AccessTools.FieldRefAccess<Projectile, Kingmaker.RuleSystem.Rules.RuleAttackRoll>("m_AttackRoll");
 
@@ -69,6 +72,7 @@ internal static class ProjPin
         PerLauncher.Clear();
         Tape.Clear();
         Untracked.Clear();
+        Pres.Clear();
         RecordedOn = false;
         Tracked = HeldBack = Forced = 0;
     }
@@ -93,11 +97,13 @@ internal static class ProjPin
         {
             int? I(string f) => o[f]?.Type == JTokenType.Integer ? (int)o[f] : (int?)null;
             string S(string f) => o[f]?.Type == JTokenType.String ? (string)o[f] : null;
+            // A string, or an explicit null.
+            bool StrOrNull(string f) => o[f]?.Type == JTokenType.String || o[f]?.Type == JTokenType.Null;
             var rule = I("rule");
             var roll = I("roll");
             var cb = o["cb"]?.Type == JTokenType.Boolean ? (bool)o["cb"] : (bool?)null;
             var res = S("res");
-            if (rule == null || roll == null || cb == null || res == null || o["trig"] == null || o["tgt"] == null || o["bp"] == null)
+            if (rule == null || roll == null || cb == null || res == null || !StrOrNull("trig") || !StrOrNull("tgt") || !StrOrNull("bp"))
             {
                 Sched.Invalidate($"recording's launch of projectile {k} lacks fields");
                 return;
@@ -110,15 +116,22 @@ internal static class ProjPin
             if (!Tape.TryGetValue(k, out var r)) { Sched.Invalidate($"recording's projectile {k} hits without a launch"); return; }
             if (r.Hit >= 0) { Sched.Invalidate($"recording's projectile {k} hits twice"); return; }
             if (t.Value < r.Launch) { Sched.Invalidate($"recording's projectile {k} hits before its launch"); return; }
+            var pd = o["pd"]?.Type == JTokenType.Float || o["pd"]?.Type == JTokenType.Integer ? (float)(double)o["pd"] : (float?)null;
+            if (o["wall"]?.Type != JTokenType.Boolean || pd == null) { Sched.Invalidate($"recording's hit of projectile {k} lacks fields"); return; }
             r.Hit = t.Value;
+            r.Wall = (bool)o["wall"];
+            r.Passed = pd.Value;
         }
     }
 
     // ---- ProjectileController.AddProjectile (postfix): a launch ----
 
-    // A point launcher's projectile with nothing attached (no attack roll, on-hit trigger or callback).
-    private static bool Presentation(Projectile p) =>
-        string.IsNullOrEmpty(p.Launcher?.UnitRef.Id) && AttackRollRef(p) == null && p.OnHitTrigger == null && p.Callback == null;
+    // Inside a decorative launcher (ProjectileSpawner.Fire, FxProjectileLauncher.LaunchProjectile): its
+    // projectiles are presentation (Pres), noted and never pinned.
+    private static int _decorative;
+    private static readonly HashSet<Projectile> Pres = new HashSet<Projectile>(new RefEq<Projectile>());
+    public static void DecorativePrefix() => _decorative++;
+    public static Exception DecorativeFinalizer(Exception __exception) { _decorative--; return __exception; }
 
     public static void AddPostfix(Projectile p)
     {
@@ -129,8 +142,9 @@ internal static class ProjPin
             var bp = Snap.Guid(p.Blueprint);
             var tgt = p.Target?.UnitRef.Id;
             if (string.IsNullOrEmpty(tgt)) tgt = null;
-            if (Presentation(p))
+            if (_decorative > 0)
             {
+                Pres.Add(p);
                 Sched.Obs("proj_launch", j => { j.Prop("pres", true); j.Prop("bp", bp); j.Prop("tgt", tgt); });
                 return;
             }
@@ -178,17 +192,19 @@ internal static class ProjPin
 
     // ---- Projectile.Tick: the arrival ----
 
-    // Bit 1: IsHit before the tick, bit 2: IsHitWall before it.
-    public static void TickPrefix(Projectile __instance, out int __state)
+    // Before the tick: whether it was observed, IsHit and IsHitWall, PassedDistance.
+    public struct TickState { public bool On, Hit, Wall; public float Passed; }
+
+    public static void TickPrefix(Projectile __instance, out TickState __state)
     {
-        __state = 0;
+        __state = default;
         if (!On || __instance == null) return;
-        __state = (__instance.IsHit ? 1 : 0) | (__instance.IsHitWall ? 2 : 0) | 4;
+        __state = new TickState { On = true, Hit = __instance.IsHit, Wall = __instance.IsHitWall, Passed = PassedDistanceRef(__instance) };
     }
 
-    public static void TickPostfix(Projectile __instance, int __state)
+    public static void TickPostfix(Projectile __instance, TickState __state)
     {
-        if ((__state & 4) == 0 || (__state & 1) != 0 || !On) return;
+        if (!__state.On || __state.Hit || !On) return;
         var p = __instance;
         try
         {
@@ -196,7 +212,7 @@ internal static class ProjPin
             if (!Tracks.TryGetValue(p, out var t))
             {
                 // Not launched in this window (or presentation): native. One that matters hitting here is unpinned.
-                if (!p.IsHit || Presentation(p) || !Untracked.Add(p)) return;
+                if (!p.IsHit || Pres.Contains(p) || !Untracked.Add(p)) return;
                 Sched.Obs("proj_untracked", j => j.Prop("bp", Snap.Guid(p.Blueprint)));
                 if (Sched.Replay) Sched.Invalidate($"a projectile launched before the window hit at tick {now} (its arrival isn't pinned)");
                 return;
@@ -207,16 +223,20 @@ internal static class ProjPin
                 if (!p.IsHit) return;
                 t.Hit = now;
                 var wall = p.IsHitWall;
-                Sched.Obs("proj_hit", j => { j.Prop("p", t.K); j.Prop("fl", now - t.Launch); j.Prop("wall", wall); });
+                var pd = PassedDistanceRef(p);
+                Sched.Obs("proj_hit", j => { j.Prop("p", t.K); j.Prop("fl", now - t.Launch); j.Prop("wall", wall); j.Prop("pd", pd); });
                 return;
             }
             if (Sched.Invalid != null) return; // left its recording: native from here
             if (t.Due < 0 || now < t.Due)
             {
-                // Not due (or the recording's never hit in its window): the native hit is taken back.
+                // Not due (or the recording's never hit in its window): the native hit is taken back, with what
+                // the hit did to the distance flown (a line or cone ability's delivery reads it every tick:
+                // AbilityDeliverProjectile.StepBasedDeliver), back to the unclamped sum Tick made before it.
                 if (!p.IsHit) return;
                 IsHitRef(p) = false;
-                if ((__state & 2) == 0) IsHitWallRef(p) = false;
+                if (!__state.Wall) IsHitWallRef(p) = false;
+                if (p.MaxRange > 0f) PassedDistanceRef(p) = __state.Passed + Kingmaker.Game.Instance.TimeController.DeltaTime * p.Blueprint.Speed;
                 if (t.Held++ == 0) HeldBack++;
                 return;
             }
@@ -227,18 +247,30 @@ internal static class ProjPin
             }
             if (!p.IsHit)
             {
+                // What Tick does when it arrives: IsHit, and the distance clamped to the range.
                 IsHitRef(p) = true;
+                if (p.MaxRange > 0f) PassedDistanceRef(p) = p.MaxRange;
                 t.IsForced = true;
                 Forced++;
             }
             t.Hit = now;
             Pending.Remove(t);
+            // The arrival's kind (a terrain-following projectile stopped by an obstacle: IsHitWall, which
+            // AbilityDeliverAttackWithWeapon reads) is the recording's; the distance flown must be too.
+            var rec = Tape[t.K];
+            if (p.IsHitWall != rec.Wall) IsHitWallRef(p) = rec.Wall;
+            var pd2 = PassedDistanceRef(p);
+            if (pd2 != rec.Passed)
+            {
+                Sched.Invalidate($"projectile {t.K} hit at tick {now} having flown {pd2:R}; the recording's {rec.Passed:R}");
+                return;
+            }
             var wall2 = p.IsHitWall;
             var held = t.Held;
             var forced = t.IsForced;
             Sched.Obs("proj_hit", j =>
             {
-                j.Prop("p", t.K); j.Prop("fl", now - t.Launch); j.Prop("wall", wall2);
+                j.Prop("p", t.K); j.Prop("fl", now - t.Launch); j.Prop("wall", wall2); j.Prop("pd", pd2);
                 if (held > 0) j.Prop("held", held);
                 if (forced) j.Prop("forced", true);
             });
@@ -302,13 +334,16 @@ internal static class ProjPin
     {
         try
         {
-            if (IsHitRef == null || IsHitWallRef == null || AttackRollRef == null) throw new MissingFieldException("Projectile's IsHit, IsHitWall or m_AttackRoll");
+            if (IsHitRef == null || IsHitWallRef == null || AttackRollRef == null || PassedDistanceRef == null) throw new MissingFieldException("Projectile's IsHit, IsHitWall, PassedDistance or m_AttackRoll");
             h.Patch(AccessTools.Method(typeof(ProjectileController), "AddProjectile", new[] { typeof(Projectile) }) ?? throw new MissingMethodException("ProjectileController.AddProjectile"),
                 postfix: new HarmonyMethod(typeof(ProjPin), nameof(AddPostfix)));
             h.Patch(AccessTools.Method(typeof(Projectile), nameof(Projectile.Tick)),
                 prefix: new HarmonyMethod(typeof(ProjPin), nameof(TickPrefix)), postfix: new HarmonyMethod(typeof(ProjPin), nameof(TickPostfix)));
             h.Patch(AccessTools.Method(typeof(Projectile), nameof(Projectile.OnHit)), prefix: new HarmonyMethod(typeof(ProjPin), nameof(OnHitPrefix)));
             h.Patch(AccessTools.Method(typeof(ProjectileHitController), nameof(ProjectileHitController.Tick)), postfix: new HarmonyMethod(typeof(ProjPin), nameof(HitTickPostfix)));
+            foreach (var (type, name) in new[] { (typeof(Kingmaker.View.Spawners.Projectile.ProjectileSpawner), "Fire"), (typeof(Kingmaker.View.FxProjectileLauncher), "LaunchProjectile") })
+                h.Patch(AccessTools.Method(type, name) ?? throw new MissingMethodException(type.Name + "." + name),
+                    prefix: new HarmonyMethod(typeof(ProjPin), nameof(DecorativePrefix)), finalizer: new HarmonyMethod(typeof(ProjPin), nameof(DecorativeFinalizer)));
             Installed = true;
         }
         catch (Exception e) { Health.Failed("patch projectile arrival", e); }

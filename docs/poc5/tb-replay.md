@@ -391,32 +391,42 @@ makes the rules. Bone poses differ by millimetres to centimetres between runs (T
 number of steps a flight takes can differ by one. [I] Animation's absolute-clock arithmetic is the likely source
 of the pose difference; the captures don't sample the bone per flight tick, so that is not established.
 
-[C] Everything the game derives from a flight goes through `IsHit`: `OnHit` (`HitThisFrame` is `IsHit` with no
+[C] What the game derives from a flight goes through `IsHit`: `OnHit` (`HitThisFrame` is `IsHit` with no
 time after the hit), `ProjectileController.HasLaunchedProjectile` (holds `TurnController`'s turn end) and
-`HasActive`, `OnTheWay` (the impatience controller), the cleanup (`Destroyed`). Nothing in the rules reads
-`CorePosition`, `PassedTime` or `Progress`. So the pin is the tick at which `IsHit` becomes true; the flight
-itself (positions, the view) stays native.
+`HasActive`, `OnTheWay` (the impatience controller), the cleanup (`Destroyed`), and the ability deliveries that poll
+`IsHit` (`AbilityDeliverProjectile`, `Touch`, `Chain`, `Ricochet`, `ClashingRocks`, `ProjectileOnGrid`). Two more
+fields are read: `PassedDistance` by the line and cone deliveries every tick (`StepBasedDeliver`: which units the
+line has reached; the hit clamps it to `MaxRange`), and `IsHitWall` by `AbilityDeliverAttackWithWeapon`. Nothing
+reads `CorePosition`, `PassedTime` or `Progress`. So the pin is the tick at which `IsHit` becomes true, with the
+distance and the wall flag as the arrival leaves them; the flight itself (positions, the view) stays native.
 
 - **Recording** (changes nothing): every projectile added to the controller in a turn-based window
   (`ProjectileController.AddProjectile`, postfix) is keyed `<launcher unit>#<n>`, n counting that launcher's
   launches in the window (`pt#<n>` for a launcher that isn't a unit), and noted: `proj_launch` (`p` the key,
   `rule` the open rule's id, `roll` the attack roll's rule id, `trig` the on-hit trigger's class or null, `cb`
   whether it has a callback, `tgt` the target unit or null, `bp` the blueprint, `res` the attack result), then
-  `proj_hit` at the tick `IsHit` became true (`fl` ticks since the launch, `wall`). A projectile from a point with
-  no attack roll, no on-hit trigger and no callback (the decorative `ProjectileSpawner`, `FxProjectileLauncher`)
-  is presentation: `proj_launch` with `pres`, never pinned. The fields are read, not resolved through getters
-  that cache (`UnitRef.Id`, not `UnitRef.Entity`).
+  `proj_hit` at the tick `IsHit` became true (`fl` ticks since the launch, `wall` its `IsHitWall`, `pd` its
+  `PassedDistance`). A projectile launched inside one of the two decorative launchers (`ProjectileSpawner.Fire`:
+  a scene's ambient spawner, random targets, always a miss; `FxProjectileLauncher.LaunchProjectile`: a scene
+  effect on a delay) is presentation: `proj_launch` with `pres`, never pinned. Every other one is pinned, a
+  point-launched ability projectile's too (the roll and range an ability sets after the launch don't count: the
+  key's contents are what the launch had). The fields are read, not resolved through getters that cache
+  (`UnitRef.Id`, not `UnitRef.Entity`).
 - **Replay**: a launch must be the recording's: same key and the same contents, within `Sched.Tol` of the
   recorded tick plus the offset so far. Its hit is due the recorded number of ticks after this replay's own
   launch (as `PathSync` dates deliveries from requests). Before then a hit the native flight makes is taken
-  back right after `Projectile.Tick` (`IsHit`, and `IsHitWall` if that tick set it, through their backing fields),
-  before anything reads them; on the due tick `IsHit` is set if the flight hasn't arrived. A recorded projectile
+  back right after `Projectile.Tick`, before anything reads it: `IsHit`, `IsHitWall` if that tick set it, and
+  `PassedDistance` back from the range it was clamped to to the sum `Tick` made (the same float expression), so
+  a line ability's sweep sees the recording's distance every tick. On the due tick `IsHit` is set if the flight
+  hasn't arrived (with `PassedDistance` clamped to `MaxRange`, as `Tick` does), `IsHitWall` is set to the
+  recording's, and a `PassedDistance` other than the recording's (bit for bit) invalidates. A recorded projectile
   that never hit in its window doesn't hit in the replay's. The replay's `proj_hit` says what the pin did
   (`held`: native hits taken back, `forced`).
 - **Invalid**: a launch the recording didn't make, or made with other contents or at another tick; a recorded
   launch that didn't happen by the window's end; a due hit that didn't happen (the projectile cleared or not
-  ticked: checked after every `ProjectileHitController.Tick`); `OnHit` on another tick than the hit; a projectile
-  launched before the window hitting inside it (unpinned); a recording without `proj_arrival` in its observers.
+  ticked: checked after every `ProjectileHitController.Tick`); `OnHit` on another tick than the hit; another
+  distance flown at the hit; a projectile launched before the window hitting inside it (unpinned); a recording
+  without `proj_arrival` in its observers, or whose launch and hit records lack or mistype a field.
 - End record (turn-based windows): `projectiles_tracked`, `projectile_hits_held`, `projectile_hits_forced`.
 
 Why this pin and not another [I]: taping the target point per flight tick would keep the native arithmetic but
