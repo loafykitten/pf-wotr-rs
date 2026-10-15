@@ -878,13 +878,12 @@ pub fn is_available(w: &mut World, f: FactIdx) -> bool {
 /// The fact's blueprint components of a type (`SelectComponentsWithRuntime<T>`: the enabled
 /// ones), in order.
 fn components_of(w: &mut World, f: FactIdx, ty: &str) -> Vec<(Rc<Blueprint>, usize)> {
-    // `BlueprintFact.CollectComponents()` (`ComponentsList`s expanded), the enabled ones.
-    w.blueprint_components(f)
-        .into_iter()
-        .filter(|(b, i)| {
-            let o = b.components_array()[*i];
-            is_a(o.ty, ty) && crate::content::View(o).int("m_Flags") & 1 == 0
-        })
+    // `EntityFact.SelectComponentsWithRuntime<T>()`: the fact's runtimes whose
+    // `SourceBlueprintComponent` is a `T` (a runtime not yet matched to its component, before
+    // the fact's post-load, has none).
+    (0..w.fact(f).components.len())
+        .filter_map(|comp| w.component(crate::world::CompRef { fact: f, comp }).source.clone())
+        .filter(|(b, i)| is_a(b.components_array()[*i].ty, ty))
         .collect()
 }
 
@@ -1012,14 +1011,16 @@ fn kensai_weapon_equipped(w: &mut World, u: EntityIdx, feature: Option<wr_conten
             .copied()
             .find(|f| w.fact(*f).kind == FactKind::Feature && w.fact(*f).blueprint == Some(g))
     });
-    let chosen = match fact {
-        Some(f)
-            if w.fact(f).bp.as_ref().is_some_and(|b| {
+    // `fact.GetComponent<KensaiChosenWeapon>()`: a runtime's source component, else the
+    // blueprint's own `ComponentsArray`.
+    let has_component = |w: &mut World, f: FactIdx| {
+        !components_of(w, f, "KensaiChosenWeapon").is_empty()
+            || w.fact(f).bp.as_ref().is_some_and(|b| {
                 b.components_array().iter().any(|o| is_a(o.ty, "KensaiChosenWeapon"))
-            }) =>
-        {
-            crate::feature_param::fact_param(w, f).weapon_category
-        }
+            })
+    };
+    let chosen = match fact {
+        Some(f) if has_component(w, f) => crate::feature_param::fact_param(w, f).weapon_category,
         _ => None,
     };
     let Some(chosen) = chosen else { return false };
