@@ -71,6 +71,11 @@ pub mod sites {
         "Assembly-CSharp|Kingmaker.EntitySystem.Entities.UnitEntityData|DropLootToGround(Boolean,Nullable`1,Boolean)|#0@237|Range(float,float)",
     );
 
+    /// `UnitMovementAgent.SlowDown`: `m_SlowDownTime = Random.Range(0.2f, 0.3f)`.
+    pub const AGENT_SLOW_DOWN: CallSite = CallSite(
+        "Assembly-CSharp|Kingmaker.View.UnitMovementAgent|SlowDown(Single&)|#0@211|Range(float,float)",
+    );
+
     /// `UnitCommand.TickApproaching`: `NextApproachTime = GameTime + Random.Range(0.2f, 0.6f)`.
     pub const TICK_APPROACHING: CallSite = CallSite(
         "Assembly-CSharp|Kingmaker.UnitLogic.Commands.Base.UnitCommand|TickApproaching()|#0@1147|Range(float,float)",

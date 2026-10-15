@@ -34,7 +34,8 @@ namespace WrathOracle;
 //    CompleteState) and the state after;
 //  - ag_call / ag_call_end: Stop, CompleteMovement, InterruptMovement, SetWaypoint, ForcePath and
 //    FollowPrecomputedPath, with the caller chain (origin) and the state after;
-//  - ag_init: at the window's first tick, every agent of UnitMovementAgentBase.AllAgents in order, with its state,
+//  - ag_init: at the window's first tick, every agent of UnitMovementAgentBase.AllAgents in order (enabled), then every
+//    other unit's agent (disabled views), with its state,
 //    the unit's position and m_Orientation (paths it holds are defined first, ag_pathdef);
 //  - ag_ctl / ag_ctl_end: UnitMoveController.TickUnit, the unit's position before; its position and orientation after;
 //  - ag_v corp, cells, fudge, speedmps, navnode, move: PathTo's, FindPath's and ConstructTags' reads (corpulence, size in
@@ -44,6 +45,8 @@ namespace WrathOracle;
 //  - ag_cb / ag_cb_end: the agent's calls into the view (OnMovementInterrupted with the destination,
 //    OnMovementComplete, OnMovementWaypointUpdate with the index);
 //  - ag_rot: UnitEntityData.UpdateSlowRotation's inputs (m_Orientation, DesiredOrientation, maxAngle);
+//  - ag_findclr: FindPath's callback (the AI's path delivered: m_RequestedFindPath cleared), with the path;
+//  - ag_enable: UnitMovementAgent.OnEnable/OnDisable (the agent joins or leaves AllAgents; its index after);
 //  - ag_ground: UnitPlaceOnGroundController.TickUnit (physics: an input for now), the position before and after;
 //  - ag_pathdef: a path's definition the first time the window refers to it (PathSync key, or an observer id for a path
 //    PathSync didn't see), with its points, error and CompleteState, so paths carried into the window are known;
@@ -289,31 +292,47 @@ internal static partial class CommandObs
     {
         try
         {
+            // AllAgents (the enabled agents, in their order), then every other unit's agent (a disabled view's:
+            // UnitMoveController still ticks its unit).
             var all = AllAgentsField().ToList();
             var index = 0;
+            var seen = new HashSet<UnitMovementAgentBase>();
             foreach (var b in all)
             {
                 var i = index++;
-                if (!(b is UnitMovementAgent a))
-                {
-                    var kind = b != null ? b.GetType().Name : "null";
-                    Sched.Obs("ag_init", j => { j.Prop("i", i); j.Prop("kind", kind); });
-                    continue;
-                }
-                var u = UnitOfAgent(a);
-                var view = a.Unit != null ? a.Unit.UniqueId : null;
-                var data = a.Unit != null ? a.Unit.EntityData : null;
-                Vector3? pos = data != null ? data.Position : (Vector3?)null;
-                float? orient = data != null ? OrientationField(data) : (float?)null;
-                var s = Snap(a);
-                Sched.Obs("ag_init", j =>
-                {
-                    j.Prop("i", i); j.Prop("kind", "UnitMovementAgent"); j.Prop("u", u); j.Prop("view", view);
-                    NullableVec(j, "upos", pos); NullableFloat(j, "orient", orient); WriteState(j, s);
-                });
+                seen.Add(b);
+                AgInitOne(b, i, true);
+            }
+            foreach (var unit in StateDump.AllUnits(Kingmaker.Game.Instance))
+            {
+                var b = unit?.View != null ? unit.View.MovementAgent : null;
+                if (b == null || seen.Contains(b)) continue;
+                seen.Add(b);
+                AgInitOne(b, -1, false);
             }
         }
         catch (Exception e) { Trace.HookFailed("observe ag_init", e); }
+    }
+
+    private static void AgInitOne(UnitMovementAgentBase b, int i, bool enabled)
+    {
+        if (!(b is UnitMovementAgent a))
+        {
+            var kind = b != null ? b.GetType().Name : "null";
+            Sched.Obs("ag_init", j => { j.Prop("i", i); j.Prop("enabled", enabled); j.Prop("kind", kind); });
+            return;
+        }
+        var u = UnitOfAgent(a);
+        var view = a.Unit != null ? a.Unit.UniqueId : null;
+        var data = a.Unit != null ? a.Unit.EntityData : null;
+        Vector3? pos = data != null ? data.Position : (Vector3?)null;
+        float? orient = data != null ? OrientationField(data) : (float?)null;
+        var s = Snap(a);
+        Sched.Obs("ag_init", j =>
+        {
+            j.Prop("i", i); j.Prop("enabled", enabled); j.Prop("kind", "UnitMovementAgent"); j.Prop("u", u); j.Prop("view", view);
+            NullableVec(j, "upos", pos); NullableFloat(j, "orient", orient); WriteState(j, s);
+        });
     }
 
     // ---- TickMovement ----
@@ -816,6 +835,38 @@ internal static partial class CommandObs
         catch (Exception e) { Trace.HookFailed("observe ag_call_end", e); }
     }
 
+    // ---- UnitMovementAgent.OnEnable / OnDisable: the agent joins or leaves AllAgents ----
+
+    public static void AgEnablePostfix(UnitMovementAgent __instance, MethodBase __originalMethod)
+    {
+        try
+        {
+            if (!AgObserved()) return;
+            var u = UnitOfAgent(__instance);
+            var view = __instance.Unit != null ? __instance.Unit.UniqueId : null;
+            var on = __originalMethod.Name == "OnEnable";
+            var i = AllAgentsField().IndexOf(__instance);
+            Sched.Obs("ag_enable", j => { j.Prop("u", u); j.Prop("view", view); j.Prop("on", on); j.Prop("i", i); });
+        }
+        catch (Exception e) { Trace.HookFailed("observe ag_enable", e); }
+    }
+
+    // ---- FindPath's own callback (a compiler-generated lambda: `m_RequestedFindPath = null; ReleaseClaimedPath()`),
+    // run when the AI's path is delivered: recorded in replays too (PathSync writes path_ret only when recording) ----
+
+    public static void AgFindClearPrefix(UnitMovementAgent __instance, Path p)
+    {
+        try
+        {
+            if (!AgObserved()) return;
+            var u = UnitOfAgent(__instance);
+            var key = PathRef(p);
+            var held = PathRef(AgRequestedFind(__instance));
+            Sched.Obs("ag_findclr", j => { j.Prop("u", u); j.Prop("path", key); j.Prop("held", held); });
+        }
+        catch (Exception e) { Trace.HookFailed("observe ag_findclr", e); }
+    }
+
     // ---- UnitMoveController.TickUnit ----
 
     public static void AgCtlPrefix(UnitEntityData unit)
@@ -842,7 +893,14 @@ internal static partial class CommandObs
             var pos = unit.Position;
             var orient = unit.Orientation;
             var view = unit.View != null ? unit.View.transform.position : (Vector3?)null;
-            Sched.Obs("ag_ctl_end", j => { j.Prop("u", u); j.Prop("pos", pos); j.Prop("orient", orient); NullableVec(j, "vpos", view); });
+            // The agent's state after the tick (UpdateVelocity included).
+            var agent = unit.View != null ? unit.View.AgentASP : null;
+            var st = agent != null ? Snap(agent) : null;
+            Sched.Obs("ag_ctl_end", j =>
+            {
+                j.Prop("u", u); j.Prop("pos", pos); j.Prop("orient", orient); NullableVec(j, "vpos", view);
+                if (st != null) WriteState(j, st);
+            });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_ctl_end", e); }
     }
@@ -1073,6 +1131,12 @@ internal static partial class CommandObs
         foreach (var n in new[] { "Stop", "CompleteMovement", "InterruptMovement", "SetWaypoint", "ForcePath", "FollowPrecomputedPath" })
             patch(M(Ag, n), nameof(AgCallPrefix), nameof(AgCallPostfix), null);
         patch(M(typeof(UnitMoveController), "TickUnit"), nameof(AgCtlPrefix), null, nameof(AgCtlFinalizer));
+        // FindPath's callback lambda: the only compiler-generated method of the agent whose name starts so.
+        var findLambdas = Ag.GetMethods(all).Where(m => m.Name.StartsWith("<FindPath>b__", StringComparison.Ordinal)).ToList();
+        if (findLambdas.Count != 1) Fail($"FindPath's callback: {findLambdas.Count} candidate lambdas");
+        else patch(findLambdas[0], nameof(AgFindClearPrefix), null, null);
+        patch(M(Ag, "OnEnable"), null, nameof(AgEnablePostfix), null);
+        patch(M(Ag, "OnDisable"), null, nameof(AgEnablePostfix), null);
         patch(M(typeof(UnitPlaceOnGroundController), "TickUnit"), nameof(AgGroundPrefix), null, nameof(AgGroundFinalizer));
         patch(M(typeof(UnitEntityData), nameof(UnitEntityData.UpdateSlowRotation)), nameof(AgRotPrefix), null, null);
         patch(M(typeof(ObstaclesHelper), nameof(ObstaclesHelper.ConnectToGroups)), nameof(AgConnectPrefix), null, nameof(AgConnectFinalizer));

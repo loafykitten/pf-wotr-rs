@@ -471,6 +471,16 @@ pub fn wants_to_move(w: &World, u: EntityIdx) -> R<bool> {
     Ok(a.path.is_some() || a.requested.is_some())
 }
 
+/// `NearTheEnd`: on the last segment, after the first tick, within 0.1 of the last waypoint
+/// (the view's position in XZ).
+pub fn near_the_end(w: &World, u: EntityIdx) -> R<bool> {
+    let a = agent(w, u)?;
+    if !on_last_segment(a) || a.first_tick {
+        return Ok(false);
+    }
+    Ok(m::distance(a.next_wp, m::to2d(a.pos)) < 0.1)
+}
+
 /// `ResetStuck`.
 fn reset_stuck(a: &mut Agent) {
     a.stuck_stop = 0.0;

@@ -148,6 +148,15 @@ pub struct Outcome {
     pub imp_handlers: usize,
     pub imp_states: usize,
     pub imp_draws: usize,
+    /// The movement agent (`agent` observer): its entries run (`TickUnit`, `PathTo`,
+    /// `OnPathComplete`, calls), the states checked, the units ticked, the requests checked, its
+    /// draws, and what it still takes from the recording, by kind.
+    pub ag_entries: usize,
+    pub ag_states: usize,
+    pub ag_ticks: usize,
+    pub ag_requests: usize,
+    pub ag_draws: usize,
+    pub ag_inputs: std::collections::BTreeMap<&'static str, usize>,
 }
 
 /// Who triggered a root rule, from its recorded call site (`origin`: the game's methods,
@@ -874,6 +883,24 @@ struct Driver<'t> {
     /// and whether their block closed, the frame of its last tick, the `UpdatePriorityTarget`
     /// entries from `TurnController.Prepare` not yet matched, its draws' numeric sites.
     imp: bool,
+    /// The movement agent is the sim's (the `agent` observer with `ag_init`): path contents by
+    /// key, the agents in `AllAgents` order, each unit's last recorded agent state, the current
+    /// `TickMovement`'s and `PathTo`'s records, `SlowDown`'s draw sites, the grid's erosion
+    /// settings (the area's nav file).
+    ag: bool,
+    ag_paths: HashMap<String, Vec<[f32; 3]>>,
+    ag_all: Vec<EntityIdx>,
+    ag_last_state: HashMap<EntityIdx, J>,
+    ag_tick_rec: Option<J>,
+    ag_req_rec: Option<J>,
+    ag_slow_sites: Vec<i64>,
+    ag_erosion: Result<Option<(i32, i32)>, String>,
+    /// The agents whose next recorded state is taken (a real-time span came before it).
+    ag_after_rt: std::collections::HashSet<EntityIdx>,
+    /// The frame of each unit's last `TickUnit`.
+    ag_last_ctl: HashMap<EntityIdx, i64>,
+    /// The capture records FindPath's callback (`ag_findclr`).
+    ag_has_findclr: bool,
     imp_init_n: usize,
     imp_init_closed: bool,
     imp_tick_frame: Option<i64>,
@@ -1115,6 +1142,17 @@ impl<'t> Driver<'t> {
             tgt_click: None,
             tgt_runs: Vec::new(),
             imp: false,
+            ag: false,
+            ag_paths: HashMap::new(),
+            ag_all: Vec::new(),
+            ag_last_state: HashMap::new(),
+            ag_tick_rec: None,
+            ag_req_rec: None,
+            ag_slow_sites: Vec::new(),
+            ag_erosion: Ok(None),
+            ag_after_rt: std::collections::HashSet::new(),
+            ag_last_ctl: HashMap::new(),
+            ag_has_findclr: false,
             imp_init_n: 0,
             imp_init_closed: false,
             imp_tick_frame: None,
@@ -1260,6 +1298,27 @@ impl<'t> Driver<'t> {
         // The impatience controller is the sim's with the `impatience` observer.
         w.combat.impatience.on = w.combat.targets.on && declared.contains(&"impatience");
         d.imp = w.combat.impatience.on;
+        // The movement agent is the sim's with the `agent` observer's initial states (`ag_init`,
+        // since poc5-tb-106); an older capture's agent records are taken as before.
+        d.ag = d.imp && declared.contains(&"agent") && recs.iter().any(|r| r["ev"] == "ag_init");
+        d.ag_has_findclr = d.ag && recs.iter().any(|r| r["ev"] == "ag_findclr");
+        if d.ag {
+            d.ag_slow_sites = trace
+                .sites
+                .iter()
+                .filter(|(_, v)| v.0 == crate::rng::sites::AGENT_SLOW_DOWN.0)
+                .map(|(k, _)| *k)
+                .collect();
+            d.ag_erosion = match w.player.area {
+                None => Err("the save names no current area (its nav file)".to_owned()),
+                Some(g) => match wr_nav::NavFile::read(&wr_nav::path_for(&g.to_string())) {
+                    Ok(f) => {
+                        Ok(f.world.grid.as_ref().map(|g| (g.erode_iterations, g.erosion_first_tag)))
+                    }
+                    Err(e) => Err(format!("the area's nav file: {e:#}")),
+                },
+            };
+        }
         d.imp_sites = trace
             .sites
             .iter()
@@ -2768,6 +2827,10 @@ impl Driver<'_> {
             {
                 return self.uc_record(w, i);
             }
+            Some("obs") if self.ag && r["ev"].as_str().is_some_and(|e| e.starts_with("ag_")) => {
+                return self.ag_record(w, i);
+            }
+            Some("obs") if self.ag && r["ev"] == "path_ret" => self.ag_path_ret(w, r),
             Some("obs") => self.obs(w, r),
             // The clocks after `TimeController.Tick`.
             Some("time") => {
@@ -4214,6 +4277,7 @@ fn pos_pair(at: &J) -> Option<([f32; 3], [f32; 3])> {
     Some((pos(&at["initiator_pos"])?, pos(&at["target_pos"])?))
 }
 
+mod agent;
 mod ai;
 mod commands;
 mod engage;
