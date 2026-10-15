@@ -169,6 +169,11 @@ impl<K: Copy + Eq + Hash, V> CsDict<K, V> {
         if free != free_count {
             return None;
         }
+        // With no freed slot the head is -1, or 0 in a dictionary that never held a key (its
+        // arrays not yet made: no slots).
+        if free_count == 0 && free_list != -1 && !(free_list == 0 && entries.is_empty()) {
+            return None;
+        }
         let free_list = if free_count == 0 { -1 } else { free_list };
         // The chain from `freeList` visits every freed slot once and ends at -1.
         let mut at = free_list;
@@ -271,8 +276,12 @@ mod tests {
         assert!(
             CsDict::from_slots(vec![RawSlot::Used(1, 1), RawSlot::Used(1, 2)], -1, 0).is_none()
         );
-        // With no freed slot, freeList isn't read (0 in a dictionary that never held a key).
+        // With no freed slot, freeList isn't read: -1, or 0 in a dictionary that never held a key.
         let f = CsDict::<i32, i32>::from_slots(Vec::new(), 0, 0).unwrap();
         assert_eq!(f.slots().1, -1);
+        assert!(CsDict::from_slots(vec![RawSlot::Used(1, 1)], -1, 0).is_some());
+        assert!(CsDict::from_slots(vec![RawSlot::Used(1, 1)], 0, 0).is_none());
+        assert!(CsDict::from_slots(vec![RawSlot::Used(1, 1)], 42, 0).is_none());
+        assert!(CsDict::<i32, i32>::from_slots(Vec::new(), 42, 0).is_none());
     }
 }
