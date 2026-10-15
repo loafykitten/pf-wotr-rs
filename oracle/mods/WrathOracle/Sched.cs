@@ -179,7 +179,8 @@ internal static class Sched
             if ((string)o["ev"] == "path_ret") PathSync.AddTape((string)o["path"], (int)o["t"], (int)o["c"], (int?)o["req"] ?? -1);
             if ((string)o["ev"] == "path_start")
                 PathSync.AddStartTape((string)o["path"], o["e"] is JArray e && e.Count == 3 ? new UnityEngine.Vector3((float)e[0], (float)e[1], (float)e[2]) : (UnityEngine.Vector3?)null, (bool?)o["strict"] ?? true);
-            if ((bool?)o["g"] == true) _gates.Add(new GateRec { Ev = (string)o["ev"], D = (string)o["d"], T = (int)o["t"] });
+            // Gates carry "g": true; other records use "g" for other things (the memory observer: a group id).
+            if (o["g"]?.Type == JTokenType.Boolean && (bool)o["g"]) _gates.Add(new GateRec { Ev = (string)o["ev"], D = (string)o["d"], T = (int)o["t"] });
         }
         else if (kind == "input")
         {
