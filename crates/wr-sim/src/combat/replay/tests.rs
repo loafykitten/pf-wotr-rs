@@ -517,6 +517,7 @@ fn resolves_match_by_the_attacks_identity() {
         target: EntityIdx(2),
         damage: None,
         attack_hit: true,
+        attack_result: 1,
         weapon_melee: false,
         source_id: Some(source),
     };

@@ -60,6 +60,7 @@ fn the_cast_is_the_sims() {
         .expect("json");
         let r = wr_sim::compare::compare(&sheet, &end);
         assert!((r.match_rate - 1.0).abs() < f64::EPSILON, "{run}: {:?}", r.diffs);
+        assert!(r.units_missing_ours.is_empty() && r.units_missing_oracle.is_empty(), "{run}");
         // Seelah is Large, by the buff's one size change.
         let seelah = w.by_id["558A"];
         assert_eq!(
@@ -123,6 +124,13 @@ fn the_revealed_flys_fight_is_valid() {
         .expect("json");
         let r = wr_sim::compare::compare(&sheet, &end);
         assert!((r.match_rate - 1.0).abs() < f64::EPSILON, "{run}: {:?}", r.diffs);
+        assert!(r.units_missing_ours.is_empty() && r.units_missing_oracle.is_empty(), "{run}");
+        // The bite's disease trigger ran its actions: their difficulty condition was evaluated.
+        assert!(
+            w.coverage.executed.contains_key("condition ContextConditionDifficultyHigherThan"),
+            "{run}: {:?}",
+            w.coverage.executed.keys().filter(|k| k.starts_with("condition")).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -304,6 +312,53 @@ fn missing_or_wrong_cast_records_are_reported() {
                 out.diff.equal,
                 w.coverage.unsupported.keys().collect::<Vec<_>>()
             ));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// The projectile pin's launch records (`proj_launch`, `poc5-tb-123`'s one ranged attack) are
+/// matched with the sim's launches: another attack result (even another hit), an unknown one,
+/// another blueprint or a missing launch is reported.
+#[test]
+#[ignore = "needs the game's packs, cache/sim/log-strings.json and rules-data.json, Manual_18 and the poc5-tb-123 capture"]
+fn wrong_projectile_launches_are_reported() {
+    let Some(dir) = fixture_in(CHAIN_REVEALED.0, CHAIN_REVEALED.1) else {
+        eprintln!("{}/{} not present: skipped", CHAIN_REVEALED.0, CHAIN_REVEALED.1);
+        return;
+    };
+    /// The first projectile launch record.
+    fn launch(recs: &[V]) -> usize {
+        recs.iter().position(|r| r["ev"] == "proj_launch").expect("the ranged attack's launch")
+    }
+    let cases: [Change; 4] = [
+        |recs| {
+            let at = launch(recs);
+            recs[at]["res"] = json!("CriticalHit");
+        },
+        |recs| {
+            let at = launch(recs);
+            recs[at]["res"] = json!("NotAResult");
+        },
+        |recs| {
+            let at = launch(recs);
+            recs[at]["bp"] = json!("00000000000000000000000000000006");
+        },
+        |recs| {
+            let at = launch(recs);
+            recs.remove(at);
+            renumber(recs);
+        },
+    ];
+    let mut missed = Vec::new();
+    for (i, change) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+        change(&mut changed.records);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if !w.coverage.unsupported.keys().any(|k| k.contains("projectiles launched differ")) {
+            missed
+                .push(format!("case {i}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>()));
         }
     }
     assert!(missed.is_empty(), "{missed:#?}");

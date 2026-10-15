@@ -955,7 +955,8 @@ fn the_difficulty_condition_compares_the_presets_stats_adjustments() {
             path_id: 77,
             is_custom_mode: false,
             preset: DifficultyPreset {
-                game_difficulty: 4,
+                // Not the stats adjustments: the condition reads `Preset.StatsAdjustments`.
+                game_difficulty: 1,
                 death_door: false,
                 dead_companions_rise_after_combat: false,
                 remove_negative_effects_on_rest: false,

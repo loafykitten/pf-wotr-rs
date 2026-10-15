@@ -320,6 +320,11 @@ fn attack_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
             w.coverage.unsupported("AttackBonusConditional: the fact has no context");
             return;
         }
+        // A null `Conditions` or `Bonus` throws in the C# (a handler exception): reported.
+        if v.obj("Conditions").is_none() || v.obj("Bonus").is_none() {
+            w.coverage.unsupported("AttackBonusConditional: a null Conditions or Bonus");
+            return;
+        }
         let pass = crate::elements::with_ctx(
             w,
             crate::elements::Ctx::Mechanics {
@@ -370,6 +375,11 @@ fn damage_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
         w.coverage.unsupported("DamageBonusConditional: the fact has no context");
         return;
     }
+    // A null `Conditions` or `Bonus` throws in the C# (a handler exception): reported.
+    if v.obj("Conditions").is_none() || v.obj("Bonus").is_none() {
+        w.coverage.unsupported("DamageBonusConditional: a null Conditions or Bonus");
+        return;
+    }
     let pass = crate::elements::with_ctx(
         w,
         crate::elements::Ctx::Mechanics {
@@ -383,6 +393,11 @@ fn damage_bonus_conditional(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent,
     }
     if v.bool("OnlyWeaponDamage") {
         w.coverage.unsupported("DamageBonusConditional: OnlyWeaponDamage (the bundle's weapon)");
+        return;
+    }
+    // `First?.AddModifierTargetRelated(Bonus.Calculate(Context), …)`: no first damage, no
+    // evaluation.
+    if evt.bundle.is_empty() {
         return;
     }
     let value = context_value(w, c, v.obj("Bonus"));

@@ -2116,8 +2116,8 @@ impl Inputs for Driver<'_> {
         }
         // With the projectile pin's observer (`proj_arrival`), its launches in the span (placed by
         // `span_ok`) are the sim's, in order (`LaunchProjectile`: one per blueprint, its resolve
-        // the on-hit trigger, no callback): its blueprint and whether its attack hit
-        // (`AttackResult`).
+        // the on-hit trigger, no callback): its blueprint and its attack roll's exact
+        // `AttackResult`.
         if self.trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
             b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
         }) {
@@ -2125,12 +2125,22 @@ impl Inputs for Driver<'_> {
                 .iter()
                 .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
                 .collect();
-            let made: Vec<bool> =
-                w.combat.pending_resolves.iter().skip(before).map(|p| p.attack_hit).collect();
+            let made: Vec<Option<&str>> = w
+                .combat
+                .pending_resolves
+                .iter()
+                .skip(before)
+                .map(|p| {
+                    usize::try_from(p.attack_result)
+                        .ok()
+                        .and_then(|i| crate::combat::attack::ATTACK_RESULTS.get(i).copied())
+                })
+                .collect();
             let ok = launches.len() == made.len()
                 && made.len() == projectiles.len()
-                && launches.iter().zip(&made).zip(&projectiles).all(|((l, hit), bp)| {
-                    matches!(l["res"].as_str(), Some("Hit" | "CriticalHit")) == *hit
+                && launches.iter().zip(&made).zip(&projectiles).all(|((l, res), bp)| {
+                    res.is_some()
+                        && l["res"].as_str() == *res
                         && l["bp"].as_str() == Some(bp.as_str())
                         && l["trig"] == "RuleAttackWithWeaponResolve"
                         && l["cb"] == false

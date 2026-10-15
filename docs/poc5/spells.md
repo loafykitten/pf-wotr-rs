@@ -67,8 +67,9 @@ not modelled, or of a unit the sim doesn't have is reported. `poc5-tb-123` is th
 
 The projectile pin (stream L's `proj_launch`, accepted in the attack's span by `span_ok`): after
 the sim fires a command's attack, the launches recorded in its span are matched with the sim's, in
-order (`LaunchProjectile`: one per projectile blueprint of the weapon, its hit, the resolve as the
-on-hit trigger, no callback); another count or content is reported.
+order (`LaunchProjectile`: one per projectile blueprint of the weapon, its roll's exact
+`AttackResult`, the resolve as the on-hit trigger, no callback); another count or content is
+reported.
 
 ## Spellcasting (`tb-cast`)
 
@@ -186,7 +187,11 @@ inputs, the driver's spell and slot, the cast's end chain), each reported or T0-
 `replay::tests`: a recorded reveal queues the unit as the game did; reveals the replay can't place
 are reported. `facts::tests::an_apply_buff_with_a_context_duration_lasts_its_rounds`,
 `facts::tests::the_difficulty_condition_compares_the_presets_stats_adjustments`.
-`poc5_spells::the_revealed_flys_fight_is_valid`: every `poc5-tb-123` run valid, end state equal.
+`poc5_spells::the_revealed_flys_fight_is_valid`: every `poc5-tb-123` run valid, end state equal
+(no unit missing on either side), the disease's difficulty condition evaluated.
+`poc5_spells::wrong_projectile_launches_are_reported`: its ranged attack's launch record with
+another result (a critical hit for a hit), an unknown one, another blueprint, or none, each
+reported.
 
 ## Next
 

@@ -43,6 +43,20 @@ pub mod result {
     pub const PARRIED: i32 = 9;
 }
 
+/// `AttackResult`'s names, by value.
+pub const ATTACK_RESULTS: [&str; 10] = [
+    "Unknown",
+    "Hit",
+    "CriticalHit",
+    "Miss",
+    "DodgeAC",
+    "ArmorAC",
+    "ShieldAC",
+    "MirrorImage",
+    "Concealment",
+    "Parried",
+];
+
 /// `AttackResultExtensions.IsHit`.
 #[must_use]
 pub fn is_hit_result(r: i32) -> bool {
@@ -1786,6 +1800,8 @@ pub struct RuleAttackWithWeaponResolve {
     pub target: EntityIdx,
     pub damage: Option<RuleDealDamage>,
     pub attack_hit: bool,
+    /// Its attack roll's `Result` (`AttackResult`, as a projectile's `AttackResult` holds it).
+    pub attack_result: i32,
     pub weapon_melee: bool,
     /// The recorded id of the `RuleAttackWithWeapon` that launched it (a replay's identity).
     pub source_id: Option<i64>,
@@ -1901,6 +1917,7 @@ impl RuleAttackWithWeapon {
                 target: t,
                 damage,
                 attack_hit: roll.is_hit(),
+                attack_result: roll.result,
                 weapon_melee: false,
                 source_id: None,
             };
@@ -2058,6 +2075,7 @@ impl RuleEvent for RuleAttackWithWeapon {
             target: t,
             damage,
             attack_hit: roll.is_hit(),
+            attack_result: roll.result,
             weapon_melee: self.weapon.is_melee(),
             source_id: None,
         };
