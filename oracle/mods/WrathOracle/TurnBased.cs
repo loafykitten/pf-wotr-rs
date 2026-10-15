@@ -217,8 +217,29 @@ internal static class TurnBased
     private static string Str(Newtonsoft.Json.Linq.JToken t) =>
         t is Newtonsoft.Json.Linq.JValue v && v.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string)v : null;
 
-    private static int? Int(Newtonsoft.Json.Linq.JToken t) =>
-        t is Newtonsoft.Json.Linq.JValue v && v.Type == Newtonsoft.Json.Linq.JTokenType.Integer ? (int?)(long)v : null;
+    // A record's spell level: an integer 0 to 10, else null (never narrowed).
+    private static int? Level(Newtonsoft.Json.Linq.JToken t)
+    {
+        if (!(t is Newtonsoft.Json.Linq.JValue v) || v.Type != Newtonsoft.Json.Linq.JTokenType.Integer || !(v.Value is long l)) return null;
+        return l >= 0 && l <= 10 ? (int?)l : null;
+    }
+
+    // A record's unit reference written by Snap.UnitRef, {"$unit": "<non-empty string>"}, else null (no coercion).
+    private static string StrictRefId(Newtonsoft.Json.Linq.JToken t) =>
+        t is Newtonsoft.Json.Linq.JObject o && o["$unit"] is Newtonsoft.Json.Linq.JValue v &&
+        v.Type == Newtonsoft.Json.Linq.JTokenType.String && !string.IsNullOrEmpty((string)v) ? (string)v : null;
+
+    // A record's spellbook field: present, and an explicit null or a GUID; `ok` false otherwise.
+    private static string SpellbookField(Newtonsoft.Json.Linq.JObject rec, out bool ok)
+    {
+        var t = rec["spellbook"];
+        ok = false;
+        if (t == null) return null;
+        if (t.Type == Newtonsoft.Json.Linq.JTokenType.Null) { ok = true; return null; }
+        var g = Str(t);
+        ok = IsGuid(g);
+        return g;
+    }
 
     private static bool Alive(UnitEntityData u) => u != null && u.IsInGame && !u.State.IsDead && u.IsInCombat;
 
@@ -384,7 +405,7 @@ internal static class TurnBased
                     // with the same target (or none) and must reach the same input for the same reason (IssueCast
                     // checks the recorded `why`). The target field must be there: a unit reference or null.
                     var t = rec["target"];
-                    var id = RefId(t);
+                    var id = StrictRefId(t);
                     if (t == null || (t.Type != Newtonsoft.Json.Linq.JTokenType.Null && id == null))
                     {
                         Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} has a malformed target");
@@ -395,7 +416,9 @@ internal static class TurnBased
                 else if (why == null && cast)
                 {
                     // A cast's target needn't be in combat (an ally out of it): in the game, as the spell allows.
-                    target = FindUnit(RefId(rec["target"]));
+                    var id = StrictRefId(rec["target"]);
+                    if (id == null) { Sched.Invalidate($"recorded {step} by {wantUnit} at tick {tick} has a malformed target"); yield break; }
+                    target = FindUnit(id);
                     if (target == null) why = "target not found";
                     else if (!CastTargetPresent(target)) why = "target not in the game";
                 }
@@ -606,12 +629,14 @@ internal static class TurnBased
         // ClickWithSelectedAbilityHandler.CreateCommand's other branches (custom move or attack, items, service
         // casters), touch spells (delivered by a second click) and casts on the caster or a point aren't driven.
         if (bp.GetComponent<AbilityCustomMove>() != null || bp.GetComponent<AbilityCustomAttack>() != null ||
-            bp.StickyTouch != null || spell.SourceItem != null || spell.IsCastByServiceCaster || spell.IsVariable ||
+            bp.StickyTouch != null || bp.CanCastToDeadTarget || spell.SourceItem != null || spell.IsCastByServiceCaster || spell.IsVariable ||
             spell.TargetAnchor != AbilityTargetAnchor.Unit)
             return CastError($"cast/{guid}: the driver casts only plain unit-targeted spells from the action bar");
-        if (rec != null &&
-            (Str(rec["slot"]) != found.Kind || Int(rec["level"]) != found.Level || Str(rec["spellbook"]) != SpellbookGuid(spell)))
-            return CastError($"cast/{guid}: the recorded slot ({Str(rec["slot"])}, level {Int(rec["level"])}, spellbook {Str(rec["spellbook"])}) " +
+        string recBook = null;
+        var bookOk = true;
+        if (rec != null) recBook = SpellbookField(rec, out bookOk);
+        if (rec != null && (!bookOk || Str(rec["slot"]) != found.Kind || Level(rec["level"]) != found.Level || recBook != SpellbookGuid(spell)))
+            return CastError($"cast/{guid}: the recorded slot ({Str(rec["slot"])}, level {Level(rec["level"])}, spellbook {(bookOk ? recBook : "malformed")}) " +
                 $"is not the one found ({found.Kind}, level {found.Level}, spellbook {SpellbookGuid(spell)})");
         var pc = Game.Instance.ClickEventsController;
         if (pc == null || pc != Game.Instance.DefaultPointerController || pc.Mode != PointerMode.Default)
