@@ -11,7 +11,7 @@
 
 use serde::Serialize;
 
-use super::astar::{self, PathKind, Request, SearchResult, State};
+use super::astar::{self, Ending, LosFn, PathKind, Request, SearchResult, State};
 use super::cs::{self, V3, d, r};
 use super::nearest::Constraint;
 use super::world::{Kind, NodeId, World};
@@ -60,6 +60,32 @@ pub struct QueryOut {
     pub tb_clearance_05: Option<PathOut>,
     #[serde(rename = "tb_clearance_1.0")]
     pub tb_clearance_10: Option<PathOut>,
+}
+
+/// A turn-based path request, as `SeekerWithClearance.StartPathWithClerance` builds it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TurnBasedRequest {
+    pub start: V3,
+    pub end: V3,
+    /// The seeker's clearance (`(corpulence * 2, 0, corpulence * 2)`, or zero).
+    pub clearance: V3,
+    /// The seeker's `traversableTags` (`UnitMovementAgent.ConstructTags`).
+    pub enabled_tags: i32,
+    /// `Seeker.StartPath`'s graph mask (2: the grid).
+    pub graph_mask: i32,
+    pub ending: Ending,
+    /// `RequestedPath.nnConstraint.distanceXZ` (`PathTo`'s argument, set after `StartPath`).
+    pub distance_xz: bool,
+}
+
+/// A computed turn-based path.
+#[derive(Debug, Clone)]
+pub struct TurnBasedPath {
+    pub search: SearchResult,
+    /// `vectorPath` before the modifiers (the traced node positions).
+    pub raw: Vec<V3>,
+    /// `vectorPath` as the callback sees it.
+    pub vector_path: Vec<V3>,
 }
 
 /// `Path.GetTotalLength`.
@@ -160,6 +186,9 @@ impl World {
                 graph_mask: self.mask_of(gi),
                 enabled_tags: -1,
                 calculate_partial: false,
+                clearance: None,
+                ending: Ending::Ab,
+                distance_xz: false,
             },
         );
         let pts = s.vector_path.clone();
@@ -180,6 +209,9 @@ impl World {
                 graph_mask: 1,
                 enabled_tags: -1,
                 calculate_partial: false,
+                clearance: None,
+                ending: Ending::Ab,
+                distance_xz: false,
             },
         );
         if s.state == State::Error {
@@ -205,6 +237,9 @@ impl World {
                 graph_mask: self.mask_of(gi),
                 enabled_tags: -1,
                 calculate_partial: false,
+                clearance: None,
+                ending: Ending::Ab,
+                distance_xz: false,
             },
         );
         let pts = s.vector_path.clone();
@@ -241,6 +276,9 @@ impl World {
                 graph_mask: 2,
                 enabled_tags: self.turn_based_tags(corpulence),
                 calculate_partial: false,
+                clearance: None,
+                ending: Ending::Ab,
+                distance_xz: false,
             },
         );
         if s.state == State::Error {
@@ -250,6 +288,44 @@ impl World {
         v = self.funnel_modifier(&s.path, &v);
         v = self.raycast_modifier(&s.path, &v, &s.constraint);
         Some(self.path_out(&s, v, None))
+    }
+
+    /// A turn-based path as the movement agent's seeker computes it
+    /// (`SeekerWithClearance.StartPathWithClerance`): `ABPathWithClearance` on the graphs
+    /// `req.graph_mask` selects, then, unless it failed, the seeker's modifiers in order
+    /// (`StartEndModifier` with the original start point, the enabled `FunnelModifier`,
+    /// `RaycastModifier` with graph raycasting). Line-of-sight answers come from `los`; a
+    /// search that needed one it didn't get stops (`search.los_unknown`) without
+    /// modifiers.
+    #[must_use]
+    pub fn turn_based_path<'l>(
+        &self,
+        req: &TurnBasedRequest,
+        los: &'l mut LosFn<'l>,
+    ) -> TurnBasedPath {
+        let s = astar::run_with_los(
+            self,
+            &Request {
+                kind: PathKind::X,
+                start: req.start,
+                end: req.end,
+                graph_mask: req.graph_mask,
+                enabled_tags: req.enabled_tags,
+                calculate_partial: false,
+                clearance: Some(req.clearance),
+                ending: req.ending,
+                distance_xz: req.distance_xz,
+            },
+            los,
+        );
+        let raw = s.vector_path.clone();
+        if s.state == State::Error || s.los_unknown.is_some() {
+            return TurnBasedPath { vector_path: raw.clone(), raw, search: s };
+        }
+        let mut v = Self::start_end(&s, s.vector_path.clone());
+        v = self.funnel_modifier(&s.path, &v);
+        v = self.raycast_modifier(&s.path, &v, &s.constraint);
+        TurnBasedPath { vector_path: v, raw, search: s }
     }
 
     /// All five kinds for one query.

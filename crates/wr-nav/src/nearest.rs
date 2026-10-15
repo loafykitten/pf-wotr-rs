@@ -64,7 +64,7 @@ impl Constraint {
         (self.graph_mask >> graph_index) & 1 != 0
     }
 
-    /// `NNConstraint.Suitable` (no ally blocking in a static snapshot).
+    /// `NNConstraint.Suitable` (with Owlcat's `constrainAllyBlocked`).
     #[must_use]
     pub fn suitable(&self, w: &World, n: NodeId) -> bool {
         if self.constrain_walkability && w.walkable(n) != self.walkable {
@@ -74,6 +74,9 @@ impl Constraint {
             return false;
         }
         if self.constrain_tags && (self.tags >> w.tag(n)) & 1 == 0 {
+            return false;
+        }
+        if self.constrain_ally_blocked && w.ally_blocked(n) > 0 {
             return false;
         }
         true

@@ -27,6 +27,9 @@ const ROTATE_TOWARDS: (usize, &str) = (0x81be34, "ffc300d1f44f01a9fd7b02a9fd8300
 const LOOK_ROTATION: (usize, &str) = (0x81c2d0, "f44fbea9fd7b01a9fd430091f30302aa");
 /// `Quaternion.Internal_ToEulerRad_Injected(ref rotation, out ret)`, the icall stub.
 const TO_EULER: (usize, &str) = (0x81c074, "ff0301d1f44f02a9fd7b03a9fdc30091");
+/// `BoundsScripting::Contains(const AABB&, const Vector3f&)`, which the icall
+/// `Bounds.Contains_Injected` (at 0x7ce45c) calls.
+const BOUNDS_CONTAINS: (usize, &str) = (0x4b4fa4, "200040bd010040bd020c40bd2338221e");
 
 #[repr(C)]
 struct Quat([f32; 4]);
@@ -62,6 +65,7 @@ impl Player {
             ROTATE_TOWARDS,
             LOOK_ROTATION,
             TO_EULER,
+            BOUNDS_CONTAINS,
         ] {
             // SAFETY: inside the loaded image's text segment.
             let have = unsafe { std::slice::from_raw_parts((p.base + off) as *const u8, 16) };
@@ -171,6 +175,18 @@ fn at_pole(q: [f32; 4]) -> bool {
     let m = (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt();
     let [x, y, z, w] = if m < 1e-5 { [0.0, 0.0, 0.0, 1.0] } else { q.map(|c| c / m) };
     (y * z - x * w).abs() >= f32::from_bits(0x3eff_ffde)
+}
+
+impl Player {
+    /// `Bounds.Contains(point)` on `Bounds { m_Center, m_Extents }`.
+    fn bounds_contains(&self, center: V3, extents: V3, p: V3) -> bool {
+        // SAFETY: `bool BoundsScripting::Contains(const AABB&, const Vector3f&)`; `AABB` is
+        // the centre then the extents, six floats.
+        let fun: extern "C" fn(*const [f32; 6], *const V3) -> bool =
+            unsafe { std::mem::transmute(self.base + BOUNDS_CONTAINS.0) };
+        let aabb = [center[0], center[1], center[2], extents[0], extents[1], extents[2]];
+        fun(&aabb, &p)
+    }
 }
 
 fn to_cols(m: &M4) -> [f32; 16] {
@@ -419,9 +435,41 @@ fn native_math_matches_the_player() {
         edges += 1;
     }
     eprintln!("{edges} threshold and non-finite cases: bit-identical");
+    // Bounds.Contains: points on and around the faces (grid cells against the blockers'
+    // boxes), zero extents (the clearance box's height), NaN.
+    let mut inside = 0;
+    for i in 0..n {
+        let c = rng.v3(100.0);
+        let e = match i % 4 {
+            0 => rng.v3(2.0),
+            1 => [rng.comp(1.0), 0.0, rng.comp(1.0)],
+            _ => rng.v3(1.0).map(f32::abs),
+        };
+        let mut q = c;
+        for (k, x) in q.iter_mut().enumerate() {
+            let face = if rng.next().is_multiple_of(2) { c[k] + e[k] } else { c[k] - e[k] };
+            *x = match rng.next() % 5 {
+                0 => face,
+                1 => f32::from_bits(face.to_bits().wrapping_add(1)),
+                2 => f32::from_bits(face.to_bits().wrapping_sub(1)),
+                3 => c[k] + rng.comp(3.0),
+                _ => {
+                    if i % 97 == 0 {
+                        f32::NAN
+                    } else {
+                        c[k]
+                    }
+                }
+            };
+        }
+        let want = p.bounds_contains(c, e, q);
+        let b = crate::update::Bounds { center: c, extents: e };
+        assert_eq!(b.contains(q), want, "Bounds({c:?}, {e:?}).Contains({q:?})");
+        inside += usize::from(want);
+    }
     eprintln!(
         "from_to {checked:?}, {n} matrices ({singular} singular), {n} rotations, {n} look \
-         rotations ({fallback} by the fallback), {n} euler conversions ({poles} at a pole): \
-         all bit-identical"
+         rotations ({fallback} by the fallback), {n} euler conversions ({poles} at a pole), {n} \
+         bounds ({inside} inside): all bit-identical"
     );
 }

@@ -92,6 +92,7 @@ internal static partial class CommandObs
         Uct.Clear();
         ResetAgentWindow();
         ResetMemWindow();
+        ResetPathsWindow();
     }
 
     // ---- fields ----
@@ -1688,5 +1689,8 @@ internal static partial class CommandObs
 
         // Group memory (observer "memory", CommandObsMemory.cs).
         InstallMemory(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+
+        // What turn-based paths are computed on and with (observer "paths", CommandObsPaths.cs).
+        InstallPaths(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
     }
 }
