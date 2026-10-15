@@ -20,7 +20,9 @@ namespace WrathOracle;
 // for its damage form) and the last damage against MaxHP and crits; GetDismemberType then picks InPower,
 // LimbsApart or Normal, with CanDismemberLimbsApart reading the impulse's age on Unity's clock
 // (Time.time) and RandomUtils' draw on the simulation tape. A blow-up dismember effect is spawned through
-// FxSpawnController (NotImportant: at most 6 spawns a frame, dropped after 5 frames in the queue), and its
+// FxSpawnController (FxHelper.SpawnFxOnUnit doesn't forward the NotImportant priority PlayDeathEffect passes, so
+// EventuallyImportant: queued, at most 6 spawns a frame, promoted after 5 frames in the queue; spawned at once
+// while the controller is inactive), and its
 // DismemberUnitFX.Init adds SystemMechanics.DismemberedUnitBuff to the unit: a real buff, with its rule
 // (RuleCanApplyBuff) and fact id, on a dead unit. [M] poc5-tb-123/tb-chain: the fly 527A, killed at t=5422,
 // got the buff at 5423 in the recording (and lost another buff when it expired at 5432), in neither replay.
@@ -41,8 +43,8 @@ internal static class DeathFxPin
     public static bool Installed, RecordedOn;
     public static long Deaths, Pinned, Inits;
 
-    private sealed class Death { public string K, Type; public int T; public bool Start; public bool? Dsm, Limbs; public bool Matched; }
-    private sealed class Init { public string U; public int T; public bool InGame, Seen; }
+    private sealed class Death { public string K, Id, Type; public int T; public bool Start, Ambiguous; public bool? Dsm, Limbs; public bool Matched; }
+    private sealed class Init { public string U, Id; public int T; public bool InGame, Seen; }
 
     private static readonly Dictionary<string, Death> Tape = new Dictionary<string, Death>();
     private static readonly List<Init> InitTape = new List<Init>();
@@ -73,20 +75,26 @@ internal static class DeathFxPin
         var t = o["t"]?.Type == JTokenType.Integer ? (int)o["t"] : -1;
         bool? B(string f) => o[f]?.Type == JTokenType.Boolean ? (bool)o[f] : (bool?)null;
         bool BoolOrNull(string f) => o[f]?.Type == JTokenType.Boolean || o[f]?.Type == JTokenType.Null;
+        // A death the recording couldn't key or finish isn't followable.
+        if (o["exc"] != null) { Sched.Invalidate($"the recording's {ev} record has an exception ({o["exc"]})"); return; }
+        if (o["ambiguous"] != null) { Sched.Invalidate($"the recording's {ev} record is of a unit made in the window with no identity of its own (ambiguous)"); return; }
+        string S(string f) => o[f]?.Type == JTokenType.String ? (string)o[f] : null;
         if (ev == "death_fx")
         {
-            var k = o["p"]?.Type == JTokenType.String ? (string)o["p"] : null;
-            if (k == null || t < 0 || B("start") == null || !BoolOrNull("dsm") || !BoolOrNull("limbs") ||
+            var k = S("p");
+            var id = S("id");
+            if (k == null || id == null || t < 0 || B("start") == null || !BoolOrNull("dsm") || !BoolOrNull("limbs") ||
                 !(o["type"]?.Type == JTokenType.String || o["type"]?.Type == JTokenType.Null))
             { Sched.Invalidate("recording's death_fx record lacks or mistypes a field"); return; }
             if (Tape.ContainsKey(k)) { Sched.Invalidate($"recording's death {k} twice"); return; }
-            Tape[k] = new Death { K = k, T = t, Start = B("start").Value, Dsm = B("dsm"), Limbs = B("limbs"), Type = o["type"]?.Type == JTokenType.String ? (string)o["type"] : null };
+            Tape[k] = new Death { K = k, Id = id, T = t, Start = B("start").Value, Dsm = B("dsm"), Limbs = B("limbs"), Type = S("type") };
         }
         else
         {
-            var u = o["u"]?.Type == JTokenType.String ? (string)o["u"] : null;
-            if (u == null || t < 0 || B("ingame") == null) { Sched.Invalidate("recording's dismember record lacks or mistypes a field"); return; }
-            InitTape.Add(new Init { U = u, T = t, InGame = B("ingame").Value });
+            var u = S("u");
+            var id = S("id");
+            if (u == null || id == null || t < 0 || B("ingame") == null) { Sched.Invalidate("recording's dismember record lacks or mistypes a field"); return; }
+            InitTape.Add(new Init { U = u, Id = id, T = t, InGame = B("ingame").Value });
         }
     }
 
@@ -98,16 +106,21 @@ internal static class DeathFxPin
         if (!On || __instance == null) return;
         try
         {
-            var id = Rules.StableId(__instance.Data as Kingmaker.EntitySystem.Entities.UnitEntityData);
-            PerUnit.TryGetValue(id, out var n);
-            PerUnit[id] = n + 1;
-            var k = id + "#" + n;
+            var unit = __instance.Data as Kingmaker.EntitySystem.Entities.UnitEntityData;
+            var key = Key(unit, out var ambiguous);
+            PerUnit.TryGetValue(key, out var n);
+            PerUnit[key] = n + 1;
+            var k = key + "#" + n;
             _view = __instance;
-            _now = new Death { K = k, T = Trace.Tick };
+            _now = new Death { K = k, Id = unit?.UniqueId ?? "?", T = Trace.Tick, Ambiguous = ambiguous };
             Deaths++;
             if (!Sched.Replay) return;
-            if (!Tape.TryGetValue(k, out var rec))
+            if (ambiguous)
+                Sched.Invalidate($"death {k} at tick {Trace.Tick}: a unit made in the window, with another of its blueprint made too (no identity to follow)");
+            else if (!Tape.TryGetValue(k, out var rec))
                 Sched.Invalidate($"death {k} at tick {Trace.Tick}: the recording has no such death");
+            else if (!Sched.SameUnit(rec.Id, _now.Id))
+                Sched.Invalidate($"death {k} at tick {Trace.Tick} is of unit {_now.Id}; the recording's of {rec.Id}");
             else if (rec.Matched)
                 Sched.Invalidate($"death {k} handled twice");
             else if (Trace.Tick != rec.T + Sched.Offset)
@@ -127,7 +140,8 @@ internal static class DeathFxPin
         {
             Sched.Obs("death_fx", j =>
             {
-                j.Prop("p", now.K); j.Prop("start", now.Start); j.Prop("dsm", now.Dsm); j.Prop("limbs", now.Limbs); j.Prop("type", now.Type);
+                j.Prop("p", now.K); j.Prop("id", now.Id); j.Prop("start", now.Start); j.Prop("dsm", now.Dsm); j.Prop("limbs", now.Limbs); j.Prop("type", now.Type);
+                if (now.Ambiguous) j.Prop("ambiguous", true);
                 if (__exception != null) j.Prop("exc", __exception.GetType().Name);
             });
             if (__exception != null)
@@ -141,6 +155,23 @@ internal static class DeathFxPin
         }
         catch (Exception e) { Trace.HookFailed("death effect end", e); }
         return __exception;
+    }
+
+    // A unit's key: its id when it existed at the window's open (the save's id, every run's) or is short (the
+    // game's sequential ids); for a unit the window made with a run-specific id, its blueprint (Rules.StableId),
+    // which names it only while no other unit of that blueprint was made in the window (else ambiguous).
+    private static string Key(Kingmaker.EntitySystem.Entities.UnitEntityData u, out bool ambiguous)
+    {
+        ambiguous = false;
+        if (u == null) return "?";
+        var id = u.UniqueId;
+        if (id == null || id.Length <= 8 || Sched.StartUnits.Contains(id)) return id ?? "?";
+        var bp = u.Blueprint;
+        var made = 0;
+        foreach (var x in StateDump.AllUnits(Kingmaker.Game.Instance))
+            if (x != null && x.UniqueId != null && x.UniqueId.Length > 8 && !Sched.StartUnits.Contains(x.UniqueId) && ReferenceEquals(x.Blueprint, bp)) made++;
+        ambiguous = made != 1;
+        return Rules.StableId(u);
     }
 
     private static string F(bool? b) => b.HasValue ? (b.Value ? "true" : "false") : "-";
@@ -192,14 +223,17 @@ internal static class DeathFxPin
         if (!On || unit == null) return;
         try
         {
-            var id = Rules.StableId(unit.Data as Kingmaker.EntitySystem.Entities.UnitEntityData);
+            var u = unit.Data as Kingmaker.EntitySystem.Entities.UnitEntityData;
+            var id = Key(u, out var ambiguous);
+            var raw = u?.UniqueId ?? "?";
             var ingame = unit.Data != null && unit.Data.IsInGame;
             var now = Trace.Tick;
             Inits++;
-            Sched.Obs("dismember", j => { j.Prop("u", id); j.Prop("ingame", ingame); });
+            Sched.Obs("dismember", j => { j.Prop("u", id); j.Prop("id", raw); j.Prop("ingame", ingame); if (ambiguous) j.Prop("ambiguous", true); });
             if (!Sched.Replay) return;
             var rec = InitTape.FirstOrDefault(r => !r.Seen && r.U == id);
-            if (rec == null) Sched.Invalidate($"dismember effect on {id} at tick {now}: the recording has no such effect");
+            if (ambiguous) Sched.Invalidate($"dismember effect on {id} at tick {now}: a unit made in the window, with another of its blueprint made too (no identity to follow)");
+            else if (rec == null || !Sched.SameUnit(rec.Id, raw)) Sched.Invalidate($"dismember effect on {id} ({raw}) at tick {now}: the recording has no such effect");
             else if (now != rec.T + Sched.Offset || ingame != rec.InGame)
                 Sched.Invalidate($"dismember effect on {id} at tick {now} (in game {ingame}); the recording's at tick {rec.T} (in game {rec.InGame}, offset so far {Sched.Offset})");
             else rec.Seen = true;

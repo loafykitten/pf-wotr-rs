@@ -95,6 +95,17 @@ internal static class Sched
     // one to one, at their first root rule.
     private static readonly Dictionary<string, string> RootBind = new Dictionary<string, string>(), RootBindBack = new Dictionary<string, string>();
     public static long RootsChecked;
+
+    // The units at the window's open (their ids are the save's, the same in every run of the fixture).
+    public static readonly HashSet<string> StartUnits = new HashSet<string>();
+
+    // Fixture.Begin, after the reload: every unit existing now.
+    public static void CaptureStartUnits()
+    {
+        StartUnits.Clear();
+        try { foreach (var u in StateDump.AllUnits(Kingmaker.Game.Instance)) if (u?.UniqueId != null) StartUnits.Add(u.UniqueId); }
+        catch (Exception e) { Health.Failed("window's starting units", e); }
+    }
     public static long GatesSeen, InputsChecked;
 
     // Animation events (a strike, the end of an attack animation) are placed by float arithmetic on
@@ -211,17 +222,7 @@ internal static class Sched
         }
         var r = _roots[_rootPos++];
         var same = r.Class == cls && Trace.Tick == r.T + _offset;
-        if (same && r.Ini != ini)
-        {
-            // Long ids (units made in the window) bound one to one; short ids and none must be equal.
-            if (r.Ini != null && ini != null && r.Ini.Length > 8 && ini.Length > 8 &&
-                (!RootBind.TryGetValue(r.Ini, out var b) || b == ini) && (!RootBindBack.TryGetValue(ini, out var a) || a == r.Ini))
-            {
-                RootBind[r.Ini] = ini;
-                RootBindBack[ini] = r.Ini;
-            }
-            else same = false;
-        }
+        if (same && !SameUnit(r.Ini, ini)) same = false;
         if (!same)
             Invalidate($"root rule #{_rootPos - 1}: replay {cls} of {ini ?? "-"} at tick {Trace.Tick}; recording {r.Class} of {r.Ini ?? "-"} at tick {r.T} (offset so far {_offset})");
     }
@@ -275,6 +276,23 @@ internal static class Sched
         if (g.Ev != ev || g.D != detail || Math.Abs(Trace.Tick - (g.T + _offset)) > Tol)
             Invalidate($"gate #{_gatePos - 1}: replay {ev} '{detail}' at tick {Trace.Tick}; recording {g.Ev} '{g.D}' at tick {g.T} (offset so far {_offset}, tolerance {Tol})");
         else Moved(Trace.Tick, g.T);
+    }
+
+    // Whether the recording's unit id `rec` and the replay's `now` name the same unit: a unit existing at the
+    // window's open (or a short id: the game's sequential ids) by its id; a long id the window made (a run-specific
+    // id) by a one-to-one binding made at its first sight, identity bindings included, so two units can never
+    // pass for one.
+    public static bool SameUnit(string rec, string now)
+    {
+        if (rec == null || now == null) return rec == now;
+        var recMade = rec.Length > 8 && !StartUnits.Contains(rec);
+        var nowMade = now.Length > 8 && !StartUnits.Contains(now);
+        if (!recMade || !nowMade) return rec == now && !recMade && !nowMade;
+        if (RootBind.TryGetValue(rec, out var b)) return b == now;
+        if (RootBindBack.ContainsKey(now)) return false;
+        RootBind[rec] = now;
+        RootBindBack[now] = rec;
+        return true;
     }
 
     // ---- inputs ----

@@ -59,6 +59,7 @@ internal static class Fixture
         PathSync.ResetWindow();
         ProjPin.ResetWindow();
         DeathFxPin.ResetWindow();
+        Sched.CaptureStartUnits();
         TurnBased.ResetWindow();
         LogObs.ResetWindow();
         if (replay)

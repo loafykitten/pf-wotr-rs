@@ -509,8 +509,9 @@ and, with it, the detach of the fly's buff `9fd2dd27d838f0049ab56e9da3508b25`. N
   `Time.time`, and `RandomUtils.GetRandomValue` (`UnityEngine.Random`, a simulation site, so taped) chooses between
   two types where both are possible.
 
-A blow-up effect is spawned at `FxPriority.NotImportant` through `FxSpawnController`: at most 6 spawns a frame,
-dropped after 5 frames in the queue. When it spawns, `FxHelper` calls its `DismemberUnitFX.Init`, which adds
+A blow-up effect is spawned through `FxSpawnController`. `PlayDeathEffect` asks for `FxPriority.NotImportant`, but
+`FxHelper.SpawnFxOnUnit` doesn't pass its priority on, so it is `EventuallyImportant`: queued (spawned at once only
+while the controller is inactive), at most 6 spawns a frame, moved forward after 5 frames in the queue. When it spawns, `FxHelper` calls its `DismemberUnitFX.Init`, which adds
 `SystemMechanics.DismemberedUnitBuff` for `Delay` (0.1 s), a real buff with its rule and fact ids (the blood puddle of
 the other branches waits for the prone animation). So the buff's tick follows the spawn: it is queued at the death
 (`HandleDeath`, gameplay time), and spawned at the next `FxSpawnController.Tick` with room in its frame budget. The
@@ -518,11 +519,15 @@ budget is shared with every other effect of that frame. [I] Which input made the
 established: the traces don't record the impulse, and `GetDismemberType` drew nothing.
 
 **Pin (`DeathFxPin.cs`, observer `death_effect`).**
-- **Recording** (no change): each `HandleDeath` in a turn-based window is keyed `<unit>#<n>` (`Rules.StableId`: a unit
-  made in the window by its blueprint; n counts that unit's deaths) and noted as `death_fx`, with `start` (the
+- **Recording** (no change): each `HandleDeath` in a turn-based window is keyed `<unit>#<n>` (n counts that unit's
+  deaths). A unit is named by its id if it existed at the window's open or its id is short (the game's sequential ids).
+  A unit the window made with a run-specific long id is named by its blueprint (`Rules.StableId`), which is only an
+  identity while no other unit of its blueprint was made in the window: otherwise the record says `ambiguous`, and the
+  replay is invalid. It is noted as `death_fx`, with `id` (the raw id), `start` (the
   coroutine started), `dsm` and `limbs` (`ShouldDismember`'s and `CanDismemberLimbsApart`'s results inside it) and
   `type` (`GetDismemberType`'s), null where not reached. Each `DismemberUnitFX.Init` is noted as `dismember` (`u`,
-  `ingame`: whether `Init` adds the buff).
+  `ingame`: whether `Init` adds the buff). A replay checks raw ids with the root rules' binding (below), and a
+  recorded death that threw (`exc`) or is `ambiguous` makes the recording unfollowable.
 - **Replay**: inside `HandleDeath`, `ShouldDismember` and `CanDismemberLimbsApart` return the recording's results.
   `GetDismemberType` runs natively, its draw (if any) from the tape, and its type must be the recording's. The death
   must be the recording's (same key, recorded tick plus the offset, same `start`). Each `Init` must be the recording's
@@ -534,8 +539,10 @@ established: the traces don't record the impulse, and `GetDismemberType` drew no
 
 **Root rules checked (`Sched.CheckRoot`, from `Rules.OnPush`).** A turn-based replay loads the recording's root rules
 (depth 0: tick, class, initiator) with its tape. Every root rule it pushes must be the recording's next one: same
-class, same initiator, on the recorded tick plus the offset so far, exactly. Initiators with long ids (units made in
-the window, whose ids are run-specific) are bound one to one at first sight; short ids and none must be equal. An
+class, same initiator, on the recorded tick plus the offset so far, exactly. An initiator that existed at the window's
+open (the save's ids: the PC's is a long GUID) or has a short id must be the same id. A long id the window made (run-
+specific) is bound one to one at first sight, identity bindings included, so two units never pass for one
+(`Sched.SameUnit`). An
 extra rule, or a recorded one left over at the close, invalidates. A root rule is a cause the recording had or not:
 the rules under it, their draws and mutations follow from it, so this check closes the kind of gap above without
 listing rule fields. End record: `root_rules_checked`. [M] On the captures before this change (`poc5-tb-115` to
