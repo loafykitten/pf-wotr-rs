@@ -413,10 +413,10 @@ distance and the wall flag as the arrival leaves them; the flight itself (positi
   point-launched ability projectile's too (the roll and range an ability sets after the launch don't count: the
   key's contents are what the launch had). The fields are read, not resolved through getters that cache
   (`UnitRef.Id`, not `UnitRef.Entity`).
-- **Replay**: a launch must be the recording's: same key and the same contents, within `Sched.Tol` of the
-  recorded tick plus the offset so far. Its hit is due on the recording's hit tick (plus the offset so far, 0 in a
-  tick-exact replay), whatever this launch's own tick within that tolerance, so the hit and what it triggers
-  follow the recording; a launch at or after that tick is invalid. Before then a hit the native flight makes is taken
+- **Replay**: a launch must be the recording's: same key and the same contents, on the recorded tick plus the
+  offset so far (exactly: unlike the gates' tolerance, since the flight's length is gameplay, the distance a line
+  ability has swept by each tick). Its hit is due on the recording's hit tick (plus that offset, 0 in a
+  tick-exact replay), so the hit and what it triggers follow the recording. Before then a hit the native flight makes is taken
   back right after `Projectile.Tick`, before anything reads it: `IsHit`, `IsHitWall` if that tick set it, and
   `PassedDistance` back from the range it was clamped to to the sum `Tick` made (the same float expression), so
   a line ability's sweep sees the recording's distance every tick. On the due tick `IsHit` is set if the flight

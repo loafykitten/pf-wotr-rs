@@ -29,8 +29,8 @@ namespace WrathOracle;
 // effect on a game-time or real-time delay) is presentation, identified by its launch inside them: noted with
 // "pres", never pinned. Every other projectile is pinned, an ability's too (AbilityDeliverProjectile, Touch,
 // Chain, Ricochet... poll IsHit, and set the attack roll and range after the launch).
-// Replay: a launch must be the recording's (same key and contents, within the scheduler's tolerance of
-// the recorded tick); its hit is due on the recording's hit tick (plus the replay's offset, 0 when tick-exact). Before
+// Replay: a launch must be the recording's (same key and contents, on the recorded tick plus the replay's
+// offset); its hit is due on the recording's hit tick (plus the replay's offset, 0 when tick-exact). Before
 // then a hit the native flight makes is taken back right after Projectile.Tick, before anything reads it
 // (IsHit; IsHitWall if that tick set it; PassedDistance, which the hit clamps to MaxRange and line and cone
 // deliveries read, back to Tick's own sum); on the due tick IsHit is set if the flight hasn't got there
@@ -205,16 +205,17 @@ internal static class ProjPin
                 Sched.Invalidate($"projectile {k} launched twice at tick {now}");
             else if (rec.Desc != desc)
                 Sched.Invalidate($"projectile {k} launched at tick {now} is {desc}; the recording's was {rec.Desc}");
-            else if (Math.Abs(now - (rec.Launch + Sched.Offset)) > Sched.Tol)
-                Sched.Invalidate($"projectile {k} launched at tick {now}; the recording's at tick {rec.Launch} (offset so far {Sched.Offset}, tolerance {Sched.Tol})");
+            else if (now != rec.Launch + Sched.Offset)
+                // Exact, unlike the gates' tolerance: the flight's length is gameplay (the distance a line or
+                // cone ability has swept by each tick), and the hit is due on the recording's tick.
+                Sched.Invalidate($"projectile {k} launched at tick {now}; the recording's at tick {rec.Launch} (offset so far {Sched.Offset})");
             else
             {
                 rec.Matched = true;
                 if (rec.Hit >= 0)
                 {
                     // The recording's hit tick (moved by the replay's offset, as its inputs are: 0 when it is
-                    // tick-exact), whatever this launch's own tick within the tolerance: the hit and what it
-                    // triggers follow the recording, not the launch.
+                    // tick-exact): the hit and what it triggers follow the recording.
                     t.Due = rec.Hit + Sched.Offset;
                     if (t.Due <= now)
                         Sched.Invalidate($"projectile {k} launched at tick {now}, at or after its recorded hit (tick {rec.Hit}, offset {Sched.Offset})");
