@@ -463,7 +463,7 @@ impl AiInputs for Driver<'_> {
             ) => {
                 let step = SimStep { ret, position, last_move_length, reached_max, waypoint };
                 // The step the sim ran (the agent driven).
-                self.nav_ai_msim(max, &step)?;
+                self.nav_ai_msim(w, max, &step)?;
                 Ok(step)
             }
             _ => self.uc_reject(

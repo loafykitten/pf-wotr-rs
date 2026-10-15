@@ -1083,6 +1083,16 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             recs.remove(at);
             renumber(recs);
         }),
+        ("without the sim's call in its frame", |recs| {
+            // A completion's path_done moved to the end of the frame before.
+            let fin = fin_of_done(recs);
+            let at = fin + recs[fin..].iter().position(|r| ev(r, "path_done")).unwrap();
+            let tick = (0..at).rev().find(|j| recs[*j]["k"] == "tick").unwrap();
+            let mut r = recs.remove(at);
+            r["t"] = json!(r["t"].as_i64().unwrap() - 1);
+            recs.insert(tick, r);
+            renumber(recs);
+        }),
         ("the recording's path_to", |recs| {
             let at = tb(recs, |r| ev(r, "path_to"));
             recs[at]["radius"] = json!(0.25);
@@ -1135,6 +1145,18 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
                         || ((ev(r, "ag_v") || ev(r, "ag_phys")) && r["ctx"] == "sim"))
                 });
                 renumber(recs);
+            }),
+            ("not the AI's unit's", |recs| {
+                // The step before the AI's first read made another unit's.
+                let m = pos(recs, |r| ev(r, "uc_v") && r["f"] == "msim");
+                let at = (0..m).rev().find(|j| ev(&recs[*j], "ag_sim")).unwrap();
+                let other = if recs[at]["u"] == "5198" { "51DD" } else { "5198" };
+                let mine = recs[at]["u"].clone();
+                for r in &mut recs[at..m] {
+                    if r["u"] == mine {
+                        r["u"] = json!(other);
+                    }
+                }
             }),
             ("the AI's AllyBlocked under", |recs| {
                 let at = pos(recs, |r| ev(r, "uc_v") && r["f"] == "ablk");

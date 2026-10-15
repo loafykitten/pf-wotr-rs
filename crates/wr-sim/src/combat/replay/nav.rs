@@ -153,7 +153,7 @@ pub struct NavDriver {
     early: HashMap<String, Vec<(String, Option<Def>)>>,
     /// The last step the sim ran (`maxMoveLength`, its result, the simulator after it), not yet
     /// read by the AI.
-    last_step: Option<(f32, bool, MovementSimulator)>,
+    last_step: Option<(EntityIdx, f32, bool, MovementSimulator)>,
     /// The recorded `path_to`/`path_done` waiting for the sim's `PathTo`/`OnPathComplete`.
     path_to: Option<usize>,
     path_done: Option<usize>,
@@ -1286,7 +1286,7 @@ impl Driver<'_> {
         match res {
             Ok(ret) => {
                 self.out.nav.sim_steps += 1;
-                self.ags.nav.last_step = Some((max, ret, sim.clone()));
+                self.ags.nav.last_step = Some((u, max, ret, sim.clone()));
             }
             Err(d) => {
                 w.coverage.unsupported(format!("driven replay: agent: {}", d.0));
@@ -1339,7 +1339,14 @@ impl Driver<'_> {
     /// A frame's controllers have all run: the grid's events of the frame are the recording's,
     /// all paired.
     pub(super) fn nav_frame_done(&mut self, w: &mut World) {
-        if !self.ags.nav.paths || w.combat.nav.broken {
+        if !self.ags.nav.paths {
+            return;
+        }
+        // A call's prefix is used in its frame.
+        if self.ags.nav.path_to.take().is_some() || self.ags.nav.path_done.take().is_some() {
+            Self::nav_unsupported(w, "a path_to or path_done without the sim's call in its frame");
+        }
+        if w.combat.nav.broken {
             return;
         }
         if !self.nav_in_step(w) {
@@ -1365,6 +1372,9 @@ impl Driver<'_> {
             return Err(Desync("PathTo without its path_to".into()));
         };
         let r = &self.trace.records[at];
+        if r["t"].as_i64() != Some(self.tick) {
+            return Err(Desync(format!("PathTo's path_to is of another frame ({})", describe(r))));
+        }
         let from = w.unit(u).map(|x| x.combat.agent.pos);
         if r["u"].as_str() != Some(w.entity(u).unique_id.as_str())
             || v3(&r["dest"]).map(bits3) != Some(bits3(dest))
@@ -1390,6 +1400,12 @@ impl Driver<'_> {
             return Err(Desync("OnPathComplete without its path_done".into()));
         };
         let r = &self.trace.records[at];
+        if r["t"].as_i64() != Some(self.tick) {
+            return Err(Desync(format!(
+                "OnPathComplete's path_done is of another frame ({})",
+                describe(r)
+            )));
+        }
         let end_ok = match v.last() {
             Some(e) => v3(&r["end"]).map(bits3) == Some(bits3(*e)),
             None => r.get("end").is_none(),
@@ -1437,13 +1453,25 @@ impl Driver<'_> {
     }
 
     /// The AI's read of `ScorePath`'s simulation step (`msim`): the step the sim just ran.
-    pub(super) fn nav_ai_msim(&mut self, max: f32, step: &crate::combat::ai::SimStep) -> R<()> {
+    pub(super) fn nav_ai_msim(
+        &mut self,
+        w: &World,
+        max: f32,
+        step: &crate::combat::ai::SimStep,
+    ) -> R<()> {
         if !self.ag {
             return Ok(());
         }
-        let Some((m, ret, sim)) = self.ags.nav.last_step.take() else {
+        let Some((u, m, ret, sim)) = self.ags.nav.last_step.take() else {
             return Err(Desync("ScorePath's simulation step without the sim's step".into()));
         };
+        // The step of the AI's own unit (`context.Unit.View.AgentASP`).
+        if crate::combat::ai::context_unit(w) != Some(u) {
+            return Err(Desync(format!(
+                "ScorePath's simulation step: the sim's step is {}'s, not the AI's unit's",
+                w.entity(u).unique_id
+            )));
+        }
         let same = m.to_bits() == max.to_bits()
             && ret == step.ret
             && bits3(sim.m_position) == bits3(step.position)

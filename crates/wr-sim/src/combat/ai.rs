@@ -815,6 +815,12 @@ fn release_group(w: &mut World) {
     c.memory_enemies = None;
 }
 
+/// `DecisionContext.Unit` of the decision running, if any.
+#[must_use]
+pub fn context_unit(w: &World) -> Option<EntityIdx> {
+    w.combat.ai.ctx.unit
+}
+
 fn ctx_unit(w: &World) -> R<EntityIdx> {
     match w.combat.ai.ctx.unit {
         Some(u) => Ok(u),
