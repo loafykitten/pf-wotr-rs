@@ -287,6 +287,7 @@ internal static class Rng
                     {
                         ProjPin.RecordedOn = obs.Any(x => x.Type == JTokenType.String && (string)x == "proj_arrival");
                         PathSync.RecordedCritters = obs.Any(x => x.Type == JTokenType.String && (string)x == "critter_paths");
+                        DeathFxPin.RecordedOn = obs.Any(x => x.Type == JTokenType.String && (string)x == "death_effect");
                     }
                     if (Sched.Window && o["time0"] != null)
                     {
@@ -317,6 +318,13 @@ internal static class Rng
                     var site = (string)o["key"] ?? (keys.TryGetValue((int)o["site"], out var key) ? key : "?" + (int)o["site"]);
                     if ((int?)o["rule"] > 0) t0Sites.Add(site);
                     tape.Add(new TapeEntry { Index = tape.Count, Key = site, Member = (string)o["m"], Args = o["a"]?.ToString(Newtonsoft.Json.Formatting.None), Value = o["v"], Ctx = (string)o["ctx"], Tick = (int?)o["t"] ?? -1 });
+                }
+                else if (Sched.Window && string.CompareOrdinal(line, k + 5, "rule\"", 0, 5) == 0)
+                {
+                    // Root rules (depth 0) only: a replay must push the same ones (Sched.CheckRoot).
+                    if (line.IndexOf("\"depth\":0,", StringComparison.Ordinal) < 0) continue;
+                    var o = JObject.Parse(line);
+                    if (o["depth"]?.Type == JTokenType.Integer && (int)o["depth"] == 0) Sched.TapeRoot(o);
                 }
                 else if (Sched.Window && string.CompareOrdinal(line, k + 5, "end\"", 0, 4) == 0)
                 {
@@ -750,11 +758,14 @@ internal static class Rng
     // Generic methods whose Random calls the global net can't see (Range(float,float) and value
     // are native, so they can't take a prefix), transpiled through one closed instantiation.
     // Mono compiles one shared body for all reference-type instantiations, so this covers every
-    // reference-type caller. LinqExtensions.WeightedRandom<T> picks unit barks
+    // reference-type caller (a value-type one needs its own entry). LinqExtensions.WeightedRandom<T> picks unit barks
     // (UnitAsksComponent.Bark.Schedule), roaming waypoints, mercenaries and camp banters.
     private static readonly (string Type, string Method, Type[] Args)[] ClosedGenerics =
     {
         ("Kingmaker.Utility.LinqExtensions", "WeightedRandom", new[] { typeof(Kingmaker.Visual.Sound.UnitAsksComponent.BarkEntry) }),
+        // A value-type instantiation has a body of its own: UnitEntityView.GetDismemberType's weighted pick of the
+        // dismember type (DeathFxPin.cs), a simulation draw (its result adds a buff or not).
+        ("Kingmaker.Utility.RandomUtils", "GetRandomValue", new[] { typeof(Kingmaker.UnitLogic.UnitState.DismemberType) }),
     };
 
     private static MethodInfo ClosedFor(MethodBase m)

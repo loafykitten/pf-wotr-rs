@@ -67,6 +67,7 @@ internal static class Hooks
                 j.Prop("rng_gap", gap);
             });
             Observe.Tick();
+            DeathFxPin.Flush(); // death effect records held while a rule was open
         }
         catch (Exception e)
         {

@@ -489,6 +489,73 @@ choice against the recording. No unit reads a critter's state; a critter reads t
 
 Pending: the main session's captures of `poc5-tb6` (`tb-lizard`) and `poc5-tb` (`tb-nearest`, `tb-focus`).
 
+## The death effect's dismemberment, and root rules checked (2026-10-15, stream L)
+
+[M] `poc5-tb-123/tb-chain` (built with the pins above): the record run has 402 rules, both replays 401, though they were
+otherwise tick-exact (offset 0, tapes used up). The extra rule is the window's last root rule, at t=5423:
+`RuleCanApplyBuff` of the dead fly 527A, from `BuffCollection.AddBuff < UnitHelper.AddBuff < DismemberUnitFX.Init <
+FxHelper.Spawn < ... < FxSpawnController.Tick`. The PC's attack 383 killed the fly at t=5422. Only the recording then
+has the presentation draws of a blow-up effect being spawned (`CameraShakeFx`, `RandomRotationOnStart` at 5423), the
+attach of buff `c98d765d063f57a49a03f13d4f697c33` (fact 5959, so every later fact id moves by one), its detach at 5432,
+and, with it, the detach of the fly's buff `9fd2dd27d838f0049ab56e9da3508b25`. No draw was made in
+`GetDismemberType`. The oracle didn't notice, because it checked draws, gates, inputs and path deliveries but not rules.
+
+[C] `UnitLifeController` calls `UnitEntityView.HandleDeath`. A visible unit with an active view starts the
+`PlayDeathEffect` coroutine, whose first step runs inside `HandleDeath` and decides the effect:
+- `ShouldDismember` reads the player's setting, the unit's size and companion state, `IsFinallyDead`, the
+  dismemberment manager's last impulse (presentation physics: whether a rip-limbs effect exists for its damage form),
+  and the last damage against `MaxHP` (with the difficulty's HP multiplier) or a crit.
+- `GetDismemberType` picks `InPower`, `LimbsApart` or `Normal`. `CanDismemberLimbsApart` reads the impulse's age on
+  `Time.time`, and `RandomUtils.GetRandomValue<DismemberType>` chooses between two types where both are possible.
+  That draw (`Random.Range(float,float)`, native, inside a generic method) wasn't hooked at all. Its value-type
+  instantiation is now transpiled (`Rng.ClosedGenerics`): a simulation site, taped.
+
+A blow-up effect is spawned through `FxSpawnController`. `PlayDeathEffect` asks for `FxPriority.NotImportant`, but
+`FxHelper.SpawnFxOnUnit` doesn't pass its priority on, so it is `EventuallyImportant`: queued (spawned at once only
+while the controller is inactive), at most 6 spawns a frame, moved forward after 5 frames in the queue. When it spawns, `FxHelper` calls its `DismemberUnitFX.Init`, which adds
+`SystemMechanics.DismemberedUnitBuff` for `Delay` (0.1 s), a real buff with its rule and fact ids (the blood puddle of
+the other branches waits for the prone animation). So the buff's tick follows the spawn: it is queued at the death
+(`HandleDeath`, gameplay time), and spawned at the next `FxSpawnController.Tick` with room in its frame budget. The
+budget is shared with every other effect of that frame. [I] Which input made the replays decide otherwise is not
+established: the traces don't record the impulse, and `GetDismemberType` drew nothing.
+
+**Pin (`DeathFxPin.cs`, observer `death_effect`).**
+- **Recording** (no change): each `HandleDeath` in a turn-based window is keyed `<unit>#<n>` (n counts that unit's
+  deaths). A unit is named by its id if it existed at the window's open or its id is short (the game's sequential ids).
+  A unit the window made with a run-specific long id is named by its blueprint (`Rules.StableId`), which is only an
+  identity while no other unit of its blueprint was made in the window: otherwise the record says `ambiguous`, and the
+  replay is invalid. It is noted as `death_fx`, with `id` (the raw id), `start` (the
+  coroutine started), `dsm` and `limbs` (`ShouldDismember`'s and `CanDismemberLimbsApart`'s results inside it) and
+  `type` (`GetDismemberType`'s), null where not reached. Each `DismemberUnitFX.Init` is noted as `dismember` (`u`,
+  `ingame`: whether `Init` adds the buff). A replay checks raw ids with the root rules' binding (below), and a
+  recorded death that threw (`exc`) or is `ambiguous` makes the recording unfollowable. A record made while a rule is
+  open (an effect spawned at once inside a rule, as `SummonedUnitBuff`'s removal can) is written when no rule is open
+  (the next tick's start, or the window's close), with its own tick as `at`: readers place records by rule spans.
+- **Replay**: inside `HandleDeath`, `ShouldDismember` and `CanDismemberLimbsApart` return the recording's results.
+  `GetDismemberType` runs natively, its draw (if any) from the tape, and its type must be the recording's. The death
+  must be the recording's (same key, recorded tick plus the offset, same `start`). Each `Init` must be the recording's
+  next for that unit, on the recorded tick plus the offset, with the same `ingame`. The spawn queue isn't pinned:
+  an effect spawned on another tick, or dropped, invalidates the replay. A recorded effect whose tick passed without
+  it is caught after the next `FxSpawnController.Tick`; one not done by the window's close is caught then too.
+- End record: `deaths`, `death_effect_pins`, `dismember_effects`. A recording without `death_effect` among its
+  observers is invalid in its replay at once.
+
+**Root rules checked (`Sched.CheckRoot`, from `Rules.OnPush`).** A turn-based replay loads the recording's root rules
+(depth 0: tick, class, initiator) with its tape. Every root rule it pushes must be the recording's next one: same
+class, same initiator, on the recorded tick plus the offset so far, exactly. An initiator that existed at the window's
+open (the save's ids: the PC's is a long GUID) or has a short id must be the same id. A long id the window made (run-
+specific) is bound one to one at first sight, identity bindings included, so two units never pass for one
+(`Sched.SameUnit`). An
+extra rule, or a recorded one left over at the close, invalidates. A root rule is a cause the recording had or not:
+the rules under it, their draws and mutations follow from it, so this check closes the kind of gap above without
+listing rule fields. End record: `root_rules_checked`. [M] On the captures before this change (`poc5-tb-115` to
+`-118`, `-121`, `-122`), every replay's root rules equal its recording's in count, class, initiator and tick (no
+shift, no long id to bind). `poc5-tb-123` differs only by the dismember rule above.
+
+### Results
+
+Pending: the main session's captures of `poc5-tb5` (`tb-chain`) and `poc5-tb` (`tb-nearest`, `tb-focus`).
+
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
 **Everything above describes the earlier mod (`c7117fd` to `ba96d22`), whose recordings do not observe the unmodified game
