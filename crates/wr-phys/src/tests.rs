@@ -201,6 +201,34 @@ fn meshes_and_other_shapes_fail_closed() {
     assert!(unverified([50.001, 1.0, 50.001], 1));
     // Beyond an outer edge, within the enlargement: the prefilter must not drop it.
     assert!(unverified([-0.002, 1.0, 25.0], 1));
+    // A sliver beside a far triangle: its f32 arithmetic can hit outside its own bounds, inside
+    // the mesh's (the player's BV4_RaycastSingle hits this at 0.5).
+    let sliver = World {
+        shapes: vec![Shape {
+            name: "sliver".into(),
+            layer: 0,
+            is_trigger: false,
+            visual_layer_move: false,
+            kind: ShapeKind::Mesh {
+                local_to_world: id,
+                vertices: vec![
+                    [0.0, 0.0, 0.0],
+                    [2.0, 2.0, 2.0],
+                    [1.0, 1.000_000_1, 0.999_999_9],
+                    [-10.0, -200.0, -10.0],
+                    [-10.0, -200.0, 10.0],
+                    [10.0, -200.0, 10.0],
+                ],
+                triangles: vec![[0, 1, 2], [3, 4, 5]],
+                geom_epsilon: 2f32.powi(-21),
+            },
+        }],
+    };
+    let s2 = Scene::new(&sliver);
+    assert!(matches!(
+        s2.raycast_down([2.3, 3.0, 2.3], 100.0, 1),
+        Err(QueryError::Unverified { .. })
+    ));
     assert_eq!(scene.raycast_down([60.0, 1.0, 60.0], 100.0, 1).unwrap(), None);
     assert_eq!(scene.raycast_down([30.0, 1.0, 30.0], 100.0, 2).unwrap(), None, "other layer");
     assert!(unverified([200.5, 5.0, 0.5], 2));

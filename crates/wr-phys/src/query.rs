@@ -247,7 +247,12 @@ fn may_touch(p: &Prepared, o: [f64; 3], max: f64) -> bool {
         }
         Prepared::Mesh { tris, eps, lo, hi } => {
             conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0)
-                && tris.iter().any(|t| conservative::ray_hits_triangle(o, DOWN, max, *t, *eps))
+                // Unsure: the mesh's grown bounds, which the ray crosses, enclose every node BV4
+                // would test.
+                && tris.iter().any(|t| {
+                    conservative::ray_touches_triangle(o, DOWN, max, *t, *eps)
+                        != conservative::Touch::No
+                })
         }
         Prepared::Other { lo, hi } => conservative::ray_hits_aabb(o, DOWN, max, *lo, *hi, 0.0),
     }

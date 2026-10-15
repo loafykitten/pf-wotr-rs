@@ -126,8 +126,9 @@ these vertical results: the origins lie inside the field's inflated bounds, so t
   plus a millionth of the coordinates' and distance's magnitude (`f32` rounding in PhysX: a box 1 cm beyond a
   1,000 km ray rounds into it), plus, for a mesh's triangles, BV4's barycentric enlargement (`mGeomEpsilon`, 2^-22 of the largest local coordinate, as cooking
   computes it) and a float-error allowance that grows as the ray turns parallel to the triangle and as the triangle
-  thins (where the two together pass a thousandth, or the triangle is degenerate in `f64`, any overlap with the
-  triangle's grown bounds counts). The native box check asserts this test counts every hit the player's
+  thins (where the two together pass a thousandth, or the triangle is degenerate in `f64`, PhysX's `f32`
+  cancellation can place a hit anywhere its midphase reaches, so the shape's own grown bounds decide: a mesh's grown by
+  every triangle's allowance and a hundredth of its extent for BV4's quantized nodes). The native box check asserts this test counts every hit the player's
   `raycast_box` reports (a million rays, grazing ones and rays ending at the hit included). Spheres, capsules and controllers count as the
   sphere of radius `(r + h/2)` times the largest scale, convex meshes as their grown bounds. The importer refuses a
   sheared transform (a rotated child of a non-uniformly scaled parent: its matrix-transformed shape needn't enclose

@@ -125,8 +125,9 @@ pub fn ray_hits_box(
         return true;
     }
     FACES.iter().any(|f| {
-        ray_hits_triangle(o, d, max, [c[f[0]], c[f[1]], c[f[2]]], 0.0)
-            || ray_hits_triangle(o, d, max, [c[f[0]], c[f[2]], c[f[3]]], 0.0)
+        // Unsure: the grown bounds the ray crossed above enclose the box's hits.
+        ray_touches_triangle(o, d, max, [c[f[0]], c[f[1]], c[f[2]]], 0.0) != Touch::No
+            || ray_touches_triangle(o, d, max, [c[f[0]], c[f[2]], c[f[3]]], 0.0) != Touch::No
     })
 }
 
@@ -156,21 +157,32 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
+/// What [`ray_touches_triangle`] can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Touch {
+    No,
+    Yes,
+    /// Too ill-conditioned to bound PhysX's `f32` arithmetic triangle by triangle: the caller
+    /// must answer with an enclosure it can prove (the shape's grown bounds, which the ray has
+    /// already been found to cross: PhysX's midphase only tests a triangle whose node bounds the
+    /// ray crosses).
+    Unsure,
+}
+
 /// Does the ray touch the triangle (either side)? Conservative: a margin along the ray and
 /// around the edges of the [`slack`] plus, relative to the edges' lengths, PhysX's barycentric
 /// enlargement `bary_eps` (a mesh's `mGeomEpsilon`) and the float error of the crossing point,
 /// which grows as the ray turns parallel to the plane and as the triangle gets thin (its
 /// determinant cancels). Where the two together pass a thousandth, or the triangle is
-/// degenerate in `f64` (PhysX's `f32` determinant needn't vanish), any overlap of the
-/// segment with the triangle's grown bounds counts.
+/// degenerate in `f64` (PhysX's `f32` determinant needn't vanish), [`Touch::Unsure`].
 #[must_use]
-pub fn ray_hits_triangle(
+pub fn ray_touches_triangle(
     o: [f64; 3],
     d: [f64; 3],
     max: f64,
     tri: [[f64; 3]; 3],
     bary_eps: f64,
-) -> bool {
+) -> Touch {
     let [a, b, c] = tri;
     let e1 = sub(b, a);
     let e2 = sub(c, a);
@@ -180,7 +192,7 @@ pub fn ray_hits_triangle(
     let lens = [dot(e1, e1).sqrt(), dot(e2, e2).sqrt(), dot(e3, e3).sqrt()];
     let edges = lens[0] + lens[1] + lens[2];
     if !nn.is_finite() || !edges.is_finite() {
-        return true;
+        return Touch::Unsure;
     }
     let longest = lens[0].max(lens[1]).max(lens[2]);
     // The ray's angle to the plane, and the triangle's thinness (1 for a right isosceles
@@ -189,23 +201,21 @@ pub fn ray_hits_triangle(
     let shape = if longest > 0.0 { nn / (longest * longest) } else { 0.0 };
     let cond = sin * shape.min(1.0);
     if cond < 1e-3 {
-        let lo = [0, 1, 2].map(|k| a[k].min(b[k]).min(c[k]));
-        let hi = [0, 1, 2].map(|k| a[k].max(b[k]).max(c[k]));
-        return ray_hits_aabb(o, d, max, lo, hi, triangle_grow(tri, bary_eps));
+        return Touch::Unsure;
     }
     // PhysX's crossing point carries an error of order 1e-7 of the triangle's size, amplified
     // by 1 / cond, along the ray and across it alike.
     let margin = slack(o, max) + (2.0 * bary_eps + 1e-5 / cond) * edges;
     let t = dot(sub(a, o), n) / dot(d, n);
     if t < -margin || t > max + margin {
-        return false;
+        return Touch::No;
     }
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
-    point_triangle_distance(p, a, b, c) <= margin
+    if point_triangle_distance(p, a, b, c) <= margin { Touch::Yes } else { Touch::No }
 }
 
-/// How far beyond its vertices' bounds [`ray_hits_triangle`] may count a touch (on top of
-/// the [`slack`]): a prefilter on bounds must grow by at least this.
+/// How far beyond its vertices' bounds [`ray_touches_triangle`] may answer [`Touch::Yes`] (on
+/// top of the [`slack`]): a prefilter on bounds must grow by at least this.
 #[must_use]
 pub fn triangle_grow(tri: [[f64; 3]; 3], bary_eps: f64) -> f64 {
     let [a, b, c] = tri;
@@ -285,9 +295,14 @@ mod tests {
     fn triangles_count_within_the_margin() {
         let tri = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
         let flipped = [tri[0], tri[2], tri[1]];
-        let hits = |o: [f64; 3], max: f64| ray_hits_triangle(o, DOWN, max, tri, 0.0);
+        let hits =
+            |o: [f64; 3], max: f64| ray_touches_triangle(o, DOWN, max, tri, 0.0) == Touch::Yes;
         assert!(hits([0.2, 5.0, 0.2], 10.0));
-        assert!(ray_hits_triangle([0.2, 5.0, 0.2], DOWN, 10.0, flipped, 0.0), "either side");
+        assert_eq!(
+            ray_touches_triangle([0.2, 5.0, 0.2], DOWN, 10.0, flipped, 0.0),
+            Touch::Yes,
+            "either side"
+        );
         assert!(hits([-0.0005, 5.0, 0.2], 10.0), "within the margin");
         assert!(!hits([-0.01, 5.0, 0.2], 10.0));
         assert!(!hits([0.2, 5.0, 0.2], 4.9), "beyond max");
@@ -300,7 +315,7 @@ mod tests {
         // PhysX's BV4 test accepts u, v down to -mGeomEpsilon: 100 / 2^22 here, 1.41 mm outside.
         let tri = [[0.0, 0.0, 0.0], [0.0, 0.0, 100.0], [100.0, 0.0, 0.0]];
         let eps = 100.0 / f64::from(1u32 << 22);
-        assert!(ray_hits_triangle([50.001, 1.0, 50.001], DOWN, 10.0, tri, eps));
+        assert_eq!(ray_touches_triangle([50.001, 1.0, 50.001], DOWN, 10.0, tri, eps), Touch::Yes);
     }
 
     #[test]
@@ -312,20 +327,19 @@ mod tests {
             [1.0, f64::from(1.000_000_1f32), f64::from(0.999_999_9f32)],
         ];
         let o = [0.3, 1.0, f64::from(0.299_999_98f32)];
-        assert!(ray_hits_triangle(o, DOWN, 100.0, tri, 2f64.powi(-21)));
+        assert_eq!(ray_touches_triangle(o, DOWN, 100.0, tri, 2f64.powi(-21)), Touch::Unsure);
         // Collinear in f64 too: still counted where the ray meets its bounds.
         let line = [[0.0, 0.0, 0.0], [2.0, 2.0, 2.0], [1.0, 1.0, 1.0]];
-        assert!(ray_hits_triangle(o, DOWN, 100.0, line, 0.0));
-        assert!(!ray_hits_triangle([3.0, 1.0, 0.3], DOWN, 100.0, line, 0.0));
+        assert_eq!(ray_touches_triangle(o, DOWN, 100.0, line, 0.0), Touch::Unsure);
+        assert_eq!(ray_touches_triangle([3.0, 1.0, 0.3], DOWN, 100.0, line, 0.0), Touch::Unsure);
     }
 
     #[test]
     fn near_parallel_triangles_are_not_skipped() {
         // Nearly containing the vertical ray, crossed 1.5 m down; a long ray must still count.
         let tri = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [5e-13, 1.0, 0.0]];
-        assert!(ray_hits_triangle([2.5e-13, 2.0, 0.25], DOWN, 1e7, tri, 0.0));
-        assert!(ray_hits_triangle([2.5e-13, 2.0, 0.25], DOWN, 3.0, tri, 0.0));
-        assert!(!ray_hits_triangle([0.5, 2.0, 0.25], DOWN, 3.0, tri, 0.0));
+        assert_eq!(ray_touches_triangle([2.5e-13, 2.0, 0.25], DOWN, 1e7, tri, 0.0), Touch::Unsure);
+        assert_eq!(ray_touches_triangle([0.5, 2.0, 0.25], DOWN, 3.0, tri, 0.0), Touch::Unsure);
     }
 
     #[test]
