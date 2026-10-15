@@ -24,8 +24,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     use it once a fixture has an enemy walk several steps.
   - *Group memory* (`combat/memory.rs`, `docs/poc5/memory.md`): `UnitGroupMemory`'s bookkeeping, then slice H1:
     `UnitMemoryController.Tick` exact on all 42,306 recorded ticks of `poc5-tb-111` to `-113`; the sim's `AddToMemory`
-    calls at offensive actions and command acts are matched against `mem_q`. Wiring the tick into the driven replay
-    (`Phase::Memory`): the doc's "H1: result".
+    calls at offensive actions and command acts are matched against `mem_q`. H2: the memory computed in the driven
+    replay (`Phase::Memory`, `Phase::Conscious`): 88,476 controller ticks and 474,876 reads by other models checked.
   - *Physics* (`crates/wr-phys`, `docs/poc5/physics.md`): PhysX 4.1's height-field and box raycasts, checked against
     the player on a million rays each; all 57,321 recorded `ag_phys` queries of `poc5-tb-100` to `-105` bit-identical;
     `wr-import phys-pack` writes `cache/sim/phys/<guid>.wrphys`. Boxes and meshes unverified (no recording reaches
@@ -36,10 +36,29 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     The nav file is format 2. The UI's path visualizer (the party's follows) isn't ported.
   - *Manual_10's facts* (`docs/poc3/manual10-facts.md`): one-sided facts 35 -> 17, match rate 0.9987.
   - Fixes: `Vector3 ==` stores its sum before comparing; the oracle's tape reader takes a gate only from a boolean `g`.
-  - Running: I (the combat log's text: observer `combat_log`, captures `poc5-tb-115`,
-    `-116` tb-hold, `-117` tb-solo; its `clog_q` records inside rule spans make the driven replay of those invalid
-    until I's fix lands, as `mem_q` did before H's).
-  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`), `-115` to `-117` (+ `combat_log`). Sim regression unchanged (`cache/regress/out-post-d`).
+  - *The combat log* (`crates/wr-sim/src/game_log/`, `docs/poc5/combat-log.md`, observer `combat_log`): every recorded
+    message of `-115` to `-117` bit-exact (318); attack and damage tooltips not yet made.
+  - *Fixtures* (`docs/poc5/fixtures.md`, plans `poc5-tb5` tb-chain, `-tb6` tb-lizard, `-tb7` tb-cast, `-tb8` tb-tie;
+    the driver's `cast/<guid>/<unit>` and `seedinit:` steps). Saves Ember would need (an enemy walking several steps,
+    impatience's hard target, iterative attacks) are listed there.
+  - *Spellcasting and the fly* (`combat/spells.rs`, `docs/poc5/spells.md`, `Phase::Abilities`, `Phase::Visibility`,
+    observer `inspect_reveal`): tb-cast (`-120`) and tb-chain (`-123`, `-124`) valid on every run.
+  - *Oracle pins* (`docs/poc5/tb-replay.md`): projectile arrival (`ProjPin`), critter paths, the death effect's
+    dismemberment (`DeathFxPin`, its draw taped) and every root rule checked against the recording (`Sched.CheckRoot`):
+    tb-lizard (`-121`) is tick-exact in the game now.
+  - *Initiative ties* (`combat/ties.rs`, observer `init_ties`, plan step `seedinit`): the comparers' identity-hash
+    decisions are recorded inputs; tb-tie (`-127`) valid.
+  - **Memory guards** (the Mac froze out of memory once): `scripts/heavy.sh` for every heavy run, capture tests serial
+    (`.config/nextest.toml`), stream builds at 4 jobs. A long capture's replay peaks at ~8.5 GB.
+  - Valid on every run: `-95`, `-96`, `-109`, `-111` to `-117`, `-120`, `-122/tb-focus`, `-123` to `-127`.
+    Not valid: `-121` (tb-lizard: the AI's ability actions, stream P), `-122/tb-nearest` (a tie recorded before
+    `init_ties`; superseded by `-127`), `-118`/`-119` (superseded). POC-5 suites 27/27.
+  - Running: M (physics and paths behind the agent in the driven replay), O (the replay's memory), P (the AI's
+    ability actions for tb-lizard).
+  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`), `-115` to `-117`
+    (+ `combat_log`), `-118`..`-120` (stream J's fights), `-121`/`-122` (projectile and critter pins), `-123`
+    (+ `inspect_reveal`), `-124`/`-125` (+ `death_effect`, root rules), `-126`/`-127` (+ `init_ties`; `-127` tb-tie).
+    Sim regression unchanged (`cache/regress/out-post-d`).
 - **The movement agent (twenty-second session, `docs/poc5/movement.md`): `TickMovement` exact against the game.**
   WrathOracle's new observer `agent` (`CommandObsAgent.cs`, three gpt-6.1-sol review rounds) records the agent's state,
   leaves, physics queries, path requests and completions; `poc5-tb-100` to `-103` (Manual_18, both fights) are clean.
