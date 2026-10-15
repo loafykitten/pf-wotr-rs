@@ -327,8 +327,8 @@ waypoint advances and the path's end.
   raised by cutscene moves, `UnitMoveAlongPath`, riders and a few abilities, isn't modelled). Every object the sim
   queues (`nav_guo`: centre, extents, mask, flags, tag), applies (`nav_update`: its erosion) and every refresh
   (`nav_tags`: `erodeIterations`, the tag, the grid's hash, the blocked and ally-blocked counts) is paired in order
-  with the recording's (each record's id an integer, mapped one to one onto the sim's objects), and every frame's
-  events are paired by the frame's end, so the corpulences and flags used are checked where they're used. `ConstructTags` reads the
+  with the recording's (each record's id an integer, mapped one to one onto the sim's objects), every frame's
+  events are paired by the frame's end, and a turn start's between its recorded entry and return, so the corpulences and flags used are checked where they're used. `ConstructTags` reads the
   grid's current `erodeIterations` (it was the nav file's).
 
 **The paths.** Each `ABPathWithClearance` the sim's agent requests (`PathTo` from the commands, `FindPath` from the
@@ -355,8 +355,9 @@ when `FixPathIfTooShort` made a fake path, the sim's path must be one it replace
 within 0.1 m in x and z; the fake path's points are an input). Every `nav_*`/`path_*` record must be of its frame, and a return's seeker, modifiers and callbacks (with the AI's
 read after `BlockUntilCalculated`) of the return's frame (`Path.ReturnPath` runs them synchronously),
 and a `path_fin`, `path_seek` or `path_mod` of a path no request started is reported; a critter's request
-(`path_critter`, `critter#n`: `CritterMoveAgent`, presentation) and a request started inside a span taken from the
-recording keep the recording's path. Captures without `paths` (up to `-113`) take the
+(`path_critter`, `critter#n` only, each once: `CritterMoveAgent`, presentation), a request started inside a span taken
+from the recording and one carried from real time keep the recording's path; any other return in turn-based combat,
+whatever its kind, is reported. Captures without `paths` (up to `-113`) take the
 recorded paths as before (A2); `paths` declared without the driven agent's chain is reported.
 
 **Still inputs:** when a path is delivered (`PathSync`), line of sight (search and simulation), the units'
@@ -400,7 +401,7 @@ rays over the meshes would check one), each answer taken from the recording and 
 The coverage line (`wr-combat replay`): `physics and paths: physics queries computed ... simulation steps ... paths
 computed ... deliveries checked ... graph events matched ...`.
 
-`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 63
+`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 66
 ways (its first replay twice: the timer's refresh removed, a return moved a frame before its callback;
 `poc5-tb-123` once: the AI reading a step of the frame before; `poc5-tb-118` four ways: the AI reading a step other
 than the sim's, or another unit's, its steps' records removed, its grid read changed), each reported: the agent's, a simulation step's and a
@@ -411,7 +412,8 @@ changed, the transcript empty or unreadable, its return missing, moved before it
 a path no request started, its end node, its modifiers changed or missing, the seeker's decision (not taken, no
 modifiers, no callback), a stray `path_seek`, the delivered path, a definition, the AI's read, a fake path where
 `FixPathIfTooShort` keeps the path, `path_done`'s length, the record itself or its frame,
-the callback's kind, a pending definition after the return, `path_to`'s radius, a step's delta; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
+the callback's kind, a pending definition after the return, a turn start's graph records before its entry, a
+return of another kind no request of the sim's made, a critter's request under a unit's key, `path_to`'s radius, a step's delta; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
 missing, a refresh repeated, the clock read missing or another, the timer negative, the observer undeclared or declared
 without `agent_sync`, a refresh moved into the next frame, a graph update's id unreadable, a definition of another
 kind of path (complete, or pending before the request's registration), a unit's corpulence reads all changed, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)

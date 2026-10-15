@@ -3595,7 +3595,7 @@ impl Driver<'_> {
                     super::life::turn_start_sweep(w);
                     // The graph's part (when the sim computes the paths).
                     if let Some(u) = u {
-                        super::paths::start_turn(w, u);
+                        self.nav_start_turn(w, u);
                     }
                 }
                 self.turn_begin = Some((i, started));
@@ -3603,6 +3603,9 @@ impl Driver<'_> {
             // `StartTurn`'s postfix: `TurnStartTime = GameTime` was set before `CurrentTurn.Start`.
             Some("turn_start") if self.turn_begin.is_some() => {
                 let Some((begin, started)) = self.turn_begin.take() else { return };
+                if started {
+                    self.nav_turn_started(w);
+                }
                 if self.inside_start_turn(begin, i) {
                     w.coverage.unsupported(
                         "CombatController.StartTurn: a root rule, input or turn event inside it",

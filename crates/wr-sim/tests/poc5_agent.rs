@@ -1117,6 +1117,42 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             recs.insert(m + 1, r);
             renumber(recs);
         }),
+        ("graph events out of step at StartTurn's entry", |recs| {
+            // A turn start's graph records moved before its entry.
+            let b = tb(recs, |r| r["k"] == "tb" && r["ev"] == "turn_start_begin");
+            let n = recs[b + 1..]
+                .iter()
+                .take_while(|r| {
+                    matches!(r["ev"].as_str(), Some("nav_guo" | "nav_update" | "nav_tags"))
+                })
+                .count();
+            assert!(n > 0, "a turn start with graph records");
+            let moved: Vec<V> = recs.drain(b + 1..=b + n).collect();
+            for (k, r) in moved.into_iter().enumerate() {
+                recs.insert(b + k, r);
+            }
+            renumber(recs);
+        }),
+        ("a turn-based path the sim didn't request", |recs| {
+            // A request and return of another kind no sim code made.
+            let at = later(recs, |r| ev(r, "turn_tick"));
+            let t = recs[at]["t"].clone();
+            let start = json!({"k": "obs", "t": t, "ev": "path_start", "path": "unestablished#0",
+                "strict": true, "e": [0.0, 0.0, 0.0]});
+            let fin = json!({"k": "obs", "t": t, "ev": "path_fin", "path": "unestablished#0",
+                "kind": "XPath", "err": false, "cs": 2, "searched": 1, "end": null, "raw": [],
+                "los": []});
+            recs.insert(at + 1, fin);
+            recs.insert(at + 1, start);
+            renumber(recs);
+        }),
+        ("a critter's request it can't read", |recs| {
+            let at = later(recs, |r| ev(r, "turn_tick"));
+            let r = json!({"k": "obs", "t": recs[at]["t"], "ev": "path_critter",
+                "path": "5198#99999", "e": [0.0, 0.0, 0.0]});
+            recs.insert(at + 1, r);
+            renumber(recs);
+        }),
         ("the recording's path_to", |recs| {
             let at = tb(recs, |r| ev(r, "path_to"));
             recs[at]["radius"] = json!(0.25);

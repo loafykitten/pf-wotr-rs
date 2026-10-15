@@ -527,11 +527,20 @@ impl Driver<'_> {
             }
             "nav_clock" => self.nav_clock(w, r),
             // A critter's request (`CritterMoveAgent`: presentation, its path not the sim's).
+            // (`PathSync` names only identified critters `critter#<n>`, each request once.)
             "path_critter" => match r["path"].as_str() {
-                Some(k) if fields(r, &["path", "e"]) => {
+                Some(k)
+                    if fields(r, &["path", "e"])
+                        && v3(&r["e"]).is_some()
+                        && k.strip_prefix("critter#").is_some_and(|n| n.parse::<u32>().is_ok())
+                        && !self.nav_known(k) =>
+                {
                     self.ags.nav.critters.insert(k.to_owned());
                 }
-                _ => Self::nav_unsupported(w, "a critter's request it can't read"),
+                _ => Self::nav_unsupported(
+                    w,
+                    format!("a critter's request it can't read, or a second ({})", describe(r)),
+                ),
             },
             // `UnitMovementAgent.PathTo`'s and `OnPathComplete(Path)`'s prefixes (observer
             // `Observe`): checked by the sim's call that follows, in turn-based combat.
@@ -695,6 +704,22 @@ impl Driver<'_> {
         }
     }
 
+    /// `StartTurn`'s graph part, between its recorded entry and return: the grid's events before
+    /// it all paired (none of the turn's recorded early), then the sim's.
+    pub(super) fn nav_start_turn(&mut self, w: &mut World, rider: EntityIdx) {
+        if self.ags.nav.paths && !w.combat.nav.broken && !self.nav_in_step(w) {
+            Self::nav_unsupported(w, "graph events out of step at StartTurn's entry");
+        }
+        paths::start_turn(w, rider);
+    }
+
+    /// `StartTurn`'s return (`turn_start`): its graph events all recorded inside it.
+    pub(super) fn nav_turn_started(&mut self, w: &mut World) {
+        if self.ags.nav.paths && !w.combat.nav.broken && !self.nav_in_step(w) {
+            Self::nav_unsupported(w, "graph events out of step at StartTurn's return");
+        }
+    }
+
     /// A `FindPath` starts: the AI's read that follows is of its path only if it makes one.
     pub(super) fn nav_find_start(&mut self) {
         self.ags.nav.last_find = None;
@@ -721,13 +746,14 @@ impl Driver<'_> {
                 self.ag_input("a critter's path (presentation)");
             } else if self.ags.nav.taken.contains(&key) {
                 self.ag_input("a path whose request was taken from the recording");
-            } else if r["kind"] == "ABPathWithClearance" && w.combat.turn_based && self.ags.synced {
+            } else if w.combat.turn_based && self.ags.synced && !self.ags.carried.contains(&key) {
+                // (Whatever its kind: in turn-based combat the sim's agent makes every request.)
                 Self::nav_unsupported(
                     w,
                     format!("{key}: a turn-based path the sim didn't request"),
                 );
             } else {
-                self.ag_input("a path the sim didn't request (real time)");
+                self.ag_input("a path the sim didn't request (real time, or carried from it)");
             }
             return;
         };
