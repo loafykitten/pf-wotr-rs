@@ -5,9 +5,9 @@
 //! Medium: two greedy passes with `Polygon.Subdivide` between them).
 
 use super::cs::{self, V3, d, r};
-use super::graph::Int3;
 use super::nearest::{Constraint, Nearest};
 use super::world::{NodeId, World};
+use crate::Int3;
 
 /// `Side` of `VectorMath.SideXZ`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

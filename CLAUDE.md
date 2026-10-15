@@ -23,9 +23,10 @@ survey and notes on other rewrites.
   - Oracle (`docs/poc5/tb-replay.md`): turn-based replays are tick-exact, under load too (`poc5-tb-51`..`-53`,
     player input neutral at the source, physics phase pinned); `cert-20` certifies from this repo's layout.
   - POC-6 render round 3 (`docs/poc6/render-round3.md`): realtime shadows; FLIP 0.1246. Next: light probes.
-  - Nav (`docs/poc0/extraction.md` §9, `tools/wr-import/src/nav`): every path query exact, smoothing included (the
-    native math ported from `UnityPlayer.dylib` and checked against it, `nav/native_check.rs`). Next: a `crates/wr-nav`
-    for the sim, then `UnitMovementAgent`.
+  - Nav (`docs/poc0/extraction.md` §9, `crates/wr-nav`): every path query exact, smoothing included (the native
+    math ported from `UnityPlayer.dylib` and checked against it, `native_check.rs`). The sim's input is the area's nav
+    file (`cache/sim/nav/<guid>.wrnav`, written by `wr-import nav-pack`, also from `scripts/scene-cache.sh`). Next:
+    `UnitMovementAgent`.
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in
     parallel (recordings, POC-6 render comparisons, Metal captures of the original), never timing. Setup, sync and

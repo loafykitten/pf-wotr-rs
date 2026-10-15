@@ -4818,16 +4818,28 @@ dependencies = [
  "anyhow",
  "clap",
  "glam 0.34.1",
- "libc",
  "lz4_flex",
  "lzma-rs",
+ "postcard",
  "rayon",
  "serde",
  "serde_json",
  "texture2ddecoder",
  "wr-assets",
+ "wr-nav",
  "wr-paths",
  "zip",
+]
+
+[[package]]
+name = "wr-nav"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "postcard",
+ "serde",
+ "wr-paths",
 ]
 
 [[package]]

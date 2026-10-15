@@ -16,16 +16,9 @@ use serde::Serialize;
 
 use crate::unity::reader::{Endian, Reader};
 
-/// Integer coordinates in millimetres (`Int3`, precision 1000).
-pub type Int3 = [i32; 3];
-
-pub const INT3_PRECISION: f32 = 1000.0;
-
-/// `GraphNode.Flags` bits kept by serialization (`& 0xFFF80001`).
-pub const FLAG_WALKABLE: u32 = 1;
-pub const FLAG_TAG_SHIFT: u32 = 19;
-pub const FLAG_TAG_MASK: u32 = 0x00F8_0000;
-pub const FLAG_GRAPH_SHIFT: u32 = 24;
+pub use wr_nav::{
+    FLAG_GRAPH_SHIFT, FLAG_TAG_MASK, FLAG_TAG_SHIFT, FLAG_WALKABLE, INT3_PRECISION, Int3,
+};
 
 /// One connection from a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

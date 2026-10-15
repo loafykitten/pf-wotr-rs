@@ -44,6 +44,16 @@ enum Cmd {
         #[arg(long)]
         no_census: bool,
     },
+    /// Writes the area's nav file for the sim, `cache/sim/nav/<guid>.wrnav`: the runtime
+    /// graphs built from the area's `.nav` bundle, in wr-nav's format.
+    NavPack {
+        /// The area's bundle name, lower case (e.g. `prologue_caves_1`).
+        #[arg(long)]
+        area: String,
+        /// The area blueprint's guid.
+        #[arg(long)]
+        guid: String,
+    },
     /// Runs a path query on an area's graph cache.
     Path {
         #[arg(long, default_value = "prologue_caves_1")]
@@ -76,6 +86,9 @@ enum Cmd {
         /// Only these sections (comma-separated: scene, hierarchy, nav_graph, nav_queries).
         #[arg(long)]
         only: Option<String>,
+        /// Run the navigation sections on the world read from this nav file.
+        #[arg(long)]
+        nav_file: Option<PathBuf>,
     },
     /// Writes `cache/sim/unit-prefabs.json`: each unit prefab's `UnitEntityView.m_IsInGame`
     /// (the `IsInGameBySettings` a unit built from it starts with), for the sim.
@@ -118,6 +131,29 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Import { area, assetripper, pruned, no_census } => {
             import(&area, assetripper.as_deref(), pruned.as_deref(), no_census)
+        }
+        Cmd::NavPack { area, guid } => {
+            let t = Instant::now();
+            let ours = wr_import::oracle_diff::load_ours(&area)?;
+            let file =
+                wr_nav::NavFile { area: guid.clone(), source: ours.nav_source, world: ours.world };
+            let path = wr_nav::path_for(&guid);
+            file.write(&path)?;
+            let back = wr_nav::NavFile::read(&path)?;
+            anyhow::ensure!(
+                postcard_eq(&back, &file),
+                "{} does not read back as written",
+                path.display()
+            );
+            eprintln!(
+                "wrote {} ({} triangles, {} grid cells, {} bytes) in {:?}",
+                path.display(),
+                file.world.tris.len(),
+                file.world.grid.as_ref().map_or(0, |g| g.positions.len()),
+                std::fs::metadata(&path)?.len(),
+                t.elapsed()
+            );
+            Ok(())
         }
         Cmd::Path { area, from, to } => {
             let ctx = context()?;
@@ -194,9 +230,15 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Diff { capture, area, only } => {
+        Cmd::Diff { capture, area, only, nav_file } => {
             let out = wr_paths::cache_root().join("import").join(&area);
-            let r = wr_import::oracle_diff::run(&capture, &area, &out, only.as_deref())?;
+            let r = wr_import::oracle_diff::run(
+                &capture,
+                &area,
+                &out,
+                only.as_deref(),
+                nav_file.as_deref(),
+            )?;
             print!("{}", wr_import::oracle_diff::summary_text(&r));
             Ok(())
         }
@@ -475,4 +517,9 @@ fn dump(names: &[String], class: &str, limit: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Two nav files encode to the same bytes.
+fn postcard_eq(a: &wr_nav::NavFile, b: &wr_nav::NavFile) -> bool {
+    matches!((postcard::to_allocvec(a), postcard::to_allocvec(b)), (Ok(x), Ok(y)) if x == y)
 }

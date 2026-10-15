@@ -484,14 +484,15 @@ connections (`[tile, index, cost, shape edge]`), and every grid node's position,
 and connection bits, plus graph settings; the other 7 are settings the dump has and the
 cache doesn't serialize.
 
-**Path queries.** The A* Pathfinding Project 4.3.10 search is ported (`nav/astar.rs`:
+**Path queries.** The A* Pathfinding Project 4.3.10 search is ported (since 2026-10-15 in
+`crates/wr-nav`, the importer keeping the cache decoder; `astar.rs`:
 4-ary heap with its tie-breaking, `PathHandler` bookkeeping, backward triangle
 expansion, `UpdateRecursiveG` reopening, grid direction order, `ABPath` endpoint costs
 and partial paths, `ABPathWithClearance`'s tag masks and ending condition), as are
-nearest-node rules for both graphs (`nav/nearest.rs`: BBTree search, XZ vs 3D distance,
-`maxNearestNodeDistance`, constraints) and the modifiers (`nav/modifiers.rs`,
-`nav/funnel.rs`: StartEnd, Funnel with unwrap, Owlcat's `RemoveExcessPoints`, the
-graph-raycast smoother), with Mono's float semantics (`nav/cs.rs`).
+nearest-node rules for both graphs (`nearest.rs`: BBTree search, XZ vs 3D distance,
+`maxNearestNodeDistance`, constraints) and the modifiers (`modifiers.rs`,
+`funnel.rs`: StartEnd, Funnel with unwrap, Owlcat's `RemoveExcessPoints`, the
+graph-raycast smoother), with Mono's float semantics (`cs.rs`).
 
 | Query kind (46 queries each: 16 endpoint pairs + the 30 `nav.json` ones) | Exact |
 |---|---|
@@ -521,8 +522,8 @@ mismatch). Until 2026-10-15 the smoothing differed:
   `u = normalize(f × X)` (or `f × Y`), ignoring `to`. `MatrixToQuaternion` was already
   exact. The turn-based raycast smoothing, downstream of the same corners, became exact
   with it.
-- **Native math checked against the player itself.** `nav/native_check.rs` (an ignored
-  test: `cargo test --release -p wr-import --lib native_check -- --ignored`) `dlopen`s the
+- **Native math checked against the player itself.** `wr-nav`'s `native_check.rs` (an ignored
+  test: `cargo test --release -p wr-nav --lib native_check -- --ignored`) `dlopen`s the
   oracle build's player and calls its `FromToQuaternionSafe`, `InvertMatrix4x4_Full`
   (Mesa's `invert_matrix_general`), `Matrix4x4f::SetTRS` and `EulerToQuaternion` (order 4,
   Z-X-Y) on a million generated inputs each: every result bit-identical with our ports. The

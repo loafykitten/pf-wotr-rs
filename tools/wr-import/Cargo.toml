@@ -10,19 +10,18 @@ description = "Offline importer: reads the game's Unity bundles and writes our o
 [dependencies]
 wr-paths.workspace = true
 wr-assets.workspace = true
+wr-nav.workspace = true
 texture2ddecoder = "0.1.2"
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 glam = "0.34"
 lz4_flex = "0.14"
 lzma-rs = "0.3"
+postcard.workspace = true
 rayon = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zip = { version = "9.0", default-features = false, features = ["deflate"] }
-
-[dev-dependencies]
-libc.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "wr-nav"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Navigation: A* Pathfinding Project 4.3.10's searches, nearest-node rules and path modifiers on an area's graphs, exact to the game, and the area nav file."
+
+[dependencies]
+wr-paths.workspace = true
+anyhow.workspace = true
+postcard.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

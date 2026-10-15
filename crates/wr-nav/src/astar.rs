@@ -6,9 +6,9 @@
 //! end-point special case, `CompleteWith`, `ChangeEndNode`).
 
 use super::cs::{self, V3, d};
-use super::graph::Int3;
 use super::nearest::Constraint;
 use super::world::{Kind, NodeId, World};
+use crate::Int3;
 
 const NONE: u32 = u32::MAX;
 const NOT_IN_HEAP: u16 = u16::MAX;

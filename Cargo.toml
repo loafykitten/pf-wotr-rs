@@ -28,6 +28,7 @@ postcard = { version = "1.1", default-features = false, features = ["use-std"] }
 zstd = { version = "0.13", default-features = false }
 wr-save = { path = "crates/wr-save" }
 wr-assets = { path = "crates/wr-assets" }
+wr-nav = { path = "crates/wr-nav" }
 wr-text = { path = "crates/wr-text" }
 
 [workspace.lints.rust]

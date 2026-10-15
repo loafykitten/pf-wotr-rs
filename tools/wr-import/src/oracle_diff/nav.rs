@@ -6,8 +6,8 @@ use serde_json::{Value as J, json};
 use super::json::{self as dj, cmp_f, cmp_fs, cmp_points, eq};
 use super::{Ours, Outcome, Section};
 use crate::nav::graph::{FLAG_TAG_MASK, FLAG_WALKABLE, Graph};
-use crate::nav::query::{NearestOut, PathOut};
-use crate::nav::world::World;
+use wr_nav::query::{NearestOut, PathOut};
+use wr_nav::world::World;
 
 /// Standard base64 (the dump's packed grid arrays).
 fn base64(s: &str) -> Vec<u8> {

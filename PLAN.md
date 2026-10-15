@@ -15,9 +15,15 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   funnel's `Quaternion.FromToRotation` is now a port of the arm64 player's own machine code (found through the icall
   table in `UnityPlayer.dylib`): single-precision magnitudes, Möller and Hughes' original `h = (1 - e) / |v|²`, double
   thresholds and Unity's own 180° case. On `check-1` and `oracle-3` 3,387 of 3,387 query checks are exact (real-time
-  corners were 26/46, turn-based 32/46 and 44/46). `nav/native_check.rs` (ignored test) `dlopen`s the player and
+  corners were 26/46, turn-based 32/46 and 44/46). `native_check.rs` (ignored test) `dlopen`s the player and
   compares our `FromToRotation`, `Matrix4x4.inverse`, `TRS` and `Quaternion.Euler` with its functions on a million
   inputs each: bit-identical. gpt-6.1-sol (high): no defects; its one residual (subnormal angles in `Euler`) fixed and tested.
+  **Then `crates/wr-nav`:** the runtime (search, nearest, modifiers, queries, `cs`) moved out of `wr-import`, which keeps
+  the cache decoder and builds the `World`; `wr-import nav-pack --area <name> --guid <guid>` (also run by
+  `scripts/scene-cache.sh`) writes the area's nav file, `cache/sim/nav/<guid>.wrnav` (postcard behind a checked header,
+  1.2 MB for the caves). `wr-import diff --nav-file` runs the oracle's queries on the world read from it: still 3,387/3,387.
+  gpt-6.1-sol (high): the move preserves behaviour; its three findings (a temporary name shared within a process, the
+  scenes' `AstarPath` settings unchecked by `--nav-file`, a test race) fixed.
 - **POC-4 round 13 (twenty-first session, `docs/poc4/dialogue.md`): facts' handler interfaces.** No fact had ever
   subscribed to the event bus (the save schema drops handler interfaces, as it did for `EtudesSystem`):
   `rulebook/bus.rs` `FACT_HANDLERS` gives `ActivatableAbility` its ten (and `KingdomMoraleFlag` its one), every
@@ -236,8 +242,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
 **Next, in order:**
 1. Replace the recorded inputs with their controllers (`docs/poc5/commands.md`): what the AI and the commands still
    read as inputs (group memory and visibility, the movement agent and pathing, animation, the Unity clock) mostly wait
-   for their own ports (memory, nav: the searches and smoothing are exact, next is moving `tools/wr-import/src/nav`
-   into a `crates/wr-nav` the sim can use, then `UnitMovementAgent`); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
+   for their own ports (memory, nav: the searches and smoothing are exact, `crates/wr-nav` and the
+   nav files are in place, next is `UnitMovementAgent`); the impatience draws need a fight that reaches a hard target. A fixture whose enemies start out of reach would
    exercise the AI's movement simulation (`ScorePath`). The movement agent waits for the nav port. The UI's requests
    stay inputs. More fights recorded on the current mod (a critical, a spell, iterative attacks, an ally dying, a loot drop, a
    five-foot step, a full attack), with call sites and the cooldown and tick hooks (POC-5's three fights with different

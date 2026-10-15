@@ -13,17 +13,17 @@ pub mod scene;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::area::Universe;
 use crate::blueprints::BlueprintIndex;
 use crate::catalog::{CabIndex, Dependencies, Locations};
 use crate::nav::graph::{self, GraphCache};
-use crate::nav::world::World;
 use crate::scene::{Inventory, Resolver, SceneData};
 use crate::unity::serialized::class_id;
 use crate::unity::value::Value;
+use wr_nav::world::World;
 
 /// Counts for one compared field or record kind.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -116,6 +116,8 @@ pub struct Ours {
     pub inventory: Inventory,
     pub cache: GraphCache,
     pub world: World,
+    /// The `.nav` bundle and its graph cache's length and checksum.
+    pub nav_source: wr_nav::Source,
 }
 
 fn area_roots(deps: &Dependencies, area: &str) -> (Vec<String>, String) {
@@ -195,6 +197,7 @@ pub fn load_ours(area: &str) -> Result<Ours> {
     };
     let inventory = crate::scene::build_inventory(area, &scenes, &mut resolver)?;
     let mut cache = None;
+    let mut nav_source = None;
     for f in universe.files_of(&nav_bundle)? {
         if let Some(o) = f.objects.iter().find(|o| o.class_id == class_id::TEXT_ASSET) {
             let v = f.read(o)?;
@@ -203,13 +206,19 @@ pub fn load_ours(area: &str) -> Result<Ours> {
                 .and_then(Value::as_bytes)
                 .context("TextAsset without m_Script")?;
             cache = Some(graph::decode(bytes)?);
+            nav_source = Some(wr_nav::Source {
+                bundle: nav_bundle.clone(),
+                cache_len: bytes.len() as u64,
+                cache_fnv: wr_nav::fnv1a64(bytes),
+            });
             break;
         }
     }
     let cache = cache.with_context(|| format!("no TextAsset in {nav_bundle}"))?;
     let (max, full) = astar_settings(&inventory);
-    let world = World::build(&cache, max, full)?;
-    Ok(Ours { scenes, inventory, cache, world })
+    let world = crate::nav::build::build_world(&cache, max, full)?;
+    let nav_source = nav_source.context("nav source")?;
+    Ok(Ours { scenes, inventory, cache, world, nav_source })
 }
 
 fn summarize(s: &Section) -> BTreeMap<String, Tally> {
@@ -217,10 +226,38 @@ fn summarize(s: &Section) -> BTreeMap<String, Tally> {
 }
 
 /// Runs the whole diff and writes `oracle_diff.json` under `out_dir`.
-pub fn run(capture: &Path, area: &str, out_dir: &Path, only: Option<&str>) -> Result<Report> {
+/// Diffs a capture against our decoding of `area`; with `nav_file`, the navigation
+/// sections use the world read from that nav file (what the sim loads) instead.
+pub fn run(
+    capture: &Path,
+    area: &str,
+    out_dir: &Path,
+    only: Option<&str>,
+    nav_file: Option<&Path>,
+) -> Result<Report> {
     let t = std::time::Instant::now();
-    let ours = load_ours(area)?;
+    let mut ours = load_ours(area)?;
     eprintln!("decoded area in {:?}", t.elapsed());
+    if let Some(p) = nav_file {
+        let file = wr_nav::NavFile::read(p)?;
+        ensure!(
+            file.source == ours.nav_source,
+            "{} was built from another graph cache ({:?}; the install has {:?})",
+            p.display(),
+            file.source,
+            ours.nav_source
+        );
+        // The settings come from the scenes' `AstarPath`, not the graph cache.
+        ensure!(
+            file.world.max_nearest_node_distance.to_bits()
+                == ours.world.max_nearest_node_distance.to_bits()
+                && file.world.full_get_nearest_search == ours.world.full_get_nearest_search,
+            "{} has other AstarPath settings than the install's scenes: rebuild it",
+            p.display()
+        );
+        ours.world = file.world;
+        eprintln!("navigation from {}", p.display());
+    }
     let want = |k: &str| only.is_none_or(|o| o.split(',').any(|x| x == k));
     let mut report = Report {
         schema: "wr-import/oracle-diff/0",
