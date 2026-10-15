@@ -749,6 +749,13 @@ internal static class TurnBased
         });
         EventBus.RaiseEvent((IClickActionHandler h) => h.OnCastRequested(spell, tw));
         unit.Commands.Run(cmd);
+        // The rest of ClickWithSelectedAbilityHandler.OnClick, in its order: a line or cone projectile's caster stops
+        // when already close enough, then the pointer mode is cleared, inside the click, before the pointer leaves the
+        // target (whose hover change would otherwise copy the still-selected spell into the turn's CurrentAbility).
+        var deliver = spell.GetDeliverProjectileFromDeliverBlueprint(Kingmaker.Armies.TacticalCombat.TacticalCombatHelper.IsActive);
+        if (deliver != null && deliver.Type != AbilityProjectileType.Simple && cmd.IsUnitCloseEnough())
+            unit.View?.StopMoving();
+        Game.Instance.ClickEventsController.ClearPointerMode();
         return cmd;
     }
 
