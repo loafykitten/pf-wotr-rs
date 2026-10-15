@@ -74,7 +74,7 @@ internal static class Rules
         return $"{s.Class}|{StableId(s.A)}|{StableId(s.B)}|{s.Draws++}";
     }
 
-    private static string StableId(UnitEntityData u)
+    internal static string StableId(UnitEntityData u)
     {
         if (u == null) return "-";
         var id = u.UniqueId;
@@ -155,6 +155,8 @@ internal static class Rules
             RuleStack.Add(s);
             RulesSeen++;
             s.Seen |= 1;
+            // A replay checks each root rule against the recording's (after its record below is written).
+            var root = s.Depth == 0;
             Trace.Emit("rule", j =>
             {
                 j.Prop("id", s.Id);
@@ -188,6 +190,7 @@ internal static class Rules
                 }
                 j.End();
             });
+            if (root) Sched.CheckRoot(s.Class, evt.Initiator?.UniqueId);
         }
         catch (Exception e)
         {

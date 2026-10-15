@@ -83,11 +83,18 @@ internal static class Sched
     public static bool On => Window && Trace.Active && Trace.OnMainThread;
 
     private struct GateRec { public string Ev, D; public int T; }
+    // A root rule of the recording (depth 0): its tick, class and initiator's id (null: none).
+    private struct RootRec { public int T; public string Class, Ini; }
     private struct InputRec { public string Step; public int T; public JObject O; }
 
     private static List<GateRec> _gates;
     private static List<InputRec> _inputs;
-    private static int _gatePos, _inputPos;
+    private static List<RootRec> _roots;
+    private static int _gatePos, _inputPos, _rootPos;
+    // Initiators with long ids (made in the window: run-specific, Rules.StableId) are bound recording-to-replay,
+    // one to one, at their first root rule.
+    private static readonly Dictionary<string, string> RootBind = new Dictionary<string, string>(), RootBindBack = new Dictionary<string, string>();
+    public static long RootsChecked;
     public static long GatesSeen, InputsChecked;
 
     // Animation events (a strike, the end of an attack animation) are placed by float arithmetic on
@@ -121,7 +128,10 @@ internal static class Sched
         GatesSeen = InputsChecked = 0;
         _gates = null;
         _inputs = null;
-        _gatePos = _inputPos = 0;
+        _roots = null;
+        _gatePos = _inputPos = _rootPos = 0;
+        RootBind.Clear(); RootBindBack.Clear();
+        RootsChecked = 0;
         _offset = 0;
         MaxOffset = OffsetChanges = 0;
     }
@@ -140,6 +150,7 @@ internal static class Sched
         Window = false;
         _gates = null;
         _inputs = null;
+        _roots = null;
         HashTape = null;
     }
 
@@ -149,10 +160,12 @@ internal static class Sched
         if (_gates == null || Invalid != null) return;
         PathSync.CheckComplete();
         ProjPin.CheckComplete();
+        DeathFxPin.CheckComplete();
         WallClock.CheckComplete();
         if (Invalid != null) return;
         if (_gatePos < _gates.Count) Invalidate($"replay ended with {_gates.Count - _gatePos} recorded gates unused (next: {_gates[_gatePos].Ev} '{_gates[_gatePos].D}' at tick {_gates[_gatePos].T})");
         else if (_inputPos < _inputs.Count) Invalidate($"replay ended with {_inputs.Count - _inputPos} recorded inputs unused (next: '{_inputs[_inputPos].Step}' at tick {_inputs[_inputPos].T})");
+        else if (_rootPos < _roots.Count) Invalidate($"replay ended with {_roots.Count - _rootPos} recorded root rules unused (next: {_roots[_rootPos].Class} of {_roots[_rootPos].Ini ?? "-"} at tick {_roots[_rootPos].T})");
     }
 
     public static void ClearInvalid() => Invalid = null;
@@ -165,7 +178,52 @@ internal static class Sched
         IdlePin.Reset();
         _gates = new List<GateRec>();
         _inputs = new List<InputRec>();
-        _gatePos = _inputPos = 0;
+        _roots = new List<RootRec>();
+        _gatePos = _inputPos = _rootPos = 0;
+    }
+
+    // A root rule record of the recording (Rng.LoadTape), validated.
+    public static void TapeRoot(JObject o)
+    {
+        if (_roots == null) return;
+        var ini = o["initiator"];
+        string id = null;
+        var ok = o["t"]?.Type == JTokenType.Integer && o["class"]?.Type == JTokenType.String;
+        if (ini == null || ini.Type == JTokenType.Null) { }
+        else if (ini is JObject u && u["$unit"]?.Type == JTokenType.String) id = (string)u["$unit"];
+        else ok = false;
+        if (!ok) { Invalidate("recording's root rule record lacks or mistypes its tick, class or initiator"); return; }
+        _roots.Add(new RootRec { T = (int)o["t"], Class = (string)o["class"], Ini = id });
+    }
+
+    // Every root rule a replay pushes (Rules.OnPush, depth 0): the recording's next, with its class and
+    // initiator, on its tick plus the offset so far (exactly). A root rule is a cause the recording had or not:
+    // the rules under it, their draws and mutations follow from it (poc5-tb-123: a dismember buff's rule the
+    // replays didn't make went unnoticed, the tapes being complete without it).
+    public static void CheckRoot(string cls, string ini)
+    {
+        if (_roots == null || !Trace.Active || Invalid != null) return;
+        RootsChecked++;
+        if (_rootPos >= _roots.Count)
+        {
+            Invalidate($"root rule {cls} of {ini ?? "-"} at tick {Trace.Tick}: the recording has no further root rule");
+            return;
+        }
+        var r = _roots[_rootPos++];
+        var same = r.Class == cls && Trace.Tick == r.T + _offset;
+        if (same && r.Ini != ini)
+        {
+            // Long ids (units made in the window) bound one to one; short ids and none must be equal.
+            if (r.Ini != null && ini != null && r.Ini.Length > 8 && ini.Length > 8 &&
+                (!RootBind.TryGetValue(r.Ini, out var b) || b == ini) && (!RootBindBack.TryGetValue(ini, out var a) || a == r.Ini))
+            {
+                RootBind[r.Ini] = ini;
+                RootBindBack[ini] = r.Ini;
+            }
+            else same = false;
+        }
+        if (!same)
+            Invalidate($"root rule #{_rootPos - 1}: replay {cls} of {ini ?? "-"} at tick {Trace.Tick}; recording {r.Class} of {r.Ini ?? "-"} at tick {r.T} (offset so far {_offset})");
     }
 
     public static void TapeRecord(string kind, JObject o)
@@ -178,8 +236,9 @@ internal static class Sched
                 IdlePin.Add((string)o["u"], new IdlePin.State { Time = (float)(double)o["time"], Random = (float)(double)o["random"], Curve = (string)o["curve"] ?? "?", Playing = (bool?)o["playing"] ?? false });
             // Path keys are "<requester>#<n>" (recordings before that numbered all requests; they no longer replay).
             if ((string)o["ev"] == "path_ret") PathSync.AddTape((string)o["path"], (int)o["t"], (int)o["c"], (int?)o["req"] ?? -1);
-            // Projectile launches and hits (ProjPin.cs).
+            // Projectile launches and hits (ProjPin.cs), death effects (DeathFxPin.cs).
             ProjPin.TapeRecord(o);
+            DeathFxPin.TapeRecord(o);
             if ((string)o["ev"] == "path_start")
                 PathSync.AddStartTape((string)o["path"], o["e"] is JArray e && e.Count == 3 ? new UnityEngine.Vector3((float)e[0], (float)e[1], (float)e[2]) : (UnityEngine.Vector3?)null, (bool?)o["strict"] ?? true);
             // Gates carry "g": true; other records use "g" for other things (the memory observer: a group id).

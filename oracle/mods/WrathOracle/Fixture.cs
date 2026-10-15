@@ -58,6 +58,7 @@ internal static class Fixture
         CommandObs.ResetWindow();
         PathSync.ResetWindow();
         ProjPin.ResetWindow();
+        DeathFxPin.ResetWindow();
         TurnBased.ResetWindow();
         LogObs.ResetWindow();
         if (replay)
@@ -138,6 +139,8 @@ internal static class Fixture
             // The pins need the recording's records: projectile arrivals, and critters' requests keyed apart.
             if (ProjPin.Installed && !ProjPin.RecordedOn)
                 Sched.Invalidate("the recording has no projectile arrivals (observer proj_arrival): re-record");
+            if (DeathFxPin.Installed && !DeathFxPin.RecordedOn)
+                Sched.Invalidate("the recording has no death effects (observer death_effect): re-record");
             if (PathSync.CritterIdOk && !PathSync.RecordedCritters)
                 Sched.Invalidate("the recording keys critters' path requests as unidentified (no observer critter_paths): re-record");
             var rec = Sched.RecCamera;
@@ -219,6 +222,10 @@ internal static class Fixture
                 j.Prop("projectiles_tracked", ProjPin.Tracked);
                 j.Prop("projectile_hits_held", ProjPin.HeldBack);
                 j.Prop("projectile_hits_forced", ProjPin.Forced);
+                j.Prop("deaths", DeathFxPin.Deaths);
+                j.Prop("death_effect_pins", DeathFxPin.Pinned);
+                j.Prop("dismember_effects", DeathFxPin.Inits);
+                j.Prop("root_rules_checked", Sched.RootsChecked);
             }
             if (replay)
             {
@@ -318,6 +325,7 @@ internal static class Fidelity
         WallClock.Install(h);
         PathSync.Install(h);
         ProjPin.Install(h);
+        DeathFxPin.Install(h);
         InputPin.Install(h);
         Observe.Install(h);
         GroupObs.Install(h);
@@ -333,6 +341,8 @@ internal static class Fidelity
         // Projectile arrival pinned (proj_launch, proj_hit; ProjPin.cs), critters' path requests keyed apart
         // (path_critter; PathSync.cs).
         if (ProjPin.Installed) Observers.Add("proj_arrival");
+        // Death effects' dismember decisions and DismemberUnitFX's buff (death_fx, dismember; DeathFxPin.cs).
+        if (DeathFxPin.Installed) Observers.Add("death_effect");
         if (PathSync.CritterIdOk) Observers.Add("critter_paths");
         else Health.Failed("critter path identification", new MissingFieldException("CritterMoveAgent.m_Seeker or Seeker.tmpPathCallback"));
         // The cutscenes' progress (gate_track, cs_action, roaming's draw producers) and the awake
