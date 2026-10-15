@@ -1150,7 +1150,7 @@ fn activatable_on_new_round(w: &mut World, f: crate::world::FactIdx, owner: Enti
             && (on_combat_starts || w.fact(f).was_in_combat))
     {
         crate::unit_facts::stop(w, f);
-    } else if crate::unit_facts::has_component(&abp, "IActivatableAbilitySpendResourceLogic")
+    } else if crate::unit_facts::spends_resources(w, f)
         || crate::unit_facts::has_component(&abp, "ActivatableAbilityUnitCommand")
     {
         w.coverage.unsupported("ActivatableAbility.OnNewRound: resource or unit-command logic");
@@ -1161,18 +1161,19 @@ fn activatable_on_new_round(w: &mut World, f: crate::world::FactIdx, owner: Enti
 /// Whether `ActivatableAbility.OnNewRound` can change nothing for this started toggle: it is
 /// on, doesn't end with combat or after its first round, and has no restriction, resource
 /// or unit-command logic.
-fn activatable_round_is_plain(bp: &crate::content::Blueprint, on: bool) -> bool {
+fn activatable_round_is_plain(
+    w: &mut World,
+    f: crate::world::FactIdx,
+    bp: &crate::content::Blueprint,
+    on: bool,
+) -> bool {
     let v = bp.view();
     on && !v.bool("DeactivateIfCombatEnded")
         && !v.bool("DeactivateAfterFirstRound")
         && v.guid("m_Resource").is_none()
-        && ![
-            "ActivatableAbilityRestriction",
-            "IActivatableAbilitySpendResourceLogic",
-            "ActivatableAbilityUnitCommand",
-        ]
-        .iter()
-        .any(|t| crate::unit_facts::has_component(bp, t))
+        && !crate::unit_facts::has_restrictions(w, f)
+        && !crate::unit_facts::spends_resources(w, f)
+        && !crate::unit_facts::has_component(bp, "ActivatableAbilityUnitCommand")
 }
 
 /// How [`activatable_abilities_unit_tick`] runs.
@@ -1260,7 +1261,7 @@ fn activatable_abilities_unit_tick(
                 if area {
                     // A round of a plain toggle that is on changes nothing but its timer,
                     // which isn't tracked for a unit that may be asleep [I].
-                    if !activatable_round_is_plain(&abp, on) {
+                    if !activatable_round_is_plain(w, f, &abp, on) {
                         would_act(w);
                         return;
                     }

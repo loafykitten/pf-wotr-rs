@@ -740,7 +740,7 @@ fn activatable_on_attack(w: &mut World, a: FactIdx, spend: Spend) {
     }
     let Some(bp) = ability_bp(w, a) else { return };
     let available = is_available(w, a);
-    if available && has_component(&bp, "IActivatableAbilitySpendResourceLogic") {
+    if available && spends_resources(w, a) {
         w.coverage
             .unsupported("ActivatableAbility: IActivatableAbilitySpendResourceLogic on an attack");
     }
@@ -877,7 +877,18 @@ pub fn is_available(w: &mut World, f: FactIdx) -> bool {
 
 /// The fact's blueprint components of a type (`SelectComponentsWithRuntime<T>`: the enabled
 /// ones), in order.
-fn components_of(w: &mut World, f: FactIdx, ty: &str) -> Vec<(Rc<Blueprint>, usize)> {
+/// Whether a toggle has resource logic that spends (`IActivatableAbilitySpendResourceLogic` among
+/// its runtimes: `ActivatableAbilityResourceLogic`).
+pub fn spends_resources(w: &mut World, f: FactIdx) -> bool {
+    !components_of(w, f, "ActivatableAbilityResourceLogic").is_empty()
+}
+
+/// Whether a toggle has restriction runtimes (`ActivatableAbilityRestriction`).
+pub fn has_restrictions(w: &mut World, f: FactIdx) -> bool {
+    !components_of(w, f, "ActivatableAbilityRestriction").is_empty()
+}
+
+pub(crate) fn components_of(w: &mut World, f: FactIdx, ty: &str) -> Vec<(Rc<Blueprint>, usize)> {
     // `EntityFact.SelectComponentsWithRuntime<T>()`: the fact's runtimes whose
     // `SourceBlueprintComponent` is a `T` (a runtime not yet matched to its component, before
     // the fact's post-load, has none).
@@ -1016,7 +1027,12 @@ fn kensai_weapon_equipped(w: &mut World, u: EntityIdx, feature: Option<wr_conten
     let has_component = |w: &mut World, f: FactIdx| {
         !components_of(w, f, "KensaiChosenWeapon").is_empty()
             || w.fact(f).bp.as_ref().is_some_and(|b| {
-                b.components_array().iter().any(|o| is_a(o.ty, "KensaiChosenWeapon"))
+                // (the fallback skips runtime providers)
+                b.components_array().iter().any(|o| {
+                    is_a(o.ty, "KensaiChosenWeapon")
+                        && !wr_content::schema::ty(o.ty)
+                            .has(wr_content::schema::type_flags::RUNTIME_PROVIDER)
+                })
             })
     };
     let chosen = match fact {

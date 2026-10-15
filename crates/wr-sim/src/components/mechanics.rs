@@ -267,14 +267,21 @@ fn run_fact_context_actions(w: &mut World, c: CompRef, list: &str) {
     if actions.is_empty() {
         return;
     }
-    let owner = w.fact(c.fact).owner;
+    // `(Fact as IFactContextOwner)?.RunActionInContext(list)`: the scope's target is the
+    // context's `MainTarget`, its owner (an enchantment's context is its wielder's; a saved
+    // `m_MainTarget` isn't hydrated).
+    let owner = w
+        .fact(c.fact)
+        .context
+        .as_ref()
+        .and_then(|x| x.owner.clone())
+        .and_then(|id| w.by_id.get(&id).copied());
     let caster = w
         .fact(c.fact)
         .context
         .as_ref()
         .and_then(|x| x.caster.clone())
         .and_then(|id| w.by_id.get(&id).copied());
-    // `(Fact as IFactContextOwner)?.RunActionInContext(list)`: the context's main target.
     in_fact_context(w, c.fact, owner, |w| {
         for a in actions {
             let v = View(a);
@@ -438,7 +445,10 @@ fn apply_buff(w: &mut World, a: View<'_>, target: Option<EntityIdx>, caster: Opt
         w.log("error", "Unable to apply buff: no context found");
         return;
     };
-    let Some(u) = (if a.bool("ToCaster") { caster } else { target }) else {
+    // `Target.Unit` / `context.MaybeCaster`: a unit or nothing.
+    let Some(u) =
+        (if a.bool("ToCaster") { caster } else { target }).filter(|u| w.unit(*u).is_some())
+    else {
         w.log("error", "Can't apply buff: target is null");
         return;
     };
