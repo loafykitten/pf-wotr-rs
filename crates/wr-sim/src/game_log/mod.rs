@@ -876,13 +876,10 @@ fn game_log_message_in_scope(w: &mut World, path: &str) -> Result<Option<Msg0>, 
             _ => t,
         })
     };
-    let tip = match tooltip(w) {
-        Ok(d) => Tip::Simple {
-            cls: "TooltipTemplateCombatLogMessage",
-            header: Some(text.clone()),
-            desc: Some(d),
-        },
-        Err(e) => return Err(e),
+    let tip = Tip::Simple {
+        cls: "TooltipTemplateCombatLogMessage",
+        header: Some(text.clone()),
+        desc: Some(tooltip(w)?),
     };
     if text.is_empty() {
         return Ok(None);
