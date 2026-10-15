@@ -1,8 +1,10 @@
 //! Spellcasting and the giant fly's facts against WrathOracle's captures (local, gitignored):
 //! `poc5-tb-120/tb-cast` (Camelia casts Enlarge Person on Seelah from a memorized slot, through
 //! the driver's `tbcast`) and `poc5-tb-118/tb-chain` (a second fight, against the giant fly;
-//! recorded again with the fly's reveal and the projectile pin as `poc5-tb-123`). See
-//! `docs/poc5/spells.md`. Ignored by default (needs the game's packs, `cache/sim/log-strings.json`,
+//! recorded again with the fly's reveal and the projectile pin as `poc5-tb-123`), and the AI's
+//! cast actions on `poc5-tb-121/tb-lizard` (the ranged centipede's spit, scored twice). See
+//! `docs/poc5/spells.md` and `docs/poc5/ai-abilities.md`. Ignored by default (needs the game's
+//! packs, `cache/sim/log-strings.json`,
 //! Manual_18 and the captures; skipped when a capture is absent).
 //! `cargo nextest run -p wr-sim --test poc5_spells --run-ignored only`.
 
@@ -16,6 +18,7 @@ const SAVE: &str = "Manual_18_WR_FirstBattle";
 const CAST: (&str, &str) = ("poc5-tb-120", "tb-cast");
 const CHAIN: (&str, &str) = ("poc5-tb-118", "tb-chain");
 const CHAIN_REVEALED: (&str, &str) = ("poc5-tb-123", "tb-chain");
+const LIZARD: (&str, &str) = ("poc5-tb-121", "tb-lizard");
 
 fn fixture_in(capture: &str, name: &str) -> Option<PathBuf> {
     // The captures live in the main checkout: look in this checkout and every directory above it
@@ -357,6 +360,111 @@ fn wrong_projectile_launches_are_reported() {
         change(&mut changed.records);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         if !w.coverage.unsupported.keys().any(|k| k.contains("projectiles launched differ")) {
+            missed
+                .push(format!("case {i}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>()));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// The ranged centipede's spit (`GiantCentipedeSpitAbilityAiAction`, a `BlueprintAiCastSpell`).
+const SPIT: &str = "14db26a8a9b3be448860e12a07559f46";
+
+/// Every run of `tb-lizard` is valid with the centipede's cast action scored by the sim: its
+/// range the ability's, `ScoreActor` 2 then 0 (`ThreatedByConsideration` on the engagement
+/// model), `ScoreTarget` 0 (`DistanceConsideration`), no impatience reads; the attack chosen both
+/// times.
+#[test]
+#[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-121 capture"]
+fn the_centipedes_cast_action_is_scored() {
+    let Some(dir) = fixture_in(LIZARD.0, LIZARD.1) else {
+        eprintln!("{}/{} not present: skipped", LIZARD.0, LIZARD.1);
+        return;
+    };
+    for run in ["record", "replay-1", "replay-2"] {
+        let (out, w) = replay::run_fixture(SAVE, &dir, run).expect("replay");
+        let reports: Vec<_> = w.coverage.unsupported.keys().collect();
+        assert!(w.valid(), "{run}: {reports:?}");
+        assert!(out.diff.equal, "{run}: {:?}", out.diff.first_difference);
+        // The centipede's brain lists the spit first (base score 2), then its attack.
+        let centipede = w.by_id["5031"];
+        let available = w.unit(centipede).and_then(|u| u.brain.clone()).map(|b| b.available);
+        assert_eq!(
+            available.map(|a| a.iter().map(|g| g.map(|g| g.to_string())).collect::<Vec<_>>()),
+            Some(vec![Some(SPIT.to_owned()), Some("866ffa6c34000cd4a86fb1671f86c7d8".to_owned())]),
+            "{run}"
+        );
+    }
+}
+
+/// The cast action's scoring is computed, so its recorded reads and checks are required: another
+/// range, a score the sim doesn't make, a missing range read, or a read the sim doesn't make
+/// (impatience: the spit isn't affected) is reported.
+#[test]
+#[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-121 capture"]
+fn wrong_cast_action_records_are_reported() {
+    let Some(dir) = fixture_in(LIZARD.0, LIZARD.1) else {
+        eprintln!("{}/{} not present: skipped", LIZARD.0, LIZARD.1);
+        return;
+    };
+    fn spit_range(recs: &[V], n: usize) -> usize {
+        (0..recs.len())
+            .filter(|&i| recs[i]["ev"] == "uc_v" && recs[i]["f"] == "range" && recs[i]["a"] == SPIT)
+            .nth(n)
+            .expect("the spit's range read")
+    }
+    fn spit_score(recs: &[V], f: &str, n: usize) -> usize {
+        (0..recs.len())
+            .filter(|&i| recs[i]["ev"] == "ai_sc" && recs[i]["fn"] == f && recs[i]["a"] == SPIT)
+            .nth(n)
+            .expect("the spit's score")
+    }
+    let cases: [(&str, Change); 6] = [
+        // The ability's medium range is 40 ft: 12.192 m.
+        ("the cast action 14db26a8a9b3be448860e12a07559f46's range", |recs| {
+            let at = spit_range(recs, 0);
+            recs[at]["v"] = json!("12.0");
+        }),
+        // Not engaged: `ThreatedByConsideration` 1, the actor's score the base score 2.
+        ("ScoreActor of None: the sim scores 2", |recs| {
+            let at = spit_score(recs, "ScoreActor", 0);
+            recs[at]["s"] = json!("1");
+        }),
+        // Engaged by the PC: 0.
+        ("ScoreActor of None: the sim scores 0", |recs| {
+            let at = spit_score(recs, "ScoreActor", 1);
+            recs[at]["s"] = json!("2");
+        }),
+        // 14.67 m away: `DistanceConsideration` 0 beyond 8 m.
+        ("ScoreTarget of Some(", |recs| {
+            let at = spit_score(recs, "ScoreTarget", 0);
+            recs[at]["s"] = json!("2");
+        }),
+        // The range read missing.
+        ("driven replay: commands:", |recs| {
+            let at = spit_range(recs, 1);
+            recs.remove(at);
+            renumber(recs);
+        }),
+        // An impatience read after the spit's target: the sim reads none for it.
+        ("driven replay: commands:", |recs| {
+            let at = spit_score(recs, "ScoreTarget", 0) + 1;
+            assert_eq!(recs[at]["f"], "ptf");
+            let mut r = recs[at].clone();
+            r["f"] = json!("ipt");
+            r["v"] = V::Null;
+            r.as_object_mut().expect("a record").remove("u");
+            recs.insert(at + 1, r);
+            renumber(recs);
+        }),
+    ];
+    let mut missed = Vec::new();
+    for (i, (want, change)) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+        change(&mut changed.records);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.contains(want)) {
             missed
                 .push(format!("case {i}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>()));
         }

@@ -163,16 +163,18 @@ impl Driver<'_> {
                 .and_then(|t| w.by_id.get(t).copied())
                 .ok_or("the command's target isn't a unit the sim has")?;
         let f = &r["fields"];
-        let guid = a.spell.blueprint.to_string();
-        let sb = a.spellbook.to_string();
+        let guid = a.blueprint().to_string();
+        let (sb, level, spell_source) =
+            (a.book("the cast's params")?.0, a.spell_level(w)?, a.spell_source(w)?);
+        let sb = sb.to_string();
         let caster = &w.entity(a.caster).unique_id;
         let ok = f["Blueprint"].as_str() == Some(guid.as_str())
             && f["Spellbook"]["blueprint"].as_str() == Some(sb.as_str())
             && f["Spellbook"]["owner"].as_str() == Some(caster.as_str())
             && f["AbilityData"]["$ability"].as_str() == Some(guid.as_str())
             && f["AbilityData"]["caster"]["$unit"].as_str() == Some(caster.as_str())
-            && f["m_SpellLevel"].as_i64() == Some(i64::from(a.spell_level(w)))
-            && f["m_SpellSource"].as_i64() == Some(a.spell_source(w))
+            && f["m_SpellLevel"].as_i64() == Some(i64::from(level))
+            && f["m_SpellSource"].as_i64() == Some(spell_source)
             && f["m_MetamagicData"].is_null()
             && f["IgnoreDCBonuses"] == false
             && ["ReplaceCasterLevel", "ReplaceSpellLevel", "ReplaceDC", "ReplaceConcentration"]

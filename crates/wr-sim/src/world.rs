@@ -186,6 +186,9 @@ pub struct Fact {
     pub param: Option<serde_json::Value>,
     /// State of narrative fact subclasses (etudes, quests, objectives, tutorials).
     pub ext: FactExt,
+    /// An `Ability` fact's saved `UsagesPerDayResource` or `StickyTouch` is set (the sim keeps
+    /// neither: an `AbilityData` of it reports them).
+    pub ability_saved_extras: bool,
 }
 
 /// The members of narrative `EntityFact` subclasses (`Etude`, `Quest`, `QuestObjective`,
@@ -302,6 +305,7 @@ impl Fact {
             enchant_parent: None,
             param: None,
             ext: FactExt::None,
+            ability_saved_extras: false,
         }
     }
 }

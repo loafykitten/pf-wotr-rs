@@ -506,7 +506,7 @@ fn initialize(w: &mut World, e: EntityIdx, bp: &Rc<Blueprint>, p: Option<&Placeh
     }
     // `new UnitBrain(descriptor)` (`SetBrain(Blueprint.DefaultBrain)`), then
     // `Brain.RestoreAvailableActions()`: the AI's action list (`crate::combat::ai`).
-    let brain = crate::combat::ai::new_brain(w, bp.view().guid("m_Brain"));
+    let brain = crate::combat::ai::new_brain(w, e, bp.view().guid("m_Brain"));
     w.unit_mut(e).expect("unit").brain = Some(brain);
     // `unit.Remove<LevelUpPlanUnitHolder>()`: `OnDispose` disposes the plan unit
     // (`LevelUpPlanUnitHolder.cs:30`): its subscriptions, facts and registry entry go.

@@ -31,4 +31,34 @@ fn scores_keep_decimal_scales() {
     // The not-priority factor and the sleeping factor keep every digit.
     let s = mul(mul(dec(0.8).unwrap(), Decimal::lit(1, 8)).unwrap(), Decimal::lit(1, 3)).unwrap();
     assert_eq!(s.to_string(), "0.000000000008");
+    // A cast action's base 2 times a threat consideration's 0 is "0" (`poc5-tb-121`'s second
+    // decision); times its 1, "2".
+    assert_eq!(mul(dec(2.0).unwrap(), dec(0.0).unwrap()).unwrap().to_string(), "0");
+    assert_eq!(mul(dec(2.0).unwrap(), dec(1.0).unwrap()).unwrap().to_string(), "2");
+}
+
+#[test]
+fn mathf_lerps_are_unitys() {
+    // `InverseLerp`: clamped, 0 for an empty interval.
+    assert_eq!(inverse_lerp(0.0, 1.0, 0.0).to_bits(), 0.0f32.to_bits());
+    assert_eq!(inverse_lerp(0.0, 1.0, 1.0).to_bits(), 1.0f32.to_bits());
+    assert_eq!(inverse_lerp(0.0, 1.0, 3.0).to_bits(), 1.0f32.to_bits());
+    assert_eq!(inverse_lerp(7.5, 8.0, 7.75).to_bits(), 0.5f32.to_bits());
+    assert_eq!(inverse_lerp(7.5, 8.0, 1.0).to_bits(), 0.0f32.to_bits());
+    assert_eq!(inverse_lerp(2.0, 2.0, 5.0).to_bits(), 0.0f32.to_bits());
+    // `LerpUnclamped` extrapolates; `Lerp` clamps `t`.
+    assert_eq!(lerp_unclamped(1.0, 0.0, 2.0).to_bits(), (-1.0f32).to_bits());
+    assert_eq!(lerp(1.0, 0.0, 2.0).to_bits(), 0.0f32.to_bits());
+    assert_eq!(lerp(1.0, 0.0, 0.25).to_bits(), 0.75f32.to_bits());
+    // The quotient is stored as a `float` before `Clamp01`: computed in double, rounded once.
+    let x = inverse_lerp(0.0, 0.3, 0.1);
+    assert_eq!(x.to_bits(), store_f32(f64::from(0.1f32) / f64::from(0.3f32)).to_bits());
+}
+
+#[test]
+fn a_cast_actions_range_is_its_abilitys_in_meters() {
+    // `40.Feet().Meters`: `40f * 0.3048f` in double, stored: the recorded 12.192 of the giant
+    // centipede's spit (`poc5-tb-121`).
+    let meters = store_f32(40.0 * f64::from(0.3048f32));
+    assert_eq!(meters.to_bits(), 12.192f32.to_bits());
 }

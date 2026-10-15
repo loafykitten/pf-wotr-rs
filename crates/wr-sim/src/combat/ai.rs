@@ -2,9 +2,11 @@
 //! `TickBrain`, `SelectAction`, `FindBestAction`, `CalculateActionScore`,
 //! `CalculateTargetsScore`), the static `DecisionContext` it decides in, `TargetInfo`,
 //! `AiAction`'s scoring (`ScoreActor`, `ScoreTarget`, `ScorePath`), `AiActionSimple`,
-//! `BlueprintAiAction` and `BlueprintAiAttack`, and the considerations the fights use
+//! `BlueprintAiAction`, `BlueprintAiAttack` and `BlueprintAiCastSpell` (an ability fact's cast at
+//! an enemy: docs/poc5/ai-abilities.md), and the considerations the fights use
 //! (`ComplexConsideration`, `InRangeConsideration`, `LifeStateConsideration`,
-//! `FactConsideration`, `NotImpatientConsideration`). docs/poc5/commands.md, slice D.
+//! `FactConsideration`, `NotImpatientConsideration`, `ThreatedByConsideration`,
+//! `DistanceConsideration`). docs/poc5/commands.md, slice D.
 //!
 //! Scores are C# `decimal`s ([`Decimal`]); `float` expressions follow Mono's double evaluation
 //! ([`store_f32`] where a value is stored). What the code reads outside itself is an input,
@@ -19,9 +21,11 @@
 use wr_content::Guid;
 
 use super::commands::{self as uc, Desync, Inputs, Of, R};
+use super::spells::{self, Ability};
+use crate::content::is_a;
 use crate::csharp::Decimal;
-use crate::csharp::arith::store_f32;
-use crate::world::{EntityIdx, World};
+use crate::csharp::arith::{clamp01, store_f32};
+use crate::world::{EntityIdx, FactIdx, World};
 
 /// `UnitBrain` as saved.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -29,7 +33,8 @@ pub struct Brain {
     /// `Blueprint`.
     pub blueprint: Option<Guid>,
     /// `AvailableActions`, in order: each `AiActionSimple`'s blueprint (`None` for another kind
-    /// of action, or one the save doesn't name).
+    /// of action, one the save doesn't name, or a cast spell whose place in the list the sim
+    /// can't establish).
     pub available: Vec<Option<Guid>>,
     /// `CustomActions.Count`.
     pub custom: usize,
@@ -142,12 +147,15 @@ pub trait AiInputs: Inputs {
     fn ai_nct_write(&mut self, w: &mut World, u: &str, v: f32) -> R<()>;
 }
 
-/// A command `SelectAction` creates (`BlueprintAiAttack.CreateCommand`: `new UnitAttack(target)`).
+/// A command `SelectAction` creates (`BlueprintAiAttack.CreateCommand`: `new UnitAttack(target)`;
+/// `BlueprintAiCastSpell.CreateCommand`: `new UnitUseAbility(RuntimeActionType, ability, target)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCommand {
     pub class: &'static str,
     pub ty: u8,
     pub target: String,
+    /// The constructor's `NeedLoS` (a `UnitUseAbility`'s: no `ILineOfSightIgnore` component).
+    pub los: bool,
 }
 
 /// The AI's state the sim keeps.
@@ -164,6 +172,17 @@ pub struct Ai {
     /// Each unit's `NextCommandTime` once established (the first read in the window, then every
     /// recorded write: the AI's own checked, the others inputs).
     pub nct: std::collections::HashMap<EntityIdx, f32>,
+    /// `BlueprintAiCastSpell.Data.AbilityData` of each unit's cast action (by its blueprint):
+    /// the ability fact `InitContext` found the first time, kept until `ClearCombatInfo`
+    /// (leaving combat). `ActionData` isn't saved and a new brain's actions are new, so every
+    /// cache is empty at the load.
+    pub cast_data: std::collections::HashMap<(EntityIdx, Guid), FactIdx>,
+}
+
+/// `UnitCombatState.Clear()`'s `Brain.ClearCombatInfo()`: the unit's cast actions forget their
+/// `AbilityData`.
+pub fn clear_combat_info(w: &mut World, u: EntityIdx) {
+    w.combat.ai.cast_data.retain(|(x, _), _| *x != u);
 }
 
 impl Ai {
@@ -217,6 +236,10 @@ pub struct Context {
     stable: Vec<(&'static str, String, Stable)>,
     /// The group memory's enemies (`Memory.Enemies.Count`), as the enemies list read it.
     memory_enemies: Option<usize>,
+    /// `Ability`: the action's `AbilityData` (a cast action's, from `InitContext`).
+    ability: Option<Ability>,
+    /// `ExpendedActions` (by blueprint), cleared by `InitUnit`.
+    expended: Vec<Guid>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -289,19 +312,41 @@ fn base_score(w: &World, g: Guid) -> Option<f32> {
 
 /// A new unit's brain: `new UnitBrain(descriptor)` (`SetBrain(brain)`: an `AiActionSimple` per
 /// action of the brain blueprint), then `RestoreAvailableActions` (each action, a cast spell's only
-/// when `ShouldBeInActionsList`: kept as `None`, reported when the AI reaches it; then sorted by
-/// base score, descending: `List.Sort`'s introsort over a list grown by `Add`).
+/// when `ShouldBeInActionsList` ([`should_be_in_actions_list`]: kept as `None` where the sim can't
+/// tell, reported when the AI reaches it); then sorted by base score, descending: `List.Sort`'s
+/// introsort over a list grown by `Add`). `owner`'s facts are the ones `Initialize` added before.
 #[must_use]
-pub fn new_brain(w: &World, brain: Option<Guid>) -> Brain {
+pub fn new_brain(w: &mut World, owner: EntityIdx, brain: Option<Guid>) -> Brain {
     let actions: Vec<Guid> = brain
         .and_then(|g| w.content.get(g))
         .map(|b| b.view().guids("m_Actions"))
         .unwrap_or_default();
+    // `ShouldBeInActionsList`'s `GetAbilityForUse` makes the fact's `AbilityData` here: a random
+    // variant draws now, whether or not the unit ever decides.
+    let draws = actions.iter().any(|g| {
+        w.content.get(*g).is_some_and(|b| {
+            let v = b.view();
+            b.type_name() == "BlueprintAiCastSpell"
+                && v.bool("m_RandomVariant")
+                && v.guid("m_Ability").is_some_and(|a| spells::ability_fact(w, owner, a).is_some())
+        })
+    });
+    if draws {
+        w.coverage.unsupported(
+            "UnitBrain.RestoreAvailableActions: a cast action's random variant (CreateAbilityData draws)",
+        );
+    }
+    let w: &World = w;
     let mut list: Vec<(Option<Guid>, f32)> = actions
         .into_iter()
-        .map(|g| {
-            let simple = w.content.get(g).is_some_and(|b| b.type_name() != "BlueprintAiCastSpell");
-            (simple.then_some(g), base_score(w, g).unwrap_or(f32::NAN))
+        .filter_map(|g| {
+            let cast = w.content.get(g).is_some_and(|b| b.type_name() == "BlueprintAiCastSpell");
+            let listed = if cast { should_be_in_actions_list(w, owner, g) } else { Some(true) };
+            match listed {
+                Some(false) => None,
+                Some(true) => Some((Some(g), base_score(w, g).unwrap_or(f32::NAN))),
+                None => Some((None, base_score(w, g).unwrap_or(f32::NAN))),
+            }
         })
         .collect();
     let cap = crate::csharp::sort::grown_capacity(list.len());
@@ -314,7 +359,36 @@ pub fn new_brain(w: &World, brain: Option<Guid>) -> Brain {
     }
 }
 
-/// An `AiActionSimple` of a `BlueprintAiAttack`, as the port supports it.
+/// `BlueprintAiCastSpell.ShouldBeInActionsList(unit)`: `!IsExpended(GetAbilityForUse(unit),
+/// GetSpellbookForUse(unit))`, true when the unit has the ability as a fact or a spellbook that
+/// can spend it. `None` where the sim can't tell: no fact but a spellbook (`Spellbook.CanSpend`
+/// isn't ported), a random variant (`CreateAbilityData` draws), no ability.
+fn should_be_in_actions_list(w: &World, u: EntityIdx, g: Guid) -> Option<bool> {
+    let v = w.content.get(g)?;
+    let v = v.view();
+    let ability = v.guid("m_Ability")?;
+    if spells::ability_fact(w, u, ability).is_some() {
+        // (`CreateAbilityData` with a fact: a random variant draws.)
+        return (!v.bool("m_RandomVariant")).then_some(true);
+    }
+    // `unit.Spellbooks.FirstOrDefault(sb => sb.CanSpend(Ability))`: none without spellbooks.
+    w.unit(u).is_some_and(|x| x.spellbooks.is_empty()).then_some(false)
+}
+
+/// What a `BlueprintAiCastSpell` adds to an action.
+#[derive(Debug, Clone)]
+struct Cast {
+    /// `m_Ability`.
+    ability: Guid,
+    force_self: bool,
+    force_enemy: bool,
+    point_under_target: bool,
+    /// `m_DeadTargetType` (`AliveOnly` 0).
+    dead: i64,
+}
+
+/// An `AiActionSimple` of a `BlueprintAiAttack` or a `BlueprintAiCastSpell`, as the port supports
+/// it.
 #[derive(Debug, Clone)]
 struct Action {
     guid: Guid,
@@ -325,16 +399,42 @@ struct Action {
     invert_difficulty: bool,
     use_on_limited: bool,
     use_when_disabled: bool,
+    /// `IsAffectedByImpatience`: an attack's is; a cast's is `m_AffectedByImpatience`.
+    impatience: bool,
+    /// A cast action's (`None`: an attack).
+    cast: Option<Cast>,
 }
 
 fn action(w: &World, g: Guid) -> R<Action> {
     let Some(bp) = w.content.get(g) else {
         return desync(format!("the AI action blueprint {g} is unknown"));
     };
-    if bp.type_name() != "BlueprintAiAttack" {
-        return unsupported(&format!("an AI action of type {}", bp.type_name()));
-    }
     let v = bp.view();
+    let cast = match bp.type_name() {
+        "BlueprintAiAttack" => None,
+        "BlueprintAiCastSpell" => {
+            let Some(ability) = v.guid("m_Ability") else {
+                return unsupported("a BlueprintAiCastSpell without an ability");
+            };
+            // `CreateAbilityData`: a variant makes `new AbilityData(abilityData, variant)` (a
+            // random one draws).
+            if v.bool("m_RandomVariant") || v.guid("m_Variant").is_some() {
+                return unsupported("a BlueprintAiCastSpell's ability variant");
+            }
+            // (`GetTargetType`, `IsTargetValid` and `CreateCommand` read the locators.)
+            if !v.seq("Locators").is_empty() {
+                return unsupported("a BlueprintAiCastSpell's locators");
+            }
+            Some(Cast {
+                ability,
+                force_self: v.bool("m_ForceTargetSelf"),
+                force_enemy: v.bool("m_ForceTargetEnemy"),
+                point_under_target: v.bool("m_TargetPointUnderTarget"),
+                dead: v.int("m_DeadTargetType"),
+            })
+        }
+        other => return unsupported(&format!("an AI action of type {other}")),
+    };
     if v.bool("AdditionalBehaviour") {
         return unsupported("an AI action's AdditionalBehaviour");
     }
@@ -363,6 +463,34 @@ fn action(w: &World, g: Guid) -> R<Action> {
         invert_difficulty: v.bool("InvertDifficultyRequirements"),
         use_on_limited: v.bool("UseOnLimitedAI"),
         use_when_disabled: v.bool("UseWhenAIDisabled"),
+        impatience: cast.is_none() || v.bool("m_AffectedByImpatience"),
+        cast,
+    })
+}
+
+/// `GetRange` of a cast action (`BlueprintAiCastSpell.GetRange`) where the blueprint decides it:
+/// `Ability.GetRange()` (no `AbilityData`: the blueprint's `Range`) in meters (`Feet.Meters`:
+/// `feet * 0.3048f`). `None` where it reads the unit (touch: `GetWeaponRange`; double move:
+/// `CombatSpeedMps * 6`; weapon: the first weapon's `AttackRange`): the recorded range is then
+/// an input, as an attack's reach is.
+fn cast_range(w: &World, ability: Guid) -> R<Option<f32>> {
+    let Some(bp) = w.content.get(ability) else {
+        return desync(format!("the AI's ability {ability} is unknown"));
+    };
+    let v = bp.view();
+    let meters = |feet: f32| store_f32(f64::from(feet) * f64::from(0.3048f32));
+    // `AbilityRange`: Touch, Close, Medium, Long, Projectile, Unlimited, Personal, Custom,
+    // DoubleMove, Weapon.
+    Ok(match v.int("Range") {
+        0 | 8 | 9 => None,
+        1 => Some(meters(30.0)),
+        2 => Some(meters(40.0)),
+        3 => Some(meters(50.0)),
+        // (`new Feet(float.PositiveInfinity)`: the replay's leaves are finite.)
+        5 => return unsupported("BlueprintAbility.GetRange of an unlimited range"),
+        6 => Some(meters(0.0)),
+        7 => Some(meters(v.obj("CustomRange").map_or(0.0, |f| f.f32("m_Value")))),
+        _ => return unsupported("BlueprintAbility.GetRange of a projectile range"),
     })
 }
 
@@ -647,6 +775,7 @@ fn init_unit(w: &mut World, u: EntityIdx) {
     c.cur = Decimal::ZERO;
     c.current_path = None;
     c.current_five = false;
+    c.expended.clear();
     c.is_player_faction = pf;
     c.stable.clear();
     if c.enemies_init {
@@ -671,6 +800,7 @@ fn release_unit<I: AiInputs>(w: &mut World, inp: &mut I) -> R<()> {
     let c = ctx(w);
     c.unit = None;
     c.action = None;
+    c.ability = None;
     c.is_player_faction = false;
     Ok(())
 }
@@ -866,6 +996,14 @@ fn action_range_with_corpulence<I: AiInputs>(w: &mut World, inp: &mut I) -> R<f3
 fn select_action<I: AiInputs>(w: &mut World, inp: &mut I, u: EntityIdx, brain: &Brain) -> R<()> {
     let id = uid(w, u);
     let (best, target) = find_best_action(w, inp, u, brain)?;
+    // `ExpendedActions`: each removed from `AvailableActions` (`List.Remove`: the first).
+    for g in std::mem::take(&mut ctx(w).expended) {
+        if let Some(b) = w.unit_mut(u).and_then(|x| x.brain.as_mut())
+            && let Some(i) = b.available.iter().position(|x| *x == Some(g))
+        {
+            b.available.remove(i);
+        }
+    }
     let set = unit_set(w, &id)?;
     let Some(best) = best else {
         uc::interrupt_ai_commands(w, inp, set)?;
@@ -891,13 +1029,16 @@ fn select_action<I: AiInputs>(w: &mut World, inp: &mut I, u: EntityIdx, brain: &
                 (true, None) => return unsupported("an AI command the sim's AI didn't make"),
             };
             if same_action && same_target {
-                // `CanKeepCommand`: a `UnitAttack` and no auto-use ability.
-                let auto = inp.ai_blueprint(w, "auto", &id)?;
-                if auto.is_some() {
-                    return unsupported("an auto-use ability");
-                }
-                if !is_attack {
-                    return unsupported("CanKeepCommand of a command other than UnitAttack");
+                // `CanKeepCommand`: a cast's is the base's (true); an attack's a `UnitAttack`
+                // and no auto-use ability.
+                if best.cast.is_none() {
+                    let auto = inp.ai_blueprint(w, "auto", &id)?;
+                    if auto.is_some() {
+                        return unsupported("an auto-use ability");
+                    }
+                    if !is_attack {
+                        return unsupported("CanKeepCommand of a command other than UnitAttack");
+                    }
                 }
                 ctx(w).best_path = None;
                 let nct = w.combat.ai.nct.get(&u).copied();
@@ -906,26 +1047,52 @@ fn select_action<I: AiInputs>(w: &mut World, inp: &mut I, u: EntityIdx, brain: &
         }
     }
     init_action(w, inp, &best)?;
-    // `BlueprintAiAttack.CreateCommand`: no auto-use ability; `UnitAttack.CreateAttackCommand`:
-    // no magus' spell before the attack.
-    if inp.ai_blueprint(w, "auto", &id)?.is_some() {
-        return unsupported("an auto-use ability");
-    }
-    if inp.ai_bool(w, "magus", Some(&id))? {
-        return unsupported("UnitAttack.CreateAttackCommand for a magus");
-    }
+    // `ApplyAction()`: nothing (neither blueprint overrides it). `CreateCommand`:
+    let (spec, ability) = match &best.cast {
+        None => {
+            // `BlueprintAiAttack.CreateCommand`: no auto-use ability;
+            // `UnitAttack.CreateAttackCommand`: no magus' spell before the attack.
+            if inp.ai_blueprint(w, "auto", &id)?.is_some() {
+                return unsupported("an auto-use ability");
+            }
+            if inp.ai_bool(w, "magus", Some(&id))? {
+                return unsupported("UnitAttack.CreateAttackCommand for a magus");
+            }
+            let spec = NewCommand {
+                class: uc::class::ATTACK,
+                ty: uc::ty::STANDARD,
+                target: target_id,
+                los: true,
+            };
+            (spec, None)
+        }
+        Some(cast) => {
+            let (spec, a) = create_cast_command(w, cast, target_id)?;
+            (spec, Some(a))
+        }
+    };
     let path = ctx(w).best_path.take();
     let five = w.combat.ai.ctx.best_five.unwrap_or(false);
-    // `NextCommandTime = Time.time`; a `UnitAttack` is a standard action:
+    // `NextCommandTime = Time.time`; then, for a command neither free nor swift,
     // `NextCommandTime += 0.3f + Random.Range(0f, 0.1f)`.
     let time = inp.ai_float(w, "time", None)?;
     inp.ai_nct_write(w, &id, time)?;
-    let r = inp.ai_draw(w)?;
-    let nct = store_f32(f64::from(time) + (f64::from(0.3f32) + f64::from(r)));
-    inp.ai_nct_write(w, &id, nct)?;
+    let mut nct = time;
+    if spec.ty != uc::ty::FREE && spec.ty != uc::ty::SWIFT {
+        let r = inp.ai_draw(w)?;
+        nct = store_f32(f64::from(time) + (f64::from(0.3f32) + f64::from(r)));
+        inp.ai_nct_write(w, &id, nct)?;
+    }
     w.combat.ai.nct.insert(u, nct);
-    let spec = NewCommand { class: uc::class::ATTACK, ty: uc::ty::STANDARD, target: target_id };
     let c = inp.ai_new_run(w, set, &spec)?;
+    // The command's `Ability` is the context's `AbilityData` (its spellcasting is
+    // `combat::spells`').
+    if let Some(a) = ability {
+        match w.combat.commands.cmds.get_mut(&c) {
+            Some(x) => x.ability = Some(a),
+            None => return desync(format!("the AI's command {c} isn't described")),
+        }
+    }
     w.combat
         .ai
         .commands
@@ -935,6 +1102,55 @@ fn select_action<I: AiInputs>(w: &mut World, inp: &mut I, u: EntityIdx, brain: &
     // (`Run`'s `UpdateCombatTarget` may change the unit's targets.)
     ctx(w).stable.retain(|(f, _, _)| *f != "manual" && *f != "last");
     inp.ai_selected(w, &id, true, Some(nct))
+}
+
+/// Components implementing `ILineOfSightIgnore` (a `UnitUseAbility`'s `NeedLoS` is false with
+/// one).
+const LOS_IGNORE: &[&str] = &[
+    "AbilityEffectStickyTouch",
+    "AbilityTargetIsDeadAnimalCompanion",
+    "AbilityTargetIsDeadCompanion",
+    "AbilityTargetStoneToFlesh",
+    "DimensionDoorRestrictionIgnorance",
+    "LineOfSightIgnorance",
+];
+
+/// `BlueprintAiCastSpell.CreateCommand(context, target)` (no locators: [`action`]):
+/// `UnitUseAbility.CreateCastCommand(ability, target)` of an available ability, the target a
+/// unit, without a touch part or a magus' part (reported: the touch ability or a spellstrike
+/// attack may replace it), `new UnitUseAbility(RuntimeActionType, ability, target)`. A missing
+/// or unavailable ability's `UnitMoveTo` and a point target are reported.
+fn create_cast_command(w: &mut World, cast: &Cast, target: String) -> R<(NewCommand, Ability)> {
+    let me = ctx_unit(w)?;
+    let ability = w.combat.ai.ctx.ability.clone();
+    let available = match &ability {
+        Some(a) => spells::is_available(w, a).map_err(|e| {
+            Desync(format!("BlueprintAiCastSpell.CreateCommand: {e} (not modelled)"))
+        })?,
+        None => false,
+    };
+    let Some(a) = ability.filter(|_| available) else {
+        return unsupported(
+            "BlueprintAiCastSpell.CreateCommand without an available ability (UnitMoveTo)",
+        );
+    };
+    if cast.point_under_target {
+        return unsupported("BlueprintAiCastSpell.CreateCommand at the point under its target");
+    }
+    if let Some(p) = w
+        .entity(me)
+        .parts
+        .iter()
+        .map(|p| p.clr)
+        .find(|p| *p == "UnitPartTouch" || *p == "UnitPartMagus")
+    {
+        return unsupported(&format!("UnitUseAbility.CreateCastCommand with {p}"));
+    }
+    let ty = spells::runtime_action_type(w, &a)
+        .map_err(|e| Desync(format!("UnitUseAbility.CreateCastCommand: {e} (not modelled)")))?;
+    let Some(bp) = a.bp(w) else { return desync("the AI's ability blueprint is missing") };
+    let los = !bp.components_array().iter().any(|o| LOS_IGNORE.iter().any(|n| is_a(o.ty, n)));
+    Ok((NewCommand { class: uc::class::USE_ABILITY, ty, target, los }, a))
 }
 
 /// `FindBestAction`: the best action and target.
@@ -959,7 +1175,11 @@ fn find_best_action<I: AiInputs>(
     // `bestAction == null || context.CurrentScore < 0.1m`.
     if best.is_none() || w.combat.ai.ctx.cur < Decimal::lit(1, 1) {
         for g in &brain.available {
-            let Some(g) = g else { return unsupported("an AI action other than AiActionSimple") };
+            let Some(g) = g else {
+                return unsupported(
+                    "an AI action the sim can't establish (not an AiActionSimple, or a cast spell's ShouldBeInActionsList)",
+                );
+            };
             let a = action(w, *g)?;
             if w.combat.ai.ctx.best > dec(a.base_score)? {
                 continue;
@@ -981,11 +1201,25 @@ fn find_best_action<I: AiInputs>(
     Ok((best, target))
 }
 
-/// `DecisionContext.InitAction(action)`.
+/// `DecisionContext.InitAction(action)`: `Ability = null`, `InitContext` (an attack's nothing, a
+/// cast's [`init_cast_context`]), `GetRange` (the weapon's reach, an input; a cast's
+/// [`cast_range`], the recorded value checked where the blueprint decides it), `GetRadius` (read
+/// by nothing the port runs).
 fn init_action<I: AiInputs>(w: &mut World, inp: &mut I, a: &Action) -> R<()> {
-    // `InitContext`: nothing for an attack; `GetRange`: the weapon's reach (an input);
-    // `GetRadius`: 0.
+    ctx(w).ability = None;
+    if let Some(cast) = &a.cast {
+        init_cast_context(w, a, cast)?;
+    }
     let range = inp.ai_range(w, a.guid)?;
+    if let Some(cast) = &a.cast
+        && let Some(sim) = cast_range(w, cast.ability)?
+        && sim.to_bits() != range.to_bits()
+    {
+        return desync(format!(
+            "the cast action {}'s range: the sim's {sim}, the recording's {range}",
+            a.guid
+        ));
+    }
     stable(w, "range", &a.guid.to_string(), Stable::Float(range.to_bits()))?;
     let base = dec(a.base_score)?;
     let c = ctx(w);
@@ -993,6 +1227,47 @@ fn init_action<I: AiInputs>(w: &mut World, inp: &mut I, a: &Action) -> R<()> {
     c.action_range = range;
     c.cur = base;
     c.target = None;
+    Ok(())
+}
+
+/// `BlueprintAiCastSpell.InitContext(context)`: the action's `Data.AbilityData`, made the first
+/// time it is null (`GetAbilityForUse`: `new AbilityData(fact)` of the unit's `Ability` fact, no
+/// variant: [`action`]; without one the spellbook's, `GetSpellbookForUse`, reported when the unit
+/// has a spellbook), kept in [`Ai::cast_data`]; `context.Ability` is it.
+fn init_cast_context(w: &mut World, a: &Action, cast: &Cast) -> R<()> {
+    let me = ctx_unit(w)?;
+    let key = (me, a.guid);
+    let fact = match w.combat.ai.cast_data.get(&key) {
+        Some(f) => Some(*f),
+        None => match spells::ability_fact(w, me, cast.ability) {
+            Some(f) => {
+                w.combat.ai.cast_data.insert(key, f);
+                Some(f)
+            }
+            None if w.unit(me).is_some_and(|x| x.spellbooks.is_empty()) => None,
+            None => {
+                return unsupported(
+                    "BlueprintAiCastSpell.GetSpellbookForUse (Spellbook.CanSpend of an ability)",
+                );
+            }
+        },
+    };
+    // (A brain listing one cast action twice would keep two caches.)
+    let listed = w
+        .unit(me)
+        .and_then(|x| x.brain.as_ref())
+        .map_or(0, |b| b.available.iter().filter(|x| **x == Some(a.guid)).count());
+    if listed > 1 {
+        return unsupported("a brain listing one cast action twice");
+    }
+    let ability = match fact {
+        Some(f) => match Ability::of_fact(w, f) {
+            Some(x) => Some(x),
+            None => return desync("the AI's ability fact has no owner or blueprint"),
+        },
+        None => None,
+    };
+    ctx(w).ability = ability;
     Ok(())
 }
 
@@ -1010,9 +1285,32 @@ fn calculate_action_score<I: AiInputs>(
         return Ok(());
     }
     let actor_score = w.combat.ai.ctx.cur;
-    // `BlueprintAiAttack`: enemies, alive only.
+    // `GetTargetType` and `GetDeadTargetType`: an attack's enemies, alive only; a cast's
+    // ([`cast_targets`]) the same where it forces an enemy target.
+    if let Some(cast) = &a.cast {
+        cast_targets(w, cast)?;
+    }
     enemies(w, inp)?;
     calculate_targets_score(w, inp, a, actor_score, best, target)?;
+    Ok(())
+}
+
+/// `BlueprintAiCastSpell.GetTargetType` (`ForceTargetSelf`: `Self`; `ForceTargetEnemy`: `Enemy`;
+/// else by the ability's anchor and targets) and `GetDeadTargetType` (`AliveOnly`, or the
+/// action's when the ability can target the dead): only enemies, alive only, are modelled.
+fn cast_targets(w: &World, cast: &Cast) -> R<()> {
+    if cast.force_self {
+        return unsupported("an AI cast action's Self targets (ForceTargetSelf)");
+    }
+    if !cast.force_enemy {
+        return unsupported("BlueprintAiCastSpell.GetTargetType without a forced target");
+    }
+    let Some(bp) = w.content.get(cast.ability) else {
+        return desync(format!("the AI's ability {} is unknown", cast.ability));
+    };
+    if cast.dead != 0 && spells::can_cast_to_dead_target(&bp) {
+        return unsupported("an AI cast action's dead targets (DeadTargetType)");
+    }
     Ok(())
 }
 
@@ -1039,12 +1337,47 @@ fn score_actor<I: AiInputs>(w: &mut World, inp: &mut I, a: &Action) -> R<()> {
         if (!a.invert_difficulty && cmp < 0) || (a.invert_difficulty && cmp > 0) {
             break 'v false;
         }
-        // `IsAvailable` and `IsExpended`: an attack's are true and false.
+        // `IsAvailable` and `IsExpended`: an attack's are true and false. A cast's: the
+        // context's `AbilityData.IsAvailable` (true without one), then expended without one
+        // (`IsExpended(ability, ability?.Spellbook)`: an ability fact's has no spellbook).
+        if a.cast.is_some() {
+            let ability = w.combat.ai.ctx.ability.clone();
+            match ability {
+                Some(ab) => match spells::is_available(w, &ab) {
+                    Ok(true) => {}
+                    Ok(false) => break 'v false,
+                    Err(e) => {
+                        return unsupported(&format!("BlueprintAiCastSpell.IsAvailable: {e}"));
+                    }
+                },
+                None => {
+                    ctx(w).expended.push(a.guid);
+                    break 'v false;
+                }
+            }
+        }
         true
     };
     if valid {
         score_considerations(w, inp, &a.actor)?;
-        // `ScoreActor`'s full-round check is for abilities only.
+        // In turn-based combat, an ability that needs a full-round action scores 0 for a
+        // subject (`Target.Unit ?? Unit`) neither surprising nor with one.
+        let ability = w.combat.ai.ctx.ability.clone();
+        if turn_based(w)
+            && w.combat.ai.ctx.cur > Decimal::ZERO
+            && let Some(ab) = ability
+        {
+            let full = spells::require_full_round_action(w, &ab).map_err(|e| {
+                Desync(format!("AiAction.ScoreActor: RequireFullRoundAction: {e} (not modelled)"))
+            })?;
+            let t = w.combat.ai.ctx.target.map_or(me, |i| w.combat.ai.ctx.enemies[i].unit);
+            if full
+                && !super::cooldowns::is_surprising(w, t)
+                && !super::cooldowns::has_full_round_action(w, t)
+            {
+                ctx(w).cur = Decimal::ZERO;
+            }
+        }
     } else {
         ctx(w).cur = Decimal::ZERO;
     }
@@ -1119,8 +1452,62 @@ fn consideration<I: AiInputs>(w: &mut World, inp: &mut I, g: Guid) -> R<f32> {
             Ok(if has { v.f32("HasFactScore") } else { v.f32("NoFactScore") })
         }
         "NotImpatientConsideration" => Ok(1.0),
+        "ThreatedByConsideration" => {
+            // `(Target.Unit ?? Unit).CombatState.EngagedBy.Count`: the engagement model's.
+            let count = engaged_by_count(w, subject)?;
+            let (min, max) = (v.i32("MinCount"), v.i32("MaxCount"));
+            if count < min {
+                return Ok(v.f32("BelowMinScore"));
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let t = inverse_lerp(min as f32, max as f32, count as f32);
+            let mut num = lerp_unclamped(v.f32("MinScore"), v.f32("MaxScore"), t);
+            if count > max {
+                #[allow(clippy::cast_precision_loss)]
+                let extra = count.wrapping_sub(max) as f32;
+                num = store_f32(
+                    f64::from(num) + f64::from(v.f32("ExtraTargetScore")) * f64::from(extra),
+                );
+            }
+            Ok(clamp01(num))
+        }
+        "DistanceConsideration" => {
+            // Without a target: an error logged, 0.
+            let Some(t) = t else { return Ok(0.0) };
+            let x = inverse_lerp(v.f32("MinDistance"), v.f32("MaxDistance"), t.distance);
+            Ok(lerp(v.f32("MinDistanceScore"), v.f32("MaxDistanceScore"), x))
+        }
         other => unsupported(&format!("the AI consideration {other}")),
     }
+}
+
+/// `UnitCombatState.EngagedBy.Count` of `u`: the engagement model's (reported without it, or
+/// before the unit's state is the game's).
+fn engaged_by_count(w: &World, u: EntityIdx) -> R<i32> {
+    let known = w.unit(u).filter(|x| w.combat.engage.on && x.combat.eng.known);
+    match known.map(|x| i32::try_from(x.combat.eng.engaged_by.len())) {
+        Some(Ok(n)) => Ok(n),
+        _ => unsupported("ThreatedByConsideration's EngagedBy without the engagement model"),
+    }
+}
+
+/// `Mathf.InverseLerp(a, b, value)`: `Clamp01((value - a) / (b - a))` (its argument stored as a
+/// `float`), 0 when `a == b`.
+fn inverse_lerp(a: f32, b: f32, value: f32) -> f32 {
+    if a == b {
+        return 0.0;
+    }
+    clamp01(store_f32((f64::from(value) - f64::from(a)) / (f64::from(b) - f64::from(a))))
+}
+
+/// `Mathf.LerpUnclamped(a, b, t)`: `a + (b - a) * t`.
+fn lerp_unclamped(a: f32, b: f32, t: f32) -> f32 {
+    store_f32(f64::from(a) + (f64::from(b) - f64::from(a)) * f64::from(t))
+}
+
+/// `Mathf.Lerp(a, b, t)`: `a + (b - a) * Clamp01(t)`.
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    lerp_unclamped(a, b, clamp01(t))
 }
 
 /// `CalculateTargetsScore(context, action, Enemies, actorScore, ...)`.
@@ -1156,8 +1543,8 @@ fn calculate_targets_score<I: AiInputs>(
             let c = ctx(w);
             c.cur = mul(c.cur, Decimal::lit(1, 8))?;
         }
-        // `IsAffectedByImpatience`: an attack is.
-        if !w.combat.ai.ctx.is_player_faction && !not_priority {
+        // `IsAffectedByImpatience`: an attack is; a cast is when its blueprint says.
+        if a.impatience && !w.combat.ai.ctx.is_player_faction && !not_priority {
             let disliked = stable_bool(w, inp, "disliked", &t.id)?;
             // (The impatience controller's, when modelled: a check.)
             if w.combat.impatience.on {
@@ -1234,8 +1621,11 @@ fn score_target<I: AiInputs>(w: &mut World, inp: &mut I, a: &Action) -> R<()> {
                 break 'v false;
             }
         }
-        // `IsTargetValid`: an attack's is true.
-        true
+        // `IsTargetValid`: an attack's is true; a cast's [`cast_target_valid`].
+        match &a.cast {
+            Some(cast) => cast_target_valid(w, cast, me, t.unit)?,
+            None => true,
+        }
     };
     if valid {
         // `DestinationPoint` (the target's position) feeds the movement leaves only.
@@ -1253,6 +1643,34 @@ fn score_target<I: AiInputs>(w: &mut World, inp: &mut I, a: &Action) -> R<()> {
         path: None,
     };
     inp.ai_score(w, &check)
+}
+
+/// Components implementing `IAbilityMinRangeProvider` (`IsTargetValid` reads the distance to the
+/// target against it).
+const MIN_RANGE_PROVIDERS: &[&str] = &[
+    "AbilityCustomCharge",
+    "AbilityCustomFly",
+    "AbilityCustomOverrun",
+    "AbilityCustomTongueGrab",
+    "AbilityDemonCharge",
+    "AbilityGriffinAttack",
+];
+
+/// `BlueprintAiCastSpell.IsTargetValid(context)` (no locators: [`action`]): the static
+/// `IsTargetValid(Ability, Unit, Target.Unit ?? Unit)`, a minimum range (reported) and the
+/// ability's target restrictions ([`spells::target_restrictions_passed`]), then the base's
+/// (true).
+fn cast_target_valid(w: &World, cast: &Cast, me: EntityIdx, target: EntityIdx) -> R<bool> {
+    let Some(bp) = w.content.get(cast.ability) else {
+        return desync(format!("the AI's ability {} is unknown", cast.ability));
+    };
+    if !bp.view().bool("IgnoreMinimalRangeLimit")
+        && bp.components_array().iter().any(|o| MIN_RANGE_PROVIDERS.iter().any(|n| is_a(o.ty, n)))
+    {
+        return unsupported("BlueprintAiCastSpell.IsTargetValid: a minimum range");
+    }
+    spells::target_restrictions_passed(w, &bp, me, target)
+        .map_err(|e| Desync(format!("BlueprintAiCastSpell.IsTargetValid: {e} (not modelled)")))
 }
 
 /// `TargetInfo.InLos`: cached until the next `InitUnit`.
