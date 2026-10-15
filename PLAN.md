@@ -34,9 +34,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     The nav file is format 2. The UI's path visualizer (the party's follows) isn't ported.
   - *Manual_10's facts* (`docs/poc3/manual10-facts.md`): one-sided facts 35 -> 17, match rate 0.9987.
   - Fixes: `Vector3 ==` stores its sum before comparing; the oracle's tape reader takes a gate only from a boolean `g`.
-  - Running: A2 and I (the combat log's text, observer `combat_log`, captures `poc5-tb-115` to `-117`).
-  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`), `-115` to
-    `-117` (+ `combat_log`; `-116` tb-hold, `-117` tb-solo). Sim regression unchanged (`cache/regress/out-post-d`).
+  - Paused at the usage limit (resume each with its context): A2, and I (the combat log's text: its observer
+    `combat_log` is merged and builds, 17966f7, but not recorded yet: record `poc5-tb.plan.json`, then `-tb3`/`-tb4`).
+  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`). Sim regression unchanged (`cache/regress/out-post-d`).
 - **The movement agent (twenty-second session, `docs/poc5/movement.md`): `TickMovement` exact against the game.**
   WrathOracle's new observer `agent` (`CommandObsAgent.cs`, three gpt-6.1-sol review rounds) records the agent's state,
   leaves, physics queries, path requests and completions; `poc5-tb-100` to `-103` (Manual_18, both fights) are clean.
