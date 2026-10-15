@@ -386,11 +386,12 @@ internal static class TurnBased
                 }
                 var turn = Cc.CurrentTurn;
                 var unit = turn?.Rider;
-                var wantUnit = RefId(rec["unit"]);
                 var attack = step == "tbattack" || step == "tbattack_impossible" || step == "tbattack_rejected";
                 var cast = step == "tbcast" || step == "tbcast_impossible" || step == "tbcast_rejected";
                 if (!attack && !cast && step != "tbend") break; // an input of some other step: not ours to make
-                if (cast && StrictRefId(rec["unit"]) == null)
+                // A cast's caster is read strictly, before any coercing read.
+                var wantUnit = cast ? StrictRefId(rec["unit"]) : RefId(rec["unit"]);
+                if (cast && wantUnit == null)
                 {
                     Sched.Invalidate($"recorded {step} at tick {tick} has a malformed caster");
                     yield break;
@@ -682,7 +683,7 @@ internal static class TurnBased
             try
             {
                 turn.HandlePortraitHover(target, true);
-                return IssueHoveredCast(unit, target, found, guid, what);
+                return IssueHoveredCast(unit, target, found, guid, what, rec);
             }
             finally
             {
@@ -696,7 +697,8 @@ internal static class TurnBased
         }
     }
 
-    private static UnitCommand IssueHoveredCast(UnitEntityData unit, UnitEntityData target, SpellSlotRef found, string guid, string what)
+    private static UnitCommand IssueHoveredCast(UnitEntityData unit, UnitEntityData target, SpellSlotRef found, string guid, string what,
+        Newtonsoft.Json.Linq.JObject rec)
     {
         var spell = found.Spell;
         var tw = new TargetWrapper(target);
@@ -704,6 +706,10 @@ internal static class TurnBased
         var cmd = UnitUseAbility.CreateCastCommand(spell, tw);
         if (!(cmd is UnitUseAbility use) || !ReferenceEquals(use.Ability, spell))
             return CastError($"cast/{guid}: the cast command is {cmd?.GetType().Name ?? "null"}, not a plain UnitUseAbility of the spell");
+        // The action it costs (RuntimeActionType: cooldowns and facts can change it) is the recorded one.
+        if (rec != null && !(rec["type"] is Newtonsoft.Json.Linq.JValue tv && tv.Type == Newtonsoft.Json.Linq.JTokenType.Integer &&
+                             tv.Value is long t && t == (int)cmd.Type))
+            return CastError($"cast/{guid}: the command's type {(int)cmd.Type} is not the recorded {rec["type"]}");
         // UnitCommands.CanRunCommand drops a command the unit can't run, silently (as for an attack).
         if ((cmd.Type == UnitCommand.CommandType.Standard && unit.State.HasCondition(UnitCondition.CantUseStandardActions)) ||
             !unit.Descriptor.State.IsConscious)
@@ -712,6 +718,7 @@ internal static class TurnBased
             {
                 j.Key("unit"); Snap.UnitRef(j, unit); j.Key("target"); Snap.UnitRef(j, target);
                 j.Prop("ability", guid); j.Prop("slot", found.Kind); j.Prop("level", found.Level); j.Prop("spellbook", SpellbookGuid(spell)); j.Prop("policy", what);
+                j.Prop("type", (int)cmd.Type);
             });
             return null;
         }
