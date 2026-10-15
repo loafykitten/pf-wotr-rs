@@ -27,6 +27,7 @@ pub mod life;
 pub mod loot;
 pub mod oracle;
 pub mod order;
+pub mod orientation;
 pub mod project;
 pub mod replay;
 pub mod rules;

@@ -319,6 +319,121 @@ pub fn rotate_towards(current: V3, target: V3, max_radians: f32, max_magnitude: 
     rotated.map(|x| x * len)
 }
 
+/// `Quaternion * Vector3` (managed): the twelve products stored as `float` locals, each
+/// component's sum in double, rounded on store.
+#[must_use]
+pub fn quat_mul_vec(q: [f32; 4], p: V3) -> V3 {
+    let n1 = q[0] * 2.0;
+    let n2 = q[1] * 2.0;
+    let n3 = q[2] * 2.0;
+    let n4 = q[0] * n1;
+    let n5 = q[1] * n2;
+    let n6 = q[2] * n3;
+    let n7 = q[0] * n2;
+    let n8 = q[0] * n3;
+    let n9 = q[1] * n3;
+    let n10 = q[3] * n1;
+    let n11 = q[3] * n2;
+    let n12 = q[3] * n3;
+    let [px, py, pz] = p.map(d);
+    [
+        r((1.0 - (d(n5) + d(n6))) * px + (d(n7) - d(n12)) * py + (d(n8) + d(n11)) * pz),
+        r((d(n7) + d(n12)) * px + (1.0 - (d(n4) + d(n6))) * py + (d(n9) - d(n10)) * pz),
+        r((d(n8) - d(n11)) * px + (d(n9) + d(n10)) * py + (1.0 - (d(n4) + d(n5))) * pz),
+    ]
+}
+
+/// The player's `LookRotationToMatrix`: the basis `x = up × z`, `y = z × x` of the
+/// normalised `view` (`z`), as `m[row][col]` with the axes as columns; `None` when `view` or
+/// `x` is shorter than 1e-5 or `|y|² - 1` exceeds 1e-6 (NaNs fail only the last test).
+#[expect(clippy::neg_cmp_op_on_partial_ord, reason = "a NaN fails the player's `b.ls`")]
+pub(crate) fn look_rotation_matrix(view: V3, up: V3) -> Option<[[f32; 3]; 3]> {
+    let mag = native_magnitude(view);
+    if mag < 1e-5 {
+        return None;
+    }
+    let z = [view[0] / mag, view[1] / mag, view[2] / mag];
+    let x = [z[2] * up[1] - z[1] * up[2], z[0] * up[2] - z[2] * up[0], z[1] * up[0] - z[0] * up[1]];
+    let xmag = native_magnitude(x);
+    if xmag < 1e-5 {
+        return None;
+    }
+    let x = [x[0] / xmag, x[1] / xmag, x[2] / xmag];
+    let y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+    let ysq = (y[0] * y[0] + y[1] * y[1]) + y[2] * y[2];
+    if !((ysq - 1.0).abs() <= 1e-6) {
+        return None;
+    }
+    Some([[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]])
+}
+
+/// Unity's native `Quaternion.LookRotation(forward, upwards)` (`QuaternionScripting::
+/// LookRotation`): `LookRotationToQuaternion` (the basis above, `MatrixToQuaternion`); when
+/// that fails, the rotation from +Z to `forward` normalised (`Matrix3x3f::SetFromToRotation`,
+/// as `FromToRotation`'s) if `forward` is longer than 1e-5, else the identity (the player
+/// logs "Look rotation viewing vector is zero").
+#[must_use]
+pub fn look_rotation(forward: V3, up: V3) -> [f32; 4] {
+    if let Some(m) = look_rotation_matrix(forward, up) {
+        return crate::funnel::matrix_to_quaternion(m);
+    }
+    let mag = native_magnitude(forward);
+    if mag > 1e-5 {
+        let f = [forward[0] / mag, forward[1] / mag, forward[2] / mag];
+        return crate::funnel::matrix_to_quaternion(crate::funnel::from_to_matrix(
+            [0.0, 0.0, 1.0],
+            f,
+        ));
+    }
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+/// The player's per-axis `asin` for `QuaternionToEuler`: `asinf` of the argument clamped to
+/// [-1, 1] (`fmin`, which keeps a NaN), times `sign`.
+fn asin_axis(sign: f32, v: f32) -> f32 {
+    let c = if v < -1.0 {
+        -1.0
+    } else if v.is_nan() || v < 1.0 {
+        v
+    } else {
+        1.0
+    };
+    let a = c.asin();
+    // `fmul` returns a NaN operand as it is; LLVM would turn `* -1.0` into a negation, which
+    // flips a NaN's sign.
+    if a.is_nan() { a } else { a * sign }
+}
+
+/// Unity's native `Quaternion.Internal_ToEulerRad` (`QuaternionScripting::ToEuler`): the
+/// quaternion normalised (the identity below a length of 1e-5), then `QuaternionToEuler` in
+/// Unity's order (`math::kOrderUnityDefault`, Z-X-Y): `x = -asin(2(yz - xw))`, `y` and `z`
+/// by `atan2f`; near the poles (`|yz - xw| ≥ 0.49999899`) `y` from the product terms and
+/// `z = 0`. Rust's `asin`/`atan2` call the same `libsystem_m` functions as the player.
+#[must_use]
+#[expect(clippy::neg_cmp_op_on_partial_ord, reason = "a NaN takes the player's `b.pl`")]
+pub fn to_euler_rad(q: [f32; 4]) -> V3 {
+    let mag = (((q[0] * q[0] + q[1] * q[1]) + q[2] * q[2]) + q[3] * q[3]).sqrt();
+    let [x, y, z, w] = if mag < 1e-5 { [0.0, 0.0, 0.0, 1.0] } else { q.map(|c| c / mag) };
+    let (xx, xy, xz, xw) = (x * x, x * y, x * z, x * w);
+    let (yy, yz, yw) = (y * y, y * z, y * w);
+    let (zz, zw, ww) = (z * z, z * w, w * w);
+    let s = yz - xw;
+    let xy_zw = xy + zw;
+    let ex = asin_axis(-1.0, s + s);
+    // 0x3effffde: 0.49999899; a NaN takes this branch (`b.pl`).
+    if !(s.abs() < f32::from_bits(0x3eff_ffde)) {
+        let a = xw - yz;
+        let b = xy - zw;
+        let c = yz + xw;
+        let ey = (xy_zw * c + a * b).atan2(a * c - xy_zw * b);
+        return [ex, ey, 0.0];
+    }
+    let xz_yw = xz + yw;
+    let ey = (xz_yw + xz_yw).atan2(ww + ((zz - xx) - yy));
+    let ez = (xy_zw + xy_zw).atan2(ww + ((yy - zz) - xx));
+    [ex, ey, ez]
+}
+
 /// Unity's native `Matrix4x4.TRS`, in float.
 #[must_use]
 pub fn trs(t: V3, q: [f32; 4], s: V3) -> M4 {
