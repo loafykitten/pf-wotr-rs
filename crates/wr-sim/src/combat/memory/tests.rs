@@ -239,6 +239,9 @@ struct Fake {
     observer_group: HashMap<u32, u8>,
     woken: Vec<u32>,
     log: Vec<String>,
+    /// Reads that fail (the game's exception): the invisibility loop, a unit's `Wake`.
+    fail_sees_invisible: bool,
+    fail_wake: Option<u32>,
 }
 
 impl MemoryWorld<u32, u8> for Fake {
@@ -282,6 +285,9 @@ impl MemoryWorld<u32, u8> for Fake {
         Ok(self.invisible.contains(&u))
     }
     fn sees_invisible(&mut self, g: u8, u: u32) -> Result<bool, MemError> {
+        if self.fail_sees_invisible {
+            return Err(MemError::NullReference);
+        }
         Ok(self.sees_invisible.contains(&(g, u)))
     }
     fn game_time(&mut self) -> Result<TimeSpan, MemError> {
@@ -300,6 +306,9 @@ impl MemoryWorld<u32, u8> for Fake {
         Ok(self.observer_group.get(&u).copied().unwrap_or(self.group[&u]))
     }
     fn wake(&mut self, u: u32) -> Result<(), MemError> {
+        if self.fail_wake == Some(u) {
+            return Err(MemError::NullReference);
+        }
         self.woken.push(u);
         Ok(())
     }
@@ -471,7 +480,10 @@ struct Rec<'a> {
     factions: HashMap<String, Factions>,
     /// Each unit's real group (`m_Group`), as `group_state` and the group records show it.
     group: HashMap<u32, String>,
-    /// Units that left their group (`OnIsInGameChanged`) and didn't come back: out of the game.
+    /// Units that left their group (`UnitGroup.Remove` of a member) and weren't put back: taken
+    /// as out of the game. The recording doesn't say why a unit left (`OnIsInGameChanged`, a
+    /// disposal, the `GroupId` setter), so reads that depend on it are counted apart; a unit still
+    /// in the game is put back by the next `UnitGroupsController.Tick`, before any `Cleanup`.
     left: HashSet<u32>,
     always_enemy: HashMap<String, bool>,
     /// Units' identity hashes (WrathOracle's `hash`, recorded on first use in the record run; a
@@ -481,7 +493,8 @@ struct Rec<'a> {
     /// frame) mod 60)` (WrathOracle's `WallClock.Frame`).
     frame_shift: i64,
     frame: i64,
-    game_delta: f64,
+    /// The frame's `GameDeltaTime` (its `time` record), when one was seen.
+    game_delta: Option<f64>,
     errors: Vec<String>,
     counts: HashMap<&'static str, usize>,
 }
@@ -577,7 +590,8 @@ fn recorded_memory_changes_reproduce_every_memory_read() {
             .rem_euclid(60);
             (hashes_of(&rec), shift)
         };
-        let r = checked(&content, &trace.records, hashes, frame_shift);
+        let mut r = checked(&content, &trace.records, hashes, frame_shift);
+        require_coverage(&mut r);
         for (k, v) in &r.counts {
             *totals.entry(k).or_default() += v;
         }
@@ -593,7 +607,27 @@ fn recorded_memory_changes_reproduce_every_memory_read() {
     t.sort();
     eprintln!("total: {t:?}");
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
-    assert!(totals.get("enemies read").copied().unwrap_or(0) > 0, "no memory read checked");
+}
+
+/// What every run of `poc5-tb-103`'s fights exercises: a run that checks none of one kind fails.
+const COVERAGE: [&str; 9] = [
+    "enemies read: engagement",
+    "enemies read: AI",
+    "enemies read: command",
+    "target remembers initiator",
+    "dictionary rows",
+    "units lists",
+    "added: visibility",
+    "friend phase compared",
+    "forgotten: left its group",
+];
+
+fn require_coverage(r: &mut Rec<'_>) {
+    for k in COVERAGE {
+        if r.counts.get(k).copied().unwrap_or(0) == 0 {
+            r.fail(-1, format!("nothing checked: {k}"));
+        }
+    }
 }
 
 fn hashes_of(recs: &[Value]) -> HashMap<String, i64> {
@@ -614,7 +648,7 @@ fn checked<'a>(
         hashes,
         frame_shift,
         frame: -1,
-        game_delta: f64::NAN,
+        game_delta: None,
         ids: HashMap::new(),
         names: Vec::new(),
         mem: HashMap::new(),
@@ -637,7 +671,12 @@ fn damaged_memory_records_are_caught() {
     let path = wr_paths::repo_root()
         .join("fixtures/captures/oracle/poc5-tb-103/fixtures/tb-focus/record.trace.jsonl.gz");
     let recs = Trace::load(&path).expect("capture").records;
-    assert!(checked(&content, &recs, hashes_of(&recs), 0).errors.is_empty());
+    let errors = |v: &[Value]| {
+        let mut r = checked(&content, v, hashes_of(v), 0);
+        require_coverage(&mut r);
+        r.errors
+    };
+    assert_eq!(errors(&recs), Vec::<String>::new());
     let pos = |f: &dyn Fn(&Value) -> bool| recs.iter().position(f).expect("record");
     let ev = |r: &Value, e: &str| r["k"] == "obs" && r["ev"] == e;
     type Damage = Box<dyn Fn(&mut Vec<Value>)>;
@@ -651,7 +690,12 @@ fn damaged_memory_records_are_caught() {
     let row =
         pos(&|r| ev(r, "leave_tick") && r["groups"].as_array().is_some_and(|g| !g.is_empty()));
     let hash = pos(&|r| ev(r, "hash") && r["u"] == "558A");
+    let without = |f: fn(&Value) -> bool| -> Damage { Box::new(move |v| v.retain(|r| !f(r))) };
     let cases: Vec<(&str, Damage)> = vec![
+        ("no flat-footed reads", without(|r| r["k"] == "env")),
+        ("no time records", without(|r| r["k"] == "time")),
+        ("no AI entries", without(|r| r["k"] == "obs" && r["ev"] == "uc_ai")),
+        ("no Cleanup removals", without(|r| r["k"] == "obs" && r["ev"] == "mem_remove")),
         ("an addition missing", Box::new(move |v| drop(v.remove(first_add)))),
         (
             "an addition twice",
@@ -705,7 +749,7 @@ fn damaged_memory_records_are_caught() {
     for (what, damage) in cases {
         let mut v = recs.clone();
         damage(&mut v);
-        assert!(!checked(&content, &v, hashes_of(&v), 0).errors.is_empty(), "{what}: not caught");
+        assert!(!errors(&v).is_empty(), "{what}: not caught");
     }
 }
 
@@ -764,7 +808,7 @@ fn check_trace(r: &mut Rec<'_>, recs: &[Value]) {
             r.frame = x["frame"].as_i64().map_or(-1, |f| f + r.frame_shift);
         }
         if x["k"] == "time" {
-            r.game_delta = x["game_delta"].as_f64().unwrap_or(f64::NAN);
+            r.game_delta = x["game_delta"].as_f64();
         }
         if !is_obs {
             continue;
@@ -811,7 +855,8 @@ fn check_trace(r: &mut Rec<'_>, recs: &[Value]) {
                 r.left.remove(&u);
             }
             "group_remove" => {
-                let Some(u) = x["u"].as_str() else { continue };
+                // A removal of a unit the group didn't hold changes nothing.
+                let (Some(u), Some(true)) = (x["u"].as_str(), x["had"].as_bool()) else { continue };
                 let u = r.id(u);
                 r.group.remove(&u);
                 r.left.insert(u);
@@ -922,10 +967,18 @@ fn check_friend_phase(r: &mut Rec<'_>, g: &str, u: u32, t: i64) {
             return;
         }
     }
-    *r.counts.entry("added: a friend on its frame").or_default() += 1;
+    let Some(delta) = r.game_delta else {
+        r.fail(t, "a friend's addition before any time record".to_owned());
+        return;
+    };
     #[allow(clippy::cast_possible_truncation)]
-    let delta = r.game_delta as f32;
-    if delta >= 0.5 || delta.is_nan() {
+    let delta = delta as f32;
+    if delta.is_nan() {
+        r.fail(t, "a friend's addition on a frame whose GameDeltaTime is NaN".to_owned());
+        return;
+    }
+    if delta >= 0.5 {
+        *r.counts.entry("friend added on a long frame").or_default() += 1;
         return;
     }
     let name = r.names[u as usize].clone();
@@ -935,6 +988,7 @@ fn check_friend_phase(r: &mut Rec<'_>, g: &str, u: u32, t: i64) {
     };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let phase = i64::from(((h as i32) as u32 >> 2) % 5);
+    *r.counts.entry("friend phase compared").or_default() += 1;
     if r.frame % 5 != phase {
         let f = r.frame;
         r.fail(
@@ -965,7 +1019,7 @@ fn apply_cleanup(r: &mut Rec<'_>, g: &str, gone: &[u32], t: i64) {
     }
     for &u in &order {
         let k = if r.left.contains(&u) {
-            "forgotten: out of the game"
+            "forgotten: left its group"
         } else {
             "forgotten: not explained"
         };
@@ -974,7 +1028,7 @@ fn apply_cleanup(r: &mut Rec<'_>, g: &str, gone: &[u32], t: i64) {
             r.fail(
                 t,
                 format!(
-                    "Cleanup of {g} removed {}, which the recording shows in the game",
+                    "Cleanup of {g} removed {}, which the recording shows in its group",
                     r.names[u as usize]
                 ),
             );
@@ -1004,6 +1058,9 @@ fn check_rows(r: &mut Rec<'_>, x: &Value, t: i64) {
             let fresh: Vec<u32> =
                 model.iter().copied().filter(|&k| r.resolve(k).in_game()).collect();
             *r.counts.entry("units lists").or_default() += 1;
+            if model.iter().any(|k| r.left.contains(k)) {
+                *r.counts.entry("reads depending on a departure").or_default() += 1;
+            }
             if fresh != list {
                 let (a, b) = (r.names(&fresh), r.names(&list));
                 r.fail(t, format!("{g}'s UnitsList: model {a:?}, game {b:?}"));
@@ -1058,6 +1115,9 @@ fn check_enemies(r: &mut Rec<'_>, x: &Value, t: i64, frame: Option<(Reader, Opti
         .map(|k| r.id(k))
         .collect::<Vec<_>>();
     let keys: Vec<u32> = r.mem.get(&g).map(|m| m.keys().collect()).unwrap_or_default();
+    if keys.iter().any(|k| r.left.contains(k)) {
+        *r.counts.entry("reads depending on a departure").or_default() += 1;
+    }
     let mut got = Vec::new();
     for k in keys {
         if !r.resolve(k).in_game() {
@@ -1076,4 +1136,32 @@ fn check_enemies(r: &mut Rec<'_>, x: &Value, t: i64, frame: Option<(Reader, Opti
         let (a, b) = (r.names(&got), r.names(&want));
         r.fail(t, format!("{who:?} read {g}'s enemies: model {a:?}, game {b:?}"));
     }
+}
+
+#[test]
+fn a_failing_invisibility_check_leaves_the_target_added_and_visible() {
+    let mut f = fight();
+    f.invisible.insert(20);
+    f.fail_sees_invisible = true;
+    let mut c = MemoryController::default();
+    assert_eq!(tick(&mut c, &mut f), Err(MemError::NullReference));
+    // As the game: `Add` and `Visible = true` happened before the loop threw.
+    assert_eq!(keys(&f.mem[&1]), [10, 20]);
+    assert!(f.mem[&1].contains_visible(20));
+    assert_eq!(f.mem[&1].enemies_cache(), None);
+}
+
+#[test]
+fn a_failure_in_the_queue_keeps_every_queued_pair() {
+    let mut f = fight();
+    f.ready.clear();
+    f.group.extend([(41, 5), (42, 5)]);
+    let mut c = MemoryController::default();
+    c.add_to_memory(41, 20, false);
+    c.add_to_memory(42, 10, false);
+    f.fail_wake = Some(42);
+    assert_eq!(tick(&mut c, &mut f), Err(MemError::NullReference));
+    // The first pair was applied, and the queue (cleared only after the loop) still holds both.
+    assert_eq!(keys(&f.mem[&5]), [20, 10]);
+    assert_eq!(c.units_for_add, [(41, 20), (42, 10)]);
 }

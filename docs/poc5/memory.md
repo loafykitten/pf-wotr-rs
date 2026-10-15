@@ -151,7 +151,9 @@ prepare's prefix).
 
 1. **The bookkeeping** (done, `combat/memory.rs`): the dictionary, both caches, `Cleanup`, the controller's tick
    and `UpdateVisibility` as decisions over their reads, the queue and the handlers' memory part. Pure, generic over
-   the unit and group keys; its reads come through `MemoryWorld`.
+   the unit and group keys; its reads come through `MemoryWorld`. Failure paths as the game's: an exception in
+   `UpdateVisibility`'s invisibility check leaves the target added and visible; one in the queue's loop keeps the
+   whole queue (it's cleared after the loop).
 2. **From what the sim has**: the groups and their faction caches (`groups.rs`: `IsEnemy`), the same-group test,
    `IsInGame`, `IsDisposed`, peaceful factions (content), `InStealthFor` (`IsInStealth` from the save, false; a
    `RuleEnterStealth` reported), `GameTime`/`GameDeltaTime` (the time model), the identity hash (`hash` records:
@@ -160,8 +162,9 @@ prepare's prefix).
    slice already raises), `Wake` (the awake timers). `Passive` is an AI leaf today (input).
 3. **Needs geometry, so stays an input until ported**: `HasLOS` (line-of-sight geometry: portable once the
    `FogOfWarBlocker`s are imported; the sight cache needs exact positions: the movement agent), `CanBeInVisionRange`
-   (a capsule-sphere overlap: membership computable with a margin, order PhysX's; order matters only when two new
-   keys enter one group's memory in one tick, which can be reported rather than guessed), `IsInFogOfWar` (revealers
+   (a capsule-sphere overlap: membership computable with a margin, order PhysX's; the order is observable whenever
+   a tick both removes and adds keys in one group's memory, e.g. a stealthed unit removed before a new one takes
+   its slot, so it stays a recorded input), `IsInFogOfWar` (revealers
    and LOS are portable; an entity beyond the radius needs its renderers' bounds: input), the ready groups (fog of
    war), `ExtendedVisionArea` (script zones: portable), see-invisibility and blindsense (reported).
 
@@ -179,14 +182,20 @@ checks, on all six runs (record and two replays of both fights):
   factions' `AlwaysEnemy` (blueprints), the reader's group from the frame it's read in (`eng_tu`, the AI's unit,
   `uc_tick`);
 - every flat-footed check's `target_remembers_initiator` (369) against `Contains`;
-- every `mem_add` of a unit absent, every `mem_clear`'s count, and each `Cleanup` removal explained: all 45 are units
-  that had left the game (`group_remove`, `OnIsInGameChanged`) a tick before;
+- every `mem_add` of a unit absent, every `mem_clear`'s count, and each `Cleanup` removal explained by what the
+  recording shows: all 45 are units that left their group a tick before and weren't put back (`group_remove` of a
+  member; a unit still in the game would have been put back by the next `UnitGroupsController.Tick`, which runs
+  before `Cleanup`). The recording doesn't say why a unit left its group (`OnIsInGameChanged`, a disposal, the
+  `GroupId` setter): the check takes such a unit as out of the game, and counts the reads whose result depends on
+  that (none in these fights);
 - every addition of a unit that isn't the group's enemy (6: the archer 5198's group adding 558A at `t=83` /
   `t=85`) on its frame: `(hash >>> 2) % 5 == frame % 5` (4 and 2), replays with WrathOracle's frame shift.
 
-All equal. `damaged_memory_records_are_caught` damages `-103/tb-focus` 8 ways (an addition missing or doubled, an
-`Enemies` read reordered, a unit forgotten without leaving the game, a flat-footed read flipped, a clear of another
-size, a row reordered, a friend's hash on another frame): each is caught. The unit tests port the C#'s branches
+All equal, and each run must check every kind above at least once (engagement, AI and `UnitAttack` reads,
+flat-footed reads, rows, cached lists, additions, a friend's frame compared, a removal). `damaged_memory_records_are_caught`
+damages `-103/tb-focus` 12 ways (an addition missing or doubled, an `Enemies` read reordered, a unit forgotten
+without leaving its group, a flat-footed read flipped, a clear of another size, a row reordered, a friend's hash on
+another frame, and every flat-footed read, time record, AI entry or `Cleanup` removal gone): each is caught. The unit tests port the C#'s branches
 (the free slot reused, caches invalidated by a known unit's `Add` but not by `Cleanup`, the 9 s boundary, `TimeSpan`
 overflow, the null reference, the queue's dedup and peaceful targets, both handlers, the tick's friend frame, a
 long frame, stealth, invisibility, the fake observer group).
@@ -233,8 +242,9 @@ and `LastUpdateTime` changes (blockers updated at run time, e.g. doors: an input
 
 `CanBeInVisionRange` as the capsule-sphere overlap (membership computed; a pair within a small margin of the
 boundary reported, PhysX's exact test isn't ported), in `Phase::Vision` (after `Phase::Move`). Its order stays an
-input (`vis` with the set's order), or the sim reports a tick where two new keys enter one group's memory from the
-near units (the only place the order is observable).
+input (`vis` in the set's order, or H1's `mnear`): order is observable through the dictionary's slots whenever
+removals and additions interleave in a group's tick (and through the free list in later ticks), not only when two
+keys are added, so the sim never orders the set itself.
 
 ### H4: fog of war
 
@@ -263,6 +273,8 @@ caches):
   validity), `mem_q` for each `AddToMemory` (observer, target, whether queued, the caller chain), and `mem_add` /
   `mem_remove` / `mem_clear` as today but `Cleanup`'s removals **in removal order** (today sorted by id).
 - `hash` in replays too (the tape's value, as read), so a replay's run carries its own.
+- `in_game`: each `IsInGame` change of a unit (with the caller chain), and `group_remove`'s caller, so a unit leaving
+  its group is known to have left the game rather than taken as such.
 
 For H2: `los` with the target's id (`GetLOS`'s `other`, from a prefix) and `los_geom` (`LineOfSightGeometry.Init` and
 `UpdateBlocker`: the blocker and `LastUpdateTime`). For H3: `vis` in the set's order (not sorted).

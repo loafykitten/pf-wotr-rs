@@ -454,7 +454,9 @@ where
             |k: K| resolved.iter().find(|(x, _)| *x == k).map_or(Resolved::Missing, |r| r.1);
         w.memory(g).cleanup(now, lookup)?;
     }
-    for (o, t) in std::mem::take(&mut ctl.units_for_add) {
+    // The queue is cleared after the loop: a failure part way keeps every pair (as the game's
+    // exception would).
+    for (o, t) in ctl.units_for_add.clone() {
         if w.disposed(o)? || w.disposed(t)? {
             continue;
         }
@@ -466,6 +468,7 @@ where
         w.memory(g).add(t, now).last_detect_time = now;
         w.wake(o)?;
     }
+    ctl.units_for_add.clear();
     Ok(())
 }
 
@@ -490,10 +493,15 @@ where
         }
     }
     if w.group_has_los(g, t)? {
-        let seen = if w.invisible(t)? { w.sees_invisible(g, t)? } else { true };
-        let info = w.memory(g).add(t, now);
-        info.visible = seen;
-        if info.visible {
+        // Added and visible first; then the invisibility check (a failure there leaves that state).
+        w.memory(g).add(t, now).visible = true;
+        if w.invisible(t)? {
+            let seen = w.sees_invisible(g, t)?;
+            if let Some(info) = w.memory(g).find_mut(t) {
+                info.visible = seen;
+            }
+        }
+        if let Some(info) = w.memory(g).find_mut(t).filter(|i| i.visible) {
             info.last_detect_time = now;
         }
         return Ok(());
