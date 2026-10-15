@@ -320,9 +320,10 @@ waypoint advances and the path's end.
   WrathOracle replays in order: `prepare_world` reads them from the recording beside it (`record.trace.jsonl.gz`),
   and the sim's timer takes them in order (one left unused, or one missing, is reported; a replay without its
   recording is reported).
-- Inputs: each unit's corpulence (its recorded reads, `uc_v corp` and the agent's request reads, all equal in the
-  window, else reported where needed; every use of it reaches a recorded output: a unit's box, an ally's box grown by
-  the rider's, the rider's size in cells as the refresh's `erodeIterations`); `AvoidanceDisabled` is the agent's field or the unit not conscious (its counter,
+- Inputs: each unit's corpulence (its last recorded read before the record being processed, `uc_v corp` or the
+  agent's request reads; it can change in a fight, as a size spell does in `poc5-tb-120`; every use of it reaches a
+  recorded output: a unit's box, an ally's box grown by the rider's, the rider's size in cells as the refresh's
+  `erodeIterations`); `AvoidanceDisabled` is the agent's field or the unit not conscious (its counter,
   raised by cutscene moves, `UnitMoveAlongPath`, riders and a few abilities, isn't modelled). Every object the sim
   queues (`nav_guo`: centre, extents, mask, flags, tag), applies (`nav_update`: its erosion) and every refresh
   (`nav_tags`: `erodeIterations`, the tag, the grid's hash, the blocked and ally-blocked counts) is paired in order
@@ -413,7 +414,7 @@ modifiers, no callback), a stray `path_seek`, the delivered path, a definition, 
 the callback's kind, a pending definition after the return, `path_to`'s radius, a step's delta; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
 missing, a refresh repeated, the clock read missing or another, the timer negative, the observer undeclared or declared
 without `agent_sync`, a refresh moved into the next frame, a graph update's id unreadable, a definition of another
-kind of path (complete, or pending before the request's registration), a corpulence that changes, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
+kind of path (complete, or pending before the request's registration), a unit's corpulence reads all changed, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
 and checks the counts.
 
 **Edits outside the agent's and paths' files** (kept small for the other streams): `combat/replay.rs` (the module,

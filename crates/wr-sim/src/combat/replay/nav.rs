@@ -318,11 +318,11 @@ impl Driver<'_> {
             }
             Err(e) => Self::nav_unsupported(w, e),
         }
-        // `Unit.Corpulence`: every recorded read of a unit's (the commands' and the AI's taps, the
-        // agent's request reads, whose unit is the request's).
+        // `Unit.Corpulence`: every recorded read of a unit's, in the trace's order (the commands' and
+        // the AI's taps, the agent's request reads, whose unit is the request's).
         let mut req_unit: Option<String> = None;
-        let mut corp: HashMap<String, Option<f32>> = HashMap::new();
-        for r in &trace.records {
+        let mut corp: HashMap<String, Vec<(usize, f32)>> = HashMap::new();
+        for (i, r) in trace.records.iter().enumerate() {
             if r["k"] != "obs" {
                 continue;
             }
@@ -347,10 +347,7 @@ impl Driver<'_> {
                 _ => None,
             };
             if let Some((u, v)) = read {
-                let e = corp.entry(u).or_insert(Some(v));
-                if e.is_some_and(|x| x.to_bits() != v.to_bits() || !v.is_finite()) {
-                    *e = None;
-                }
+                corp.entry(u).or_default().push((i, v));
             }
         }
         w.combat.nav.corp =

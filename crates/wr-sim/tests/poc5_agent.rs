@@ -966,9 +966,15 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
                 .collect();
             recs[b]["observers"] = json!(obs);
         }),
-        ("corpulence changes in the window", |recs| {
+        ("a graph event differs from the sim's", |recs| {
+            // A unit's corpulence reads all another value: its boxes aren't the recorded ones.
             let at = tb(recs, |r| ev(r, "uc_v") && r["f"] == "corp");
-            recs[at]["v"] = json!("0.75");
+            let u = recs[at]["u"].clone();
+            for r in recs.iter_mut() {
+                if ev(r, "uc_v") && r["f"] == "corp" && r["u"] == u {
+                    r["v"] = json!("0.75");
+                }
+            }
         }),
         ("the seeker's decision", |recs| {
             let at = of_path(recs, fin_of_done(recs), "path_seek");

@@ -394,8 +394,11 @@ pub struct NavRun {
     pub nav: Option<CombatNav>,
     /// The grid's `nodeSize`.
     pub node_size: f32,
-    /// `Unit.Corpulence` by unit (`None`: its recorded reads differ).
-    pub corp: HashMap<EntityIdx, Option<f32>>,
+    /// `Unit.Corpulence` by unit: its recorded reads (the record's index, the value), in order;
+    /// the one a hook uses is the last read before the record being processed ([`Self::at`]).
+    pub corp: HashMap<EntityIdx, Vec<(usize, f32)>>,
+    /// The record the driven replay is processing.
+    pub at: usize,
     /// An input wasn't established at one of the hooks, or a graph update failed: the grid isn't
     /// the game's from there (reported; later paths aren't computed).
     pub broken: bool,
@@ -427,17 +430,26 @@ fn unit_id(w: &SimWorld, u: EntityIdx) -> String {
 }
 
 /// `Unit.Corpulence` (an input).
+/// `Unit.Corpulence` (an input: the unit's last recorded read before the record being processed;
+/// every use reaches a recorded output, a box or the refresh's `erodeIterations`).
 fn corpulence(w: &mut SimWorld, u: EntityIdx) -> Option<f32> {
-    match w.combat.nav.corp.get(&u).copied() {
-        Some(Some(c)) => Some(c),
-        Some(None) => {
+    let at = w.combat.nav.at;
+    let last = w
+        .combat
+        .nav
+        .corp
+        .get(&u)
+        .and_then(|reads| reads.iter().take_while(|(i, _)| *i < at).last().map(|(_, v)| *v));
+    match last {
+        Some(c) if c.is_finite() => Some(c),
+        Some(_) => {
             let id = unit_id(w, u);
-            nav_break(w, format!("{id}'s corpulence changes in the window (its reads differ)"));
+            nav_break(w, format!("{id}'s corpulence read can't be read"));
             None
         }
         None => {
             let id = unit_id(w, u);
-            nav_break(w, format!("{id}'s corpulence isn't recorded in the window"));
+            nav_break(w, format!("{id}'s corpulence isn't recorded before it is used"));
             None
         }
     }

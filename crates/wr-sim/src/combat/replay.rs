@@ -3007,6 +3007,8 @@ impl Driver<'_> {
         let trace = self.trace;
         let recs = &trace.records;
         let r = &recs[i];
+        // (The grid's inputs read before this record: `paths::NavRun::at`.)
+        w.combat.nav.at = i;
         self.tgt_clear_boundary(w, r);
         // A snapshot block is contiguous (its rows and their path definitions only).
         if self.ag
