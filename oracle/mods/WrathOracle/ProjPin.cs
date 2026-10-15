@@ -284,11 +284,11 @@ internal static class ProjPin
             var rec = Tape[t.K];
             if (!p.IsHit)
             {
-                // What Tick does when it arrives: IsHit, and, for an arrival at the target or the range (not a
-                // wall: this tick reached neither, or the native flight would have hit), the distance clamped
-                // to the range.
+                // What Tick does when it arrives: IsHit, and the distance clamped to the range when the
+                // recording's arrival was clamped (one at the target or the range is; a wall stop alone isn't:
+                // Tick clamps in its target/range branch, which a wall stop may or may not also take).
                 IsHitRef(p) = true;
-                if (p.MaxRange > 0f && !rec.Wall) PassedDistanceRef(p) = p.MaxRange;
+                if (p.MaxRange > 0f && rec.Passed == p.MaxRange) PassedDistanceRef(p) = p.MaxRange;
                 t.IsForced = true;
                 Forced++;
             }

@@ -420,8 +420,8 @@ distance and the wall flag as the arrival leaves them; the flight itself (positi
   back right after `Projectile.Tick`, before anything reads it: `IsHit`, `IsHitWall` if that tick set it, and
   `PassedDistance` back from the range it was clamped to to the sum `Tick` made (the same float expression), so
   a line ability's sweep sees the recording's distance every tick. On the due tick `IsHit` is set if the flight
-  hasn't arrived (with `PassedDistance` clamped to `MaxRange` as `Tick` does, unless the recording's arrival was
-  a wall's, which `Tick` doesn't clamp), `IsHitWall` is set to the
+  hasn't arrived (with `PassedDistance` clamped to `MaxRange` as `Tick` does when the recording's arrival was
+  clamped: one at the target or the range is, a wall stop alone isn't), `IsHitWall` is set to the
   recording's, and a `PassedDistance` other than the recording's (bit for bit) invalidates. A recorded projectile
   that never hit in its window doesn't hit in the replay's. The replay's `proj_hit` says what the pin did
   (`held`: native hits taken back, `forced`).
