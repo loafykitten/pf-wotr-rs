@@ -506,8 +506,9 @@ and, with it, the detach of the fly's buff `9fd2dd27d838f0049ab56e9da3508b25`. N
   dismemberment manager's last impulse (presentation physics: whether a rip-limbs effect exists for its damage form),
   and the last damage against `MaxHP` (with the difficulty's HP multiplier) or a crit.
 - `GetDismemberType` picks `InPower`, `LimbsApart` or `Normal`. `CanDismemberLimbsApart` reads the impulse's age on
-  `Time.time`, and `RandomUtils.GetRandomValue` (`UnityEngine.Random`, a simulation site, so taped) chooses between
-  two types where both are possible.
+  `Time.time`, and `RandomUtils.GetRandomValue<DismemberType>` chooses between two types where both are possible.
+  That draw (`Random.Range(float,float)`, native, inside a generic method) wasn't hooked at all. Its value-type
+  instantiation is now transpiled (`Rng.ClosedGenerics`): a simulation site, taped.
 
 A blow-up effect is spawned through `FxSpawnController`. `PlayDeathEffect` asks for `FxPriority.NotImportant`, but
 `FxHelper.SpawnFxOnUnit` doesn't pass its priority on, so it is `EventuallyImportant`: queued (spawned at once only

@@ -19,7 +19,7 @@ namespace WrathOracle;
 // dismemberment manager's last impulse (presentation physics: whether the blueprint has a rip-limbs effect
 // for its damage form) and the last damage against MaxHP and crits; GetDismemberType then picks InPower,
 // LimbsApart or Normal, with CanDismemberLimbsApart reading the impulse's age on Unity's clock
-// (Time.time) and RandomUtils' draw on the simulation tape. A blow-up dismember effect is spawned through
+// (Time.time) and RandomUtils' draw (taped: Rng.ClosedGenerics transpiles its DismemberType instantiation). A blow-up dismember effect is spawned through
 // FxSpawnController (FxHelper.SpawnFxOnUnit doesn't forward the NotImportant priority PlayDeathEffect passes, so
 // EventuallyImportant: queued, at most 6 spawns a frame, promoted after 5 frames in the queue; spawned at once
 // while the controller is inactive), and its

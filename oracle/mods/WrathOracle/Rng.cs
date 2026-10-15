@@ -758,11 +758,14 @@ internal static class Rng
     // Generic methods whose Random calls the global net can't see (Range(float,float) and value
     // are native, so they can't take a prefix), transpiled through one closed instantiation.
     // Mono compiles one shared body for all reference-type instantiations, so this covers every
-    // reference-type caller. LinqExtensions.WeightedRandom<T> picks unit barks
+    // reference-type caller (a value-type one needs its own entry). LinqExtensions.WeightedRandom<T> picks unit barks
     // (UnitAsksComponent.Bark.Schedule), roaming waypoints, mercenaries and camp banters.
     private static readonly (string Type, string Method, Type[] Args)[] ClosedGenerics =
     {
         ("Kingmaker.Utility.LinqExtensions", "WeightedRandom", new[] { typeof(Kingmaker.Visual.Sound.UnitAsksComponent.BarkEntry) }),
+        // A value-type instantiation has a body of its own: UnitEntityView.GetDismemberType's weighted pick of the
+        // dismember type (DeathFxPin.cs), a simulation draw (its result adds a buff or not).
+        ("Kingmaker.Utility.RandomUtils", "GetRandomValue", new[] { typeof(Kingmaker.UnitLogic.UnitState.DismemberType) }),
     };
 
     private static MethodInfo ClosedFor(MethodBase m)
