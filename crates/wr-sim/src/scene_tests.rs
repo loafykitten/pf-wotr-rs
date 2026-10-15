@@ -596,6 +596,7 @@ fn difficulty_comparison_uses_the_ordinal_of_the_option() {
         unfair_difficulty: 0,
         stats_adjustment_presets: Vec::new(),
         mob_experience_coeffs: Vec::new(),
+        preset_asset_indices: std::collections::BTreeMap::new(),
     };
     let mut d = Difficulty { list: Some(list), ..Difficulty::default() };
     d.settings.stats_adjustments = Some(2);

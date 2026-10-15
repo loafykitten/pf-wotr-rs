@@ -1,6 +1,7 @@
 //! Spellcasting and the giant fly's facts against WrathOracle's captures (local, gitignored):
 //! `poc5-tb-120/tb-cast` (Camelia casts Enlarge Person on Seelah from a memorized slot, through
-//! the driver's `tbcast`) and `poc5-tb-118/tb-chain` (a second fight, against the giant fly). See
+//! the driver's `tbcast`) and `poc5-tb-118/tb-chain` (a second fight, against the giant fly;
+//! recorded again with the fly's reveal and the projectile pin as `poc5-tb-123`). See
 //! `docs/poc5/spells.md`. Ignored by default (needs the game's packs, `cache/sim/log-strings.json`,
 //! Manual_18 and the captures; skipped when a capture is absent).
 //! `cargo nextest run -p wr-sim --test poc5_spells --run-ignored only`.
@@ -14,6 +15,7 @@ use wr_sim::combat::{oracle::Trace, replay};
 const SAVE: &str = "Manual_18_WR_FirstBattle";
 const CAST: (&str, &str) = ("poc5-tb-120", "tb-cast");
 const CHAIN: (&str, &str) = ("poc5-tb-118", "tb-chain");
+const CHAIN_REVEALED: (&str, &str) = ("poc5-tb-123", "tb-chain");
 
 fn fixture_in(capture: &str, name: &str) -> Option<PathBuf> {
     // The captures live in the main checkout: look in this checkout and every directory above it
@@ -89,6 +91,38 @@ fn the_flys_handlers_are_the_sims() {
             w.coverage.unsupported.keys().any(|k| k.contains("GameLogEventKnowledge")),
             "{run}: the knowledge event of the revealed fly is the one known gap"
         );
+    }
+}
+
+/// `tb-chain` recorded with the inspection controller's reveals (`inspect_reveal`): every run
+/// valid, T0-equal, its end state the oracle's. The fly is revealed by fog of war and queued for
+/// its knowledge check where the game did; its bite hits here, so the disease trigger's actions
+/// run (their difficulty condition false at the save's setting: no saving throw), and `Airborne`'s
+/// `DamageBonusConditional` is the sim's. Needs `cache/sim/rules-data.json` with the presets'
+/// asset indices (`wr-rules-data`).
+#[test]
+#[ignore = "needs the game's packs, cache/sim/log-strings.json and rules-data.json, Manual_18 and the poc5-tb-123 capture"]
+fn the_revealed_flys_fight_is_valid() {
+    let Some(dir) = fixture_in(CHAIN_REVEALED.0, CHAIN_REVEALED.1) else {
+        eprintln!("{}/{} not present: skipped", CHAIN_REVEALED.0, CHAIN_REVEALED.1);
+        return;
+    };
+    for run in ["record", "replay-1", "replay-2"] {
+        let (out, w) = replay::run_fixture(SAVE, &dir, run).expect("replay");
+        let reports: Vec<_> = w.coverage.unsupported.keys().collect();
+        assert!(w.valid(), "{run}: {reports:?}");
+        assert!(out.diff.equal, "{run}: {:?}", out.diff.first_difference);
+        let units: Vec<wr_sim::world::EntityIdx> = (0..w.entities.len())
+            .map(|i| wr_sim::world::EntityIdx(u32::try_from(i).unwrap_or(0)))
+            .filter(|e| w.unit(*e).is_some())
+            .collect();
+        let sheet = wr_sim::sheet::dump(&w, &units, "end");
+        let end: V = serde_json::from_slice(
+            &std::fs::read(dir.join(format!("state-end-{run}.json"))).expect("end state"),
+        )
+        .expect("json");
+        let r = wr_sim::compare::compare(&sheet, &end);
+        assert!((r.match_rate - 1.0).abs() < f64::EPSILON, "{run}: {:?}", r.diffs);
     }
 }
 

@@ -118,7 +118,15 @@ fn main() -> Result<()> {
         ensure!(lists.contains(&p.path_id), "entry {idx} is not a DifficultyPresetsList");
         let o = f.object(p.path_id).context("list object")?;
         let v = f.read(o)?;
-        let list = presets_list(&f, &v, p.path_id)?;
+        let mut list = presets_list(&f, &v, p.path_id)?;
+        // The entries that point at one of its presets (a blueprint's `DifficultyPresetAsset`
+        // field holds such an index).
+        for (i, e) in entries.iter().enumerate() {
+            let Some(q) = e.get("Asset").and_then(Value::as_pptr) else { continue };
+            if q.file_id == 0 && list.difficulties.iter().any(|d| d.path_id == q.path_id) {
+                list.preset_asset_indices.insert(i32::try_from(i)?, q.path_id);
+            }
+        }
         found = Some((node.path.clone(), list, p.path_id));
         break;
     }
@@ -428,5 +436,6 @@ fn presets_list(f: &SerializedFile<'_>, v: &Value, path_id: i64) -> Result<Diffi
         unfair_difficulty: pptr_id(v, "m_UnfairDifficulty")?,
         stats_adjustment_presets: stats,
         mob_experience_coeffs: mob,
+        preset_asset_indices: BTreeMap::new(),
     })
 }

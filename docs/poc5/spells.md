@@ -9,8 +9,11 @@ names and counts only.
 | Fixture | Result |
 |---|---|
 | `poc5-tb-120/tb-cast` (Camelia casts Enlarge Person on Seelah from a memorized slot, the driver's `tbcast`) | **Every run valid** (record, replay-1, replay-2) [M]: T0-equal (558 records), end state 1.0000 (the spent slot, Seelah Large with her size, Strength and Dexterity modifiers), nothing reported, every combat log message the sim's (26, with the cast's) |
-| `poc5-tb-118/tb-chain` (a second fight, the giant fly) | Every run T0-equal, end state 1.0000; the fly's two facts' handlers are the sim's [M]. Not valid: one combat log event, the fly revealed by fog of war (`GameLogEventKnowledge`), isn't recorded; the new observer `inspect_reveal` records it (`poc5-tb-123`, to record; below) |
+| `poc5-tb-123/tb-chain` (the giant fly's fight recorded again with `inspect_reveal` and the projectile pin) | **Every run valid** [M]: T0-equal (859 records in the record run, 854 in the replays), end state 1.0000, nothing reported. The fly's reveal is queued where the game did (4 `insp_reveal` records); its bite hits this time, so the disease trigger's actions run (their difficulty condition false at the save's setting) and `Airborne`'s `DamageBonusConditional` handler is the sim's |
+| `poc5-tb-118/tb-chain` (the same fight, before the reveal was recorded) | Every run T0-equal, end state 1.0000 [M]. Not valid: the fly's reveal isn't recorded, so its `GameLogEventKnowledge` is missing (21 combat log kinds) |
 | The captures to keep valid (`-95`, `-96`, `-109`, `-111` to `-117`) | Still valid on every run [M] |
+| `poc5-tb-122/tb-focus` | Valid on every run [M]; `tb-nearest`'s kinds are an initiative tie (the turn order's identity-hash fallback), not this stream's |
+| `poc5-tb-121/tb-lizard` | Not valid [M]: the lizard's AI scores an ability action (`AiCastSpell`-like, blueprint `14db26a8…`; the sim's AI scores only `AiActionSimple`), and the turn and command kinds that follow; its line-of-sight rays outside the agent's entries. Not this stream's code; the disease-like weapon trigger kind it had is gone |
 
 ## The giant fly (`tb-chain`) [C]
 
@@ -25,8 +28,23 @@ names and counts only.
 - **`AddInitiatorAttackWithWeaponTrigger`** (`GiantFly_Feature_Disease`): `AbstractWeaponTrigger`'s
   `IsSuitable` in the C#'s order (the roll's outcome now kept on `RuleAttackWithWeapon`:
   `roll_outcome`, `resolves_triggered`), including the `Ensure<UnitPartDamageGrace>` its last
-  operand makes. A suitable attack's actions (they run in a `ContextAttackData` scope) and a
-  pending resolve's `OnResolve` subscription are reported: the fly's one bite missed, so nothing ran.
+  operand makes. After the attack, a triggered resolve runs the actions
+  (`AbstractWeaponTrigger.RunActions`: the fact's `RunActionInContext(Action, target)`, the
+  initiator with `ActionsOnInitiator`) when its damage suits (`IsSuitable(c, damage)`: the three
+  checks that read the damage rule are reported); the `ContextAttackData` scope they run in isn't
+  modelled (no ported element reads one). A pending resolve's `OnResolve` subscription is reported.
+- **`DamageBonusConditional`** (`Airborne`): before `RuleCalculateDamage`, its conditions in the
+  fact's context scoped on the target (the wielder with `CheckWielder`) decide
+  `First.AddModifierTargetRelated(Bonus, Fact, Descriptor)`; `OnlyWeaponDamage` (the bundle's
+  weapon isn't kept) is reported.
+- **`ContextConditionDifficultyHigherThan`** (the disease's actions: "difficulty at least Core"):
+  the checked `DifficultyPresetAsset` is an asset index in the runtime pack (`m_Difficulty`); the
+  rules data now maps the `BlueprintReferencedAssets` entries that point at the presets list's
+  presets to them (`DifficultyPresetsList.preset_asset_indices`, written by `wr-rules-data`;
+  `cache/sim/rules-data.json` must be extracted again). Its `StatsAdjustments` against the
+  setting's, for a caster not of the player's faction; a preset the rules data doesn't resolve is
+  reported. The disease's saving throw (`ContextActionSavingThrow`) isn't ported: reached, it's
+  reported (in `tb-chain` the condition is false: the save's setting is Decline, Core's preset 4).
 - `ContextConditionTargetIsYourself` and `ContextConditionCasterHasFact` (the latter was ported but
   not listed) are in `conditions::IMPLEMENTED` too.
 
@@ -44,9 +62,13 @@ call added it to the controller's set, the caller chain). The driven replay
 `Sleeping`), runs the sim's `HandleEntityRevealed` (`inspect::entity_revealed`: queued without a
 `UnitInfo` of its blueprint; a polymorph's inspection blueprint reported) and compares its queuing
 with the record's. A record without the observer declared, of another shape or tick, from a caller
-not modelled, or of a unit the sim doesn't have is reported. The capture with it is `poc5-tb-123`
-(to record). [I] As a diagnostic only (not a result), a scratch copy of `tb-chain`'s record run
-with one such record put after t=2347's vision records replays valid.
+not modelled, or of a unit the sim doesn't have is reported. `poc5-tb-123` is the capture with it
+(every run valid, above).
+
+The projectile pin (stream L's `proj_launch`, accepted in the attack's span by `span_ok`): after
+the sim fires a command's attack, the launches recorded in its span are matched with the sim's, in
+order (`LaunchProjectile`: one per projectile blueprint of the weapon, its hit, the resolve as the
+on-hit trigger, no callback); another count or content is reported.
 
 ## Spellcasting (`tb-cast`)
 
@@ -162,11 +184,15 @@ cast's snapshots, a missing params or cast root, the resistance check from anoth
 of another class, the resistance d20, the params' DC, the buff's attach, four `RuleApplySpell`
 inputs, the driver's spell and slot, the cast's end chain), each reported or T0-unequal.
 `replay::tests`: a recorded reveal queues the unit as the game did; reveals the replay can't place
-are reported. `facts::tests::an_apply_buff_with_a_context_duration_lasts_its_rounds`.
+are reported. `facts::tests::an_apply_buff_with_a_context_duration_lasts_its_rounds`,
+`facts::tests::the_difficulty_condition_compares_the_presets_stats_adjustments`.
+`poc5_spells::the_revealed_flys_fight_is_valid`: every `poc5-tb-123` run valid, end state equal.
 
 ## Next
 
-1. Check `tb-chain` with the reveal recorded (`poc5-tb-123`).
+1. `ContextActionSavingThrow` and `ContextActionConditionalSaved` (the disease at Core and
+   above); the AI's ability actions (`poc5-tb-121`), with `combat/spells.rs`'s availability and
+   targeting.
 2. `UnitUseAbility`'s class code as the sim's (as slice B did for `UnitAttack`): taps for its
    reads (`CanTarget`'s range and line of sight aren't in `CanTarget` itself; the animation's
    precast and act), then `OnAction`'s checks and its spend.

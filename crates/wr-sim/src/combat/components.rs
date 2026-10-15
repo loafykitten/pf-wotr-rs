@@ -427,16 +427,51 @@ fn add_initiator_attack_with_weapon_trigger(
     }
     // `foreach resolveRule in evt.ResolveRules`: a triggered one runs the actions when its damage
     // suits; a waiting one subscribes to `OnResolve`.
+    let (initiator, target) = (evt.initiator, evt.target);
     for triggered in evt.resolves_triggered.clone() {
         if triggered {
-            w.coverage.unsupported(
-                "AddInitiatorAttackWithWeaponTrigger: its actions on a suitable attack (not modelled)",
-            );
+            if weapon_trigger_damage_suitable(w, c) == Some(true) {
+                weapon_trigger_run_actions(w, c, initiator, target);
+            }
         } else {
             w.coverage
                 .unsupported("AddInitiatorAttackWithWeaponTrigger: an OnResolve subscription");
         }
     }
+}
+
+/// `AbstractWeaponTrigger.IsSuitable(c, RuleDealDamage)` of a triggered resolve: true without
+/// `CheckPhysicalDamageForm`, `ReduceHPToZero` and `DamageMoreTargetMaxHP`; those read the damage
+/// rule, which the sim doesn't keep on the resolve (reported, `None`).
+fn weapon_trigger_damage_suitable(w: &mut World, c: CompRef) -> Option<bool> {
+    let reads = with_settings(w, c, |v| {
+        ["CheckPhysicalDamageForm", "ReduceHPToZero", "DamageMoreTargetMaxHP"]
+            .into_iter()
+            .find(|k| v.bool(k))
+    })?;
+    if let Some(k) = reads {
+        w.coverage.unsupported(format!("AddInitiatorAttackWithWeaponTrigger: {k}"));
+        return None;
+    }
+    Some(true)
+}
+
+/// `AbstractWeaponTrigger.RunActions` after the attack: on the attack's target (its initiator
+/// with `ActionsOnInitiator`; `m_OverrideTargetData` is a subclass's, unset here), the fact's
+/// `RunActionInContext(Action, unit)`, inside a `ContextAttackData` scope of the attack roll (no
+/// ported element reads one).
+fn weapon_trigger_run_actions(w: &mut World, c: CompRef, initiator: EntityIdx, target: EntityIdx) {
+    let Some((bp, i)) = crate::components::settings_of(w, c) else { return };
+    let objs = bp.components_array();
+    let v = crate::content::View(objs[i]);
+    let unit = if v.bool("ActionsOnInitiator") { initiator } else { target };
+    crate::components::mechanics::run_action_in_context(
+        w,
+        c.fact,
+        &bp,
+        v.obj("Action"),
+        Some(unit),
+    );
 }
 
 /// `AbstractWeaponTrigger.IsSuitable(RuleAttackWithWeapon)`; `None` (reported) where it reads
