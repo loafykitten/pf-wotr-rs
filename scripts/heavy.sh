@@ -5,7 +5,8 @@
 # for enough free memory, so parallel streams queue instead of exhausting the 32 GB together.
 #   WR_HEAVY_MIN_GB  free memory (GiB) to wait for before starting (default 12)
 #   WR_HEAVY_WAIT    seconds to wait for memory before giving up (default 1800)
-# One driven replay of a long capture peaks at about 8.5 GB; the game while recording takes more.
+# One driven replay of a long capture peaks at about 1.8 GB (docs/poc5/replay-memory.md); a capture
+# test that damages a recording takes more (the POC-5 suites' largest about 12 GB), as does the game.
 set -euo pipefail
 [ $# -gt 0 ] || { echo "usage: scripts/heavy.sh CMD [ARGS...]" >&2; exit 2; }
 root=$(cd "$(dirname "$0")/.." && pwd)

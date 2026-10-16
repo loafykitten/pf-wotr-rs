@@ -1,5 +1,6 @@
 # Tests that read oracle captures or the install load whole recordings into memory: one driven
-# replay of a long capture peaks at about 8.5 GB. They run one at a time (everything else stays
+# replay of a long capture peaks at about 1.8 GB, and a test that damages one edits a JSON copy of it
+# (the POC-5 suites' largest peaks at about 12 GB). They run one at a time (everything else stays
 # parallel), so a suite can't take the machine's memory with it.
 [test-groups]
 captures = { max-threads = 1 }
