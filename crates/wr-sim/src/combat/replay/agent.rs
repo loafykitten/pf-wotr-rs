@@ -65,6 +65,32 @@ fn fields(r: &J, keys: &[&str]) -> bool {
     })
 }
 
+/// A critter's ground query (`ag_phys`, ctx "critter"): exactly the record WrathOracle writes, with
+/// no unit (`u` present and null) and a complete identity of the critter (scene, hierarchy path,
+/// sibling path). Anything less isn't identified.
+fn critter_phys(r: &J) -> bool {
+    let mut keys = vec!["fn", "ctx", "u", "critter", "o", "max", "mask", "hit"];
+    match r["fn"].as_str() {
+        Some("ray") => keys.push("d"),
+        Some("disc") => keys.push("r"),
+        _ => return false,
+    }
+    match r["hit"].as_bool() {
+        Some(true) => keys.extend(["dist", "pt", "col"]),
+        Some(false) => {}
+        None => return false,
+    }
+    let c = &r["critter"];
+    let name = |k: &str| c[k].as_str().is_some_and(|x| !x.is_empty());
+    r["ctx"] == "critter"
+        && fields(r, &keys)
+        && r["u"].is_null()
+        && c.as_object().is_some_and(|o| o.len() == 3)
+        && name("scene")
+        && name("path")
+        && c["sib"].as_array().is_some_and(|a| a.iter().all(J::is_u64))
+}
+
 /// A required boolean (a missing, null or mistyped value isn't `false`).
 fn boolean(r: &J, k: &str, what: &str) -> R<bool> {
     r[k].as_bool().ok_or_else(|| Desync(format!("{what} without a boolean {k} ({})", describe(r))))
@@ -654,13 +680,7 @@ impl Driver<'_> {
             "ag_phys" if r["ctx"] == "sim" => self.ag_input("physics (the AI's simulation)"),
             // A critter's ground ray (`CritterMoveAgent.TickMovement`, the static `Move`; WrathOracle names
             // the critter): presentation, no unit's.
-            "ag_phys"
-                if r["ctx"] == "critter"
-                    && r["u"].is_null()
-                    && r["critter"]["path"].is_string() =>
-            {
-                self.ag_input("a critter's ground ray (presentation)")
-            }
+            "ag_phys" if critter_phys(r) => self.ag_input("a critter's ground ray (presentation)"),
             "ag_sim" | "ag_sim_end" => self.ag_input("the AI's simulation steps"),
             "ag_v" if r["ctx"] == "sim" => self.ag_input("the AI's simulation reads"),
             _ => Self::ag_unsupported(
@@ -2582,6 +2602,57 @@ impl Driver<'_> {
             }
             let i = self.i;
             self.i = self.record(w, i);
+        }
+    }
+}
+
+#[cfg(test)]
+mod critter_phys_tests {
+    use super::critter_phys;
+    use serde_json::{Value, json};
+
+    fn ray() -> Value {
+        json!({"seq": 1, "k": "obs", "t": 5, "ev": "ag_phys", "fn": "ray", "ctx": "critter", "u": null,
+            "critter": {"scene": "S", "path": "Critters/Tarantula", "sib": [0]},
+            "o": [0.0, 2.0, 0.0], "d": [0.0, -1.0, 0.0], "max": 100.0, "mask": 2099457, "hit": true,
+            "dist": 2.0, "pt": [0.0, 0.0, 0.0], "col": {"type": "TerrainCollider"}})
+    }
+
+    #[test]
+    fn accepts_the_record_written() {
+        assert!(critter_phys(&ray()));
+        let mut miss = ray();
+        let o = miss.as_object_mut().unwrap();
+        o.insert("hit".into(), json!(false));
+        for k in ["dist", "pt", "col"] {
+            o.remove(k);
+        }
+        assert!(critter_phys(&miss));
+    }
+
+    #[test]
+    fn rejects_damaged_identity_or_shape() {
+        let damage: Vec<fn(&mut Value)> = vec![
+            |r| {
+                r.as_object_mut().unwrap().remove("u");
+            },
+            |r| r["u"] = json!("51FC"),
+            |r| r["critter"]["path"] = json!(""),
+            |r| {
+                r["critter"].as_object_mut().unwrap().remove("scene");
+            },
+            |r| r["critter"]["sib"] = json!(["x"]),
+            |r| r["critter"]["extra"] = json!(1),
+            |r| r["ctx"] = json!("other"),
+            |r| r["fn"] = json!("box"),
+            |r| {
+                r.as_object_mut().unwrap().remove("dist");
+            },
+        ];
+        for (i, d) in damage.iter().enumerate() {
+            let mut r = ray();
+            d(&mut r);
+            assert!(!critter_phys(&r), "damage {i} accepted");
         }
     }
 }
