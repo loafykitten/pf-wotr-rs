@@ -370,10 +370,11 @@ fn wrong_projectile_launches_are_reported() {
 /// The ranged centipede's spit (`GiantCentipedeSpitAbilityAiAction`, a `BlueprintAiCastSpell`).
 const SPIT: &str = "14db26a8a9b3be448860e12a07559f46";
 
-/// Every run of `tb-lizard` is valid with the centipede's cast action scored by the sim: its
+/// Every run of `tb-lizard` is T0-equal with the centipede's cast action scored by the sim: its
 /// range the ability's, `ScoreActor` 2 then 0 (`ThreatedByConsideration` on the engagement
 /// model), `ScoreTarget` 0 (`DistanceConsideration`), no impatience reads; the attack chosen both
-/// times.
+/// times. The one kind left is the movement agent's: ground rays of no unit outside its entries
+/// (`docs/poc5/ai-abilities.md`, "Results").
 #[test]
 #[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-121 capture"]
 fn the_centipedes_cast_action_is_scored() {
@@ -384,7 +385,8 @@ fn the_centipedes_cast_action_is_scored() {
     for run in ["record", "replay-1", "replay-2"] {
         let (out, w) = replay::run_fixture(SAVE, &dir, run).expect("replay");
         let reports: Vec<_> = w.coverage.unsupported.keys().collect();
-        assert!(w.valid(), "{run}: {reports:?}");
+        let rays = "driven replay: agent: a record outside the sim's agent entries (ag_phys fn=\"ray\" ctx=\"other\")";
+        assert!(reports.iter().all(|k| k.as_str() == rays), "{run}: {reports:?}");
         assert!(out.diff.equal, "{run}: {:?}", out.diff.first_difference);
         // The centipede's brain lists the spit first (base score 2), then its attack.
         let centipede = w.by_id["5031"];

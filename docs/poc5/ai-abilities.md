@@ -101,10 +101,28 @@ nobody engages, scoring above the attack's 1 after the path factor [I].
 
 ## Results [M]
 
-(Filled in below.)
+`poc5-tb-121/tb-lizard`, each run (record, replay-1, replay-2): T0-equal (1,825 records), end state
+1.0000 (21 units), AI: 407 decisions, 462 scores checked (the spit's 3 among them), 22 commands
+run and 22 draws, each checked. The six AI, command and turn kinds are gone; one kind is left in
+each run, not the AI's:
+
+- `agent: a record outside the sim's agent entries (ag_phys fn="ray" ctx="other")`: 27, 39 and 215
+  per run. Downward rays (`d` (0, -1, 0), from about 2 m above the ground, `max` 100) with no unit,
+  outside every agent entry, one per frame along a slowly moving point (around x 98 to 104, z 97 to
+  114: by Lann and Wenduag, far from the fights), hitting the terrain or a floor collider. A
+  non-unit mover's ground probe, probably a critter's [I]; the observer doesn't name its caller.
+  This is the movement agent's replay (stream M's area): its `ag_phys` records would need the
+  caller (or a critter mark) to be placed as presentation.
+
+The captures to keep valid (`-95`, `-96`, `-109`, `-111` to `-117`, `-120`, `-122/tb-focus`, `-123`,
+`-125` to `-127`): every run valid (75 runs). `-122/tb-nearest` stays invalid on its initiative tie
+(the comparer's identity-hash fallback, recorded without `init_tie`), as before.
 
 ## Tests
 
 - `combat::ai::tests`: `Mathf`'s lerps, the cast range's meters, decimal scales of a cast's scores.
-- `tests/poc5_spells.rs`: `poc5-tb-121` valid on every run; damaged records of the cast action's
-  scoring, each reported.
+- `tests/poc5_spells.rs`: `the_centipedes_cast_action_is_scored` (every `poc5-tb-121` run
+  T0-equal, nothing reported but the agent's unattributed rays, the centipede's brain the spit then
+  the attack); `wrong_cast_action_records_are_reported` (six damaged records of the spit's scoring:
+  its range, both `ScoreActor`s, its `ScoreTarget`, a missing range read, an extra impatience read;
+  each reported).
