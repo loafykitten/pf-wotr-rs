@@ -96,6 +96,36 @@ enum Prepared {
 pub struct Scene<'w> {
     world: Cow<'w, World>,
     prepared: Vec<Prepared>,
+    /// The largest coordinate any shape reaches: the pruner's tree nodes, which enclose
+    /// several shapes, round at that scale.
+    extent: f64,
+}
+
+/// The largest coordinate a shape reaches (an upper bound).
+fn shape_extent(s: &crate::Shape, p: &Prepared) -> f64 {
+    let m3 = |a: &[f64; 3]| a.iter().fold(0.0f64, |x, y| x.max(y.abs()));
+    match (p, &s.kind) {
+        (
+            Prepared::HeightField { lo, hi, .. }
+            | Prepared::MeshExact { lo, hi, .. }
+            | Prepared::Mesh { lo, hi, .. }
+            | Prepared::Other { lo, hi },
+            _,
+        ) => m3(lo).max(m3(hi)),
+        (Prepared::Box { .. }, ShapeKind::Box { local_to_world: m, center, size }) => {
+            let local =
+                center.iter().zip(size).map(|(c, h)| f64::from(c.abs() + h.abs())).sum::<f64>();
+            let basis = m[..12].iter().fold(0.0f64, |x, y| x.max(f64::from(y.abs())));
+            abs_max(&[m[12], m[13], m[14]]) + 3.0 * basis * local
+        }
+        _ => f64::INFINITY,
+    }
+}
+
+impl Scene<'_> {
+    fn extent(world: &World, prepared: &[Prepared]) -> f64 {
+        world.shapes.iter().zip(prepared).map(|(s, p)| shape_extent(s, p)).fold(0.0, f64::max)
+    }
 }
 
 impl fmt::Debug for Scene<'_> {
@@ -112,14 +142,16 @@ impl<'w> Scene<'w> {
     #[must_use]
     pub fn new(world: &'w World) -> Self {
         let prepared = Self::prepare(world);
-        Self { world: Cow::Borrowed(world), prepared }
+        let extent = Self::extent(world, &prepared);
+        Self { world: Cow::Borrowed(world), prepared, extent }
     }
 
     /// A scene that owns its world.
     #[must_use]
     pub fn owned(world: World) -> Scene<'static> {
         let prepared = Self::prepare(&world);
-        Scene { world: Cow::Owned(world), prepared }
+        let extent = Self::extent(&world, &prepared);
+        Scene { world: Cow::Owned(world), prepared, extent }
     }
 
     fn prepare(world: &World) -> Vec<Prepared> {
@@ -376,7 +408,9 @@ impl<'w> Scene<'w> {
         let o = f64x3(o.to_array());
         let max = f64::from(max);
         let size = lo.iter().chain(hi).chain(&o).fold(max, |a, x| a.max(x.abs()));
-        let tol = 1e-5 * (size + operands) + 1e-5;
+        // The pruner's tree nodes enclose other shapes: their rounding is at the scene's scale
+        // (the static colliders of the area's scenes; others aren't modelled).
+        let tol = 1e-5 * (size + operands + self.extent) + 1e-5;
         (0..3).all(|k| k == 1 || (lo[k] + tol < o[k] && o[k] < hi[k] - tol))
             && o[1] - max + tol <= hi[1]
             && lo[1] <= o[1] - tol

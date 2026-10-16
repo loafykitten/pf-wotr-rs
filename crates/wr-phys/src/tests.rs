@@ -498,6 +498,13 @@ fn a_shape_the_pruner_may_skip_fails_closed() {
     let scene = Scene::new(&w);
     let r = scene.raycast_down([6.0, 10.0, 2.0], 100.0, 1);
     assert!(!matches!(r, Ok(Some(_))), "{r:?}");
+    // Another shape 1e8 m out (on another layer): the pruner's node over both rounds at that
+    // scale and can cut the square off.
+    let mut w = World { shapes: vec![recorded_square("near", [-2.0, 0.0, 0.0], 0)] };
+    w.shapes.push(recorded_square("far", [1.0e8, 0.0, 0.0], 5));
+    let scene = Scene::new(&w);
+    let r = scene.raycast_down([-1.0, 10.0, 1.4], 100.0, 1);
+    assert!(!matches!(r, Ok(Some(_))), "{r:?}");
 }
 
 #[test]
