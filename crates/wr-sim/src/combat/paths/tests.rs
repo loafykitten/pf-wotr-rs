@@ -86,15 +86,6 @@ struct Delivery {
     raw: bool,
 }
 
-/// A recorded `LineOfSightGeometry.HasObstacle` call inside a search (`path_fin`'s `los`).
-#[derive(Debug, Clone, Copy)]
-struct LosAnswer {
-    from: V3,
-    to: V3,
-    fudge: f32,
-    blocked: bool,
-}
-
 /// How a request's check came out.
 #[derive(Debug, Default)]
 struct Tally {
@@ -1108,38 +1099,6 @@ impl Fight<'_> {
             }
         }
     }
-}
-
-/// `path_fin`'s `los`: each call `[from, to, fudge, result]` (null: none). Anything else is an
-/// error, never an answer.
-fn parse_los(los: &Value) -> Result<Vec<LosAnswer>, String> {
-    let none = Vec::new();
-    let calls = if los.is_null() {
-        &none
-    } else {
-        los.as_array().ok_or_else(|| format!("path_fin los {los}"))?
-    };
-    let vec = |v: &Value| -> Option<V3> {
-        let a = v.as_array().filter(|a| a.len() == 3)?;
-        let p = [a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?].map(|x| x as f32);
-        p.iter().all(|x| x.is_finite()).then_some(p)
-    };
-    calls
-        .iter()
-        .map(|c| {
-            let call = || -> Option<LosAnswer> {
-                let a = c.as_array().filter(|a| a.len() == 4)?;
-                let fudge = a[2].as_f64()? as f32;
-                Some(LosAnswer {
-                    from: vec(&a[0])?,
-                    to: vec(&a[1])?,
-                    fudge: fudge.is_finite().then_some(fudge)?,
-                    blocked: a[3].as_bool()?,
-                })
-            };
-            call().ok_or_else(|| format!("line-of-sight call {c} isn't [from, to, fudge, result]"))
-        })
-        .collect()
 }
 
 #[test]

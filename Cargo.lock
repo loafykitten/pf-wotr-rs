@@ -4911,6 +4911,7 @@ dependencies = [
  "wr-content",
  "wr-nav",
  "wr-paths",
+ "wr-phys",
  "wr-save",
  "wr-text",
 ]

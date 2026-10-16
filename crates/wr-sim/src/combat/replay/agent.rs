@@ -30,17 +30,17 @@ use crate::combat::movement::{self, MoveInputs};
 use crate::combat::orientation;
 use crate::world::{EntityIdx, World};
 
-fn f(v: &J) -> Option<f32> {
+pub(super) fn f(v: &J) -> Option<f32> {
     #[allow(clippy::cast_possible_truncation)]
     v.as_f64().map(|x| x as f32)
 }
 
-fn v3(v: &J) -> Option<V3> {
+pub(super) fn v3(v: &J) -> Option<V3> {
     let a = v.as_array().filter(|a| a.len() == 3)?;
     Some([f(&a[0])?, f(&a[1])?, f(&a[2])?])
 }
 
-fn v2(v: &J) -> Option<V2> {
+pub(super) fn v2(v: &J) -> Option<V2> {
     let a = v.as_array().filter(|a| a.len() == 2)?;
     Some([f(&a[0])?, f(&a[1])?])
 }
@@ -53,12 +53,12 @@ fn opt_f(v: &J) -> Option<Option<f32>> {
     if v.is_null() { Some(None) } else { f(v).map(Some) }
 }
 
-fn bits3(v: V3) -> [u32; 3] {
+pub(super) fn bits3(v: V3) -> [u32; 3] {
     v.map(f32::to_bits)
 }
 
 /// The record has exactly `keys` besides the trace's own (`seq`, `k`, `t`, `ev`).
-fn fields(r: &J, keys: &[&str]) -> bool {
+pub(super) fn fields(r: &J, keys: &[&str]) -> bool {
     const BASE: [&str; 4] = ["seq", "k", "t", "ev"];
     r.as_object().is_some_and(|o| {
         o.len() == BASE.len() + keys.len() && BASE.iter().chain(keys).all(|k| o.contains_key(*k))
@@ -71,7 +71,54 @@ fn fields(r: &J, keys: &[&str]) -> bool {
 /// cast of radius 0.4, 100 m, `WalkableMask`, from a finite point, with a finite result and the
 /// collider when it hit. Anything less isn't identified.
 fn critter_phys(r: &J) -> bool {
-    let mut keys = vec!["fn", "ctx", "u", "critter", "o", "max", "mask", "hit"];
+    let query = match r["fn"].as_str() {
+        Some("ray") => v3(&r["d"]).map(bits3) == Some(bits3([0.0, -1.0, 0.0])),
+        _ => f(&r["r"]).map(f32::to_bits) == Some(0.4f32.to_bits()),
+    };
+    let c = &r["critter"];
+    r["ctx"] == "critter"
+        && phys_record(r, "critter")
+        && query
+        && f(&r["max"]).map(f32::to_bits) == Some(100.0f32.to_bits())
+        && r["mask"].as_i64() == Some(2_099_457)
+        && c.as_object().is_some_and(|o| o.len() == 3)
+        && placed(c)
+}
+
+/// Another caller's query (`ag_phys`, ctx "other": outside any unit agent's entry and not a
+/// critter's own move): exactly the record WrathOracle writes, with no unit (`u` present and
+/// null), the caller chain (`origin`, non-empty), no critter, a ray (finite direction) or a disc
+/// cast (finite radius) from a finite point with a finite length and a mask, and a finite result
+/// and the collider when it hit.
+fn other_phys(r: &J) -> bool {
+    let query = match r["fn"].as_str() {
+        Some("ray") => finite3(&r["d"]),
+        _ => f(&r["r"]).is_some_and(f32::is_finite),
+    };
+    r["ctx"] == "other"
+        && phys_record(r, "origin")
+        && query
+        && r["origin"].as_str().is_some_and(|x| !x.is_empty())
+        && f(&r["max"]).is_some_and(f32::is_finite)
+        && r["mask"].is_i64()
+}
+
+/// A finite vector.
+fn finite3(v: &J) -> bool {
+    v3(v).is_some_and(|p| p.iter().all(|x| x.is_finite()))
+}
+
+/// An identified object (`PhysProbe.WritePath`/`WriteId`): scene, hierarchy path, sibling path.
+fn placed(o: &J) -> bool {
+    ["scene", "path"].iter().all(|k| o[*k].as_str().is_some_and(|x| !x.is_empty()))
+        && o["sib"].as_array().is_some_and(|a| a.iter().all(J::is_u64))
+}
+
+/// An unattributed `ag_phys` record's shape: exactly its keys (the query's, `u` null, `who`: the
+/// critter or the caller chain, the hit's when it hit), a finite origin, and a finite result with
+/// the collider hit (`WriteId`: placed, its type and instance id) when it hit.
+fn phys_record(r: &J, who: &str) -> bool {
+    let mut keys = vec!["fn", "ctx", "u", who, "o", "max", "mask", "hit"];
     match r["fn"].as_str() {
         Some("ray") => keys.push("d"),
         Some("disc") => keys.push("r"),
@@ -82,39 +129,18 @@ fn critter_phys(r: &J) -> bool {
         Some(false) => {}
         None => return false,
     }
-    let c = &r["critter"];
-    // An identified object (`PhysProbe.WritePath`/`WriteId`): scene, hierarchy path, sibling path.
-    let placed = |o: &J| {
-        ["scene", "path"].iter().all(|k| o[*k].as_str().is_some_and(|x| !x.is_empty()))
-            && o["sib"].as_array().is_some_and(|a| a.iter().all(J::is_u64))
-    };
-    // The collider hit (`WriteId`): placed, its type and instance id.
     let col = &r["col"];
     let collider = col.as_object().is_some_and(|o| o.len() == 5)
         && placed(col)
         && col["type"].as_str().is_some_and(|x| !x.is_empty())
         && col["iid"].is_i64();
-    let finite3 = |v: &J| v3(v).is_some_and(|p| p.iter().all(|x| x.is_finite()));
-    let query = match r["fn"].as_str() {
-        Some("ray") => v3(&r["d"]).map(bits3) == Some(bits3([0.0, -1.0, 0.0])),
-        _ => f(&r["r"]).map(f32::to_bits) == Some(0.4f32.to_bits()),
-    };
     let result = r["hit"] == false
         || (f(&r["dist"]).is_some_and(f32::is_finite) && finite3(&r["pt"]) && collider);
-    r["ctx"] == "critter"
-        && query
-        && result
-        && finite3(&r["o"])
-        && f(&r["max"]).map(f32::to_bits) == Some(100.0f32.to_bits())
-        && r["mask"].as_i64() == Some(2_099_457)
-        && fields(r, &keys)
-        && r["u"].is_null()
-        && c.as_object().is_some_and(|o| o.len() == 3)
-        && placed(c)
+    result && finite3(&r["o"]) && fields(r, &keys) && r["u"].is_null()
 }
 
 /// A required boolean (a missing, null or mistyped value isn't `false`).
-fn boolean(r: &J, k: &str, what: &str) -> R<bool> {
+pub(super) fn boolean(r: &J, k: &str, what: &str) -> R<bool> {
     r[k].as_bool().ok_or_else(|| Desync(format!("{what} without a boolean {k} ({})", describe(r))))
 }
 
@@ -385,6 +411,8 @@ pub(super) struct AgDriver {
     pub rows_checked: Option<i64>,
     /// The recording ended (its last frame's controllers may not have run).
     pub ending: bool,
+    /// The physics and paths the sim computes (`replay/nav.rs`).
+    pub nav: super::nav::NavDriver,
 }
 
 impl Default for AgDriver {
@@ -423,12 +451,13 @@ impl Default for AgDriver {
             rows: (-1, HashSet::new()),
             rows_checked: None,
             ending: false,
+            nav: super::nav::NavDriver::default(),
         }
     }
 }
 
 impl Driver<'_> {
-    fn ag_input(&mut self, what: impl Into<String>) {
+    pub(super) fn ag_input(&mut self, what: impl Into<String>) {
         *self.out.ag_inputs.entry(what.into()).or_default() += 1;
     }
 
@@ -463,11 +492,30 @@ impl Driver<'_> {
     /// A stop record skipped (an input's span, a desynced entry): a `SlowDown` draw takes the
     /// tape's to keep its site in step, a request start counts for its requester.
     fn ag_skip_stop(&mut self, w: &mut World, r: &J) {
+        // A physics query of the span: the sim's answer to its recorded arguments, checked.
+        if r["k"] == "obs" && r["ev"] == "ag_phys" {
+            // (A critter's or another caller's, identified: the sim never uses the answer.)
+            let ctx = if critter_phys(r) || other_phys(r) {
+                super::nav::PhysCtx::Other
+            } else if matches!(r["ctx"].as_str(), Some("critter" | "other")) {
+                Self::ag_unsupported(
+                    w,
+                    format!("an unattributed physics query it can't identify ({})", describe(r)),
+                );
+                return;
+            } else {
+                super::nav::PhysCtx::Span
+            };
+            self.nav_phys_alone(w, r, ctx);
+        }
         if self.ag_slow_draw(r) {
             let _ = w.rng.range_float(crate::rng::sites::AGENT_SLOW_DOWN, 0.2, 0.3);
         }
         if r["k"] == "obs" && r["ev"] == "path_start" {
             self.ag_count_request(r);
+            if let Some(k) = r["path"].as_str() {
+                self.nav_taken_request(k);
+            }
         }
     }
 
@@ -510,12 +558,18 @@ impl Driver<'_> {
             if let Some((who, _)) = key.rsplit_once('#') {
                 *self.ags.req_counts.entry(who.to_owned()).or_default() += 1;
             }
+            self.nav_seeker_start(key);
         }
     }
 
     /// Records up to the next one `want` takes (returned); everything before it is processed as
     /// usual, but an agent record the sim didn't ask for stops the pull.
-    fn ag_pull(&mut self, w: &mut World, what: &str, want: impl Fn(&J) -> bool) -> R<usize> {
+    pub(super) fn ag_pull(
+        &mut self,
+        w: &mut World,
+        what: &str,
+        want: impl Fn(&J) -> bool,
+    ) -> R<usize> {
         let trace = self.trace;
         loop {
             let Some(r) = trace.records.get(self.i) else {
@@ -540,7 +594,7 @@ impl Driver<'_> {
     }
 
     /// The next record a pull would stop at, not consumed.
-    fn ag_peek(&self) -> Option<J> {
+    pub(super) fn ag_peek(&self) -> Option<J> {
         self.trace.records[self.i..].iter().find(|r| self.ag_stop(r)).cloned()
     }
 
@@ -657,6 +711,13 @@ impl Driver<'_> {
             "ag_done" => return self.ag_entry(w, i, AgEntry::Done),
             "ag_call" => return self.ag_entry(w, i, AgEntry::Call),
             // The place-on-ground step outside a `TickUnit` (its own controller): physics, an input.
+            // The place-on-ground controller's own step (`ground_view`: its rays come first).
+            "ag_phys" if r["ctx"] == "ground" && self.ags.nav.ground_view => {
+                return self.nav_ground_entry(w, i);
+            }
+            "ag_ground" if self.ags.nav.ground_view => {
+                Self::ag_unsupported(w, "a place-on-ground step without its rays");
+            }
             "ag_ground" => {
                 let u = r["u"].as_str().and_then(|x| w.by_id.get(x).copied());
                 let (pos, after) = (v3(&r["pos"]), v3(&r["after"]));
@@ -699,12 +760,33 @@ impl Driver<'_> {
                     self.ag_input("isdone (read outside the sim's agent code)");
                 }
             }
-            "ag_phys" if r["ctx"] == "sim" => self.ag_input("physics (the AI's simulation)"),
-            // A critter's ground ray (`CritterMoveAgent.TickMovement`, the static `Move`; WrathOracle names
-            // the critter): presentation, no unit's.
-            "ag_phys" if critter_phys(r) => self.ag_input("a critter's ground ray (presentation)"),
-            "ag_sim" | "ag_sim_end" => self.ag_input("the AI's simulation steps"),
-            "ag_v" if r["ctx"] == "sim" => self.ag_input("the AI's simulation reads"),
+            // A critter's ground ray (`CritterMoveAgent.TickMovement`, the static `Move`; WrathOracle
+            // names the critter): presentation, no unit's; the sim's answer checked when it has one.
+            "ag_phys" if critter_phys(r) => {
+                self.nav_phys_alone(w, r, super::nav::PhysCtx::Other);
+            }
+            // The movement simulation (`SimulateTickMovementForTurnBased`: the AI's `ScorePath`,
+            // the path visualizer): each step the sim's from its recorded simulator
+            // (`replay/nav.rs`); in real time its physics the sim's, its reads inputs.
+            "ag_sim" => return self.nav_sim_step(w, i),
+            // A query of another caller (a critter's move): the sim's answer checked when it has one.
+            "ag_phys" if other_phys(r) => {
+                self.nav_phys_alone(w, r, super::nav::PhysCtx::Other);
+            }
+            "ag_phys" if r["ctx"] == "sim" && !w.combat.turn_based => {
+                self.nav_phys_alone(w, r, super::nav::PhysCtx::Span);
+            }
+            "ag_sim_end" | "ag_v"
+                if !w.combat.turn_based && (ev == "ag_sim_end" || r["ctx"] == "sim") =>
+            {
+                self.ag_input("the AI's simulation (real time)");
+            }
+            "ag_phys" | "ag_sim_end" | "ag_v" if ev == "ag_sim_end" || r["ctx"] == "sim" => {
+                Self::ag_unsupported(
+                    w,
+                    format!("a movement simulation record outside its step ({})", describe(r)),
+                );
+            }
             _ => Self::ag_unsupported(
                 w,
                 format!("a record outside the sim's agent entries ({})", describe(r)),
@@ -719,11 +801,20 @@ impl Driver<'_> {
             return;
         };
         if r["pending"] == true {
+            // (The path's kind is known before its points.)
+            match r["kind"].as_str() {
+                Some(kind) if fields(r, &["path", "kind", "pending"]) => {
+                    self.nav_def(w, k, kind, None);
+                }
+                _ => Self::ag_unsupported(w, "a path definition it can't read"),
+            }
             return;
         }
         let pts: Option<Vec<V3>> = r["v"].as_array().and_then(|v| v.iter().map(v3).collect());
         match (pts, r["err"].as_bool(), r["cs"].as_i64(), r["kind"].as_str(), r["pid"].as_i64()) {
             (Some(p), Some(err), Some(cs), Some(kind), Some(pid)) => {
+                // A path the sim computes: the definition is a check.
+                self.nav_def(w, k, kind, Some((&p, err, cs)));
                 self.ags.paths.insert(k.to_owned(), p);
                 self.ags.defs.insert(k.to_owned(), (err, cs, kind.to_owned(), pid));
             }
@@ -777,6 +868,10 @@ impl Driver<'_> {
             return;
         };
         let requested = self.ags.finding.remove(path);
+        // The callback the seeker makes for a path the sim computed.
+        if let Err(d) = self.nav_delivered(path, None) {
+            Self::ag_unsupported(w, format!("FindPath's callback: {}", d.0));
+        }
         if self.ags.strict && !(self.ag_deliver(path) && requested) {
             Self::ag_unsupported(
                 w,
@@ -1058,6 +1153,7 @@ impl Driver<'_> {
         self.ag_frame_end(w);
         self.ag_block_close(w);
         self.ag_batch_close(w);
+        self.nav_finish(w);
     }
 
     /// An entry: the sim's code runs, pulling its records; on a desync the entry's remaining
@@ -1246,6 +1342,7 @@ impl Driver<'_> {
             return Err(Desync(format!("a FindPath record it can't read ({})", describe(r))));
         };
         self.ag_input("FindPath's arguments (the AI's ScorePath)");
+        self.nav_find_start();
         self.ags.req_want = Some(vec![("fn", Want::S(Some("find".into())))]);
         ag::find_path(w, u, p, approach, los, ibr, self)?;
         Ok(())
@@ -1271,8 +1368,20 @@ impl Driver<'_> {
         if r["forced"] != false {
             return Err(Desync("a delivered path completed as forced".into()));
         }
+        // The sim's path when it computes it (the recorded one a check), else the recording's.
+        let cs = r["cs"].as_i64().ok_or_else(|| Desync("OnPathComplete: no state".into()))?;
+        let kind = r["kind"].as_str().unwrap_or("");
+        let pts = match self.nav_delivered(&key, Some((&pts, err, cs, kind)))? {
+            Some(v) => {
+                self.out.nav.delivered_to_agent += 1;
+                v
+            }
+            None => {
+                self.ag_input("path contents");
+                pts
+            }
+        };
         self.ags.paths.insert(key.clone(), pts.clone());
-        self.ag_input("path contents");
         let p = AgentPath { forced: key.starts_with("?ForcedPath"), key, points: pts };
         ag::on_path_complete(w, u, &p, err, false, self)
     }
@@ -1857,6 +1966,8 @@ impl Driver<'_> {
     /// synthesizes the synchronization from each agent's last recorded state (reported: such a
     /// run is never valid).
     pub(super) fn ag_combat_start(&mut self, w: &mut World) {
+        // `HandleCombatStart`'s graph part (`Clear`), before `m_Units` is filled (paths computed).
+        crate::combat::paths::combat_start(w);
         if self.ag && self.ags.strict {
             // The observer writes its snapshot right after: until then the agents aren't the
             // sim's.
@@ -2132,6 +2243,9 @@ impl AgentInputs for Driver<'_> {
     ) -> R<()> {
         let path = p.key.as_str();
         let r = self.ag_take(w, u, "ag_done", "OnPathComplete")?;
+        // `OnPathComplete(p, forcedPath)`'s prefix (`path_done`, right before `ag_done`): its
+        // path's.
+        self.nav_path_done(w, u, &p.key, error, &p.points)?;
         // The path's contents (a delivered one's are the record's own; a `ForcedPath` is
         // constructed `Complete`).
         let pts: Option<Vec<V3>> = r["v"].as_array().and_then(|v| v.iter().map(v3).collect());
@@ -2178,6 +2292,13 @@ impl AgentInputs for Driver<'_> {
     }
     fn req_start(&mut self, w: &mut World, u: EntityIdx) -> R<()> {
         let r = self.ag_take(w, u, "ag_req", "PathTo/FindPath")?;
+        if r["fn"] == "pathto" {
+            let (p, radius) = (v3(&r["p"]), f(&r["r"]));
+            let (Some(p), Some(radius)) = (p, radius) else {
+                return Err(Desync(format!("a request record it can't read ({})", describe(&r))));
+            };
+            self.nav_path_to(w, u, p, radius)?;
+        }
         let want = self.ags.req_want.take();
         let shape = match r["fn"].as_str() {
             Some("pathto") => fields(
@@ -2236,6 +2357,7 @@ impl AgentInputs for Driver<'_> {
                 if start["fn"] == "find" {
                     self.ags.finding.insert(q.key.clone());
                 }
+                self.nav_request(w, u, q, start["fn"] == "find");
                 let rq = &r["rq"];
                 let ending = match q.approach {
                     Some(a) => {
@@ -2392,7 +2514,12 @@ impl AgentInputs for Driver<'_> {
             .and_then(|x| i32::try_from(x).ok())
             .ok_or_else(|| Desync("cells without a value".into()))
     }
-    fn grid_erosion(&mut self, _: &mut World) -> R<Option<(i32, i32)>> {
+    fn grid_erosion(&mut self, w: &mut World) -> R<Option<(i32, i32)>> {
+        // The grid's current settings when the sim keeps it (combat changes `erodeIterations`),
+        // else the area's nav file's.
+        if let Some(e) = self.nav_erosion(w) {
+            return Ok(e);
+        }
         self.ags.erosion.clone().map_err(Desync)
     }
     fn fudge_radius(&mut self, w: &mut World, u: EntityIdx, command: Option<u32>) -> R<f32> {
@@ -2469,9 +2596,33 @@ impl MoveInputs for Driver<'_> {
     fn interrupt_move(&mut self, _: &mut World, _: EntityIdx) -> R<()> {
         Err(Desync("TickUnit interrupts a move it can't make (UnitCommands.InterruptMove from the controller isn't wired)".into()))
     }
-    fn place_on_ground(&mut self, w: &mut World, u: EntityIdx, required: bool) -> R<Option<V3>> {
+    fn place_on_ground(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        required: bool,
+    ) -> R<Option<(V3, V3)>> {
         let id = self.ag_unit_id(w, u);
         let next = self.ag_peek();
+        // With `ground_view` the step is the sim's, from its first ray.
+        if self.ags.nav.ground_view {
+            let ray = next.as_ref().is_some_and(|r| {
+                r["ev"] == "ag_phys" && r["ctx"] == "ground" && r["u"].as_str() == Some(id.as_str())
+            });
+            if ray {
+                return self.nav_ground(w, u, true).map(Some);
+            }
+            if required {
+                return Err(Desync(
+                    "TickUnit places a unit on the ground; the recording has no ray".into(),
+                ));
+            }
+            if next.is_some_and(|r| r["ev"] == "ag_ground" && r["u"].as_str() == Some(id.as_str()))
+            {
+                return Err(Desync("a place-on-ground step without its rays".into()));
+            }
+            return Ok(None);
+        }
         let here =
             next.is_some_and(|r| r["ev"] == "ag_ground" && r["u"].as_str() == Some(id.as_str()));
         if !here {
@@ -2494,7 +2645,7 @@ impl MoveInputs for Driver<'_> {
             return Err(Desync("the place-on-ground step starts from another position".into()));
         }
         v3(&r["after"])
-            .map(Some)
+            .map(|a| Some((a, a)))
             .ok_or_else(|| Desync("ag_ground without its position after".into()))
     }
     fn desired_orientation(
@@ -2543,7 +2694,8 @@ impl Driver<'_> {
         let id = self.ag_unit_id(w, u);
         let at = self
             .ag_pull(w, &format!("a {kind} query"), |r| r["k"] == "obs" && r["ev"] == "ag_phys")?;
-        let r = &self.trace.records[at];
+        let trace = self.trace;
+        let r = &trace.records[at];
         let recorded: Option<Vec<f32>> = if kind == "ray" {
             v3(&r["d"]).map(|d| d.to_vec())
         } else {
@@ -2564,14 +2716,8 @@ impl Driver<'_> {
                 describe(r)
             )));
         }
-        let hit = r["hit"].as_bool().ok_or_else(|| Desync("a query without its hit".into()))?;
-        let dist = if hit {
-            Some(f(&r["dist"]).ok_or_else(|| Desync("a hit without its distance".into()))?)
-        } else {
-            None
-        };
-        *self.out.ag_inputs.entry("physics".into()).or_default() += 1;
-        Ok(dist)
+        // The sim's answer (`wr-phys`), the recorded one its check.
+        self.nav_phys(w, r, kind, o, shape, max, mask, super::nav::PhysCtx::Agent)
     }
 
     /// A call into the view (`OnMovementInterrupted`, `OnMovementComplete`,
@@ -2630,7 +2776,7 @@ impl Driver<'_> {
 
 #[cfg(test)]
 mod critter_phys_tests {
-    use super::critter_phys;
+    use super::{critter_phys, other_phys};
     use serde_json::{Value, json};
 
     fn ray() -> Value {
@@ -2692,6 +2838,70 @@ mod critter_phys_tests {
             let mut r = ray();
             d(&mut r);
             assert!(!critter_phys(&r), "damage {i} accepted");
+        }
+    }
+
+    fn other() -> Value {
+        json!({"seq": 1, "k": "obs", "t": 5, "ev": "ag_phys", "fn": "disc", "ctx": "other", "u": null,
+            "origin": "UnitMovementAgentBase.Move < CritterMoveAgent.TickMovement",
+            "o": [0.0, 2.0, 0.0], "r": 0.4, "max": 100.0, "mask": 2099457, "hit": true,
+            "dist": 2.0, "pt": [0.0, 0.0, 0.0],
+            "col": {"scene": "S", "path": "TERRAIN", "sib": [], "type": "TerrainCollider", "iid": 1672364}})
+    }
+
+    #[test]
+    fn accepts_another_callers_record() {
+        assert!(other_phys(&other()));
+        assert!(!critter_phys(&other()));
+        let mut miss = other();
+        let o = miss.as_object_mut().unwrap();
+        o.insert("hit".into(), json!(false));
+        for k in ["dist", "pt", "col"] {
+            o.remove(k);
+        }
+        assert!(other_phys(&miss));
+        let mut ray = other();
+        let o = ray.as_object_mut().unwrap();
+        o.remove("r");
+        o.insert("fn".into(), json!("ray"));
+        o.insert("d".into(), json!([0.0, -1.0, 0.0]));
+        assert!(other_phys(&ray));
+    }
+
+    #[test]
+    fn rejects_another_callers_damaged_record() {
+        let damage: Vec<fn(&mut Value)> = vec![
+            |r| {
+                r.as_object_mut().unwrap().remove("u");
+            },
+            |r| r["u"] = json!("51FC"),
+            |r| {
+                r.as_object_mut().unwrap().remove("origin");
+            },
+            |r| r["origin"] = json!(""),
+            |r| r["origin"] = json!(null),
+            |r| r["critter"] = json!({"scene": "S", "path": "Critters/Tarantula", "sib": [0]}),
+            |r| r["ctx"] = json!("critter"),
+            |r| r["ctx"] = json!("span"),
+            |r| r["fn"] = json!("box"),
+            |r| r["r"] = json!(null),
+            |r| r["d"] = json!([0.0, -1.0, 0.0]),
+            |r| r["mask"] = json!("x"),
+            |r| r["max"] = json!(null),
+            |r| r["o"] = json!([0.0, "x", 0.0]),
+            |r| {
+                r.as_object_mut().unwrap().remove("dist");
+            },
+            |r| r["hit"] = json!(false),
+            |r| r["hit"] = json!(null),
+            |r| r["col"] = json!(null),
+            |r| r["col"]["iid"] = json!("1"),
+            |r| r["extra"] = json!(1),
+        ];
+        for (i, d) in damage.iter().enumerate() {
+            let mut r = other();
+            d(&mut r);
+            assert!(!other_phys(&r), "damage {i} accepted");
         }
     }
 }

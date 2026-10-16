@@ -421,6 +421,8 @@ impl AiInputs for Driver<'_> {
                     && (!fake || (state == 2 && points.len() == 2))
                     && (fake || points.len() > 2 || kept_two_points(&points)) =>
             {
+                // The sim's path of its FindPath, when it computes the paths.
+                self.nav_ai_path(w, fake, error, state, &points)?;
                 Ok(Path { error, state, points })
             }
             _ => self.uc_reject(at, "a path it can't read"),
@@ -458,7 +460,12 @@ impl AiInputs for Driver<'_> {
                 Some(last_move_length),
                 Some(reached_max),
                 Some(waypoint),
-            ) => Ok(SimStep { ret, position, last_move_length, reached_max, waypoint }),
+            ) => {
+                let step = SimStep { ret, position, last_move_length, reached_max, waypoint };
+                // The step the sim ran (the agent driven).
+                self.nav_ai_msim(w, max, &step)?;
+                Ok(step)
+            }
             _ => self.uc_reject(
                 at,
                 format!("a movement simulation step of {max}: the recording has another"),
@@ -466,11 +473,15 @@ impl AiInputs for Driver<'_> {
         }
     }
 
-    fn ai_blocked(&mut self, w: &mut World) -> R<i64> {
+    fn ai_blocked(&mut self, w: &mut World, p: [f32; 3]) -> R<i64> {
         let at = self.ai_leaf(w, "ablk", &["v"])?;
         // `sbyte AllyBlocked`; no node: the game throws.
         match self.trace.records[at]["v"].as_i64().filter(|x| i8::try_from(*x).is_ok()) {
-            Some(v) => Ok(v),
+            Some(v) => {
+                // The sim's grid's, when it keeps the grid.
+                self.nav_ai_blocked(w, p, v)?;
+                Ok(v)
+            }
             None => self.uc_reject(at, "a node's AllyBlocked it can't read (or no node)"),
         }
     }

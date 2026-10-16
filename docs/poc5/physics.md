@@ -152,9 +152,10 @@ in `scripts/scene-cache.sh` yet (other areas may hit the refusals above).
 
 ## For the sim
 
-`combat::agent`'s `AgentInputs::raycast` and `disc_cast` (today taken from the recording) can come from
-`Scene::raycast_down` and `Scene::heuristic_disc_cast_down` with the area's file (`wr_phys::path_for`); a
-`QueryError` becomes a report. Not done here (`agent.rs` belongs to another stream).
+**Done** (stream M, `docs/poc5/movement.md`, "Physics and paths computed"): in the driven replay the agent's
+`AgentPhysics` and the movement simulation's queries are `Scene::raycast_down` and `Scene::heuristic_disc_cast_down`
+on the area's file (`Scene::owned` keeps it), every recorded `ag_phys` a check; a `QueryError` is reported and the
+recorded answer taken.
 
 ## Not modelled
 

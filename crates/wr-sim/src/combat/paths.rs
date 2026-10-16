@@ -15,15 +15,24 @@
 //! The search, the ending conditions and the seeker's modifiers are `wr-nav`'s
 //! ([`wr_nav::world::World::turn_based_path`]); line-of-sight answers
 //! (`LineOfSightGeometry.HasObstacle`) are an input.
+//!
+//! In the driven replay ([`NavRun`], `docs/poc5/movement.md`, "Physics and paths computed") the
+//! sim's turn controller runs the grid's side at its points: [`combat_start`]
+//! (`HandleCombatStart`'s `Clear`), [`start_turn`] (`StartTurn`), [`remove_unit`]
+//! (`RemoveUnit`), [`combat_end`] (`HandleCombatEnd`) and [`refresh_tags`]
+//! (`UpdateNavigationGrid`'s timer).
 
 use std::collections::HashMap;
 
 use anyhow::{Result, ensure};
+use serde_json::Value as J;
 use wr_nav::astar::Ending;
 use wr_nav::cs::{V3, d, r};
 use wr_nav::query::TurnBasedRequest;
 use wr_nav::update::{Bounds, GraphUpdate};
 use wr_nav::world::World;
+
+use crate::world::{EntityIdx, World as SimWorld};
 
 /// A unit in `CombatController.m_Units`, as `PrepareUnitNavmeshUpdateObject` reads it.
 #[derive(Debug, Clone, PartialEq)]
@@ -328,6 +337,261 @@ impl AgentRequest {
             distance_xz: self.distance_xz && !self.find,
         })
     }
+}
+
+/// A recorded `LineOfSightGeometry.HasObstacle` call inside a search (`path_fin`'s `los`).
+#[derive(Debug, Clone, Copy)]
+pub struct LosAnswer {
+    pub from: V3,
+    pub to: V3,
+    pub fudge: f32,
+    pub blocked: bool,
+}
+
+/// `path_fin`'s `los`: each call `[from, to, fudge, result]` (null: none). Anything else is an
+/// error, never an answer.
+///
+/// # Errors
+///
+/// A transcript that isn't one.
+pub fn parse_los(los: &J) -> std::result::Result<Vec<LosAnswer>, String> {
+    let none = Vec::new();
+    let calls = if los.is_null() {
+        &none
+    } else {
+        los.as_array().ok_or_else(|| format!("path_fin los {los}"))?
+    };
+    let vec = |v: &J| -> Option<V3> {
+        let a = v.as_array().filter(|a| a.len() == 3)?;
+        let p = [a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?].map(|x| x as f32);
+        p.iter().all(|x| x.is_finite()).then_some(p)
+    };
+    calls
+        .iter()
+        .map(|c| {
+            let call = || -> Option<LosAnswer> {
+                let a = c.as_array().filter(|a| a.len() == 4)?;
+                let fudge = a[2].as_f64()? as f32;
+                Some(LosAnswer {
+                    from: vec(&a[0])?,
+                    to: vec(&a[1])?,
+                    fudge: fudge.is_finite().then_some(fudge)?,
+                    blocked: a[3].as_bool()?,
+                })
+            };
+            call().ok_or_else(|| format!("line-of-sight call {c} isn't [from, to, fudge, result]"))
+        })
+        .collect()
+}
+
+/// The grid as the sim's turn controller keeps it in the driven replay (`docs/poc5/movement.md`,
+/// "Physics and paths computed"): on when the recording declares WrathOracle's `paths` with the
+/// agent driven. The units' corpulences are inputs (each unit's recorded reads, all equal in the
+/// window; every box the sim queues is checked against the recorded one, `nav_guo`).
+#[derive(Debug, Default)]
+pub struct NavRun {
+    pub on: bool,
+    pub nav: Option<CombatNav>,
+    /// The grid's `nodeSize`.
+    pub node_size: f32,
+    /// `Unit.Corpulence` by unit: its recorded reads (the record's index, the value), in order;
+    /// the one a hook uses is the last read before the record being processed ([`Self::at`]).
+    pub corp: HashMap<EntityIdx, Vec<(usize, f32)>>,
+    /// The record the driven replay is processing.
+    pub at: usize,
+    /// An input wasn't established at one of the hooks, or a graph update failed: the grid isn't
+    /// the game's from there (reported; later paths aren't computed).
+    pub broken: bool,
+    /// A replay's recording's navigation timer and clock reads (read beside its trace by
+    /// `replay::prepare_world`; WrathOracle replays them, its trace doesn't hold them).
+    pub recording_clock: Option<std::result::Result<(f32, Vec<f32>), String>>,
+    /// Turn starts, removals and tag refreshes (combat start and end, the timer) the sim ran.
+    pub turn_starts: usize,
+    pub removals: usize,
+    pub refreshes: usize,
+}
+
+fn nav_report(w: &mut SimWorld, what: impl std::fmt::Display) {
+    w.coverage.unsupported(format!("driven replay: paths: {what}"));
+}
+
+/// The grid can't follow the fight from here.
+fn nav_break(w: &mut SimWorld, what: impl std::fmt::Display) {
+    nav_report(w, what);
+    w.combat.nav.broken = true;
+}
+
+fn nav_live(w: &SimWorld) -> bool {
+    w.combat.nav.on && !w.combat.nav.broken && w.combat.nav.nav.is_some()
+}
+
+fn unit_id(w: &SimWorld, u: EntityIdx) -> String {
+    w.entity(u).unique_id.clone()
+}
+
+/// `Unit.Corpulence` (an input).
+/// `Unit.Corpulence` (an input: the unit's last recorded read before the record being processed;
+/// every use reaches a recorded output, a box or the refresh's `erodeIterations`).
+fn corpulence(w: &mut SimWorld, u: EntityIdx) -> Option<f32> {
+    let at = w.combat.nav.at;
+    let last = w
+        .combat
+        .nav
+        .corp
+        .get(&u)
+        .and_then(|reads| reads.iter().take_while(|(i, _)| *i < at).last().map(|(_, v)| *v));
+    match last {
+        Some(c) if c.is_finite() => Some(c),
+        Some(_) => {
+            let id = unit_id(w, u);
+            nav_break(w, format!("{id}'s corpulence read can't be read"));
+            None
+        }
+        None => {
+            let id = unit_id(w, u);
+            nav_break(w, format!("{id}'s corpulence isn't recorded before it is used"));
+            None
+        }
+    }
+}
+
+/// `unit.View.AgentASP.AvoidanceDisabled`: the agent's `m_AvoidanceDisabled`, or the unit not
+/// conscious. Its counter (raised by cutscene moves, `UnitMoveAlongPath`, riders and a few
+/// abilities) isn't modelled: a box it would empty differs from the recorded one (`nav_guo`).
+#[must_use]
+pub fn avoidance_disabled(w: &SimWorld, u: EntityIdx) -> bool {
+    w.unit(u).is_some_and(|x| x.combat.agent.avoidance_off) || !super::units::is_conscious(w, u)
+}
+
+/// The turn of `rider` as `PrepareUnitNavmeshUpdateObject` and `UpdateNavigationGridTags` read
+/// it (no mount: mounts aren't modelled, and the turn order reports one).
+fn turn_of(w: &mut SimWorld, rider: EntityIdx) -> Option<Turn> {
+    let corp = corpulence(w, rider)?;
+    let avoid = avoidance_disabled(w, rider);
+    Some(Turn {
+        unit: unit_id(w, rider),
+        mount: None,
+        corpulence: corp,
+        avoidance_disabled: avoid,
+        rider_avoidance_disabled: avoid,
+        rider_size_in_cells: size_in_cells(corp, w.combat.nav.node_size),
+        rider_in_combat_alive: super::is_in_combat(w, rider) && !super::units::is_dead(w, rider),
+    })
+}
+
+/// `CurrentTurn`'s (`Ok(None)`: no turn; `Err`: an input missing, reported).
+fn current_turn(w: &mut SimWorld) -> std::result::Result<Option<Turn>, ()> {
+    match w.combat.current_unit {
+        None => Ok(None),
+        Some(r) => turn_of(w, r).map(Some).ok_or(()),
+    }
+}
+
+/// `m_Units` in order (the turn port's).
+fn order(w: &SimWorld) -> Vec<EntityIdx> {
+    w.combat.turns.units.iter().map(|x| x.unit).collect()
+}
+
+fn with_nav(w: &mut SimWorld, what: &str, f: impl FnOnce(&mut CombatNav) -> Result<()>) {
+    let Some(nav) = w.combat.nav.nav.as_mut() else { return };
+    if let Err(e) = f(nav) {
+        nav_break(w, format!("{what}: {e:#}"));
+    }
+}
+
+/// `CombatController.Clear()`'s graph part: every unit's object reverted, the tags refreshed with
+/// the current turn.
+fn clear(w: &mut SimWorld) {
+    let ids: Vec<String> = order(w).into_iter().map(|u| unit_id(w, u)).collect();
+    let Ok(turn) = current_turn(w) else { return };
+    with_nav(w, "CombatController.Clear", |nav| {
+        for id in &ids {
+            nav.revert(id);
+        }
+        nav.update_navigation_grid_tags(turn.as_ref())
+    });
+    w.combat.nav.refreshes += 1;
+}
+
+/// `HandleCombatStart`'s graph part, before `m_Units` is filled: `erosionOnlyAroundCellsWithTag =
+/// 31` (for the session), then `Clear()`.
+pub fn combat_start(w: &mut SimWorld) {
+    if !nav_live(w) {
+        return;
+    }
+    if let Some(g) = w.combat.nav.nav.as_mut().and_then(|n| n.world.grid.as_mut()) {
+        g.erosion_only_around_cells_with_tag = 31;
+    }
+    clear(w);
+}
+
+/// `HandleCombatEnd`'s graph part: `Clear()`, then (the units gone) another refresh without a
+/// turn.
+pub fn combat_end(w: &mut SimWorld) {
+    if !nav_live(w) {
+        return;
+    }
+    clear(w);
+    if !nav_live(w) {
+        return;
+    }
+    with_nav(w, "HandleCombatEnd", |nav| nav.update_navigation_grid_tags(None));
+    w.combat.nav.refreshes += 1;
+}
+
+/// `StartTurn(rider)`'s graph part (with `CurrentTurn` the new turn, after the buffs' tick):
+/// every unit's object reverted and, but for the rider (and none when its avoidance is off),
+/// prepared again around the unit and queued; then the tags refreshed with the rider's size.
+pub fn start_turn(w: &mut SimWorld, rider: EntityIdx) {
+    if !nav_live(w) {
+        return;
+    }
+    let Some(turn) = turn_of(w, rider) else { return };
+    let mut units = Vec::new();
+    for u in order(w) {
+        let Some(corpulence) = corpulence(w, u) else { return };
+        let Some(position) = w.unit(u).map(|x| x.position) else {
+            nav_break(w, "StartTurn: a unit of the turn order the sim doesn't have");
+            return;
+        };
+        let enemy = u != rider && super::units::is_enemy(w, u, rider);
+        units.push(OrderUnit {
+            id: unit_id(w, u),
+            position,
+            corpulence,
+            avoidance_disabled: avoidance_disabled(w, u),
+            enemy_of_current: enemy,
+        });
+    }
+    with_nav(w, "CombatController.StartTurn", |nav| nav.start_turn(&units, &turn));
+    w.combat.nav.turn_starts += 1;
+}
+
+/// `RemoveUnit(u)`'s graph part (a unit leaving the turn order: it left combat or died): its
+/// object reverted, the tags refreshed with the current turn (a rider who left isn't in combat:
+/// no erosion).
+pub fn remove_unit(w: &mut SimWorld, u: EntityIdx) {
+    if !nav_live(w) {
+        return;
+    }
+    let id = unit_id(w, u);
+    let Ok(turn) = current_turn(w) else { return };
+    with_nav(w, "CombatController.RemoveUnit", |nav| {
+        nav.revert(&id);
+        nav.update_navigation_grid_tags(turn.as_ref())
+    });
+    w.combat.nav.removals += 1;
+}
+
+/// `UpdateNavigationGrid`'s timer running out: `UpdateNavigationGridTags()` with the current
+/// turn.
+pub fn refresh_tags(w: &mut SimWorld) {
+    if !nav_live(w) {
+        return;
+    }
+    let Ok(turn) = current_turn(w) else { return };
+    with_nav(w, "UpdateNavigationGrid", |nav| nav.update_navigation_grid_tags(turn.as_ref()));
+    w.combat.nav.refreshes += 1;
 }
 
 #[cfg(test)]

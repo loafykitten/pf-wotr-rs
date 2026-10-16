@@ -183,6 +183,8 @@ pub struct Outcome {
     pub ag_reads: usize,
     pub ag_rows: usize,
     pub ag_inputs: std::collections::BTreeMap<String, usize>,
+    /// The physics queries and turn-based paths the sim computed (`replay/nav.rs`).
+    pub nav: nav::NavCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
     /// messages against the recording's ([`crate::game_log::check`]).
     pub clog: Option<crate::game_log::check::Summary>,
@@ -704,6 +706,10 @@ pub fn prepare_world(
     let (mut w, _) =
         crate::hydrate::hydrate(content, registry, &s, &crate::hydrate::Options::default())?;
     let trace = Trace::load(&dir.join(format!("{run_name}.trace.jsonl.gz")))?;
+    // A replay's navigation timer and clock reads are its recording's (the paths' grid).
+    if run_name != "record" {
+        w.combat.nav.recording_clock = Some(nav::recording_clock(dir));
+    }
     let start: J = serde_json::from_slice(
         &std::fs::read(dir.join(format!("state-start-{run_name}.json")))
             .context("state-start dump")?,
@@ -1449,6 +1455,33 @@ impl<'t> Driver<'t> {
                     Err(e) => Err(format!("the area's nav file: {e:#}")),
                 },
             };
+            d.nav_start(w);
+        }
+        // The paths' records need the driven agent (`agent_sync` and its chain).
+        // Observer `paths`' records without its declaration (a damaged begin record).
+        let paths_records = recs.iter().any(|r| {
+            r["k"] == "obs"
+                && matches!(
+                    r["ev"].as_str(),
+                    Some(
+                        "nav_guo"
+                            | "nav_update"
+                            | "nav_tags"
+                            | "path_fin"
+                            | "path_seek"
+                            | "path_mod"
+                    )
+                )
+        });
+        if paths_records && !declared.contains(&"paths") {
+            w.coverage.unsupported(
+                "driven replay: paths: observer paths' records without its declaration",
+            );
+        }
+        if !d.ag && declared.contains(&"paths") {
+            w.coverage.unsupported(
+                "driven replay: paths: observer paths without the driven agent (agent_sync and the impatience, targets, engage, ai, command and turn records)",
+            );
         }
         d.imp_sites = trace
             .sites
@@ -1912,6 +1945,10 @@ impl Driver<'_> {
                 Phase::Groups => super::groups::tick(w),
                 Phase::Turn if self.port => {
                     self.turn_go_on = super::turns::tick_units_changed(w);
+                    // `UpdateNavigationGrid` (when the sim computes the paths).
+                    if self.ag {
+                        self.nav_grid_tick(w);
+                    }
                 }
                 Phase::TurnChoose if self.port && self.turn_go_on => {
                     // A frame's remaining phases run when the next one starts: its own mode.
@@ -2990,6 +3027,8 @@ impl Driver<'_> {
         let trace = self.trace;
         let recs = &trace.records;
         let r = &recs[i];
+        // (The grid's inputs read before this record: `paths::NavRun::at`.)
+        w.combat.nav.at = i;
         self.tgt_clear_boundary(w, r);
         // A snapshot block is contiguous (its rows and their path definitions only).
         if self.ag
@@ -3026,6 +3065,9 @@ impl Driver<'_> {
                 self.run_phases(w, &rest);
                 self.draining = None;
                 self.mem_frame_done(w);
+                if self.ag {
+                    self.nav_frame_done(w);
+                }
                 if self.tt {
                     self.tt_close(w);
                 }
@@ -3082,6 +3124,26 @@ impl Driver<'_> {
                 return self.ag_record(w, i);
             }
             Some("obs") if self.ag && r["ev"] == "path_ret" => self.ag_path_ret(w, r),
+            Some("obs")
+                if self.ag
+                    && matches!(
+                        r["ev"].as_str(),
+                        Some(
+                            "nav_guo"
+                                | "nav_update"
+                                | "nav_tags"
+                                | "nav_clock"
+                                | "path_fin"
+                                | "path_seek"
+                                | "path_mod"
+                                | "path_critter"
+                                | "path_to"
+                                | "path_done"
+                        )
+                    ) =>
+            {
+                self.nav_record(w, i);
+            }
             Some("obs") if self.ag && r["ev"] == "path_start" => self.ag_path_start(w, r),
             Some("obs") if r["ev"].as_str().is_some_and(|e| e.starts_with("clog_")) => {
                 self.clog_record(w, r);
@@ -3551,12 +3613,19 @@ impl Driver<'_> {
                         w.combat.commands.running.clear();
                     }
                     super::life::turn_start_sweep(w);
+                    // The graph's part (when the sim computes the paths).
+                    if let Some(u) = u {
+                        self.nav_start_turn(w, u);
+                    }
                 }
                 self.turn_begin = Some((i, started));
             }
             // `StartTurn`'s postfix: `TurnStartTime = GameTime` was set before `CurrentTurn.Start`.
             Some("turn_start") if self.turn_begin.is_some() => {
                 let Some((begin, started)) = self.turn_begin.take() else { return };
+                if started {
+                    self.nav_turn_started(w);
+                }
                 if self.inside_start_turn(begin, i) {
                     w.coverage.unsupported(
                         "CombatController.StartTurn: a root rule, input or turn event inside it",
@@ -3668,6 +3737,8 @@ impl Driver<'_> {
             Some("combat_end") => {
                 self.place_combat_change(w, "a combat end");
                 crate::game_log::party_combat_changed(w, false);
+                // `HandleCombatEnd`'s graph part (when the sim computes the paths).
+                super::paths::combat_end(w);
                 if self.port {
                     // `Clear()`: the current turn, if any, is cleared (its `turn_clear` follows).
                     if let Some(c) = w.combat.current_unit {
@@ -4583,6 +4654,7 @@ mod commands;
 mod engage;
 mod impatience;
 mod memory;
+mod nav;
 mod spells;
 mod targets;
 
