@@ -66,8 +66,10 @@ fn fields(r: &J, keys: &[&str]) -> bool {
 }
 
 /// A critter's ground query (`ag_phys`, ctx "critter"): exactly the record WrathOracle writes, with
-/// no unit (`u` present and null) and a complete identity of the critter (scene, hierarchy path,
-/// sibling path). Anything less isn't identified.
+/// no unit (`u` present and null), a complete identity of the critter (scene, hierarchy path,
+/// sibling path) and the query `UnitMovementAgentBase.Move` makes: a ray straight down or a disc
+/// cast of radius 0.4, 100 m, `WalkableMask`, from a finite point, with a finite result and the
+/// collider when it hit. Anything less isn't identified.
 fn critter_phys(r: &J) -> bool {
     let mut keys = vec!["fn", "ctx", "u", "critter", "o", "max", "mask", "hit"];
     match r["fn"].as_str() {
@@ -82,7 +84,21 @@ fn critter_phys(r: &J) -> bool {
     }
     let c = &r["critter"];
     let name = |k: &str| c[k].as_str().is_some_and(|x| !x.is_empty());
+    let finite3 = |v: &J| v3(v).is_some_and(|p| p.iter().all(|x| x.is_finite()));
+    let query = match r["fn"].as_str() {
+        Some("ray") => v3(&r["d"]).map(bits3) == Some(bits3([0.0, -1.0, 0.0])),
+        _ => f(&r["r"]).map(f32::to_bits) == Some(0.4f32.to_bits()),
+    };
+    let result = r["hit"] == false
+        || (f(&r["dist"]).is_some_and(f32::is_finite)
+            && finite3(&r["pt"])
+            && r["col"].as_object().is_some_and(|o| !o.is_empty()));
     r["ctx"] == "critter"
+        && query
+        && result
+        && finite3(&r["o"])
+        && f(&r["max"]).map(f32::to_bits) == Some(100.0f32.to_bits())
+        && r["mask"].as_i64() == Some(2_099_457)
         && fields(r, &keys)
         && r["u"].is_null()
         && c.as_object().is_some_and(|o| o.len() == 3)
@@ -2648,6 +2664,14 @@ mod critter_phys_tests {
             |r| {
                 r.as_object_mut().unwrap().remove("dist");
             },
+            |r| r["d"] = json!(null),
+            |r| r["d"] = json!([0.0, 1.0, 0.0]),
+            |r| r["mask"] = json!(512),
+            |r| r["max"] = json!(50.0),
+            |r| r["o"] = json!([0.0, "x", 0.0]),
+            |r| r["col"] = json!(null),
+            |r| r["pt"] = json!([0.0, 0.0]),
+            |r| r["dist"] = json!("2"),
         ];
         for (i, d) in damage.iter().enumerate() {
             let mut r = ray();
