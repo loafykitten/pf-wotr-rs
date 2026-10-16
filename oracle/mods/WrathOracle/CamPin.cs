@@ -61,7 +61,7 @@ internal static class CamPin
     private static readonly List<Frustum> FrustumTape = new List<Frustum>();
     private static readonly List<Isle> IsleTape = new List<Isle>();
     private static int _islePos;
-    private static int _scrollPos, _frustumPos;
+    private static int _scrollPos, _frustumPos, _frustumChecked = -1;
     private static readonly Dictionary<string, int> CmdPos = new Dictionary<string, int>();
     // The player each command was first queried for in this window: a command queried for two players (copies
     // of one cutscene, its own random ids) has no identity to follow and is refused (ambiguous).
@@ -76,6 +76,7 @@ internal static class CamPin
     {
         ScrollTape.Clear(); CmdTape.Clear(); FrustumTape.Clear(); CmdPos.Clear(); IsleTape.Clear(); CmdPlayer.Clear();
         _scrollPos = _frustumPos = _islePos = 0;
+        _frustumChecked = -1;
         _frustumLast = null;
         _perturbNote = null;
         RecordedOn = false;
@@ -101,6 +102,7 @@ internal static class CamPin
             if (t < 0 || S("site") != "turn" || n != ScrollTape.Count || !(o["u"]?.Type == JTokenType.String || o["u"]?.Type == JTokenType.Null) ||
                 B("routine") == null || B("v") == null)
             { Sched.Invalidate("recording's cam_scroll record lacks, mistypes or misnumbers a field"); return; }
+            if (ScrollTape.Count > 0 && ScrollTape[ScrollTape.Count - 1].T > t) { Sched.Invalidate("recording's cam_scroll records go back in time"); return; }
             ScrollTape.Add(new Query { Site = "turn", T = t, Unit = S("u"), Routine = B("routine").Value, V = B("v").Value });
         }
         else if (ev == "cam_cmd")
@@ -111,12 +113,14 @@ internal static class CamPin
             if (o["ambiguous"] != null) { Sched.Invalidate($"recording's camera command {key} was queried for two cutscene players (ambiguous)"); return; }
             if (!CmdTape.TryGetValue(key, out var list)) CmdTape[key] = list = new List<Query>();
             if (n != list.Count) { Sched.Invalidate($"recording's cam_cmd records of {key} misnumbered"); return; }
+            if (list.Count > 0 && list[list.Count - 1].T > t) { Sched.Invalidate($"recording's cam_cmd records of {key} go back in time"); return; }
             list.Add(new Query { Site = "cmd", Key = key, Unit = S("player"), T = t, V = B("v").Value });
         }
         else if (ev == "cam_isle")
         {
             var dir = S("dir");
             if (t < 0 || dir == null) { Sched.Invalidate("recording's cam_isle record lacks a field"); return; }
+            if (IsleTape.Count > 0 && IsleTape[IsleTape.Count - 1].T > t) { Sched.Invalidate("recording's cam_isle records go back in time"); return; }
             IsleTape.Add(new Isle { T = t, Dir = dir });
         }
         else
@@ -312,7 +316,8 @@ internal static class CamPin
             while (_frustumPos + 1 < FrustumTape.Count && FrustumTape[_frustumPos + 1].T + Sched.Offset <= now) _frustumPos++;
             var want = FrustumTape.Count > 0 && FrustumTape[_frustumPos].T + Sched.Offset <= now ? FrustumTape[_frustumPos] : null;
             if (want == null) Sched.Invalidate($"units in the camera's view at tick {now}: the recording has no state for them yet");
-            else if (!Sched.SameUnitGroups(want.In, want.Out, inView, outView))
+            else if (Sched.SameUnitGroups(want.In, want.Out, inView, outView)) _frustumChecked = Math.Max(_frustumChecked, _frustumPos);
+            else
                 Sched.Invalidate($"units in the camera's view at tick {now}: in [{string.Join(",", inView)}], out [{string.Join(",", outView)}]; " +
                                  $"the recording's in [{string.Join(",", want.In)}], out [{string.Join(",", want.Out)}] (tick {want.T})");
         }
@@ -375,8 +380,9 @@ internal static class CamPin
             Sched.Invalidate($"the recording's camera direction {IsleTape[_islePos].Dir} at tick {IsleTape[_islePos].T} wasn't reached in the replay");
             return;
         }
-        if (FrustumTape.Count > 0 && FrustumTape[FrustumTape.Count - 1].T + Sched.Offset > Trace.Tick)
-            Sched.Invalidate($"the recording's view change at tick {FrustumTape[FrustumTape.Count - 1].T} came after the replay's window");
+        // Every recorded view must have been matched by a check (the controller may not tick on the last ticks).
+        if (_frustumChecked < FrustumTape.Count - 1)
+            Sched.Invalidate($"the recording's view at tick {FrustumTape[_frustumChecked + 1].T} was never checked in the replay");
     }
 
     public static void Install(Harmony h)
