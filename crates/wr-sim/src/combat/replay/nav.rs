@@ -274,6 +274,9 @@ fn recorded_mesh(r: &J) -> Option<wr_phys::RecordedMesh> {
         position: [p[0], p[1], p[2]],
         rotation: [q[0], q[1], q[2], q[3]],
         lossy_scale: [l[0], l[1], l[2]],
+        trigger: r["trigger"].as_bool()?,
+        convex: r["convex"].as_bool()?,
+        cooking: r["cooking"].as_i64()?,
     })
 }
 

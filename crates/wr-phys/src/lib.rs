@@ -130,14 +130,30 @@ pub struct RecordedMesh {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub lossy_scale: [f32; 3],
+    pub trigger: bool,
+    pub convex: bool,
+    /// `MeshCollider.cookingOptions`.
+    pub cooking: i64,
 }
 
 impl World {
     /// The recording's mesh colliders against the meshes' recorded transforms: each mesh with
-    /// one is recorded present, on its layer, with its transform (zeros' signs aside, which the
-    /// recording doesn't keep), and every present mesh collider of the world's scenes is one
-    /// of its shapes (the units' colliders, in other scenes, aren't modelled).
+    /// one is recorded exactly once, present, on its layer, with its transform (zeros' signs
+    /// aside, which the recording doesn't keep), its trigger flag, non-convex and with the
+    /// baked mesh's cooking options; and every present mesh collider of the world's scenes is
+    /// one of its shapes (the units' colliders, in other scenes, aren't modelled).
     pub fn check_recorded_meshes(&self, recorded: &[RecordedMesh]) -> Result<(), String> {
+        for s in &self.shapes {
+            if let ShapeKind::Mesh { runtime: Some(_), .. } = s.kind {
+                let n = recorded
+                    .iter()
+                    .filter(|c| c.name == s.name && c.sibling_path == s.sibling_path)
+                    .count();
+                if n != 1 {
+                    return Err(format!("{} {:?}: recorded {n} times", s.name, s.sibling_path));
+                }
+            }
+        }
         let same = |a: &[f32], b: &[f32]| {
             a.len() == b.len()
                 && a.iter()
@@ -150,15 +166,18 @@ impl World {
         for c in recorded.iter().filter(|c| scenes.contains(&scene(&c.name))) {
             let shape =
                 self.shapes.iter().find(|s| s.name == c.name && s.sibling_path == c.sibling_path);
-            match shape.map(|s| &s.kind) {
+            match shape.map(|s| (s, &s.kind)) {
                 None if c.present => {
                     return Err(format!(
                         "{} {:?}: not in the physics file",
                         c.name, c.sibling_path
                     ));
                 }
-                Some(ShapeKind::Mesh { runtime: Some(r), .. })
+                Some((s, ShapeKind::Mesh { runtime: Some(r), .. }))
                     if !c.present
+                        || c.trigger != s.is_trigger
+                        || c.convex
+                        || c.cooking != 30
                         || c.layer != r.layer
                         || !same(&c.position, &r.position)
                         || !same(&c.rotation, &r.rotation)

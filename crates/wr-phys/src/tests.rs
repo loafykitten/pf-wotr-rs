@@ -422,11 +422,64 @@ fn a_tie_between_shapes_fails_closed() {
         scene.raycast_down([2.0, 7.0, 2.0], 100.0, 1 | 1 << 8),
         Err(QueryError::Unsupported(_))
     ));
-    // One a hair higher: no tie.
-    w.shapes[2] = recorded_square("b", [1.0, 3.000_001, 1.0], 0);
+    // One a centimetre higher: no tie.
+    w.shapes[2] = recorded_square("b", [1.0, 3.01, 1.0], 0);
     let scene = Scene::new(&w);
     let hit = scene.raycast_down([2.0, 7.0, 2.0], 100.0, 1 | 1 << 8).unwrap().unwrap();
     assert_eq!(hit.shape, 2);
+}
+
+#[test]
+fn recorded_colliders_are_checked_against_the_file() {
+    let mut s = recorded_square("S:Static/sq (MeshCollider)", [1.0, 0.0, 2.0], 11);
+    s.sibling_path = vec![3];
+    let w = World { shapes: vec![s] };
+    let good = RecordedMesh {
+        name: "S:Static/sq (MeshCollider)".into(),
+        sibling_path: vec![3],
+        present: true,
+        layer: 11,
+        position: [1.0, -0.0, 2.0],
+        rotation: [0.0, 0.0, -0.0, 1.0],
+        lossy_scale: [1.0; 3],
+        trigger: false,
+        convex: false,
+        cooking: 30,
+    };
+    assert_eq!(w.check_recorded_meshes(std::slice::from_ref(&good)), Ok(()));
+    assert!(w.check_recorded_meshes(&[]).is_err(), "unrecorded");
+    assert!(w.check_recorded_meshes(&[good.clone(), good.clone()]).is_err(), "twice");
+    let other_scene = RecordedMesh { name: "T:Unit/c (MeshCollider)".into(), ..good.clone() };
+    assert_eq!(w.check_recorded_meshes(&[good.clone(), other_scene]), Ok(()), "another scene");
+    let changes: [fn(&mut RecordedMesh); 7] = [
+        |c| c.lossy_scale[0] = 1.000_000_1,
+        |c| c.position[2] = 2.000_000_2,
+        |c| c.layer = 0,
+        |c| c.present = false,
+        |c| c.trigger = true,
+        |c| c.convex = true,
+        |c| c.cooking = 14,
+    ];
+    for (k, change) in changes.iter().enumerate() {
+        let mut c = good.clone();
+        change(&mut c);
+        assert!(w.check_recorded_meshes(&[c]).is_err(), "change {k} accepted");
+    }
+    let mut extra = good.clone();
+    extra.sibling_path = vec![4];
+    assert!(w.check_recorded_meshes(&[good, extra]).is_err(), "a mesh the file doesn't have");
+}
+
+#[test]
+fn a_shape_the_pruner_may_skip_fails_closed() {
+    // From 1e8 m up, the ray ending 8 m above the square: the mesh's raycast, rounding at that
+    // scale, can report a hit the player's pruner never asks for (its segment stops short).
+    let w = World { shapes: vec![recorded_square("square", [0.0, 0.0, 0.0], 0)] };
+    let scene = Scene::new(&w);
+    let r = scene.raycast_down([1.119_281_8, 1.0e8, 1.425_916_6], 99_999_992.0, 1);
+    assert!(!matches!(r, Ok(Some(_))), "{r:?}");
+    // Near by, the same square is surely tested.
+    assert!(scene.raycast_down([1.1, 10.0, 1.4], 100.0, 1).unwrap().is_some());
 }
 
 #[test]

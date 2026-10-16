@@ -55,6 +55,9 @@ enum Prepared {
     /// The field's local bounds (PhysX keeps them with the height field).
     HeightField {
         bounds: crate::px::Bounds,
+        /// Its world bounds, in `f64` (whether PhysX's pruner surely tests it).
+        lo: [f64; 3],
+        hi: [f64; 3],
     },
     Box {
         m: M4,
@@ -75,6 +78,9 @@ enum Prepared {
         poses: Vec<Transform>,
         scale: MeshScale,
         layer: u32,
+        /// Its vertices' world bounds, in `f64`.
+        lo: [f64; 3],
+        hi: [f64; 3],
     },
     Other {
         lo: [f64; 3],
@@ -118,8 +124,21 @@ impl<'w> Scene<'w> {
             .shapes
             .iter()
             .map(|s| match &s.kind {
-                ShapeKind::HeightField { field, .. } => {
-                    Prepared::HeightField { bounds: field.local_bounds() }
+                ShapeKind::HeightField { field, pose } => {
+                    let bounds = field.local_bounds();
+                    let corners = (0..8).map(|c| {
+                        let pick = |k: usize, a: f32, b: f32| {
+                            f64::from(if c >> k & 1 == 0 { a } else { b })
+                        };
+                        let local = [
+                            pick(0, bounds.min.x, bounds.max.x),
+                            pick(1, bounds.min.y, bounds.max.y),
+                            pick(2, bounds.min.z, bounds.max.z),
+                        ];
+                        place(*pose, [1.0; 3], local)
+                    });
+                    let (lo, hi) = aabb(corners);
+                    Prepared::HeightField { bounds, lo, hi }
                 }
                 ShapeKind::Box { local_to_world, center, size } => {
                     let m = M4::from_f32(local_to_world);
@@ -127,14 +146,22 @@ impl<'w> Scene<'w> {
                     let half = f64x3(*size).map(|x| x.abs() * 0.5);
                     Prepared::Box { m, center, half }
                 }
-                ShapeKind::Mesh { runtime: Some(r), .. } => Prepared::MeshExact {
-                    poses: zero_sign_variants(r.position, r.rotation),
-                    scale: MeshScale {
-                        scale: Vec3::from_array(r.lossy_scale),
-                        rotation: Quat::IDENTITY,
-                    },
-                    layer: r.layer,
-                },
+                ShapeKind::Mesh { runtime: Some(r), mesh, .. } => {
+                    let poses = zero_sign_variants(r.position, r.rotation);
+                    let s = f64x3(r.lossy_scale);
+                    let (lo, hi) =
+                        aabb(mesh.vertices.iter().map(|v| place(poses[0], s, f64x3(*v))));
+                    Prepared::MeshExact {
+                        poses,
+                        scale: MeshScale {
+                            scale: Vec3::from_array(r.lossy_scale),
+                            rotation: Quat::IDENTITY,
+                        },
+                        layer: r.layer,
+                        lo,
+                        hi,
+                    }
+                }
                 ShapeKind::Mesh { local_to_world, mesh, runtime: None, .. } => {
                     let (vertices, triangles) = (&mesh.vertices, &mesh.triangles);
                     let geom_epsilon = &mesh.geom_epsilon;
@@ -269,33 +296,75 @@ impl<'w> Scene<'w> {
         }
         // `MultiQueryCallback` in every order: each shape gets the distance shrunk to the closest
         // hit so far and its hit is kept when `distance <= shrunk` (the height field's distance,
-        // recomputed from the rounded point, can exceed the traced length).
-        let mut answer: Option<Option<RaycastHit>> = None;
+        // recomputed from the rounded point, can exceed the traced length); a shape the
+        // pruner may skip (its bounds not surely reached) is tried both tested and skipped.
+        let mut outcomes = Vec::new();
         let mut order = candidates.clone();
         let mut more = true;
         while more {
-            let mut shrunk = max;
-            let mut best: Option<RaycastHit> = None;
-            for &i in &order {
-                if let Some((distance, point)) = self.shape_hit(i, o, dir, shrunk)?
-                    && distance <= shrunk
-                {
-                    best = Some(RaycastHit { distance, point, shape: i });
-                    shrunk = distance;
-                }
-            }
-            match &answer {
-                None => answer = Some(best),
-                Some(a) if same_hit(*a, best) => {}
-                Some(a) => {
-                    return Err(QueryError::Unsupported(format!(
-                        "the scene query's shape order decides the hit ({a:?} or {best:?})"
-                    )));
-                }
-            }
+            self.orders(&order, o, dir, max, None, &mut outcomes)?;
             more = next_permutation(&mut order);
         }
-        Ok(answer.flatten())
+        match outcomes.split_first() {
+            None => Ok(None),
+            Some((a, rest)) => match rest.iter().find(|b| !same_hit(*a, **b)) {
+                None => Ok(*a),
+                Some(b) => Err(QueryError::Unsupported(format!(
+                    "the scene query's shape order or pruning decides the hit ({a:?} or {b:?})"
+                ))),
+            },
+        }
+    }
+
+    /// The scene query over the shapes `order` (in that order) from `shrunk` and `best`: every
+    /// outcome, a shape whose test by the pruner isn't sure taken both ways.
+    fn orders(
+        &self,
+        order: &[usize],
+        o: Vec3,
+        dir: Vec3,
+        shrunk: f32,
+        best: Option<RaycastHit>,
+        out: &mut Vec<Option<RaycastHit>>,
+    ) -> Result<(), QueryError> {
+        let Some((&i, rest)) = order.split_first() else {
+            out.push(best);
+            if out.len() > MAX_OUTCOMES {
+                return Err(QueryError::Unsupported(
+                    "too many ways the scene query can go (the pruner's order and culling)".into(),
+                ));
+            }
+            return Ok(());
+        };
+        match self.shape_hit(i, o, dir, shrunk)? {
+            Some((distance, point)) if distance <= shrunk => {
+                let hit = Some(RaycastHit { distance, point, shape: i });
+                self.orders(rest, o, dir, distance, hit, out)?;
+                if !self.surely_tested(i, o, shrunk) {
+                    self.orders(rest, o, dir, shrunk, best, out)?;
+                }
+                Ok(())
+            }
+            _ => self.orders(rest, o, dir, shrunk, best, out),
+        }
+    }
+
+    /// Does the straight-down ray from `o` over `max` surely reach shape `i`'s bounds, so that
+    /// PhysX's pruner tests it whatever its own bounds (they enclose the shape's) and rounding?
+    /// Inside the bounds shrunk by a tolerance well above the `f32` rounding of the
+    /// coordinates involved.
+    fn surely_tested(&self, i: usize, o: Vec3, max: f32) -> bool {
+        let (lo, hi) = match &self.prepared[i] {
+            Prepared::HeightField { lo, hi, .. } | Prepared::MeshExact { lo, hi, .. } => (lo, hi),
+            _ => return false,
+        };
+        let o = f64x3(o.to_array());
+        let max = f64::from(max);
+        let size = lo.iter().chain(hi).chain(&o).fold(max, |a, x| a.max(x.abs()));
+        let tol = 1e-5 * size + 1e-5;
+        (0..3).all(|k| k == 1 || (lo[k] + tol < o[k] && o[k] < hi[k] - tol))
+            && o[1] - max + tol <= hi[1]
+            && lo[1] <= o[1] - tol
     }
 
     /// Shape `i`'s raycast as `MultiQueryCallback` makes it, `max` the shrunk distance: the
@@ -310,9 +379,11 @@ impl<'w> Scene<'w> {
     ) -> Result<Option<(f32, [f32; 3])>, QueryError> {
         let s = &self.world.shapes[i];
         match (&s.kind, &self.prepared[i]) {
-            (ShapeKind::HeightField { pose, field }, Prepared::HeightField { bounds }) => Ok(field
-                .raycast_in(*bounds, *pose, o, dir, max, false)
-                .map(|h| (h.distance, h.position.to_array()))),
+            (ShapeKind::HeightField { pose, field }, Prepared::HeightField { bounds, .. }) => {
+                Ok(field
+                    .raycast_in(*bounds, *pose, o, dir, max, false)
+                    .map(|h| (h.distance, h.position.to_array())))
+            }
             (ShapeKind::Mesh { mesh, .. }, Prepared::MeshExact { poses, scale, .. }) => {
                 let mut first: Option<Option<(f32, [f32; 3])>> = None;
                 for pose in poses {
@@ -376,6 +447,35 @@ const HIT_FLAGS: u16 = 0xb;
 
 /// The most shapes whose orders a query tries (5! orders).
 const MAX_CANDIDATES: usize = 5;
+
+/// The most outcomes (orders times the pruner's choices) a query weighs.
+const MAX_OUTCOMES: usize = 4096;
+
+/// `p + q (s v)` in `f64`: a local point under a pose and an axis scale.
+fn place(pose: Transform, s: [f64; 3], v: [f64; 3]) -> [f64; 3] {
+    let q = [pose.q.x, pose.q.y, pose.q.z, pose.q.w].map(f64::from);
+    let v = [v[0] * s[0], v[1] * s[1], v[2] * s[2]];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    };
+    let u = [q[0], q[1], q[2]];
+    let t = cross(u, v).map(|x| 2.0 * x);
+    let ut = cross(u, t);
+    let p = f64x3(pose.p.to_array());
+    [0, 1, 2].map(|k| v[k] + q[3] * t[k] + ut[k] + p[k])
+}
+
+fn aabb(points: impl Iterator<Item = [f64; 3]>) -> ([f64; 3], [f64; 3]) {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    (lo, hi)
+}
 
 /// A hit compared bit for bit (the shape too: the caller checks the collider).
 fn key(h: Option<(f32, [f32; 3])>) -> Option<(u32, [u32; 3])> {
