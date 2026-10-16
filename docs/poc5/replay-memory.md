@@ -1,9 +1,10 @@
 # POC-5: the driven replay's memory
 
-Written 2026-10-15 (stream O). `wr-combat replay` on the longest captures (`poc5-tb-119` and `-121`,
-`tb-lizard`: 2.9 million records, 46 MB gzipped, 477 MB as text) peaked at 8.5 to 9 GB resident; the Mac
-has 32 GB, and parallel streams queue their replays (`scripts/heavy.sh`). Now they peak at 1.7 to 1.8 GB
-(5x less) and run in 10 s instead of 17 s, with every output byte-identical.
+Written 2026-10-15 (stream O). `wr-combat replay` on the longest captures (`tb-lizard` of `poc5-tb-119`,
+`-121`, `-128` and `-129`: from 2.9 million records, 46 MB gzipped and 477 MB as text, up to 57 MB gzipped)
+peaked at 8.5 to 10.4 GB resident; the Mac has 32 GB, and parallel streams queue their replays
+(`scripts/heavy.sh`). Now they peak at 1.7 to 2.0 GB (5x less) and run about 40% faster, with every
+output byte-identical.
 
 ## Where the memory went
 
@@ -55,48 +56,53 @@ while parsing), 1,380 MB peak at the end; 1.7 GB resident.
 ## Measurements
 
 Release build, `wr-combat replay <fixture> --run <run>`, each run alone (`scripts/heavy.sh`),
-`/usr/bin/time -l`; before = `poc` at `73abee2`, after = this change on it.
+`/usr/bin/time -l`; before = `poc` at `61bdde0`, after = this change rebased onto it.
 
 | Capture | Trace (gz) | Peak before | Peak after | Ratio | Time before | Time after |
 |---|---|---|---|---|---|---|
-| `poc5-tb-96/tb-hold` | 3 MB | 1.04 GB | 0.53 GB | 2.0x | 1.7 s | 1.0 s |
-| `poc5-tb-95/tb-focus` | 3 MB | 1.19 GB | 0.55 GB | 2.2x | 1.9 s | 1.2 s |
+| `poc5-tb-96/tb-hold` | 3 MB | 1.05 GB | 0.52 GB | 2.0x | 1.7 s | 1.0 s |
+| `poc5-tb-95/tb-focus` | 3 MB | 1.19 GB | 0.54 GB | 2.2x | 1.9 s | 1.2 s |
 | `poc5-tb-95/tb-nearest` | 3 MB | 1.20 GB | 0.55 GB | 2.2x | 2.0 s | 1.2 s |
-| `poc5-tb-109/tb-nearest` | 5 MB | 1.39 GB | 0.59 GB | 2.4x | 2.0 s | 1.1 s |
-| `poc5-tb-109/tb-focus` | 5 MB | 1.49 GB | 0.61 GB | 2.5x | 2.3 s | 1.2 s |
-| `poc5-tb-113/tb-nearest` | 8 MB | 1.79 GB | 0.65 GB | 2.7x | 2.8 s | 1.6 s |
-| `poc5-tb-125/tb-nearest` | 9 MB | 1.94 GB | 0.70 GB | 2.8x | 3.4 s | 2.1 s |
-| `poc5-tb-113/tb-focus` | 9 MB | 1.96 GB | 0.68 GB | 2.9x | 3.1 s | 1.8 s |
-| `poc5-tb-112/tb-nearest` | 10 MB | 2.11 GB | 0.71 GB | 3.0x | 3.2 s | 1.9 s |
-| `poc5-tb-115/tb-focus` | 10 MB | 2.14 GB | 0.73 GB | 2.9x | 3.7 s | 2.2 s |
-| `poc5-tb-126/tb-focus` | 10 MB | 2.15 GB | 0.73 GB | 3.0x | 3.9 s | 2.4 s |
-| `poc5-tb-122/tb-focus` | 11 MB | 2.35 GB | 0.76 GB | 3.1x | 4.2 s | 2.5 s |
-| `poc5-tb-114/tb-nearest` | 12 MB | 2.43 GB | 0.75 GB | 3.2x | 3.9 s | 2.2 s |
-| `poc5-tb-117/tb-solo` | 12 MB | 2.43 GB | 0.77 GB | 3.1x | 4.2 s | 2.5 s |
-| `poc5-tb-115/tb-nearest` | 12 MB | 2.47 GB | 0.78 GB | 3.2x | 4.3 s | 2.6 s |
-| `poc5-tb-120/tb-cast` | 12 MB | 2.45 GB | 0.78 GB | 3.2x | 4.6 s | 2.7 s |
-| `poc5-tb-111/tb-focus` | 12 MB | 2.45 GB | 0.76 GB | 3.2x | 3.7 s | 2.1 s |
-| `poc5-tb-122/tb-nearest` | 13 MB | 2.55 GB | 0.79 GB | 3.2x | 4.7 s | 2.7 s |
-| `poc5-tb-116/tb-hold` | 13 MB | 2.58 GB | 0.79 GB | 3.3x | 4.5 s | 2.7 s |
-| `poc5-tb-126/tb-nearest` | 13 MB | 2.65 GB | 0.80 GB | 3.3x | 4.7 s | 3.0 s |
-| `poc5-tb-111/tb-nearest` | 14 MB | 2.70 GB | 0.79 GB | 3.4x | 4.4 s | 2.4 s |
-| `poc5-tb-127/tb-tie` | 14 MB | 2.75 GB | 0.82 GB | 3.3x | 5.2 s | 3.0 s |
-| `poc5-tb-114/tb-focus` | 14 MB | 2.77 GB | 0.80 GB | 3.4x | 4.7 s | 2.6 s |
-| `poc5-tb-112/tb-focus` | 16 MB | 3.01 GB | 0.84 GB | 3.6x | 5.0 s | 2.7 s |
-| `poc5-tb-125/tb-focus` | 16 MB | 3.11 GB | 0.88 GB | 3.5x | 6.0 s | 3.5 s |
-| `poc5-tb-118/tb-chain` | 20 MB | 4.06 GB | 1.03 GB | 4.0x | 7.6 s | 4.5 s |
-| `poc5-tb-123/tb-chain` | 23 MB | 4.39 GB | 1.08 GB | 4.1x | 9.0 s | 4.9 s |
-| `poc5-tb-124/tb-chain` | 23 MB | 4.49 GB | 1.09 GB | 4.1x | 8.9 s | 5.2 s |
-| `poc5-tb-121/tb-lizard` | 46 MB | 8.50 GB | 1.71 GB | 5.0x | 17.7 s | 10.2 s |
-| `poc5-tb-119/tb-lizard` | 47 MB | 9.03 GB | 1.80 GB | 5.0x | 16.9 s | 9.7 s |
+| `poc5-tb-109/tb-nearest` | 5 MB | 1.39 GB | 0.59 GB | 2.4x | 2.1 s | 1.2 s |
+| `poc5-tb-109/tb-focus` | 5 MB | 1.49 GB | 0.61 GB | 2.5x | 2.3 s | 1.3 s |
+| `poc5-tb-113/tb-nearest` | 8 MB | 1.81 GB | 0.65 GB | 2.8x | 3.1 s | 1.8 s |
+| `poc5-tb-125/tb-nearest` | 9 MB | 1.96 GB | 0.70 GB | 2.8x | 3.6 s | 2.3 s |
+| `poc5-tb-113/tb-focus` | 9 MB | 1.98 GB | 0.68 GB | 2.9x | 3.5 s | 1.9 s |
+| `poc5-tb-112/tb-nearest` | 10 MB | 2.12 GB | 0.70 GB | 3.0x | 3.6 s | 2.0 s |
+| `poc5-tb-115/tb-focus` | 10 MB | 2.16 GB | 0.73 GB | 2.9x | 4.2 s | 2.5 s |
+| `poc5-tb-126/tb-focus` | 10 MB | 2.17 GB | 0.73 GB | 3.0x | 4.2 s | 2.5 s |
+| `poc5-tb-122/tb-focus` | 11 MB | 2.37 GB | 0.76 GB | 3.1x | 4.5 s | 2.9 s |
+| `poc5-tb-114/tb-nearest` | 12 MB | 2.44 GB | 0.75 GB | 3.2x | 4.5 s | 2.5 s |
+| `poc5-tb-117/tb-solo` | 12 MB | 2.45 GB | 0.78 GB | 3.1x | 4.6 s | 2.9 s |
+| `poc5-tb-115/tb-nearest` | 12 MB | 2.49 GB | 0.78 GB | 3.2x | 4.8 s | 2.9 s |
+| `poc5-tb-120/tb-cast` | 12 MB | 2.48 GB | 0.78 GB | 3.2x | 4.9 s | 3.1 s |
+| `poc5-tb-111/tb-focus` | 12 MB | 2.45 GB | 0.75 GB | 3.3x | 4.0 s | 2.3 s |
+| `poc5-tb-122/tb-nearest` | 13 MB | 2.57 GB | 0.79 GB | 3.2x | 5.0 s | 3.1 s |
+| `poc5-tb-116/tb-hold` | 13 MB | 2.57 GB | 0.79 GB | 3.2x | 5.0 s | 3.1 s |
+| `poc5-tb-126/tb-nearest` | 13 MB | 2.67 GB | 0.81 GB | 3.3x | 5.3 s | 3.1 s |
+| `poc5-tb-111/tb-nearest` | 14 MB | 2.70 GB | 0.79 GB | 3.4x | 4.6 s | 2.5 s |
+| `poc5-tb-127/tb-tie` | 14 MB | 2.78 GB | 0.82 GB | 3.4x | 5.8 s | 3.3 s |
+| `poc5-tb-114/tb-focus` | 14 MB | 2.79 GB | 0.81 GB | 3.4x | 5.3 s | 2.9 s |
+| `poc5-tb-112/tb-focus` | 16 MB | 3.00 GB | 0.84 GB | 3.6x | 5.2 s | 2.9 s |
+| `poc5-tb-125/tb-focus` | 16 MB | 3.13 GB | 0.88 GB | 3.6x | 6.1 s | 3.8 s |
+| `poc5-tb-118/tb-chain` | 20 MB | 4.08 GB | 1.04 GB | 3.9x | 8.4 s | 5.2 s |
+| `poc5-tb-123/tb-chain` | 23 MB | 4.41 GB | 1.09 GB | 4.1x | 9.0 s | 5.6 s |
+| `poc5-tb-124/tb-chain` | 23 MB | 4.51 GB | 1.10 GB | 4.1x | 9.5 s | 5.7 s |
+| `poc5-tb-121/tb-lizard` | 46 MB | 8.53 GB | 1.72 GB | 5.0x | 18.8 s | 11.8 s |
+| `poc5-tb-119/tb-lizard` | 47 MB | 9.06 GB | 1.81 GB | 5.0x | 17.4 s | 10.7 s |
+| `poc5-tb-128/tb-lizard` | 51 MB | 9.20 GB | 1.82 GB | 5.1x | 20.9 s | 12.5 s |
+| `poc5-tb-129/tb-lizard` | 57 MB | 10.35 GB | 1.99 GB | 5.2x | 25.1 s | 14.2 s |
 
 Peak = the largest of the fixture's three runs (record, replay-1, replay-2), resident set size in
-10^9 bytes; time = their mean wall clock. All 90 runs together: 463 s before, 268 s after.
+10^9 bytes; time = their mean wall clock (other streams' builds ran meanwhile, so times are noisy).
+All 96 runs together: 633 s before, 378 s after.
 
 Every run's stdout (with the run time masked) and output files (`*.oracle.t0.jsonl`, `*.sim.t0.jsonl`,
-`*.state-end.json`, `*.compare-end.json`) are byte-identical before and after on all 90 runs of
-`poc5-tb-95`, `-96`, `-109` and `-111` to `-127`, and again after rebasing onto `5e12bf2` (stream P's
-cast actions): 90 of 90 identical, 472 s before, 272 s after; and onto `a8658c3` (stream L's critter rays): the `tb-chain`, `tb-lizard` and `tb-tie` runs of `-118`, `-119`, `-121` and `-127`, 12 of 12 identical.
+`*.state-end.json`, `*.compare-end.json`) are byte-identical before and after on all 96 runs of
+`poc5-tb-95`, `-96`, `-109` and `-111` to `-129` at `61bdde0`. The same held at each earlier base the
+branch was rebased over (`73abee2`: 90 of 90; `5e12bf2`: 90 of 90; `a8658c3`: 12 of 12), and at
+`b8c901c` (stream R's area parts) on the 27 runs of `-96`, `-109`, `-118`, `-119`, `-121`, `-127`,
+`-128` and `-129`.
 
 A replay's floor is now about 0.5 GB resident (the content pack, the hydrated save, the nav and scene
 caches); a record adds about 0.4 KB (it was 1.1 KB, and twice that at the end), so the ratio grows

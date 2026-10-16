@@ -49,7 +49,7 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   - *Initiative ties* (`combat/ties.rs`, observer `init_ties`, plan step `seedinit`): the comparers' identity-hash
     decisions are recorded inputs; tb-tie (`-127`) valid.
   - **Memory guards** (the Mac froze out of memory once): `scripts/heavy.sh` for every heavy run, capture tests serial
-    (`.config/nextest.toml`), stream builds at 4 jobs. A long capture's replay peaked at ~8.5 GB; ~1.8 GB since stream O (`docs/poc5/replay-memory.md`).
+    (`.config/nextest.toml`), stream builds at 4 jobs. A long capture's replay peaked at ~8.5 GB; ~2 GB since stream O (`docs/poc5/replay-memory.md`).
   - Valid on every run: `-95`, `-96`, `-109`, `-111` to `-117`, `-120`, `-122/tb-focus`, `-123` to `-127`.
     Not valid: `-121` (tb-lizard: the AI's ability actions, stream P), `-122/tb-nearest` (a tie recorded before
     `init_ties`; superseded by `-127`), `-118`/`-119` (superseded). POC-5 suites 27/27.
