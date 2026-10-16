@@ -684,6 +684,52 @@ fallbacks.
 The captures valid before (`poc5-tb-109`, `-111` to `-117`, `-122/tb-focus`, `-95`, `-96`) are still valid on all
 54 runs, and so is `poc5-tb-126` (declares `init_ties`, no tie).
 
+## Critters' ground rays (2026-10-15, stream L)
+
+[M] After stream P, `poc5-tb-121/tb-lizard` left one kind in the driven replay: `ag_phys` records with `ctx` "other"
+(no unit). There were 27 in the record run, 39 in replay-1 and 215 in replay-2. All are downward rays (100 m, mask
+`WalkableMask`), one per frame, along a slowly moving point. Each run of them starts one or two ticks after a
+critter's path request (`path_critter`): in the record run, `critter#0` at t=11008, then rays at t=11010 to 11036
+from (104.32, 48.08, 113.84). In replay-2, four requests and four runs, the first from (98.89, 48.11, 96.98). The
+window's collider list (`ph_col`) puts the scene's critters exactly there: `Critters/Tarantula` (98.88, 96.96) and
+`Critters/TarantulaFirstWorld` (104.33, 113.85), `CharacterController`s on layer 9 (`Unit`).
+
+[C] The caller: `CritterMoveAgent.TickMovement` (from the critter's own `Update`, a `Rabbit`) calls `Move`, which
+moves its transform through the static `UnitMovementAgentBase.Move`, the method whose ground ray (and disc cast)
+the agent observer taps. Outside turn-based combat, `Move` also clamps to the navmesh. The other callers of the
+static `Move` are the unit agents (inside their observed entries: "tick", "sim") and `Projectile.Tick` for a
+terrain-following projectile.
+
+**Classification (`CommandObsAgent.cs`).**
+- A query made inside `CritterMoveAgent.TickMovement`, with no unit agent's entry open, has `ctx` "critter" and
+  `critter` (the critter's scene, hierarchy path and sibling path, as `ph_col` names colliders; `u` null). That is a
+  positive identification by the method on the stack.
+- Every other unattributed query stays "other" and now carries `origin`, its caller chain, so nothing unidentified
+  passes unnamed. This includes nested critter movement and a terrain-following projectile.
+- The driven replay (`combat/replay/agent.rs`) counts a "critter" ray with a named critter and no unit as a
+  presentation input. "other" stays unsupported.
+
+**Can they matter?**
+- [M, C] The ray only reads the physics scene, and the critter writes only its own transform.
+- `Physics.autoSyncTransforms` is off in every recorded window: the header's `physics_auto_sync` and `ph_settings`
+  say so, and a turn-based replay with other physics settings is invalid at once. So a query doesn't flush pending
+  transform changes into the physics scene, and later queries see the same scene whether or not the critter's query
+  ran.
+- The critter's own collider moves with its transform (synced at the next physics step). It is on layer 9, and no
+  gameplay query includes that layer:
+  - the agent's ground rays and the projectiles' casts use `WalkableMask` (Default, OptimizeShadow, GroundNoCamera);
+  - the pointer uses `PointerMask`;
+  - vision and the camera frustum use the sphere-bounds layers;
+  - random encounters use `Ground`.
+- [C] The game's other physics queries (43 call sites in Assembly-CSharp) take masks that are serialized or include
+  more layers, but they all belong to presentation: the audio engine's (`AkRoomPortal` overlaps every layer,
+  `AkObstructionOcclusion`), decals, the camera (Ground, Water, CameraOnly), effects, the local map, the global map,
+  weather and the UI raycaster.
+- [I] PhysX's scene-query structures commit pending shape changes when queried; that changes when the work is done,
+  not what a later query finds.
+
+The plan to record is `poc5-tb6.plan.json` (`tb-lizard`).
+
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
 **Everything above describes the earlier mod (`c7117fd` to `ba96d22`), whose recordings do not observe the unmodified game
