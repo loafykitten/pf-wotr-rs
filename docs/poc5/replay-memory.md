@@ -96,7 +96,7 @@ Peak = the largest of the fixture's three runs (record, replay-1, replay-2), res
 Every run's stdout (with the run time masked) and output files (`*.oracle.t0.jsonl`, `*.sim.t0.jsonl`,
 `*.state-end.json`, `*.compare-end.json`) are byte-identical before and after on all 90 runs of
 `poc5-tb-95`, `-96`, `-109` and `-111` to `-127`, and again after rebasing onto `5e12bf2` (stream P's
-cast actions): 90 of 90 identical, 472 s before, 272 s after.
+cast actions): 90 of 90 identical, 472 s before, 272 s after; and onto `a8658c3` (stream L's critter rays): the `tb-chain`, `tb-lizard` and `tb-tie` runs of `-118`, `-119`, `-121` and `-127`, 12 of 12 identical.
 
 A replay's floor is now about 0.5 GB resident (the content pack, the hydrated save, the nav and scene
 caches); a record adds about 0.4 KB (it was 1.1 KB, and twice that at the end), so the ratio grows
