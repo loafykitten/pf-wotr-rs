@@ -65,7 +65,7 @@ pub(super) fn is_unit(w: &World, id: &str) -> bool {
 }
 
 /// A lifecycle record of the entry being run: one the sim asks for, never processed on the way.
-fn boundary(r: &Rv) -> bool {
+pub(super) fn boundary(r: &Rv) -> bool {
     if r["k"] == "tick" {
         return true;
     }
@@ -1853,6 +1853,17 @@ impl Inputs for Driver<'_> {
         }
     }
 
+    fn look(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        site: uc::LookSite,
+        f: crate::combat::orientation::LookFn,
+        arg: Option<crate::combat::orientation::LookArg>,
+        optional: bool,
+    ) -> R<()> {
+        self.look_write(w, u, site, f, arg, optional)
+    }
     fn call(&mut self, w: &mut World, call: &uc::approach::Call) -> R<()> {
         use uc::approach::Call;
         let at = self.uc_pull(w, &format!("{call:?}"), |r| obs(r, "uc_call").is_some())?;

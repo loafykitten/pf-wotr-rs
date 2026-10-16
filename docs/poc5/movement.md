@@ -236,7 +236,7 @@ driven**: per run `tb-nearest` 19,294 entries, 276 commands' calls run, 18,013 s
 `MoveTo`'s points, the constructed paths' `IsDone`), 13,012 rows checked; `tb-focus` 22,748 entries, 565 calls,
 21,626 states, 8,809 ticks, 17 requests, 3,587 getters, 14,525 rows. Still inputs (by kind, `tb-nearest`'s record):
 the real-time entries (2,714), `TickOnUnit`'s stops of units without commands (9,121), `IsDone` (2,726: when A*
-hands a path back), `DesiredOrientation` (7,443: `LookAt` isn't ported), the gates and reads the agent makes of
+hands a path back), `DesiredOrientation` (7,443; the sim's since stream T where the capture has `look`: `orientation.md`), the gates and reads the agent makes of
 the unit and its view (`CanMove` 1,094, `CanRotate` 7,985, the animation 1,071, commands 1,071, `MaxSpeed`
 1,090, `FlyHeight` 546, corpulence, cells, speed, fudge), physics (546 queries), path contents and deliveries,
 `FindPath`'s arguments (11), the obstacle group (10) and `IsProne` (from the `Stop`'s own end state), one roaming
@@ -271,7 +271,7 @@ placed with the combat change (`Phase::Join`, after the move phase): **every run
 driven**, and `-113`, `-112`, `-111` and `-109` still are (`-115` to `-117` report only the combat log, not the agent).
 `driven_agent_replays_are_valid` (`poc5_agent.rs`) replays `-113` and `-114`. gpt-6.1-sol: no findings.
 
-Left: `UnitCommands.InterruptMove` from `TickUnit` (reported where reached), `LookAt`/`DesiredOrientation`, the
+Left: `UnitCommands.InterruptMove` from `TickUnit` (reported where reached), the
 units' `ControlledByDirector` (reported in a cutscene), mounts, real time.
 
 ## Physics and paths computed (2026-10-16, stream M)

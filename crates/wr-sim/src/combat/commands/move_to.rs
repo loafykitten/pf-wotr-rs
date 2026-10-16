@@ -3,12 +3,14 @@
 //! `OnRun`, `OnAction`, and its answers to the lifecycle (`AwaitMovementFinish`,
 //! `DontWaitForHands`, the base ones otherwise), each checked against the recorded leaf.
 //!
-//! Inputs: the AI action's `PreventMovementFinish` (`pmf`). Not modelled: the orientations it
-//! writes (`DesiredOrientation`, `CombatState.ReturnOrientation`) and `CombatState.ReturnPosition`
-//! (read by the return to the starting position, a recorded run), and a rider's target (mounts).
+//! Inputs: the AI action's `PreventMovementFinish` (`pmf`). `OnAction`'s `DesiredOrientation`
+//! write is the sim's (`docs/poc5/orientation.md`). Not modelled: `CombatState.ReturnOrientation`
+//! and `ReturnPosition` (read by the return to the starting position, a recorded run), and a
+//! rider's target (mounts).
 
 use super::approach::Call;
 use super::{Inputs, Of, R, cmd, cmd_mut, executor, on_run_base, res};
+use crate::combat::orientation::{LookArg, LookFn};
 use crate::world::World;
 
 /// What the creator set (`uc_new`'s `mv`).
@@ -79,12 +81,23 @@ pub fn on_start(w: &World, c: u32) -> R<()> {
     fields(w, c).map(|_| ())
 }
 
-/// `OnAction()`: the view stops, the orientation is set (not modelled), and the move succeeds
-/// unless its AI action prevents the finish.
+/// `OnAction()`: the view stops, the orientation is set (`Executor.DesiredOrientation =
+/// Orientation.Value` when it has one), and the move succeeds unless its AI action prevents the
+/// finish.
 pub fn on_action<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<u8> {
     let u = executor(w, c)?;
     let unit = w.entity(u).unique_id.clone();
     inp.call(w, &Call::Stop { unit, c: Some(c) })?;
+    if let Some(o) = fields(w, c)?.orientation {
+        inp.look(
+            w,
+            u,
+            super::LookSite::MoveToAction,
+            LookFn::Desired,
+            Some(LookArg::Value(o)),
+            false,
+        )?;
+    }
     if cmd(w, c)?.ai && inp.leaf(w, "pmf", Of::Cmd(c))? {
         return Ok(res::NONE);
     }

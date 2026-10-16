@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use super::orientation::{LookArg, LookFn, Orientation};
 use crate::world::{EntityIdx, World};
 
 pub mod aoo;
@@ -574,6 +575,25 @@ pub trait Inputs {
         let _ = (w, c, result, raise);
         desync("a command class that overrides OnEnded (not modelled)")
     }
+    /// A write of `u`'s orientation by the commands' code at `site`: `f` with `arg` (`None`: a
+    /// point the sim doesn't know, a class's own `GetTargetPoint`). `optional`: the game makes it
+    /// only past a gate the sim doesn't see (the attack of opportunity's animation handle). By
+    /// default the sim's write where it knows the argument (always made).
+    fn look(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        site: LookSite,
+        f: LookFn,
+        arg: Option<LookArg>,
+        optional: bool,
+    ) -> R<()> {
+        let _ = (site, optional);
+        if let Some(arg) = arg {
+            look_apply(w, u, f, arg)?;
+        }
+        Ok(())
+    }
     /// A boolean leaf read right after the last record taken (code that records nothing in
     /// between): `UpdateCombatTarget`'s.
     fn leaf_next(&mut self, w: &mut World, f: &'static str, of: Of) -> R<bool> {
@@ -646,6 +666,110 @@ fn turn_based(w: &World) -> bool {
 fn unsupported<T>(w: &mut World, what: &str) -> R<T> {
     let _ = w;
     desync(format!("{what} (not modelled)"))
+}
+
+// ---- orientation (`docs/poc5/orientation.md`) ----
+
+/// Where the commands' code writes a unit's orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookSite {
+    /// `UnitCommandController.TickCommand`'s `TurnToTarget()` of a running command.
+    TickCommand,
+    /// `TickApproaching`'s `TurnToTarget()` once the unit needn't approach.
+    TickApproaching,
+    /// `UnitAttackOfOpportunity.OnRun`'s `LookAt(Target.Position)` past its animation gate.
+    AooRun,
+    /// `UnitMoveTo.OnAction`'s `DesiredOrientation = Orientation.Value`.
+    MoveToAction,
+}
+
+impl LookSite {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TickCommand => "TickCommand's TurnToTarget",
+            Self::TickApproaching => "TickApproaching's TurnToTarget",
+            Self::AooRun => "UnitAttackOfOpportunity.OnRun",
+            Self::MoveToAction => "UnitMoveTo.OnAction",
+        }
+    }
+
+    /// The innermost frames of the call's recorded caller chain (the game's methods).
+    #[must_use]
+    pub fn frames(self) -> &'static [&'static str] {
+        const TURN: &str = "Kingmaker.UnitLogic.Commands.Base.UnitCommand.TurnToTarget";
+        match self {
+            Self::TickCommand => {
+                &[TURN, "Kingmaker.Controllers.Units.UnitCommandController.TickCommand"]
+            }
+            Self::TickApproaching => {
+                &[TURN, "Kingmaker.UnitLogic.Commands.Base.UnitCommand.TickApproaching"]
+            }
+            Self::AooRun => &["Kingmaker.UnitLogic.Commands.UnitAttackOfOpportunity.OnRun"],
+            Self::MoveToAction => &["Kingmaker.UnitLogic.Commands.UnitMoveTo.OnAction"],
+        }
+    }
+}
+
+/// `f(arg)` on unit `u` (no saddled unit): its orientation before and after.
+///
+/// # Errors
+///
+/// `u` isn't a unit, or `arg` isn't `f`'s kind.
+pub fn look_apply(
+    w: &mut World,
+    u: EntityIdx,
+    f: LookFn,
+    arg: LookArg,
+) -> R<(Orientation, Orientation)> {
+    let Some(unit) = w.unit_mut(u) else { return desync(format!("{} of a non-unit", f.name())) };
+    let before = Orientation { value: unit.orientation, desired: unit.combat.desired_orientation };
+    let Some(after) = before.write(f, arg, unit.position) else {
+        return desync(format!("{} with an argument of another kind", f.name()));
+    };
+    unit.orientation = after.value;
+    unit.combat.desired_orientation = after.desired;
+    Ok((before, after))
+}
+
+/// `ApproachPoint` (`GetTargetPoint()`) as `TurnToTarget` reads it: the base `Target?.Point ??
+/// Executor.Position` (`Target.Point`: the unit's position, else the wrapper's point) for
+/// `UnitAttack` and `UnitAttackOfOpportunity`, which don't override it, and `UnitUseAbility`'s
+/// `Target.Point`; `None` for another class (its own `GetTargetPoint`) or a target the sim can't
+/// resolve: the recording's point.
+fn look_point(w: &World, c: u32) -> R<Option<[f32; 3]>> {
+    let x = cmd(w, c)?;
+    let base = x.class == class::ATTACK || x.class == class::AOO;
+    if !base && x.class != class::USE_ABILITY {
+        return Ok(None);
+    }
+    Ok(match &x.s.target {
+        Target::Point(p) => Some(*p),
+        Target::Unit(id) => w.by_id.get(id).and_then(|e| w.unit(*e)).map(|t| t.position),
+        Target::None if base => w.unit(executor(w, c)?).map(|e| e.position),
+        Target::None => None,
+    })
+}
+
+/// `command.TurnToTarget()` from `site`: the base one, `Executor.LookAt(ApproachPoint)`;
+/// `UnitMoveTo`'s does nothing; another class's override isn't modelled.
+pub(crate) fn turn_to_target<I: Inputs>(
+    w: &mut World,
+    inp: &mut I,
+    c: u32,
+    site: LookSite,
+) -> R<()> {
+    let x = cmd(w, c)?;
+    if x.overrides("TurnToTarget") {
+        if x.class == class::MOVE_TO {
+            return Ok(());
+        }
+        let what = format!("{}.TurnToTarget", x.class);
+        return unsupported(w, &what);
+    }
+    let u = executor(w, c)?;
+    let point = look_point(w, c)?;
+    inp.look(w, u, site, LookFn::LookAt, point.map(LookArg::Point), false)
 }
 
 /// The class names the lifecycle tests (`is UnitMoveTo`, `is UnitAttack`, ...).
@@ -1291,8 +1415,9 @@ fn tick_command<I: Inputs>(w: &mut World, inp: &mut I, c: u32, can_move: bool) -
         tick_approaching(w, inp, c)?;
     }
     if cmd(w, c)?.s.running() {
-        // `TurnToTarget` (the view's orientation) isn't modelled.
-        answer(w, inp, "stt", c)?;
+        if answer(w, inp, "stt", c)? {
+            turn_to_target(w, inp, c, LookSite::TickCommand)?;
+        }
         let acted = cmd(w, c)?.s.acted;
         tick(w, inp, c)?;
         let x = cmd(w, c)?.clone();

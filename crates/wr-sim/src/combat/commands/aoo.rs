@@ -6,10 +6,13 @@
 //!
 //! Inputs: `ShouldBeInterrupted` (`CanAttack`: conditions and the attack-type restriction, a
 //! recorded leaf), the view's animation manager and whether it can run an idle action. Past that
-//! gate `OnRun` is presentation (the attack's animation handle, `LookAt`).
+//! gate `OnRun` is presentation (the attack's animation handle) but for its `LookAt` of the
+//! target, which the sim makes when the recording shows the handle was made
+//! (`docs/poc5/orientation.md`).
 
 use super::attack::{Slot, Spec};
 use super::{Inputs, Of, R, cmd, cmd_mut, executor, interrupt, on_run_base, res, unsupported};
+use crate::combat::orientation::{LookArg, LookFn};
 use crate::combat::weapon::{self, Hand, Weapon};
 use crate::world::{EntityIdx, World};
 
@@ -118,6 +121,19 @@ pub fn on_run<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<()> {
     let uid = w.entity(u).unique_id.clone();
     if inp.saddled(w, Some(&uid))?.is_some() {
         return unsupported(w, "UnitAttackOfOpportunity.OnRun: a mounted executor");
+    }
+    // `if (attackHandInfo.AnimationHandle != null) { if (m_ShouldTurnToTarget)
+    // Executor.LookAt(Target.Position); ... }`: whether the handle was made is presentation (the
+    // recording's); `Target` is the target unit.
+    if st(w, c)?.turn {
+        let point = super::target_in_world(w, c)?
+            .and_then(|id| w.by_id.get(&id).copied())
+            .and_then(|t| w.unit(t))
+            .map(|t| t.position);
+        let Some(point) = point else {
+            return unsupported(w, "UnitAttackOfOpportunity.OnRun: a target that doesn't resolve");
+        };
+        inp.look(w, u, super::LookSite::AooRun, LookFn::LookAt, Some(LookArg::Point(point)), true)?;
     }
     Ok(())
 }

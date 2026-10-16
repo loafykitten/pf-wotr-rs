@@ -88,6 +88,58 @@ fn look_angle_and_orientation_direction() {
     assert_eq!((o.value, o.desired), (90.0, 90.0));
 }
 
+#[test]
+fn get_look_at_angle_and_the_writes() {
+    let pos = [10.0, 2.0, -3.0];
+    // The point's height is the unit's: only x and z count.
+    assert_eq!(look_at_angle(pos, 7.0, [11.0, 50.0, -3.0]), 90.0);
+    assert_eq!(look_at_angle(pos, 7.0, [10.0, -9.0, -2.0]), 0.0);
+    // The unit's own position (within `Vector3 ==`, 1e-5): its desired orientation, unchanged.
+    assert_eq!(look_at_angle(pos, 7.0, [10.0, 40.0, -3.0]), 7.0);
+    assert_eq!(look_at_angle(pos, -725.5, [10.000_001, 2.0, -3.0]), -725.5);
+    // The difference is rounded per component before `LookRotation`.
+    let p = [10.3, 0.0, -2.9];
+    let diff = [store_f32(f64::from(10.3f32) - 10.0), 0.0, store_f32(f64::from(-2.9f32) + 3.0)];
+    assert_eq!(look_at_angle(pos, 0.0, p).to_bits(), look_angle(diff).to_bits());
+
+    let o = Orientation { value: 30.0, desired: 40.0 };
+    let east = LookArg::Point([12.0, 0.0, -3.0]);
+    // `LookAt` turns the desired orientation only; `ForceLookAt` both.
+    assert_eq!(
+        o.write(LookFn::LookAt, east, pos),
+        Some(Orientation { value: 30.0, desired: 90.0 })
+    );
+    assert_eq!(
+        o.write(LookFn::ForceLookAt, east, pos),
+        Some(Orientation { value: 90.0, desired: 90.0 })
+    );
+    // At its own position: `LookAt` keeps the desired orientation, `ForceLookAt` sets the
+    // orientation to it.
+    let here = LookArg::Point(pos);
+    assert_eq!(o.write(LookFn::LookAt, here, pos), Some(o));
+    assert_eq!(
+        o.write(LookFn::ForceLookAt, here, pos),
+        Some(Orientation { value: 40.0, desired: 40.0 })
+    );
+    // The setters, unnormalised.
+    let v = LookArg::Value(-400.0);
+    assert_eq!(
+        o.write(LookFn::Orientation, v, pos),
+        Some(Orientation { value: -400.0, desired: -400.0 })
+    );
+    assert_eq!(
+        o.write(LookFn::Desired, v, pos),
+        Some(Orientation { value: 30.0, desired: -400.0 })
+    );
+    // An argument of the other kind.
+    assert_eq!(o.write(LookFn::Desired, east, pos), None);
+    assert_eq!(o.write(LookFn::LookAt, v, pos), None);
+    for f in [LookFn::LookAt, LookFn::ForceLookAt, LookFn::Orientation, LookFn::Desired] {
+        assert_eq!(LookFn::parse(f.name()), Some(f));
+    }
+    assert_eq!(LookFn::parse("Desired"), None);
+}
+
 /// The captures checked: `WR_ORIENT_CAPTURES` (comma-separated labels), by default
 /// `poc5-tb-100` to `-103` (every one with the `agent` observer's `ag_ctl` and `ag_rot`).
 fn captures() -> Vec<PathBuf> {
