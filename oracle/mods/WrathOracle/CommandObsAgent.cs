@@ -12,6 +12,7 @@ using Kingmaker.UnitLogic.Commands.Base;
 using Kingmaker.Utility;
 using Kingmaker.View;
 using Kingmaker.Visual.Animation.Kingmaker;
+using Kingmaker.Visual.Animation.Kingmaker.Actions;
 using Pathfinding;
 using Pathfinding.Util;
 using UnityEngine;
@@ -59,7 +60,8 @@ namespace WrathOracle;
 //  - ag_enable: UnitMovementAgent.OnEnable/OnDisable (the agent joins or leaves AllAgents; its index after);
 //  - ag_ground: UnitPlaceOnGroundController.TickUnit, the position before and after, and (since ground_view) what the
 //    sim needs to compute it: the view's position after (`vafter`: the view takes the computed position even when the
-//    position's setter keeps the old one), FlyHeight, the view's IsProne and, when prone, CenterTorso's position; its
+//    position's setter keeps the old one), FlyHeight, the view's IsProne and, when prone, CenterTorso's position and the prone action's AllowFallingBelowGround
+//    (`fall`: true skips the torso's ray); its
 //    raycasts are ag_phys with ctx "ground" and the unit;
 //  - ag_pathdef: a path's definition the first time the window refers to it (PathSync key, or an observer id for a path
 //    PathSync didn't see), with its points, error and CompleteState, so paths carried into the window are known;
@@ -404,10 +406,12 @@ internal static partial class CommandObs
         AccessTools.FieldRefAccess<UnitEntityData, Vector3>("m_Position");
 
     private static UnitEntityData _groundUnit;
-    // UnitPlaceOnGroundController.TickUnit's reads at its start (FlyHeight, the view's IsProne, CenterTorso's position).
+    // UnitPlaceOnGroundController.TickUnit's reads at its start (FlyHeight, the view's IsProne, CenterTorso's position,
+    // the prone action's AllowFallingBelowGround).
     private static float _groundFly;
     private static bool _groundProne;
     private static Vector3? _groundTorso;
+    private static bool? _groundFall;
 
     public static void AgPosPrefix(UnitEntityData __instance, Vector3 value)
     {
@@ -1192,6 +1196,7 @@ internal static partial class CommandObs
         _groundFly = 0f;
         _groundProne = false;
         _groundTorso = null;
+        _groundFall = null;
         try
         {
             if (!AgObserved() || data == null) return;
@@ -1202,7 +1207,14 @@ internal static partial class CommandObs
             if (view != null)
             {
                 _groundProne = view.IsProne;
-                if (_groundProne) _groundTorso = view.CenterTorso.position;
+                if (_groundProne)
+                {
+                    _groundTorso = view.CenterTorso.position;
+                    // TickUnit's own test, `view.AnimationManager?.CurrentAction?.Action as UnitAnimationActionProne`
+                    // and its AllowFallingBelowGround (getters that return fields): true skips the torso's ray.
+                    var prone = view.AnimationManager?.CurrentAction?.Action as UnitAnimationActionProne;
+                    _groundFall = (object)prone != null && prone.AllowFallingBelowGround;
+                }
             }
         }
         catch (Exception e) { Trace.HookFailed("observe ag_ground", e); }
@@ -1223,12 +1235,14 @@ internal static partial class CommandObs
             var fly = _groundFly;
             var prone = _groundProne;
             var torso = _groundTorso;
+            var fall = _groundFall;
             AgObs("ag_ground", j =>
             {
                 j.Prop("u", u); j.Prop("ctl", inCtl); j.Prop("pos", before); j.Prop("after", after);
                 j.Key("vafter"); if (vafter.HasValue) j.Vec(vafter.Value); else j.W.WriteNull();
                 j.Prop("fly", fly); j.Prop("prone", prone);
                 j.Key("torso"); if (torso.HasValue) j.Vec(torso.Value); else j.W.WriteNull();
+                j.Key("fall"); if (fall.HasValue) j.W.WriteValue(fall.Value); else j.W.WriteNull();
             });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_ground", e); }

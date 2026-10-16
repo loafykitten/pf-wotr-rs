@@ -1310,7 +1310,8 @@ impl Driver<'_> {
     /// `UnitPlaceOnGroundController.TickUnit(unit, (0, 50, 0), 100)` with WrathOracle's
     /// `ground_view`: a ray down from 50 m above the unit (else from 5, 10, .. 95 m above, until
     /// one hits), for a prone unit one from its torso (its position an input: the bone isn't
-    /// modelled; the prone action's `AllowFallingBelowGround`, which skips it, an input), the unit
+    /// modelled; the prone action's `AllowFallingBelowGround`, which skips it, an input: recorded
+    /// as `fall`, or in captures before it established false by the torso's ray, else reported), the unit
     /// raised by the difference and its `FlyHeight` (an input). The view takes the position; the
     /// unit's setter keeps the old one when `Vector3 ==` holds. Returns (the unit's position, the
     /// view's), checked against the step's record (`ag_ground`: `after`, `vafter`).
@@ -1338,6 +1339,20 @@ impl Driver<'_> {
             }
             _ => return Err(Desync("a torso of a unit not prone".into())),
         };
+        // The prone action's `AllowFallingBelowGround` (`fall`, null when not prone; absent in
+        // captures recorded before it: then only the torso's ray establishes it false).
+        let has_fall = gr.as_object().is_some_and(|o| o.contains_key("fall"));
+        let fall = match (&gr["fall"], prone) {
+            (J::Null, false) => None,
+            (J::Bool(b), true) => Some(*b),
+            (J::Null, true) if !has_fall => None,
+            _ => {
+                return Err(Desync(format!(
+                    "a place-on-ground record's AllowFallingBelowGround it can't read ({})",
+                    describe(gr)
+                )));
+            }
+        };
         self.ag_input("the place-on-ground step's FlyHeight");
         let pos = w.unit(u).ok_or_else(|| Desync("no unit".into()))?.position;
         // `(position + startOffset) ?? Vector3.up`: the offset (0, 50, 0).
@@ -1362,7 +1377,25 @@ impl Driver<'_> {
             let ray = next.is_some_and(|x| {
                 x["ev"] == "ag_phys" && x["ctx"] == "ground" && x["u"] == id.as_str()
             });
-            if ray {
+            match (fall, ray) {
+                (Some(true), true) => {
+                    return Err(Desync(
+                        "a torso ray of a prone unit whose action allows falling below ground"
+                            .into(),
+                    ));
+                }
+                // Recorded false: the ray is required (the pull reports it missing).
+                (Some(false), _) | (None, true) => {}
+                (Some(true), false) => self.ag_input("the prone action's AllowFallingBelowGround"),
+                (None, false) => {
+                    return Err(Desync(
+                        "a prone unit's step without its torso ray, and the prone action's \
+                         AllowFallingBelowGround not recorded (ground_view before `fall`)"
+                            .into(),
+                    ));
+                }
+            }
+            if fall != Some(true) {
                 let o = [t[0] + 0.0, t[1] + 1.0, t[2] + 0.0];
                 if let Some((_, pt)) = self.nav_ground_ray(w, u, o)? {
                     // `Mathf.Clamp(hit.y - torso.y, num, Mathf.Max(num, 0f) + 0.5f)`.
@@ -1376,8 +1409,6 @@ impl Driver<'_> {
                         value
                     };
                 }
-            } else {
-                self.ag_input("the prone action's AllowFallingBelowGround");
             }
         }
         let mut p = pos;
@@ -1393,7 +1424,11 @@ impl Driver<'_> {
             || v3(&r["pos"]).map(bits3) != Some(bits3(pos))
             || v3(&r["after"]).map(bits3) != Some(bits3(after))
             || v3(&r["vafter"]).map(bits3) != Some(bits3(p))
-            || !fields(r, &["u", "ctl", "pos", "after", "vafter", "fly", "prone", "torso"])
+            || !(fields(
+                r,
+                &["u", "ctl", "pos", "after", "vafter", "fly", "prone", "torso", "fall"],
+            ) || !has_fall
+                && fields(r, &["u", "ctl", "pos", "after", "vafter", "fly", "prone", "torso"]))
         {
             return Err(Desync(format!(
                 "the place-on-ground step: the sim's unit at {after:?}, view at {p:?}; the recording's {}",

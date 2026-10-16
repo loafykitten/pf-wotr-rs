@@ -71,7 +71,54 @@ pub(super) fn fields(r: &J, keys: &[&str]) -> bool {
 /// cast of radius 0.4, 100 m, `WalkableMask`, from a finite point, with a finite result and the
 /// collider when it hit. Anything less isn't identified.
 fn critter_phys(r: &J) -> bool {
-    let mut keys = vec!["fn", "ctx", "u", "critter", "o", "max", "mask", "hit"];
+    let query = match r["fn"].as_str() {
+        Some("ray") => v3(&r["d"]).map(bits3) == Some(bits3([0.0, -1.0, 0.0])),
+        _ => f(&r["r"]).map(f32::to_bits) == Some(0.4f32.to_bits()),
+    };
+    let c = &r["critter"];
+    r["ctx"] == "critter"
+        && phys_record(r, "critter")
+        && query
+        && f(&r["max"]).map(f32::to_bits) == Some(100.0f32.to_bits())
+        && r["mask"].as_i64() == Some(2_099_457)
+        && c.as_object().is_some_and(|o| o.len() == 3)
+        && placed(c)
+}
+
+/// Another caller's query (`ag_phys`, ctx "other": outside any unit agent's entry and not a
+/// critter's own move): exactly the record WrathOracle writes, with no unit (`u` present and
+/// null), the caller chain (`origin`, non-empty), no critter, a ray (finite direction) or a disc
+/// cast (finite radius) from a finite point with a finite length and a mask, and a finite result
+/// and the collider when it hit.
+fn other_phys(r: &J) -> bool {
+    let query = match r["fn"].as_str() {
+        Some("ray") => finite3(&r["d"]),
+        _ => f(&r["r"]).is_some_and(f32::is_finite),
+    };
+    r["ctx"] == "other"
+        && phys_record(r, "origin")
+        && query
+        && r["origin"].as_str().is_some_and(|x| !x.is_empty())
+        && f(&r["max"]).is_some_and(f32::is_finite)
+        && r["mask"].is_i64()
+}
+
+/// A finite vector.
+fn finite3(v: &J) -> bool {
+    v3(v).is_some_and(|p| p.iter().all(|x| x.is_finite()))
+}
+
+/// An identified object (`PhysProbe.WritePath`/`WriteId`): scene, hierarchy path, sibling path.
+fn placed(o: &J) -> bool {
+    ["scene", "path"].iter().all(|k| o[*k].as_str().is_some_and(|x| !x.is_empty()))
+        && o["sib"].as_array().is_some_and(|a| a.iter().all(J::is_u64))
+}
+
+/// An unattributed `ag_phys` record's shape: exactly its keys (the query's, `u` null, `who`: the
+/// critter or the caller chain, the hit's when it hit), a finite origin, and a finite result with
+/// the collider hit (`WriteId`: placed, its type and instance id) when it hit.
+fn phys_record(r: &J, who: &str) -> bool {
+    let mut keys = vec!["fn", "ctx", "u", who, "o", "max", "mask", "hit"];
     match r["fn"].as_str() {
         Some("ray") => keys.push("d"),
         Some("disc") => keys.push("r"),
@@ -82,35 +129,14 @@ fn critter_phys(r: &J) -> bool {
         Some(false) => {}
         None => return false,
     }
-    let c = &r["critter"];
-    // An identified object (`PhysProbe.WritePath`/`WriteId`): scene, hierarchy path, sibling path.
-    let placed = |o: &J| {
-        ["scene", "path"].iter().all(|k| o[*k].as_str().is_some_and(|x| !x.is_empty()))
-            && o["sib"].as_array().is_some_and(|a| a.iter().all(J::is_u64))
-    };
-    // The collider hit (`WriteId`): placed, its type and instance id.
     let col = &r["col"];
     let collider = col.as_object().is_some_and(|o| o.len() == 5)
         && placed(col)
         && col["type"].as_str().is_some_and(|x| !x.is_empty())
         && col["iid"].is_i64();
-    let finite3 = |v: &J| v3(v).is_some_and(|p| p.iter().all(|x| x.is_finite()));
-    let query = match r["fn"].as_str() {
-        Some("ray") => v3(&r["d"]).map(bits3) == Some(bits3([0.0, -1.0, 0.0])),
-        _ => f(&r["r"]).map(f32::to_bits) == Some(0.4f32.to_bits()),
-    };
     let result = r["hit"] == false
         || (f(&r["dist"]).is_some_and(f32::is_finite) && finite3(&r["pt"]) && collider);
-    r["ctx"] == "critter"
-        && query
-        && result
-        && finite3(&r["o"])
-        && f(&r["max"]).map(f32::to_bits) == Some(100.0f32.to_bits())
-        && r["mask"].as_i64() == Some(2_099_457)
-        && fields(r, &keys)
-        && r["u"].is_null()
-        && c.as_object().is_some_and(|o| o.len() == 3)
-        && placed(c)
+    result && finite3(&r["o"]) && fields(r, &keys) && r["u"].is_null()
 }
 
 /// A required boolean (a missing, null or mistyped value isn't `false`).
@@ -468,9 +494,15 @@ impl Driver<'_> {
     fn ag_skip_stop(&mut self, w: &mut World, r: &J) {
         // A physics query of the span: the sim's answer to its recorded arguments, checked.
         if r["k"] == "obs" && r["ev"] == "ag_phys" {
-            // (A critter's or another caller's: the sim never uses the answer.)
-            let ctx = if critter_phys(r) || r["ctx"] == "other" {
+            // (A critter's or another caller's, identified: the sim never uses the answer.)
+            let ctx = if critter_phys(r) || other_phys(r) {
                 super::nav::PhysCtx::Other
+            } else if matches!(r["ctx"].as_str(), Some("critter" | "other")) {
+                Self::ag_unsupported(
+                    w,
+                    format!("an unattributed physics query it can't identify ({})", describe(r)),
+                );
+                return;
             } else {
                 super::nav::PhysCtx::Span
             };
@@ -738,7 +770,7 @@ impl Driver<'_> {
             // (`replay/nav.rs`); in real time its physics the sim's, its reads inputs.
             "ag_sim" => return self.nav_sim_step(w, i),
             // A query of another caller (a critter's move): the sim's answer checked when it has one.
-            "ag_phys" if r["ctx"] == "other" => {
+            "ag_phys" if other_phys(r) => {
                 self.nav_phys_alone(w, r, super::nav::PhysCtx::Other);
             }
             "ag_phys" if r["ctx"] == "sim" && !w.combat.turn_based => {
@@ -2744,7 +2776,7 @@ impl Driver<'_> {
 
 #[cfg(test)]
 mod critter_phys_tests {
-    use super::critter_phys;
+    use super::{critter_phys, other_phys};
     use serde_json::{Value, json};
 
     fn ray() -> Value {
@@ -2806,6 +2838,70 @@ mod critter_phys_tests {
             let mut r = ray();
             d(&mut r);
             assert!(!critter_phys(&r), "damage {i} accepted");
+        }
+    }
+
+    fn other() -> Value {
+        json!({"seq": 1, "k": "obs", "t": 5, "ev": "ag_phys", "fn": "disc", "ctx": "other", "u": null,
+            "origin": "UnitMovementAgentBase.Move < CritterMoveAgent.TickMovement",
+            "o": [0.0, 2.0, 0.0], "r": 0.4, "max": 100.0, "mask": 2099457, "hit": true,
+            "dist": 2.0, "pt": [0.0, 0.0, 0.0],
+            "col": {"scene": "S", "path": "TERRAIN", "sib": [], "type": "TerrainCollider", "iid": 1672364}})
+    }
+
+    #[test]
+    fn accepts_another_callers_record() {
+        assert!(other_phys(&other()));
+        assert!(!critter_phys(&other()));
+        let mut miss = other();
+        let o = miss.as_object_mut().unwrap();
+        o.insert("hit".into(), json!(false));
+        for k in ["dist", "pt", "col"] {
+            o.remove(k);
+        }
+        assert!(other_phys(&miss));
+        let mut ray = other();
+        let o = ray.as_object_mut().unwrap();
+        o.remove("r");
+        o.insert("fn".into(), json!("ray"));
+        o.insert("d".into(), json!([0.0, -1.0, 0.0]));
+        assert!(other_phys(&ray));
+    }
+
+    #[test]
+    fn rejects_another_callers_damaged_record() {
+        let damage: Vec<fn(&mut Value)> = vec![
+            |r| {
+                r.as_object_mut().unwrap().remove("u");
+            },
+            |r| r["u"] = json!("51FC"),
+            |r| {
+                r.as_object_mut().unwrap().remove("origin");
+            },
+            |r| r["origin"] = json!(""),
+            |r| r["origin"] = json!(null),
+            |r| r["critter"] = json!({"scene": "S", "path": "Critters/Tarantula", "sib": [0]}),
+            |r| r["ctx"] = json!("critter"),
+            |r| r["ctx"] = json!("span"),
+            |r| r["fn"] = json!("box"),
+            |r| r["r"] = json!(null),
+            |r| r["d"] = json!([0.0, -1.0, 0.0]),
+            |r| r["mask"] = json!("x"),
+            |r| r["max"] = json!(null),
+            |r| r["o"] = json!([0.0, "x", 0.0]),
+            |r| {
+                r.as_object_mut().unwrap().remove("dist");
+            },
+            |r| r["hit"] = json!(false),
+            |r| r["hit"] = json!(null),
+            |r| r["col"] = json!(null),
+            |r| r["col"]["iid"] = json!("1"),
+            |r| r["extra"] = json!(1),
+        ];
+        for (i, d) in damage.iter().enumerate() {
+            let mut r = other();
+            d(&mut r);
+            assert!(!other_phys(&r), "damage {i} accepted");
         }
     }
 }
