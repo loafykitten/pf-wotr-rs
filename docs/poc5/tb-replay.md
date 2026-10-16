@@ -721,8 +721,10 @@ terrain-following projectile.
   - the pointer uses `PointerMask`;
   - vision and the camera frustum use the sphere-bounds layers;
   - random encounters use `Ground`.
-- The queries that include every layer are the audio engine's (`AkRoomPortal`, `AkObstructionOcclusion`), decals, the
-  camera, the local map and the global map, all presentation.
+- [C] The game's other physics queries (43 call sites in Assembly-CSharp) take masks that are serialized or include
+  more layers, but they all belong to presentation: the audio engine's (`AkRoomPortal` overlaps every layer,
+  `AkObstructionOcclusion`), decals, the camera (Ground, Water, CameraOnly), effects, the local map, the global map,
+  weather and the UI raycaster.
 - [I] PhysX's scene-query structures commit pending shape changes when queried; that changes when the work is done,
   not what a later query finds.
 
