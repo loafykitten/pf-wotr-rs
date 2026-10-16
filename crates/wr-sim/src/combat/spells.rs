@@ -26,7 +26,7 @@ use crate::elements::MechRef;
 use crate::rulebook::{RuleBase, RuleEvent};
 use crate::spellbook::Spell;
 use crate::unit_state::has_condition;
-use crate::world::{EntityIdx, World};
+use crate::world::{EntityIdx, FactIdx, World};
 
 /// `UnitCondition` values these checks read.
 mod cond {
@@ -164,15 +164,61 @@ fn has_any(bp: &Blueprint, names: &[&str]) -> Option<&'static str> {
     })
 }
 
-/// An `AbilityData` of a memorizing spellbook (the spell its slot holds).
+/// An `AbilityData`: a memorizing spellbook's spell (the spell its slot holds), or an ability
+/// fact's (`new AbilityData(fact)`, which the AI's `BlueprintAiCastSpell` makes).
 #[derive(Debug, Clone)]
 pub struct Ability {
     pub caster: EntityIdx,
-    pub spellbook: Guid,
-    pub spell: Spell,
+    pub source: Source,
+}
+
+/// Where an [`Ability`] comes from.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A memorizing spellbook's spell: the slot's `SpellShell`.
+    Memorized { spellbook: Guid, spell: Spell },
+    /// `new AbilityData(fact)`: no spellbook blueprint, the fact's blueprint and owner.
+    Fact { fact: FactIdx, blueprint: Guid },
 }
 
 impl Ability {
+    /// `new AbilityData(fact)` of the `Ability` fact `f` (its owner the caster).
+    #[must_use]
+    pub fn of_fact(w: &World, f: FactIdx) -> Option<Self> {
+        let x = w.fact(f);
+        Some(Self { caster: x.owner?, source: Source::Fact { fact: f, blueprint: x.blueprint? } })
+    }
+
+    /// `Blueprint`.
+    #[must_use]
+    pub fn blueprint(&self) -> Guid {
+        match &self.source {
+            Source::Memorized { spell, .. } => spell.blueprint,
+            Source::Fact { blueprint, .. } => *blueprint,
+        }
+    }
+
+    /// The spellbook and its spell (`Err` for an ability fact's, naming what isn't ported).
+    ///
+    /// # Errors
+    ///
+    /// An ability fact's `AbilityData`.
+    pub fn book(&self, what: &str) -> Result<(Guid, &Spell), String> {
+        match &self.source {
+            Source::Memorized { spellbook, spell } => Ok((*spellbook, spell)),
+            Source::Fact { .. } => Err(format!("{what} of an ability fact's AbilityData")),
+        }
+    }
+
+    /// `Fact`.
+    #[must_use]
+    pub fn fact(&self) -> Option<FactIdx> {
+        match &self.source {
+            Source::Fact { fact, .. } => Some(*fact),
+            Source::Memorized { .. } => None,
+        }
+    }
+
     /// The spell of `caster`'s spellbook `sb` a memorized slot of `level` holds (the driver's
     /// `MechanicActionBarSlotMemorizedSpell`: the slot's `SpellShell`, equal by value to any
     /// other slot's of that spell).
@@ -200,22 +246,26 @@ impl Ability {
             .filter_map(|s| s.spell.as_ref())
             .find(|s| s.blueprint == blueprint && book.spell_level_of(s) == level)
             .ok_or_else(|| "no memorized slot of the spell at the level".to_owned())?;
-        Ok(Self { caster, spellbook: sb, spell: spell.clone() })
+        Ok(Self { caster, source: Source::Memorized { spellbook: sb, spell: spell.clone() } })
     }
 
     #[must_use]
     pub fn bp(&self, w: &World) -> Option<Rc<Blueprint>> {
-        w.content.get(self.spell.blueprint)
+        w.content.get(self.blueprint())
     }
 
     fn sb_bp(&self, w: &World) -> Option<Rc<Blueprint>> {
-        w.content.get(self.spellbook)
+        self.book("").ok().and_then(|(sb, _)| w.content.get(sb))
     }
 
     /// `SpellLevel`: the spellbook's level of it.
-    #[must_use]
-    pub fn spell_level(&self, w: &World) -> i32 {
-        crate::spellbook::spell_level(w, self.caster, self.spellbook, &self.spell)
+    ///
+    /// # Errors
+    ///
+    /// An ability fact's (not ported).
+    pub fn spell_level(&self, w: &World) -> Result<i32, String> {
+        let (sb, spell) = self.book("SpellLevel")?;
+        Ok(crate::spellbook::spell_level(w, self.caster, sb, spell))
     }
 
     /// `SpellSchool` (`Blueprint.School`).
@@ -231,26 +281,32 @@ impl Ability {
 
     /// `SpellSource` (`CalcSpellSource`): a spell or spell-like ability of a spellbook is
     /// arcane or divine by the spellbook's `IsArcane`; anything else `None`.
-    #[must_use]
-    pub fn spell_source(&self, w: &World) -> i64 {
+    ///
+    /// # Errors
+    ///
+    /// An ability fact's (not ported).
+    pub fn spell_source(&self, w: &World) -> Result<i64, String> {
+        self.book("SpellSource")?;
         let ty = self.bp(w).map_or(-1, |b| b.view().int("Type"));
         if ty != 0 && ty != 1 {
-            return source::NONE;
+            return Ok(source::NONE);
         }
-        if self.sb_bp(w).is_some_and(|b| b.view().bool("IsArcane")) {
+        Ok(if self.sb_bp(w).is_some_and(|b| b.view().bool("IsArcane")) {
             source::ARCANE
         } else {
             source::DIVINE
-        }
+        })
     }
 }
 
 /// `AbilityData.ActionType`: `GetDefaultActionType`, the blueprint's for a spellbook spell
 /// without metamagic data and no item (`HasMetamagic(Quicken)` also reads the caster's
 /// `UnitPartSpecialMetamagic`: reported), without a `UnitPartAbilityModifiers` override
-/// (reported), as `commands::ty`.
+/// (reported), as `commands::ty`. An ability fact's the same without a source item (a
+/// `SourceItem`'s action type and metamagic reported: [`fact_state`]).
 fn action_type(w: &World, a: &Ability) -> Result<u8, String> {
     let bp = a.bp(w).ok_or_else(|| "the spell's blueprint is missing".to_owned())?;
+    fact_state(w, a)?;
     if let Some(p) = part(w, a.caster, &["UnitPartSpecialMetamagic", "UnitPartAbilityModifiers"]) {
         return Err(format!("AbilityData.ActionType: {p}"));
     }
@@ -303,8 +359,35 @@ pub fn can_cast(w: &World, u: EntityIdx) -> bool {
     !has_condition(w, u, cond::USE_ABILITY_FORBIDDEN)
 }
 
+/// What an ability fact's `AbilityData` reads of the fact that the sim doesn't keep, reported:
+/// its `SourceItem` (an item's charges, action type, metamagic and device check), its
+/// `StickyTouch` and `Spellbook` (only `UnitPartTouch` sets them) and its `UsagesPerDayResource`
+/// (only `AddSpellListAsAbilities` sets it), and a saved fact's `UsagesPerDayResource` or
+/// `StickyTouch` ([`crate::world::Fact::ability_saved_extras`]).
+fn fact_state(w: &World, a: &Ability) -> Result<(), String> {
+    let Some(f) = a.fact() else { return Ok(()) };
+    if w.fact(f).source_item.is_some() {
+        return Err("AbilityData: an ability fact from an item".into());
+    }
+    if w.fact(f).ability_saved_extras {
+        return Err(
+            "AbilityData: an ability fact's saved UsagesPerDayResource or StickyTouch".into()
+        );
+    }
+    if let Some(p) = part(w, a.caster, &["UnitPartTouch"]) {
+        return Err(format!("AbilityData: an ability fact's StickyTouch and Spellbook ({p})"));
+    }
+    if unit_has_component(w, a.caster, "AddSpellListAsAbilities") {
+        return Err(
+            "AbilityData: an ability fact's UsagesPerDayResource (AddSpellListAsAbilities)".into(),
+        );
+    }
+    Ok(())
+}
+
 /// `AbilityData.IsAvailableForCast` (no conversion, no service caster: the spell has no source
-/// item): `CanBeCastByCaster`.
+/// item): `CanBeCastByCaster`. An ability fact's has no charges (`-1`: no spellbook, no item)
+/// and no resource ([`fact_state`]), and isn't available while the fact isn't active.
 ///
 /// # Errors
 ///
@@ -312,18 +395,22 @@ pub fn can_cast(w: &World, u: EntityIdx) -> bool {
 pub fn is_available_for_cast(w: &mut World, a: &Ability) -> Result<bool, String> {
     let bp = a.bp(w).ok_or_else(|| "the spell's blueprint is missing".to_owned())?;
     let u = a.caster;
+    fact_state(w, a)?;
     if let Some(c) = has_any(&bp, &["AbilityEffectStickyTouch", "AbilityResourceLogic"]) {
         return Err(format!("AbilityData.GetAvailableForCastCount: {c}"));
     }
-    if a.spell.save_spellbook_slot {
-        return Err("AbilityData.GetAvailableForCastCount: SaveSpellbookSlot".into());
-    }
-    // `GetAvailableCastsCountFromCharges`: the spellbook's count / `SpellSlotCost`; no resources.
-    let charges = crate::spellbook::available_for_cast_count(w, u, a.spellbook, &a.spell);
-    let cost = arith::add(1, a.spell.extra_spell_slot_cost);
-    let count = if charges >= 0 && cost > 0 { charges / cost } else { charges };
-    if count == 0 {
-        return Ok(false);
+    if let Source::Memorized { spellbook, spell } = &a.source {
+        if spell.save_spellbook_slot {
+            return Err("AbilityData.GetAvailableForCastCount: SaveSpellbookSlot".into());
+        }
+        // `GetAvailableCastsCountFromCharges`: the spellbook's count / `SpellSlotCost`; no
+        // resources.
+        let charges = crate::spellbook::available_for_cast_count(w, u, *spellbook, spell);
+        let cost = arith::add(1, spell.extra_spell_slot_cost);
+        let count = if charges >= 0 && cost > 0 { charges / cost } else { charges };
+        if count == 0 {
+            return Ok(false);
+        }
     }
     if let Some(c) = has_any(&bp, CASTER_RESTRICTIONS) {
         return Err(format!("AbilityData.CasterRestrictions: {c}"));
@@ -350,7 +437,10 @@ pub fn is_available_for_cast(w: &mut World, a: &Ability) -> Result<bool, String>
         if super::inspect::polymorphed(w, u) {
             return Err("AbilityData.CanBeCastByCaster: a polymorphed caster".into());
         }
-        if let Some(p) = part(w, u, &["UnitPartForbiddenSpellbooks"]) {
+        // `Spellbook != null`: an ability fact's has none ([`fact_state`]).
+        if a.fact().is_none()
+            && let Some(p) = part(w, u, &["UnitPartForbiddenSpellbooks"])
+        {
             return Err(format!("AbilityData.CanBeCastByCaster: {p}"));
         }
     }
@@ -362,6 +452,10 @@ pub fn is_available_for_cast(w: &mut World, a: &Ability) -> Result<bool, String>
     }
     if let Some(c) = has_any(&bp, REQUIRED_PARAMETERS) {
         return Err(format!("AbilityData.HasRequiredParams: {c}"));
+    }
+    // `Fact != null && !Fact.Active`.
+    if a.fact().is_some_and(|f| !w.fact(f).is_active) {
+        return Ok(false);
     }
     if let Some(c) = has_any(&bp, RESTRICTIONS) {
         return Err(format!("AbilityData.Restrictions: {c}"));
@@ -375,17 +469,27 @@ pub fn is_available_for_cast(w: &mut World, a: &Ability) -> Result<bool, String>
     Ok(true)
 }
 
-/// `IsAvailable`: `IsAvailableInSpellbook` (`Spellbook.CanSpend`) and `IsAvailableForCast`, not
-/// `TemporarilyDisabled`.
+/// `IsAvailable`: `IsAvailableInSpellbook` (`Spellbook.CanSpend`; true without a spellbook, an
+/// ability fact's) and `IsAvailableForCast`, not `TemporarilyDisabled` (a new `AbilityData(fact)`'s
+/// is false).
 ///
 /// # Errors
 ///
 /// As [`is_available_for_cast`].
 pub fn is_available(w: &mut World, a: &Ability) -> Result<bool, String> {
-    if !crate::spellbook::spend_spell(w, a.caster, a.spellbook, &a.spell, false) {
-        return Ok(false);
+    match &a.source {
+        Source::Memorized { spellbook, spell } => {
+            if !crate::spellbook::spend_spell(w, a.caster, *spellbook, spell, false) {
+                return Ok(false);
+            }
+            let disabled = spell.temporarily_disabled;
+            Ok(is_available_for_cast(w, a)? && !disabled)
+        }
+        Source::Fact { .. } => {
+            fact_state(w, a)?;
+            is_available_for_cast(w, a)
+        }
     }
-    Ok(is_available_for_cast(w, a)? && !a.spell.temporarily_disabled)
 }
 
 /// `AbilityData.CanTarget(target)` for a unit target (no mount, no magic hack).
@@ -399,26 +503,22 @@ pub fn can_target(w: &mut World, a: &Ability, target: EntityIdx) -> Result<bool,
     if let Some(p) = part(w, a.caster, &["UnitPartSaddled", "UnitPartRider"]) {
         return Err(format!("AbilityData.CanTarget: {p}"));
     }
-    for o in bp.components_array() {
-        if TARGET_RESTRICTIONS.iter().any(|n| is_a(o.ty, n)) {
-            return Err(format!(
-                "AbilityData.TargetRestrictions: {}",
-                wr_content::schema::ty(o.ty).short
-            ));
-        }
-        if is_a(o.ty, "AbilityTargetHasFact") && !target_has_fact(w, View(o), a.caster, target)? {
-            return Ok(false);
-        }
+    if !target_restrictions_passed(w, &bp, a.caster, target)? {
+        return Ok(false);
     }
     if !v.bool("CanTargetSelf") && target == a.caster {
         return Ok(false);
     }
     let dead = super::units::is_dead(w, target);
-    if dead && has_any(&bp, CAN_TARGET_DEAD).is_none() {
+    if dead && !can_cast_to_dead_target(&bp) {
         return Ok(false);
     }
-    // `TargetAnchor`.
-    if a.spell.force_target_owner {
+    // `TargetAnchor` (`ForceTargetOwner`: a new `AbilityData(fact)`'s is false).
+    let force_owner = match &a.source {
+        Source::Memorized { spell, .. } => spell.force_target_owner,
+        Source::Fact { .. } => false,
+    };
+    if force_owner {
         return Ok(target == a.caster);
     }
     if a.sb_bp(w).is_some_and(|b| has_any(&b, &["IsAlchemistSpellbook"]).is_some()) {
@@ -444,6 +544,49 @@ pub fn can_target(w: &mut World, a: &Ability, target: EntityIdx) -> Result<bool,
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Every `IAbilityTargetRestriction` of `bp` (`BlueprintAbility.TargetRestrictions`, in order)
+/// passed for `caster` on `target`: `AbilityTargetHasFact` ported, the others reported when
+/// reached.
+///
+/// # Errors
+///
+/// A restriction of a kind not ported.
+pub fn target_restrictions_passed(
+    w: &World,
+    bp: &Blueprint,
+    caster: EntityIdx,
+    target: EntityIdx,
+) -> Result<bool, String> {
+    for o in bp.components_array() {
+        if TARGET_RESTRICTIONS.iter().any(|n| is_a(o.ty, n)) {
+            return Err(format!(
+                "AbilityData.TargetRestrictions: {}",
+                wr_content::schema::ty(o.ty).short
+            ));
+        }
+        if is_a(o.ty, "AbilityTargetHasFact") && !target_has_fact(w, View(o), caster, target)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `BlueprintAbility.CanCastToDeadTarget`: an `ICanTargetDeadUnits` component.
+#[must_use]
+pub fn can_cast_to_dead_target(bp: &Blueprint) -> bool {
+    has_any(bp, CAN_TARGET_DEAD).is_some()
+}
+
+/// `AbilityCollection.GetAbility(blueprint)`: the unit's first `Ability` fact of that blueprint
+/// (`RawFacts`' order: the order the facts were added).
+#[must_use]
+pub fn ability_fact(w: &World, u: EntityIdx, blueprint: Guid) -> Option<FactIdx> {
+    w.entity(u).facts.list.iter().copied().find(|f| {
+        let x = w.fact(*f);
+        x.kind == crate::world::FactKind::Ability && x.blueprint == Some(blueprint)
+    })
 }
 
 /// `AbilityTargetHasFact.IsTargetRestrictionPassed`.
@@ -533,10 +676,18 @@ pub fn begin_cast(w: &mut World, a: &Ability, target: EntityIdx) -> Option<u32> 
         w.coverage.unsupported(format!("AbilityExecutionContext: {c} on the spell"));
         return None;
     }
+    let (spellbook, level, spell_source) =
+        match (a.book("CalculateParams"), a.spell_level(w), a.spell_source(w)) {
+            (Ok((sb, _)), Ok(l), Ok(s)) => (sb, l, s),
+            (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => {
+                w.coverage.unsupported(format!("AbilityExecutionContext: {e}"));
+                return None;
+            }
+        };
     let mut rule = crate::rules::ability_params::RuleCalculateAbilityParams::new(a.caster, &bp);
-    rule.spellbook = Some(a.spellbook);
-    rule.spell_level = Some(a.spell_level(w));
-    rule.spell_source = a.spell_source(w);
+    rule.spellbook = Some(spellbook);
+    rule.spell_level = Some(level);
+    rule.spell_source = spell_source;
     rule.ability_data = true;
     trigger_any(w, &mut rule, |r| {
         // The oracle's snapshot of `Result` has its computed `IsChanged` too.
@@ -566,7 +717,7 @@ pub fn begin_cast(w: &mut World, a: &Ability, target: EntityIdx) -> Option<u32> 
         spell_descriptor: super::rules::spell_descriptor(&bp),
         source_ability: Some(SourceAbility {
             blueprint: bp.guid,
-            spellbook: Some(a.spellbook),
+            spellbook: Some(spellbook),
             school: a.school(w),
         }),
         ..MechanicsContext::default()
@@ -611,14 +762,20 @@ pub fn cast(w: &mut World, i: u32, cutscene: bool) -> Option<CastOutcome> {
 /// `AbilityData.Spend()` of a spellbook spell: no material component, no item, the spellbook's
 /// slot (`SpendFromSpellbook`: `SpellSlotCost` charges), no resources.
 fn spend(w: &mut World, a: &Ability) {
-    if a.spell.save_spellbook_slot {
+    // (Only a spellbook spell's cast begins: `begin_cast`.)
+    let Ok((spellbook, spell)) = a.book("Spend") else {
+        w.coverage.unsupported("AbilityData.Spend of an ability fact's AbilityData");
+        return;
+    };
+    if spell.save_spellbook_slot {
         return;
     }
-    let cost = arith::add(1, a.spell.extra_spell_slot_cost);
+    let cost = arith::add(1, spell.extra_spell_slot_cost);
     let mut n = cost;
+    let spell = spell.clone();
     while n > 0 {
         n -= 1;
-        crate::spellbook::spend_spell(w, a.caster, a.spellbook, &a.spell, true);
+        crate::spellbook::spend_spell(w, a.caster, spellbook, &spell, true);
     }
 }
 
@@ -702,9 +859,16 @@ impl RuleEvent for RuleCastSpell {
             return;
         }
         // `IsAffectedByArcaneSpellFailure`: an arcane spellbook spell without touch delivery.
-        let standalone =
-            crate::spellbook::standalone_mythic(w, c.ability.caster, c.ability.spellbook);
-        if c.ability.spell_source(w) == source::ARCANE && !standalone && !forced {
+        let (spellbook, spell_source) =
+            match (c.ability.book("RuleCastSpell"), c.ability.spell_source(w)) {
+                (Ok((sb, _)), Ok(s)) => (sb, s),
+                (Err(e), _) | (_, Err(e)) => {
+                    w.coverage.unsupported(format!("RuleCastSpell: {e}"));
+                    return;
+                }
+            };
+        let standalone = crate::spellbook::standalone_mythic(w, c.ability.caster, spellbook);
+        if spell_source == source::ARCANE && !standalone && !forced {
             w.coverage.unsupported("RuleCastSpell: arcane spell failure");
             return;
         }
@@ -733,7 +897,7 @@ pub fn spell_inputs(w: &World, ctx: u32, target: Option<EntityIdx>) -> Option<J>
         })
     });
     Some(json!({
-        "Spell": { "$ability": c.ability.spell.blueprint.to_string(), "caster": caster },
+        "Spell": { "$ability": c.ability.blueprint().to_string(), "caster": caster },
         "Context": { "$context": context, "caster": caster },
         "SpellTarget": spell_target,
     }))

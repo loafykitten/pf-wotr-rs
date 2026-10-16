@@ -616,7 +616,7 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
         };
     }
     if let Some(r) = any.downcast_ref::<crate::combat::spells::RuleCastSpell>() {
-        let a = w.combat.spells.context(r.ctx).map(|c| c.ability.spell.blueprint);
+        let a = w.combat.spells.context(r.ctx).map(|c| c.ability.blueprint());
         if let Some(spell) = a {
             return Payload::CastSpell {
                 initiator: r.initiator,

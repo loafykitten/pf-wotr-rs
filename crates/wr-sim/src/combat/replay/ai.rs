@@ -593,7 +593,8 @@ impl AiInputs for Driver<'_> {
         {
             return self.uc_reject(at, "the AI's Run of another command, or one it can't read");
         }
-        // `new UnitAttack(target)` with its `AiAction`: nothing else set.
+        // `new UnitAttack(target)` or `new UnitUseAbility(type, ability, target)` with its
+        // `AiAction`: nothing else set.
         let Some(x) = w.combat.commands.cmds.get(&c) else {
             return self.uc_reject(at, "the AI's command isn't described");
         };
@@ -608,9 +609,12 @@ impl AiInputs for Driver<'_> {
             && !x.mount
             && x.bases.is_empty();
         // The constructor's approach: `ApproachRadius` 0.3, no maximum, not `DistanceXZ`, `NeedLoS`
-        // (`UnitAttack`'s).
+        // (`UnitAttack`'s; a `UnitUseAbility`'s by its ability).
         let approach = x.ap.as_ref().is_none_or(|a| {
-            a.radius.to_bits() == 0.3f32.to_bits() && a.max_radius == 0.0 && !a.xz && a.los
+            a.radius.to_bits() == 0.3f32.to_bits()
+                && a.max_radius == 0.0
+                && !a.xz
+                && a.los == spec.los
         });
         let attack_flags = x.ua.as_ref().is_none_or(|a| {
             let f = &a.flags;

@@ -189,6 +189,10 @@ impl Loader<'_> {
         fact.is_suppressed = o.bool_or("IsSuppressed", false);
         fact.parent_context = clr == "ItemEnchantment" && o.obj("ParentContext").is_some();
         fact.param = o.get("Param").and_then(|v| to_json(v, o.ix)).filter(|v| !v.is_null());
+        fact.ability_saved_extras = clr == "Ability"
+            && ["UsagesPerDayResource", "StickyTouch"]
+                .iter()
+                .any(|k| o.get(k).is_some_and(|v| !matches!(v, wr_save::value::Value::Null)));
         if clr == "Buff" {
             fact.buff = Some(crate::world::BuffTimes {
                 end_time: o.timespan("m_EndTime"),

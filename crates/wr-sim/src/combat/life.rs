@@ -392,6 +392,7 @@ fn combat_state_clear(w: &mut World, u: EntityIdx) {
     super::engage::clear(w, u);
     super::targets::clear(w, u);
     super::impatience::clear(w, u);
+    super::ai::clear_combat_info(w, u);
 }
 
 /// `if (SettingsRoot.Difficulty.RemoveAnnoyingBuffsAfterCombat) Buffs.RemoveAnnoyingBuffs()`:
