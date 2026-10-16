@@ -288,9 +288,12 @@ point and collider (`scene:path (type)`, the importer's shape name, which must n
 sibling path `sib` must have an index per ancestor: the file keeps no sibling indices), bit for bit. Inside `TickMovement`'s `Move` the
 query's arguments are the sim's (`AgentPhysics` answered by the driver); inside a movement simulation step the sim
 runs (below) likewise; inside a span the driven replay takes from the recording (real time: the walk-up, the agent's
-code isn't run there) the arguments are the recording's and only the answer is checked; so are another caller's
-(`ctx: "other"`: a critter's move, presentation), except that one `wr-phys` can't answer is taken there, not
-reported (the sim never uses it). A query `wr-phys` answers
+code isn't run there) the arguments are the recording's and only the answer is checked; so are a critter's
+(`ctx: "critter"`, named) and another caller's (`ctx: "other"`, with its caller chain `origin`: presentation), except
+that one `wr-phys` can't answer is taken there, not reported (the sim never uses it). Those two are exempt only as
+exactly the record WrathOracle writes (no unit, the critter's identity or a non-empty `origin`, the query's fields, a
+finite result and the collider when it hit); any other `critter` or `other` record, in a span too, is reported. (`-121`'s
+`other` records predate `origin` and are reported.) A query `wr-phys` answers
 `Unverified` (a box, a mesh or another collider within reach) or `Unsupported` is reported (`driven replay:
 physics: ...`) and the recorded answer taken; none occurs here. With observer `phys_probe` the recorded global query
 settings must be `wr-phys`'s (`ph_settings`: back faces not hit; triggers fail closed in `wr-phys` either way).
@@ -366,12 +369,18 @@ view stood elsewhere, or its own controller). `poc5-tb-128` showed why it can't 
 still (`529A`, 215 frames) has its view 4.5e-6 m above its position. The step computes the ground position, sets the
 view's transform to it and then `data.Position` to it, whose setter keeps the old position when `Vector3 ==` holds
 (within about 1e-5 m), so the view and the unit differ; `ag_ground` recorded only the unit's position after. WrathOracle
-now records, declared `ground_view` (`CommandObsAgent.cs`, written in this stream, not yet recorded), the view's position
-after (`vafter`), `FlyHeight`, the view's `IsProne` and its torso's position when prone, and the step's rays as `ag_phys`
+now records, declared `ground_view` (`CommandObsAgent.cs`, first recorded in `poc5-tb-129`), the view's position
+after (`vafter`), `FlyHeight`, the view's `IsProne` and, when prone, its torso's position and the prone action's
+`AllowFallingBelowGround` (`fall`, added after `-129`: true skips the torso's ray), and the step's rays as `ag_phys`
 with ctx `ground`; with it the sim runs the step (`nav_ground`): the ray from 50 m above (else 5, 10, .. 95 m above), the
 prone torso's ray and its clamp, the unit raised by the difference and `FlyHeight` (an input), the view given the result
-and the unit the setter's, every ray `wr-phys`'s and checked, the result checked against `after` and `vafter`. Captures
-before it keep the step an input, so `-128` reports the view's difference until it is re-recorded.
+and the unit the setter's, every ray `wr-phys`'s and checked, the result checked against `after` and `vafter`. The
+torso's ray is required when `fall` is false and reported when it's true; in a capture without `fall` only a recorded
+torso ray establishes it false, and a prone step without one is reported. Captures before `ground_view` keep the step an
+input, so `-128` reports the view's difference. `-129` (tb-lizard, Ember's `Manual_18`, recorded with `ground_view`)
+computes 7 steps per run, view included, with no report (its 300 prone steps are in spans taken from the recording,
+their rays checked as span physics); it is valid but for the cave wall's mesh queries (1,511 to 1,513 per run,
+`Unverified`, fail-closed as on `-121`).
 
 **Still inputs:** when a path is delivered (`PathSync`), line of sight (search and simulation), the units'
 corpulences, `MaxSpeed`/`FlyHeight` in the simulation, the Unity clock the navigation timer reads (a replay's are
