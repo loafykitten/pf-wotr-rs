@@ -1289,4 +1289,41 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
         })];
         damage_cases_of(&chain, "record", &stale, false);
     }
+    // The place-on-ground step (`ground_view`, `poc5-tb-129`: its run invalid on the cave wall's
+    // mesh queries only). Its standing units' steps are the ones the sim computes.
+    if let Some(lizard) = fixture_in("poc5-tb-129", "tb-lizard") {
+        fn step(recs: &[V]) -> usize {
+            tb(recs, |r| ev(r, "ag_ground") && r["prone"] == false)
+        }
+        fn ray(recs: &[V]) -> usize {
+            let at = step(recs);
+            (0..at).rev().find(|j| ev(&recs[*j], "ag_phys") && recs[*j]["ctx"] == "ground").unwrap()
+        }
+        let ground: Vec<(&str, Change)> = vec![
+            ("the place-on-ground step: the sim's", |recs| {
+                let at = step(recs);
+                let y = recs[at]["vafter"][1].as_f64().unwrap();
+                recs[at]["vafter"][1] = json!(y + 0.001);
+            }),
+            ("a ray query from", |recs| {
+                let at = ray(recs);
+                let y = recs[at]["pt"][1].as_f64().unwrap();
+                recs[at]["pt"][1] = json!(y + 0.01);
+            }),
+            ("AllowFallingBelowGround it can't read", |recs| {
+                let at = step(recs);
+                recs[at]["fall"] = json!(true);
+            }),
+            ("place-on-ground record it can't read", |recs| {
+                let at = step(recs);
+                recs[at].as_object_mut().unwrap().remove("fly");
+            }),
+            ("ground", |recs| {
+                let at = ray(recs);
+                recs.remove(at);
+                renumber(recs);
+            }),
+        ];
+        damage_cases_of(&lizard, "record", &ground, false);
+    }
 }
