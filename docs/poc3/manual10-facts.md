@@ -91,32 +91,86 @@ In load order:
   slots through `items::hand_maybe_weapon`, `hand_has_weapon`, `limb_slots`. The combat code's own
   slot reads (`combat/weapon.rs`) don't use them yet (other streams own that directory).
 
+## Area parts and suppression (stream R, same session)
+
+`wr-sim hydrate Manual_10` against the same dump [M]:
+
+| | before (stream E) | after |
+|---|---|---|
+| match rate | 0.9988 | **0.9989** |
+| facts on one side only | 17 | **0** |
+| `fact.id` equal | 21,884 / 21,900 | 21,884 / 21,900 (the 16 below) |
+| `facts.order` equal | 520 / 539 | **537 / 539** |
+| unsupported kinds at load | 205 | **201** |
+| unsupported reports at load | 51,339 | 49,922 |
+
+(Stream Q's merge had moved E's numbers slightly: 0.9988 and 205 kinds are the base this was
+measured from.) The kinds gone: `SleepingUnitsController: suppressed units (area parts)` (430
+reports), `EntityCreationController.ShouldSpawnOptimizedDummy: area part bounds` (488),
+`UnitActivatableAbilitiesController: area unit with a toggle to tick (AwakeUnits)` (411) and
+`SleepingUnitsController: a toggle acts on a unit taken as awake at load` (19).
+
+**The rule** [C]: an area with parts (`BlueprintArea.HasParts`) loads one of them as
+`SceneLoader.CurrentlyLoadedAreaPart`, which `AreaService.CurrentAreaPart` answers. Loading a save
+(`LoadAreaCoroutine`, no area loaded before it, no enter point) takes the save's `AreaPart` (the
+player's `CurrentAreaPart`), or the area, and corrects it to
+`AreaService.FindLocalMapBoundsContainsPoint(area, main character's position)`: the area if its own
+`LocalMapBounds` contain the point in x and z (`GeometryUtils.ContainsXZ`, 0.1 of slack), else the
+first part whose do, else the closest by `ManhattanDistance2D` (the area first among equals).
+`SuppressEntitiesController` is the first controller of every game mode's frame; `Activate` sets
+`m_UpdateAll`, so its first tick after the load evaluates every suppressible entity:
+`Suppressed = HoldingState != CrossSceneState && !MechanicBounds.ContainsXZ(Position)` (`m_Suppressed`
+isn't saved, and nothing else sets it). `SleepingUnitsController`, later in the same frame, puts a
+suppressed unit to sleep before its `AwakeTimer` is read, so a unit spawned at load outside the bounds
+is asleep at the first tick despite the wake its creation gave it, and the activatable-abilities
+controller doesn't tick it. `EntityCreationController.ShouldSpawnOptimizedDummy` gives a unit spawned
+into the area's state outside the bounds (3D `Bounds.Contains`, no slack) the optimization dummy's view.
+
+**The data** [C]: each part's bounds are an `AreaPartBounds` asset, not a blueprint; the runtime pack
+holds `m_Bounds` as an index into `BlueprintReferencedAssets`. `wr-rules-data` now also extracts every
+`AreaPartBounds` that list holds in `blueprint.assets` (544; default, mechanic and local-map bounds with
+their overrides) into `cache/sim/area-bounds.json`, by index (`crate::area_parts::AreaBoundsTable`). A
+scene cache wasn't needed: the bounds aren't scene data. Rerun `wr-rules-data` to write the file.
+
+**In Manual_10** [M]: the area is `DrezenCapital`, whose own bounds asset is `DrezenThroneRoomBounds`
+(mechanic bounds centred at x ≈ 200, z ≈ -2, 24 each way); the main character (x 185.19, z -7.8) is in
+its local map, so the loaded part is the area itself, as saved. The 17 sleeping vendors and officers are
+outside, the gold golem and Anevia inside: the sim now starts exactly the toggles the oracle starts, with
+no unit's awake state assumed.
+
+**Computed** (`crates/wr-sim/src/area_parts.rs`): the loaded part (`establish`, before the area's states
+load; a part other than the saved one is reported, since the etudes still read the saved one), suppression
+at the first tick (`suppressed_at_load`, in `spawn::awake_after_spawn`'s `ShouldBeSleeping`), and the dummy
+view of placeholders and spawners (`outside_mechanic_bounds`). `Bounds.Contains` is `wr-nav`'s port, checked
+against the player; `ContainsXZ` and `ManhattanDistance2D` follow Mono's double evaluation. A missing
+table, an index the table doesn't hold or a zip-sourced reference fails closed (the old reports). Still
+reported: suppression in later frames (`SuppressEntitiesController` re-evaluates only entities that moved
+or joined a state, at the start of the frame; the sim doesn't follow that), the entity pool's suppressed
+entities (`EntityPoolEnumerator`, in later frames), and `UpdateHasDummyView`'s later view swaps.
+
 ## What is left
 
-- **The 17 toggles on sleeping units** (vendors and officers of Drezen: `InspiredRageAllyToggleSwitchBuff`).
-  [C] `SleepingUnitsController.ShouldBeSleeping` checks, in order: out of the game, fake,
-  `Suppressed`; a companion; then `AwakeTimer`. A unit spawned at load is woken by its creation
-  (`CreateEntityData` sets `Position`, whose setter calls `Wake()`: `AwakeTimer = 0`, counted down
-  only after that tick), so the camera, cutscene, fog-of-war and command checks after the timer
-  don't apply to it: it is awake at the first tick unless something before the timer puts it to
-  sleep. The sim now establishes that (`awake_after_spawn`): in Manual_13, 19 and 20 (no area
-  parts) every such unit is awake, as the oracle shows (Manual_13's cave monsters, far from the
-  party, start their toggles with the same ids as the sim's). [M] Manual_10's area has parts:
-  `SuppressEntitiesController` suppresses units outside the current part's `MechanicBounds`, and
-  the 17 sleeping units are all far from the party (x ≤ 69 against the party's 185) while the two
-  that are awake (the gold golem and Anevia, x ≈ 215) stand by it [I: suppression, not the fog of
-  war, keeps them asleep]. The sim has no area-part bounds (a scene's `AreaPartBounds`), so it
-  reports suppression as unknown (as before) and now also each unit whose toggle it starts on
-  that assumption (`SleepingUnitsController: a toggle acts on a unit taken as awake at load`,
-  19 units). Closing it needs the area's part bounds in the scene cache (`wr-import`).
-- **16 ids allocated after the load** [M]: the oracle's controllers restart toggles in their
-  first ticks (`UnitActivatableAbilitiesController` → `TryStart` → `ReapplyBuff`) for 13 party
-  members' toggles the sim keeps started from the save (Lann, Woljif, Ember, Ulbrig, Sosiel,
-  Greybor, Trever), after three area effects spawn (`AddAreaEffect.OnAreaActivated` and the view's
-  `HandleCharacterParticleSnapMapUpdated`), and the main character's `LifeBondingFriendshipEffectBuff`
-  comes from an area effect's unit-enter actions. Why those toggles stopped (they are on and were
-  started when saved) isn't established yet: the next step, with the area effects (the second is
-  driven by the view).
+- **16 ids allocated after the load** [M, `manual10-ids-2`]: WrathOracle's `IdTrace` now records,
+  with the ids and their callers, each `ActivatableAbility.Stop` of a started toggle and each change
+  of a unit's `IsInGame`. It establishes why 13 of them restart. The seven remote companions (Lann,
+  Woljif, Ember, Ulbrig, Sosiel, Greybor, Trever: `CompanionState.Remote`, in game when saved) are taken
+  out of the game during the load by their scene's `CompanionSpawner`
+  (`SceneLoader.ProcessSpawnerActivationCoroutine` → `HandleAreaSpawnerInit` → `PlaceCompanion`:
+  `ShouldShowUnit` is false while capital mode is still off), which deactivates their toggles
+  (`OnIsInGameChanged` → `ActivatableAbilities.SetActive(false)` → `OnDeactivate` → `Stop`, the buffs
+  removed). Then the etude bracket `CapitalCompanionLogic.OnEnter` (`UpdateEtudes`) turns capital mode
+  on (`PlaceAllCompanions` → `SetCapitalMode` → `HandleCapitalModeChanged`), and the same spawners put
+  them back in the game (`BeginControllingCompanion` → `PlaceCompanion`). Their toggles are active,
+  on and no longer started, so the controller's first tick starts them (`TryStart` → `ReapplyBuff`: new
+  buff ids). The two others (`5FA03`, `6241B`) start in both, only later in the oracle's sequence.
+  Computing this needs
+  Drezen's scene (its `CompanionSpawner`s, their flags and `ShowCondition`s; the area has no scene cache)
+  and `CapitalCompanionLogic`; both are reported (`SceneLoader: no scene cache for the area`,
+  `CapitalCompanionLogic.OnEnter`). The other three ids come from area effects:
+  `AddAreaEffect.OnAreaActivated`, and twice the view's `HandleCharacterParticleSnapMapUpdated`
+  (presentation-timed). The main character's `LifeBondingFriendshipEffectBuff` is reapplied by an area
+  effect's unit-enter actions. Those are reported too (`AddAreaEffect.OnActivate`,
+  `AddAreaEffect: IAreaActivationHandler`, `AddAreaEffect: IAreaHandler`).
 - **In `crates/wr-sim/src/combat/` (another stream's, so not changed here)**: `AddAdditionalLimb`
   fills a limb slot directly, without `ItemSlot.InsertItem`'s `HandleEquipmentSlotUpdated`, so a
   limb added while `ShiftersFuryPart` is on or a `BuffEnchantAnyWeapon` buff is active isn't seen
@@ -126,12 +180,13 @@ In load order:
 - `facts.order` (19 units) and the stat differences left (difficulty and a few components) are
   unchanged by this work; Hurlun's difficulty modifier (-29 against -25) predates it.
 
-## Observer changes requested
+## Observer changes
 
-None needed for what was done. For the next steps: an IdTrace-style record of who calls
-`ActivatableAbility.Stop` during a load (with the call chain) would show why the party's toggles
-restart; and a dump of `Suppressed`/`IsInFogOfWar`/`AwakeTimer` per unit at the first
-`SleepingUnitsController` tick after the load would confirm the suppression inference above.
+Stream R extended `IdTrace` (schema `wrath-oracle-ids-v2`: the ids gain `seq`, and `events` holds the
+`aa_stop` and `in_game` records in the same sequence, field reads only) and recorded `manual10-ids-2`
+(plan `dump-manual10-ids.json`, as for `manual10-ids-1`). The per-unit `Suppressed`/`AwakeTimer` dump E
+proposed wasn't needed: the rule is read in the code, and its prediction matches the oracle's dump on
+every unit (each toggle the oracle starts and each it doesn't).
 
 ## Review
 
