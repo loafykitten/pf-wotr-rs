@@ -313,10 +313,20 @@ internal static class CamPin
             }
             if (!Sched.Replay || Sched.Invalid != null) return;
             // The recording's state on this tick: its last change at or before it.
-            while (_frustumPos + 1 < FrustumTape.Count && FrustumTape[_frustumPos + 1].T + Sched.Offset <= now) _frustumPos++;
+            // Moving past a recorded state needs it checked first: one a replay never compared (a controller tick
+            // it skipped) isn't followed.
+            while (_frustumPos + 1 < FrustumTape.Count && FrustumTape[_frustumPos + 1].T + Sched.Offset <= now)
+            {
+                if (_frustumChecked < _frustumPos)
+                {
+                    Sched.Invalidate($"the recording's view at tick {FrustumTape[_frustumPos].T} was never checked in the replay (passed at tick {now})");
+                    return;
+                }
+                _frustumPos++;
+            }
             var want = FrustumTape.Count > 0 && FrustumTape[_frustumPos].T + Sched.Offset <= now ? FrustumTape[_frustumPos] : null;
             if (want == null) Sched.Invalidate($"units in the camera's view at tick {now}: the recording has no state for them yet");
-            else if (Sched.SameUnitGroups(want.In, want.Out, inView, outView)) _frustumChecked = Math.Max(_frustumChecked, _frustumPos);
+            else if (Sched.SameUnitGroups(want.In, want.Out, inView, outView)) _frustumChecked = _frustumPos;
             else
                 Sched.Invalidate($"units in the camera's view at tick {now}: in [{string.Join(",", inView)}], out [{string.Join(",", outView)}]; " +
                                  $"the recording's in [{string.Join(",", want.In)}], out [{string.Join(",", want.Out)}] (tick {want.T})");
