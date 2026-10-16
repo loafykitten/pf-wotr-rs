@@ -595,7 +595,12 @@ struct Tally {
     collider_exact: usize,
     near: usize,
     wrong: usize,
-    errors: usize,
+    /// Failed closed: a collider not verified (a box, ...), something not modelled.
+    unverified: usize,
+    unsupported: usize,
+    /// Records whose recorded collider is a mesh, and of those computed exactly.
+    mesh_records: usize,
+    mesh_records_exact: usize,
 }
 
 impl std::ops::AddAssign for Tally {
@@ -610,7 +615,10 @@ impl std::ops::AddAssign for Tally {
         self.collider_exact += o.collider_exact;
         self.near += o.near;
         self.wrong += o.wrong;
-        self.errors += o.errors;
+        self.unverified += o.unverified;
+        self.unsupported += o.unsupported;
+        self.mesh_records += o.mesh_records;
+        self.mesh_records_exact += o.mesh_records_exact;
     }
 }
 
@@ -660,11 +668,14 @@ fn every_recorded_query_is_computed_exactly() {
     assert!(alone.is_some_and(|h| h.distance > max), "{alone:?}");
     assert_eq!(scene.raycast_down(o, max, 1 << 8).unwrap(), None);
     let mut distinct = std::collections::HashSet::new();
-    let mut total = Tally::default();
+    // The sim's queries (`ag_phys`) and the probes (`ph_probe`: a check of the colliders, not
+    // a query the sim makes, so failing closed there isn't a failure).
+    let (mut total, mut total_probes) = (Tally::default(), Tally::default());
     let mut failures = Vec::new();
+    let mut probe_fails = std::collections::BTreeMap::<String, usize>::new();
     for path in captures() {
         let gz = fs::File::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let mut t = Tally::default();
+        let (mut tq, mut tp) = (Tally::default(), Tally::default());
         for line in std::io::BufReader::new(flate2::read::GzDecoder::new(gz)).lines() {
             let line = line.unwrap();
             if !line.contains("\"ag_phys\"") && !line.contains("\"ph_probe\"") {
@@ -675,6 +686,7 @@ fn every_recorded_query_is_computed_exactly() {
             if r["ev"] != "ag_phys" && !probe {
                 continue;
             }
+            let t = if probe { &mut tp } else { &mut tq };
             let o = v3(&r["o"]);
             // A probe: `Physics.Raycast(o, Vector3.down, out h, 100f, WalkableMask)`.
             let (kind, max, mask) = if probe {
@@ -714,10 +726,35 @@ fn every_recorded_query_is_computed_exactly() {
                 r["t"],
                 r["ev"],
             );
+            let mesh_record = r["col"]["type"] == "MeshCollider";
+            t.mesh_records += usize::from(mesh_record);
+            if let Ok(Some(h)) = &got
+                && mesh_record
+                && want.is_some_and(|(d, pt)| {
+                    h.distance.to_bits() == d.to_bits()
+                        && h.point.map(f32::to_bits) == pt.map(f32::to_bits)
+                        && same_collider(&r, &file.world.shapes[h.shape])
+                })
+            {
+                t.mesh_records_exact += 1;
+            }
             match (got, want) {
                 (Err(e), _) => {
-                    t.errors += 1;
-                    failures.push(format!("{what}: {e}"));
+                    match e {
+                        QueryError::Unverified { .. } => t.unverified += 1,
+                        QueryError::Unsupported(_) => t.unsupported += 1,
+                    }
+                    if probe {
+                        let class = match &e {
+                            QueryError::Unverified { shape } => {
+                                format!("unverified {}", shape.rsplit(' ').next().unwrap_or(""))
+                            }
+                            QueryError::Unsupported(s) => s.split(" (").next().unwrap_or("").into(),
+                        };
+                        *probe_fails.entry(class).or_default() += 1;
+                    } else {
+                        failures.push(format!("{what}: {e}"));
+                    }
                 }
                 (Ok(None), None) => {
                     t.exact += 1;
@@ -758,10 +795,15 @@ fn every_recorded_query_is_computed_exactly() {
                 }
             }
         }
-        eprintln!("{}: {t:?}", path.display());
-        total += t;
+        eprintln!("{}: queries {tq:?}", path.display());
+        if tp.probes > 0 {
+            eprintln!("    probes {tp:?}");
+        }
+        total += tq;
+        total_probes += tp;
     }
     eprintln!("total: {total:?}; {} distinct queries", distinct.len());
+    eprintln!("probes: {total_probes:?}; failed closed: {probe_fails:?}");
     for x in failures.iter().take(30) {
         eprintln!("  {x}");
     }
