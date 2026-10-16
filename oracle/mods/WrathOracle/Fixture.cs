@@ -133,6 +133,7 @@ internal static class Fixture
         // The colliders and a probe of them (observer phys_probe; reads only), where the window records
         // observations (Sched.On: turn-based windows), so no unrecorded query runs elsewhere.
         if (Fidelity.Observers.Contains("phys_probe") && Sched.On) PhysProbe.Run();
+        CamPin.WindowOpen(); // the camera's view of extra and dead units at the window's open (reads only)
         Main.Note($"fixture {Mode} {name} -> {PathNow}");
         PrePathSync.Flush(Time.frameCount);
         if (prePath != null && Sched.Replay) Sched.Invalidate(prePath);

@@ -759,21 +759,33 @@ doesn't need to know.
   `CommandControlCamera.IsFinished`. They read the rig's 2D distance to the target, `IsScrollActive` and
   `IsRotationActive`, and their result decides when the cutscene's track moves on.
   - Each call is noted as `cam_cmd` (`cmd`: the command's type and blueprint; `n`: its ordinal for that command;
-    `v`).
-  - A replay's call must be the recording's next for that command, on its tick plus the offset. It returns the
-    recorded result without running the original, which reads nothing else. The replay's own record says `pin`.
+    `player`: the cutscene player's id; `v`).
+  - A replay's call must be the recording's next for that command, on its tick plus the offset, and of the same
+    player. Players are bound one to one as units are, so two players of one cutscene can't trade results. It
+    returns the recorded result without running the original, which reads nothing else. The replay's own record
+    says `pin`.
 - **The camera's view, checked:** `EntitiesInCameraFrustumController` sets every entity's `IsInCameraFrustum` from
-  the rig's position and frustum. `SleepingUnitsController` reads it for extra units, which sleep out of view, and
-  for dead ones (`IsDeathRevealed`, then `HasDummyView`, which is saved).
-  - After each of its ticks, the state of those units (in view, out of view; `Rules.StableId`) is noted as
-    `cam_frustum` when it changes.
-  - A replay's state must equal the recording's on every tick (its last change at or before the tick, plus the
-    offset); otherwise the replay is invalid.
+  the rig's position and frustum. Gameplay reads it:
+  - for extra units (`SleepingUnitsController`: they sleep out of view);
+  - for finally dead ones (`IsDeathRevealed`, then `HasDummyView`, which is saved);
+  - for dead ones whose view's visibility changes (`UnitEntityView.OnVisibilityChanged`);
+  - for the dying unit itself (`HandleDeath`, before the controller's next tick). `DeathFxPin`'s `death_fx` now
+    carries this as `view`, and a replay must match it.
+  - The state of extra and dead units (the ids in view and out of view) is noted as `cam_frustum` (`in`, `out`):
+    once at the window's open (tick -1, the state the first ticks read, since `SleepingUnitsController` runs before
+    the frustum controller), then after each of the controller's ticks when it changes.
+  - A replay's state must be the recording's on every tick (its last change at or before the tick, plus the
+    offset). Ids are matched one to one (`Sched.SameUnits`): the window's starting units and short ids by id,
+    units made in the window bound.
   - It is checked, not pinned: it follows from the camera's position, which no pin sets.
+- **Alushenyrra's isles, checked:** `IslesController.TickCameraRotation` turns the camera's yaw into a direction
+  whose changes drive isle states (their actions, navmesh cuts). Combat locks it, but a window's walks don't. Each
+  change is noted as `cam_isle` (`dir`), and a replay's change must be the recording's next, on its tick plus the
+  offset.
 - The other readers are presentation: overtips, the IK controller, effects, sound, the UI, dialogue camera
   placement, and the cutscene art controller.
 
-**Tape and damaged-tape test.** All three are loaded with the recording's tape and validated: fields typed, ordinals
+**Tape and damaged-tape test.** All of them are loaded with the recording's tape and validated: fields typed, ordinals
 consecutive, views in tick order. A recording without `camera_gates` among its observers is invalid in its replay
 at once. End record: `camera_scroll_queries`, `camera_command_queries`, `camera_view_changes`.
 

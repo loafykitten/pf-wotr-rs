@@ -43,7 +43,7 @@ internal static class DeathFxPin
     public static bool Installed, RecordedOn;
     public static long Deaths, Pinned, Inits;
 
-    private sealed class Death { public string K, Id, Type; public int T; public bool Start, Ambiguous; public bool? Dsm, Limbs; public bool Matched; }
+    private sealed class Death { public string K, Id, Type; public int T; public bool Start, Ambiguous, View; public bool? Dsm, Limbs; public bool Matched; }
     private sealed class Init { public string U, Id; public int T; public bool InGame, Seen; }
 
     private static readonly Dictionary<string, Death> Tape = new Dictionary<string, Death>();
@@ -86,11 +86,11 @@ internal static class DeathFxPin
         {
             var k = S("p");
             var id = S("id");
-            if (k == null || id == null || t < 0 || B("start") == null || !BoolOrNull("dsm") || !BoolOrNull("limbs") ||
+            if (k == null || id == null || t < 0 || B("start") == null || B("view") == null || !BoolOrNull("dsm") || !BoolOrNull("limbs") ||
                 !(o["type"]?.Type == JTokenType.String || o["type"]?.Type == JTokenType.Null))
             { Sched.Invalidate("recording's death_fx record lacks or mistypes a field"); return; }
             if (Tape.ContainsKey(k)) { Sched.Invalidate($"recording's death {k} twice"); return; }
-            Tape[k] = new Death { K = k, Id = id, T = t, Start = B("start").Value, Dsm = B("dsm"), Limbs = B("limbs"), Type = S("type") };
+            Tape[k] = new Death { K = k, Id = id, T = t, Start = B("start").Value, View = B("view").Value, Dsm = B("dsm"), Limbs = B("limbs"), Type = S("type") };
         }
         else
         {
@@ -115,7 +115,8 @@ internal static class DeathFxPin
             PerUnit[key] = n + 1;
             var k = key + "#" + n;
             _view = __instance;
-            _now = new Death { K = k, Id = unit?.UniqueId ?? "?", T = Trace.Tick, Ambiguous = ambiguous };
+            // HandleDeath reveals the body if it is in the camera's view (IsDeathRevealed): a gameplay read of the camera.
+            _now = new Death { K = k, Id = unit?.UniqueId ?? "?", T = Trace.Tick, Ambiguous = ambiguous, View = unit != null && unit.IsInCameraFrustum };
             Deaths++;
             if (!Sched.Replay) return;
             if (ambiguous)
@@ -143,7 +144,7 @@ internal static class DeathFxPin
         {
             Note("death_fx", j =>
             {
-                j.Prop("p", now.K); j.Prop("id", now.Id); j.Prop("start", now.Start); j.Prop("dsm", now.Dsm); j.Prop("limbs", now.Limbs); j.Prop("type", now.Type);
+                j.Prop("p", now.K); j.Prop("id", now.Id); j.Prop("view", now.View); j.Prop("start", now.Start); j.Prop("dsm", now.Dsm); j.Prop("limbs", now.Limbs); j.Prop("type", now.Type);
                 if (now.Ambiguous) j.Prop("ambiguous", true);
                 if (__exception != null) j.Prop("exc", __exception.GetType().Name);
             });
@@ -152,9 +153,9 @@ internal static class DeathFxPin
                 if (Sched.Replay) Sched.Invalidate($"death {now.K}: HandleDeath threw {__exception.GetType().Name}");
                 return __exception;
             }
-            if (rec != null && (now.Start != rec.Start || now.Dsm != rec.Dsm || now.Limbs != rec.Limbs || now.Type != rec.Type))
-                Sched.Invalidate($"death {now.K} at tick {now.T}: effect started {now.Start}, dismember {F(now.Dsm)}, limbs apart {F(now.Limbs)}, type {now.Type ?? "-"}; " +
-                                 $"the recording's {rec.Start}, {F(rec.Dsm)}, {F(rec.Limbs)}, {rec.Type ?? "-"}");
+            if (rec != null && (now.View != rec.View || now.Start != rec.Start || now.Dsm != rec.Dsm || now.Limbs != rec.Limbs || now.Type != rec.Type))
+                Sched.Invalidate($"death {now.K} at tick {now.T}: in view {now.View}, effect started {now.Start}, dismember {F(now.Dsm)}, limbs apart {F(now.Limbs)}, type {now.Type ?? "-"}; " +
+                                 $"the recording's {rec.View}, {rec.Start}, {F(rec.Dsm)}, {F(rec.Limbs)}, {rec.Type ?? "-"}");
         }
         catch (Exception e) { Trace.HookFailed("death effect end", e); }
         return __exception;

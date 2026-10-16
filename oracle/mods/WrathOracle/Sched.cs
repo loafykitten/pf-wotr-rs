@@ -298,6 +298,33 @@ internal static class Sched
         return true;
     }
 
+    // A long id the window made (run-specific), not one existing at its open.
+    private static bool Made(string id) => id != null && id.Length > 8 && !StartUnits.Contains(id);
+
+    // Whether the recording's ids `rec` and the replay's `now` name the same units, one to one (SameUnit's rules:
+    // existing and short ids equal, made ids bound; ids unbound so far are bound in order).
+    public static bool SameUnits(IList<string> rec, IList<string> now)
+    {
+        if (rec.Count != now.Count) return false;
+        var rest = new List<string>(now);
+        var unbound = new List<string>();
+        foreach (var r in rec)
+        {
+            if (!Made(r)) { if (!rest.Remove(r) || Made(r)) return false; }
+            else if (RootBind.TryGetValue(r, out var b)) { if (!rest.Remove(b)) return false; }
+            else unbound.Add(r);
+        }
+        foreach (var r in unbound)
+        {
+            var x = rest.FirstOrDefault(m => Made(m) && !RootBindBack.ContainsKey(m));
+            if (x == null) return false;
+            RootBind[r] = x;
+            RootBindBack[x] = r;
+            rest.Remove(x);
+        }
+        return rest.Count == 0;
+    }
+
     // ---- inputs ----
 
     // Every input record goes through here: a replay must make the recorded input, at the

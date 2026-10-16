@@ -35,12 +35,17 @@ namespace WrathOracle;
 //  - The cutscene commands whose completion reads the camera (pinned): CommandMoveCamera.IsFinished and
 //    CommandControlCamera.IsFinished read the rig's distance to the target, IsScrollActive and
 //    IsRotationActive; their result decides when a cutscene's track moves on. Each call is noted ("cam_cmd": the
-//    command, its ordinal, the result) and a replay returns the recorded result in the same way.
+//    command, its ordinal, the cutscene player's id, the result) and a replay returns the recorded result in the
+//    same way, the player bound as units are (Sched.SameUnit).
 //  - The entities in the camera's frustum (checked, not pinned): EntitiesInCameraFrustumController sets
-//    IsInCameraFrustum from the rig's position, and SleepingUnitsController reads it for extra units (asleep out
-//    of view) and dead ones (IsDeathRevealed). After each of its ticks the state of those units is noted when it
-//    changes ("cam_frustum": the units in view, the units out of view) and a replay's must equal the recording's
-//    on every tick.
+//    IsInCameraFrustum from the rig's position; SleepingUnitsController reads it for extra units (asleep out of
+//    view) and finally dead ones (IsDeathRevealed), UnitEntityView.OnVisibilityChanged for dead ones, HandleDeath
+//    for the dying (DeathFxPin's "view"). The state of extra and dead units (in view, out of view: their ids) is
+//    noted at the window's open and after each of the controller's ticks when it changes ("cam_frustum"); a
+//    replay's must be the recording's on every tick (Sched.SameUnits).
+//  - Alushenyrra's isles (checked): IslesController.TickCameraRotation turns the camera's yaw into a direction
+//    whose changes drive isle states (their actions, navmesh cuts). Each change is noted ("cam_isle") and a
+//    replay's must be the recording's, on its tick.
 // The camera's other readers are presentation (UI, overtips, IK, effects, sound).
 internal static class CamPin
 {
@@ -48,11 +53,14 @@ internal static class CamPin
     public static long Scrolls, Commands, FrustumChanges;
 
     private sealed class Query { public string Site, Key, Unit; public int T; public bool Routine, V, Used; }
-    private sealed class Frustum { public int T; public string S; }
+    private sealed class Frustum { public int T; public List<string> In, Out; }
+    private sealed class Isle { public int T; public string Dir; }
 
     private static readonly List<Query> ScrollTape = new List<Query>();
     private static readonly Dictionary<string, List<Query>> CmdTape = new Dictionary<string, List<Query>>();
     private static readonly List<Frustum> FrustumTape = new List<Frustum>();
+    private static readonly List<Isle> IsleTape = new List<Isle>();
+    private static int _islePos;
     private static int _scrollPos, _frustumPos;
     private static readonly Dictionary<string, int> CmdPos = new Dictionary<string, int>();
     private static string _frustumLast;
@@ -63,8 +71,8 @@ internal static class CamPin
 
     public static void ResetWindow()
     {
-        ScrollTape.Clear(); CmdTape.Clear(); FrustumTape.Clear(); CmdPos.Clear();
-        _scrollPos = _frustumPos = 0;
+        ScrollTape.Clear(); CmdTape.Clear(); FrustumTape.Clear(); CmdPos.Clear(); IsleTape.Clear();
+        _scrollPos = _frustumPos = _islePos = 0;
         _frustumLast = null;
         _perturbNote = null;
         RecordedOn = false;
@@ -78,7 +86,7 @@ internal static class CamPin
     public static void TapeRecord(JObject o)
     {
         var ev = (string)o["ev"];
-        if (ev != "cam_scroll" && ev != "cam_cmd" && ev != "cam_frustum") return;
+        if (ev != "cam_scroll" && ev != "cam_cmd" && ev != "cam_frustum" && ev != "cam_isle") return;
         var t = o["t"]?.Type == JTokenType.Integer ? (int)o["t"] : -1;
         string S(string f) => o[f]?.Type == JTokenType.String ? (string)o[f] : null;
         bool? B(string f) => o[f]?.Type == JTokenType.Boolean ? (bool)o[f] : (bool?)null;
@@ -95,17 +103,26 @@ internal static class CamPin
         {
             var key = S("cmd");
             var n = I("n");
-            if (key == null || t < 0 || n == null || B("v") == null) { Sched.Invalidate("recording's cam_cmd record lacks or mistypes a field"); return; }
+            if (key == null || t < 0 || n == null || B("v") == null || S("player") == null) { Sched.Invalidate("recording's cam_cmd record lacks or mistypes a field"); return; }
             if (!CmdTape.TryGetValue(key, out var list)) CmdTape[key] = list = new List<Query>();
             if (n != list.Count) { Sched.Invalidate($"recording's cam_cmd records of {key} misnumbered"); return; }
-            list.Add(new Query { Site = "cmd", Key = key, T = t, V = B("v").Value });
+            list.Add(new Query { Site = "cmd", Key = key, Unit = S("player"), T = t, V = B("v").Value });
+        }
+        else if (ev == "cam_isle")
+        {
+            var dir = S("dir");
+            if (t < 0 || dir == null) { Sched.Invalidate("recording's cam_isle record lacks a field"); return; }
+            IsleTape.Add(new Isle { T = t, Dir = dir });
         }
         else
         {
-            var s = S("s");
-            if (t < 0 || s == null || (FrustumTape.Count > 0 && FrustumTape[FrustumTape.Count - 1].T >= t))
+            List<string> L(string f) => o[f] is JArray a && a.All(x => x.Type == JTokenType.String) ? a.Select(x => (string)x).ToList() : null;
+            var inV = L("in");
+            var outV = L("out");
+            // The window's open is tick -1.
+            if (t < -1 || inV == null || outV == null || (FrustumTape.Count > 0 && FrustumTape[FrustumTape.Count - 1].T >= t))
             { Sched.Invalidate("recording's cam_frustum record lacks a field or is out of order"); return; }
-            FrustumTape.Add(new Frustum { T = t, S = s });
+            FrustumTape.Add(new Frustum { T = t, In = inV, Out = outV });
         }
     }
 
@@ -189,17 +206,18 @@ internal static class CamPin
     // The command's key: its type and blueprint id.
     private static string CmdKey(object cmd) => cmd.GetType().Name + ":" + (cmd is Kingmaker.Blueprints.SimpleBlueprint b ? b.AssetGuid.ToString() : "?");
 
-    public static bool CmdPrefix(object __instance, ref bool __result, out (string key, int n, bool pinned) __state)
+    public static bool CmdPrefix(object __instance, CutscenePlayerData player, ref bool __result, out (string key, int n, bool pinned, string player) __state)
     {
-        __state = (null, -1, false);
+        __state = (null, -1, false, null);
         if (!On || __instance == null) return true;
         try
         {
             var key = CmdKey(__instance);
+            var pid = player?.UniqueId ?? "-";
             CmdPos.TryGetValue(key, out var n);
             CmdPos[key] = n + 1;
             Commands++;
-            __state = (key, n, false);
+            __state = (key, n, false, pid);
             if (!Sched.Replay || Sched.Invalid != null) return true;
             if (!CmdTape.TryGetValue(key, out var list) || n >= list.Count)
             {
@@ -208,26 +226,26 @@ internal static class CamPin
             }
             var rec = list[n];
             rec.Used = true;
-            if (Trace.Tick != rec.T + Sched.Offset)
+            if (Trace.Tick != rec.T + Sched.Offset || !Sched.SameUnit(rec.Unit, pid))
             {
-                Sched.Invalidate($"camera command {key} completion query #{n} at tick {Trace.Tick}; the recording's at tick {rec.T} (offset so far {Sched.Offset})");
+                Sched.Invalidate($"camera command {key} completion query #{n} of player {pid} at tick {Trace.Tick}; the recording's of player {rec.Unit} at tick {rec.T} (offset so far {Sched.Offset})");
                 return true;
             }
             __result = rec.V;
-            __state = (key, n, true);
+            __state = (key, n, true, pid);
             return false;
         }
         catch (Exception e) { Trace.HookFailed("camera command query", e); return true; }
     }
 
-    public static void CmdPostfix(bool __result, (string key, int n, bool pinned) __state)
+    public static void CmdPostfix(bool __result, (string key, int n, bool pinned, string player) __state)
     {
         if (__state.key == null || !On) return;
         try
         {
-            var (key, n, pinned) = __state;
+            var (key, n, pinned, player) = __state;
             var v = __result;
-            Sched.Obs("cam_cmd", j => { j.Prop("cmd", key); j.Prop("n", n); j.Prop("v", v); if (pinned) j.Prop("pin", true); });
+            Sched.Obs("cam_cmd", j => { j.Prop("cmd", key); j.Prop("n", n); j.Prop("player", player); j.Prop("v", v); if (pinned) j.Prop("pin", true); });
         }
         catch (Exception e) { Trace.HookFailed("camera command query end", e); }
     }
@@ -236,34 +254,84 @@ internal static class CamPin
 
     public static void FrustumPostfix()
     {
-        if (!On) return;
+        if (On) View(Trace.Tick);
+    }
+
+    // Fixture.Begin, after the trace's begin: the state the window's first ticks read.
+    public static void WindowOpen()
+    {
+        if (On) View(Trace.Tick);
+    }
+
+    // The extra and dead units in view and out of view (raw ids, sorted), noted when changed; a replay's checked.
+    private static void View(int now)
+    {
         try
         {
             var inView = new List<string>();
             var outView = new List<string>();
             foreach (var u in StateDump.AllUnits(Kingmaker.Game.Instance))
             {
-                if (u == null || !(u.IsExtra || u.Descriptor.State.IsFinallyDead)) continue;
-                (u.IsInCameraFrustum ? inView : outView).Add(Rules.StableId(u));
+                if (u == null || u.UniqueId == null) continue;
+                var st = u.Descriptor.State;
+                if (!(u.IsExtra || st.IsDead || st.IsFinallyDead)) continue;
+                (u.IsInCameraFrustum ? inView : outView).Add(u.UniqueId);
             }
             inView.Sort(StringComparer.Ordinal);
             outView.Sort(StringComparer.Ordinal);
-            var s = new StringBuilder().Append(string.Join(",", inView)).Append('|').Append(string.Join(",", outView)).ToString();
-            var now = Trace.Tick;
+            var s = string.Join(",", inView) + "|" + string.Join(",", outView);
             if (s != _frustumLast)
             {
                 _frustumLast = s;
                 FrustumChanges++;
-                Sched.Obs("cam_frustum", j => j.Prop("s", s));
+                Sched.Obs("cam_frustum", j =>
+                {
+                    j.Arr("in"); foreach (var x in inView) j.W.WriteValue(x); j.EndArr();
+                    j.Arr("out"); foreach (var x in outView) j.W.WriteValue(x); j.EndArr();
+                });
             }
             if (!Sched.Replay || Sched.Invalid != null) return;
             // The recording's state on this tick: its last change at or before it.
             while (_frustumPos + 1 < FrustumTape.Count && FrustumTape[_frustumPos + 1].T + Sched.Offset <= now) _frustumPos++;
-            var want = FrustumTape.Count > 0 && FrustumTape[_frustumPos].T + Sched.Offset <= now ? FrustumTape[_frustumPos].S : null;
+            var want = FrustumTape.Count > 0 && FrustumTape[_frustumPos].T + Sched.Offset <= now ? FrustumTape[_frustumPos] : null;
             if (want == null) Sched.Invalidate($"units in the camera's view at tick {now}: the recording has no state for them yet");
-            else if (want != s) Sched.Invalidate($"units in the camera's view at tick {now} are {s}; the recording's {want}");
+            else if (!Sched.SameUnits(want.In, inView) || !Sched.SameUnits(want.Out, outView))
+                Sched.Invalidate($"units in the camera's view at tick {now}: in [{string.Join(",", inView)}], out [{string.Join(",", outView)}]; " +
+                                 $"the recording's in [{string.Join(",", want.In)}], out [{string.Join(",", want.Out)}] (tick {want.T})");
         }
         catch (Exception e) { Trace.HookFailed("camera frustum", e); }
+    }
+
+    // ---- Alushenyrra's isles: the camera direction's changes ----
+
+    private static readonly AccessTools.FieldRef<Kingmaker.AreaLogic.AlushenyrraIsles.IslesController, Kingmaker.AreaLogic.AlushenyrraIsles.CameraDirection?> LastDir =
+        AccessTools.FieldRefAccess<Kingmaker.AreaLogic.AlushenyrraIsles.IslesController, Kingmaker.AreaLogic.AlushenyrraIsles.CameraDirection?>("m_LastDir");
+
+    public static void IslePrefix(Kingmaker.AreaLogic.AlushenyrraIsles.IslesController __instance, out Kingmaker.AreaLogic.AlushenyrraIsles.CameraDirection? __state)
+    {
+        __state = On && __instance != null ? LastDir(__instance) : null;
+    }
+
+    public static void IslePostfix(Kingmaker.AreaLogic.AlushenyrraIsles.IslesController __instance, Kingmaker.AreaLogic.AlushenyrraIsles.CameraDirection? __state)
+    {
+        if (!On || __instance == null) return;
+        try
+        {
+            var now = LastDir(__instance);
+            if (now == __state) return;
+            var dir = now?.ToString() ?? "-";
+            var t = Trace.Tick;
+            Sched.Obs("cam_isle", j => j.Prop("dir", dir));
+            if (!Sched.Replay || Sched.Invalid != null) return;
+            if (_islePos >= IsleTape.Count) Sched.Invalidate($"camera direction {dir} at tick {t}: the recording had no further change");
+            else
+            {
+                var r = IsleTape[_islePos++];
+                if (r.Dir != dir || t != r.T + Sched.Offset)
+                    Sched.Invalidate($"camera direction {dir} at tick {t}; the recording's {r.Dir} at tick {r.T} (offset so far {Sched.Offset})");
+            }
+        }
+        catch (Exception e) { Trace.HookFailed("camera isle direction", e); }
     }
 
     // Before the window closes (Sched.CheckComplete): every recorded query made.
@@ -285,6 +353,11 @@ internal static class CamPin
                 return;
             }
         }
+        if (_islePos < IsleTape.Count)
+        {
+            Sched.Invalidate($"the recording's camera direction {IsleTape[_islePos].Dir} at tick {IsleTape[_islePos].T} wasn't reached in the replay");
+            return;
+        }
         if (FrustumTape.Count > 0 && FrustumTape[FrustumTape.Count - 1].T + Sched.Offset > Trace.Tick)
             Sched.Invalidate($"the recording's view change at tick {FrustumTape[FrustumTape.Count - 1].T} came after the replay's window");
     }
@@ -302,6 +375,9 @@ internal static class CamPin
                 h.Patch(AccessTools.Method(t, nameof(CommandBase.IsFinished), new[] { typeof(CutscenePlayerData) }) ?? throw new MissingMethodException(t.Name + ".IsFinished"),
                     prefix: new HarmonyMethod(typeof(CamPin), nameof(CmdPrefix)), postfix: new HarmonyMethod(typeof(CamPin), nameof(CmdPostfix)));
             h.Patch(M(typeof(EntitiesInCameraFrustumController), nameof(EntitiesInCameraFrustumController.Tick)), postfix: new HarmonyMethod(typeof(CamPin), nameof(FrustumPostfix)));
+            if (LastDir == null) throw new MissingFieldException("IslesController.m_LastDir");
+            h.Patch(M(typeof(Kingmaker.AreaLogic.AlushenyrraIsles.IslesController), "TickCameraRotation"),
+                prefix: new HarmonyMethod(typeof(CamPin), nameof(IslePrefix)), postfix: new HarmonyMethod(typeof(CamPin), nameof(IslePostfix)));
             Installed = true;
         }
         catch (Exception e) { Health.Failed("patch the camera's gates", e); }
