@@ -384,13 +384,8 @@ fn the_centipedes_cast_action_is_scored() {
         let (out, w) = replay::run_fixture(SAVE, &dir, run).expect("replay");
         let reports: Vec<_> = w.coverage.unsupported.keys().collect();
         let rays = "driven replay: agent: a record outside the sim's agent entries (ag_phys fn=\"ray\" ctx=\"other\")";
-        // Since the agent's physics are computed (stream M), a ray that may touch a MeshCollider
-        // is reported until the mesh raycast is ported and verified (stream S tightens this).
-        let mesh = |k: &str| {
-            k.starts_with("driven replay: physics: the ray may touch ")
-                && k.ends_with("(MeshCollider), whose query isn't verified yet")
-        };
-        assert!(reports.iter().all(|k| k.as_str() == rays || mesh(k)), "{run}: {reports:?}");
+        // The cave walls' mesh queries are computed (stream S, `docs/poc5/physics.md`).
+        assert!(reports.iter().all(|k| k.as_str() == rays), "{run}: {reports:?}");
         assert!(out.diff.equal, "{run}: {:?}", out.diff.first_difference);
         // The centipede's brain lists the spit first (base score 2), then its attack.
         let centipede = w.by_id["5031"];

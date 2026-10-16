@@ -256,8 +256,8 @@ fn tb_request(q: &PathRequest) -> TurnBasedRequest {
 }
 
 /// A `ph_col` record of a mesh collider (observer `phys_probe`).
-fn recorded_mesh(r: &J) -> Option<wr_phys::RecordedMesh> {
-    let floats = |v: &J, n: usize| -> Option<Vec<f32>> {
+fn recorded_mesh(r: &Rv) -> Option<wr_phys::RecordedMesh> {
+    let floats = |v: &Rv, n: usize| -> Option<Vec<f32>> {
         let a = v.as_array().filter(|a| a.len() == n)?;
         a.iter().map(f).collect()
     };
