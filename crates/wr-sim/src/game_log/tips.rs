@@ -523,15 +523,37 @@ fn float_text(v: f32) -> Res<String> {
     if v == 0.0 {
         return Ok("0".into());
     }
-    // Seven significant digits, then the shorter of fixed and scientific as "G" chooses.
-    let s = format!("{:.6e}", f64::from(v));
+    // Mono's formatter: the value as a double to 15 significant digits, rounded half up to 7
+    // (`1.0078125f` is "1.007813"); fixed-point for a decimal exponent from -5 (exclusive) to 7.
+    let s = format!("{:.14e}", f64::from(v));
     let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
-    let exp: i32 = exp.parse().unwrap_or(0);
-    if !(-5..7).contains(&exp) {
+    let mut exp: i32 = exp.parse().unwrap_or(0);
+    let neg = mant.starts_with('-');
+    let mut d: Vec<u8> = mant.bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
+    let up = d.get(7).is_some_and(|&x| x >= 5);
+    d.truncate(7);
+    if up {
+        let mut i = d.len();
+        loop {
+            if i == 0 {
+                d.insert(0, 1);
+                d.truncate(7);
+                exp += 1;
+                break;
+            }
+            i -= 1;
+            if d[i] == 9 {
+                d[i] = 0;
+            } else {
+                d[i] += 1;
+                break;
+            }
+        }
+    }
+    if !(-4..7).contains(&exp) {
         return unsupported(format!("a multiplier's text in scientific notation ({v})"));
     }
-    let neg = mant.starts_with('-');
-    let digits: String = mant.chars().filter(char::is_ascii_digit).collect();
+    let digits: String = d.iter().map(|x| char::from(b'0' + x)).collect();
     let digits = digits.trim_end_matches('0');
     let digits = if digits.is_empty() { "0" } else { digits };
     let point = exp + 1;
@@ -987,10 +1009,14 @@ mod tests {
             (1_234_567.0, "1234567"),
             (0.000_12, "0.00012"),
             (-0.75, "-0.75"),
+            (1.007_812_5, "1.007813"),
+            (1.999_999_9, "2"),
+            (0.000_1, "0.0001"),
         ] {
             assert_eq!(float_text(v).unwrap(), s, "{v}");
         }
         assert!(float_text(12_345_678.0).is_err());
+        assert!(float_text(0.000_01).is_err(), "Mono writes 1E-05");
     }
 
     #[test]

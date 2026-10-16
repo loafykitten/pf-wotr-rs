@@ -21,12 +21,20 @@ fn bp(w: &World, g: wr_content::Guid) -> Result<std::rc::Rc<crate::content::Blue
 }
 
 /// A `LocalizedString` field as a string, converted in the log's scope (a null field is
-/// `"<null>"`, as the implicit conversion writes it).
+/// `"<null>"`, as the implicit conversion writes it). Its key is `GetActualKey`'s: a `Shared`
+/// string's when it has one (the zip's form names it; the runtime pack's `m_Key` already holds
+/// it, and an empty one is resolved through the shared strings' table, reported when missing).
 fn loc(w: &World, v: View<'_>, field: &str) -> Result<String, TextError> {
-    match v.obj(field) {
-        Some(s) => super::localized(w, s.str("m_Key").unwrap_or("")),
-        None => Ok("<null>".to_owned()),
-    }
+    let Some(s) = v.obj(field) else { return Ok("<null>".to_owned()) };
+    let key = s.str("m_Key").unwrap_or("");
+    let shared = match s.node("Shared") {
+        Some(wr_content::node::Node::SharedString(Some(r))) => Some(r.key.to_string()),
+        Some(wr_content::node::Node::AssetIndex(_)) if key.is_empty() => {
+            crate::text::shared_string_key(w, s, "Shared")?
+        }
+        _ => None,
+    };
+    super::localized(w, shared.as_deref().unwrap_or(key))
 }
 
 /// A blueprint's `LocalizedString` field, converted in the log's scope.

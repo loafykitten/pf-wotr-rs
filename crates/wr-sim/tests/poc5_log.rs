@@ -87,26 +87,55 @@ fn edit_tip(recs: &mut [V], th: &str, f: impl Fn(&str) -> String) {
     recs[at]["tip"]["d"] = json!(e);
 }
 
-/// The first line after the first line containing `after` that has the colour markup removed.
-fn drop_line(d: &str, after: &str) -> String {
-    let lines: Vec<&str> = d.split('\n').collect();
-    let start = lines.iter().position(|l| l.contains(after)).expect("the header");
-    let at = (start + 1..lines.len()).find(|&i| lines[i].contains("<color")).expect("a line");
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != at)
-        .map(|(_, l)| *l)
-        .collect::<Vec<_>>()
-        .join("\n")
+// The tooltips' damages pick lines by their markup and place, never by their (game) text.
+
+/// The lines of a tooltip with colour markup (the breakdowns' entries), by index.
+fn color_lines(lines: &[&str]) -> Vec<usize> {
+    (0..lines.len()).filter(|&i| lines[i].contains("<color")).collect()
 }
 
-/// The two first nonempty lines after the first line containing `after`, swapped.
-fn swap_after(d: &str, after: &str) -> String {
+/// The last breakdown entry dropped.
+fn drop_last_entry(d: &str) -> String {
     let mut lines: Vec<&str> = d.split('\n').collect();
-    let start = lines.iter().position(|l| l.contains(after)).expect("the header");
+    let at = *color_lines(&lines).last().expect("an entry");
+    lines.remove(at);
+    lines.join("\n")
+}
+
+/// The first two breakdown entries (adjacent: the first breakdown's) swapped.
+fn swap_first_entries(d: &str) -> String {
+    let mut lines: Vec<&str> = d.split('\n').collect();
+    let c = color_lines(&lines);
+    assert!(c.len() >= 2 && c[1] == c[0] + 1, "two adjacent entries");
+    lines.swap(c[0], c[1]);
+    lines.join("\n")
+}
+
+/// The first breakdown entry's label changed.
+fn relabel_first_entry(d: &str) -> String {
+    let lines: Vec<&str> = d.split('\n').collect();
+    let at = color_lines(&lines)[0];
+    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
+    out[at] = format!("x{}", out[at]);
+    out.join("\n")
+}
+
+/// The first line nested eight spaces deep without markup (a damage's roll result) changed.
+fn change_roll_result(d: &str) -> String {
+    let mut lines: Vec<String> = d.split('\n').map(str::to_owned).collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("        ") && !l.contains('<') && !l.contains("->"))
+        .expect("a roll result");
+    lines[at].push('1');
+    lines.join("\n")
+}
+
+/// The two first nonempty lines after the first (the header) swapped.
+fn swap_after_header(d: &str) -> String {
+    let mut lines: Vec<&str> = d.split('\n').collect();
     let next: Vec<usize> =
-        (start + 1..lines.len()).filter(|&i| !lines[i].trim().is_empty()).take(2).collect();
+        (1..lines.len()).filter(|&i| !lines[i].trim().is_empty()).take(2).collect();
     assert_eq!(next.len(), 2, "two lines to swap");
     lines.swap(next[0], next[1]);
     lines.join("\n")
@@ -176,18 +205,16 @@ const CASES: [(&str, Change); 62] = [
     // breakdown, another source's name, another header; a damage's dice modification, its roll
     // result, its bonus's breakdown reordered.
     (L, |recs| edit_tip(recs, "AttackLogThread", |d| d.replacen(">+", ">+1", 1))),
-    (L, |recs| edit_tip(recs, "AttackLogThread", |d| drop_line(d, "Armor Class"))),
-    (L, |recs| edit_tip(recs, "AttackLogThread", |d| swap_after(d, "<b>Attack Bonus"))),
-    (L, |recs| edit_tip(recs, "AttackLogThread", |d| d.replacen("Dexterity", "Strength", 1))),
+    (L, |recs| edit_tip(recs, "AttackLogThread", drop_last_entry)),
+    (L, |recs| edit_tip(recs, "AttackLogThread", swap_first_entries)),
+    (L, |recs| edit_tip(recs, "AttackLogThread", relabel_first_entry)),
     (L, |recs| {
         let at = first_msg(recs, "AttackLogThread");
         recs[at]["tip"]["h"] = json!("x");
     }),
-    (L, |recs| edit_tip(recs, "DamageDealtLogThread", |d| d.replacen("-> 1d6", "-> 1d8", 1))),
-    (L, |recs| {
-        edit_tip(recs, "DamageDealtLogThread", |d| d.replacen("Roll result: ", "Roll result: 1", 1))
-    }),
-    (L, |recs| edit_tip(recs, "DamageDealtLogThread", |d| swap_after(d, "Damage result"))),
+    (L, |recs| edit_tip(recs, "DamageDealtLogThread", |d| d.replacen("-> ", "-> 2", 1))),
+    (L, |recs| edit_tip(recs, "DamageDealtLogThread", change_roll_result)),
+    (L, |recs| edit_tip(recs, "DamageDealtLogThread", swap_after_header)),
     // Ticks.
     (L, |recs| {
         let at = nth(recs, "clog_tick", 2);

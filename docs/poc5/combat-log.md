@@ -163,7 +163,7 @@ How the game makes them [C]:
   critical AC as `DC`, then `DC` back), fortification, then `AppendAttackBonusBreakdown`
   (`<b>…: +N</b>`, `AllBonuses`: the rule's own then its inner rule's, then the inner rule's
   `StatModifiersAtTheMoment`, the `AdditionalAttackBonus` display modifiers) and
-  `AppendArmorClassBreakdown` (`<b>…: N (Flat-footed, Touch)</b>`, `ArmorClassBase: AC.BaseValue`
+  `AppendArmorClassBreakdown` (`<b>…: N (…)</b>` with the `Flatfooted` and `Touch` strings, `ArmorClassBase: AC.BaseValue`
   read when the text is made, then `StatModifiersAtTheMoment`: `GetDisplayArmorModifiers` taken
   inside the rule's temporary modifiers scope, so the rule's own bonuses are among them).
 - **`StatModifiersBreakdown`**: a static list of entries (value, source text, descriptor):
@@ -182,7 +182,7 @@ How the game makes them [C]:
   modifiers for the attack bonus); the AC's drops dodge and Dexterity for a flat-footed target,
   armour and shield for a touch attack.
 - **Names**: `EntityFact.Name` is the blueprint's `m_DisplayName` (converted in the log's scope),
-  a feature's with its parameter (`Weapon Focus (…)`: `StatsStrings.GetText(WeaponCategory)`); an
+  a feature's with its parameter (a weapon category in parentheses: `StatsStrings.GetText(WeaponCategory)`); an
   item enchantment shows its owner's name; an empty name falls back to the fact's context's
   parent's source item. Items: `ItemEntity.Name`, now with `BlueprintItemArmor.Name` (its type's
   default name) and `BlueprintItemShield.Name` (its armour component's) [M: armour and shields here
@@ -193,10 +193,10 @@ How the game makes them [C]:
   multipliers, the reduction, `= <b>N</b>`, the damage forms (`DamageFormString`), sneak or
   precision; then, indented, `AppendSources`: the weapon (`Tooltips.Source`) for the bundle's
   first damage, the dice with `AppendDiceModifiersBreakdown` (`Tooltips.BaseValue` then each
-  modification: a critical's `CombatTexts.CriticalHit`, a size's descriptor) and `Roll result`
+  modification: a critical's `CombatTexts.CriticalHit`, a size's descriptor) and `SkillcheckTooltips.RollResult`
   when there is more than dice, the bonus's breakdown (`+N` with its modifiers, a base value line
-  for what they don't explain), a critical's `(×N): Critical hit`), and the difficulty's line
-  (`<b> (×m)</b>: Difficulty (` + `UISettingsRoot`'s `DamageToParty.Description` + `)`). The
+  for what they don't explain), a critical's multiplier with `CombatTexts.CriticalHit`), and the difficulty's line
+  (the multiplier, then the `Difficulty` descriptor's name and, in parentheses, `UISettingsRoot`'s `DamageToParty.Description`). The
   `DamageLogMessage` object's own fields (`m_BonusPercentModifier`…) carry from one value to the
   next. Multipliers are `float.ToString()` (Mono's "G7"; the oracle's culture writes `.`).
 
@@ -208,7 +208,7 @@ handle the event. The game's strings: `log-strings.json` has a 35th container, `
 to their objects by `wr-rules-data`: rerun it). Three rule fixes the tooltips found (the numbers
 were right, the sources weren't kept): `RuleCalculateAC`'s temporary modifiers carry their bonus's
 fact (`TemporaryModifiersScope` sets `Source`), `RuleCalculateWeaponStats` copies the
-`AdditionalDamage` modifiers with their source fact, and `DistanceDamageBonus` (Point-Blank Shot)
+`AdditionalDamage` modifiers with their source fact, and `DistanceDamageBonus`
 adds its damage with its fact. Every capture run stays as valid as it was.
 
 Reported when reached, not made: a breakdown of more than 16 entries (the static list's capacity
