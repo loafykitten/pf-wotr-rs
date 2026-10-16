@@ -730,6 +730,81 @@ terrain-following projectile.
 
 The plan to record is `poc5-tb6.plan.json` (`tb-lizard`).
 
+## The camera's gates (2026-10-16, stream L)
+
+[M] `poc5-tb-130/tb-nearest`: both game replays were invalidated by the root-rule check, at rule 252
+(`RuleCalculateAttacksCount` of 523B). It came at 2488 in replay-1, 2490 in replay-2 and 2489 in the recording. The
+first departure (gpt-6.1-sol's audit; every record up to it, all 826 `ag_look` rows included, matched) came earlier
+in the same tick. The turn scrolling to 523B since 2485 entered `Prepare` (commands interrupted, the AI forced, its
+attack) a tick early in replay-1 and a tick late in replay-2. `poc5-tb-132`, the same plan on the same build,
+replayed exactly, so the release only sometimes falls near a tick boundary.
+
+[C] `TurnController.Tick` enters `Prepare` once `!CameraRig.IsScrollActive(m_ScrollRoutine)`. The scroll
+`ScrollToTimed` started at the turn's start ends after a duration computed from the rig's position, a
+camera-adjusted target (a physics ray), the smoothing state and `Time.time`. Its routine clears itself, or
+`TickScroll` stops it past its deadline. `WallClock`'s camera clock pins the clock, but not the duration, the
+geometry or which frame the routine ends on. [I] The traces don't record which input moved the end, and the pin
+doesn't need to know.
+
+**The readers that gate gameplay on the camera** (a survey of the decompiled code: `IsScrollActive`,
+`IsRotationActive`, the rig's position and `IsInCameraFrustum`):
+- **`TurnController.Tick`'s `IsScrollActive`, pinned** (`CamPin.cs`, observer `camera_gates`). The call is
+  replaced in `TurnController.Tick`'s IL by a tap, which still makes the one native query.
+  - A recording notes each query as `cam_scroll`: `site` "turn", `n` (its ordinal in the window), `u` (the turn's
+    unit, read from `m_Rider`'s id), `routine` (whether the turn holds a routine), `v` (the result).
+  - A replay's query must be the recording's next one: on its tick plus the offset, same unit (`Sched.SameUnit`),
+    same routine state. It returns the recorded result; the native one is noted as `nat`.
+  - A query the recording didn't make, a recorded one the replay didn't make, or any mismatch invalidates.
+- **The cutscene commands whose completion reads the camera, pinned:** `CommandMoveCamera.IsFinished` and
+  `CommandControlCamera.IsFinished`. They read the rig's 2D distance to the target, `IsScrollActive` and
+  `IsRotationActive`, and their result decides when the cutscene's track moves on.
+  - Each call is noted as `cam_cmd` (`cmd`: the command's type and blueprint; `n`: its ordinal for that command;
+    `player`: the cutscene player's id; `v`).
+  - A replay's call must be the recording's next for that command, on its tick plus the offset, and of the same
+    player. A command queried for a second player in the window (a copy of the cutscene; players take random ids)
+    has no identity to follow: the record says `ambiguous`, which makes a recording unfollowable and a replay
+    invalid. It returns the recorded result without running the original, which reads nothing else. The replay's
+    own record says `pin`.
+- **The camera's view, checked:** `EntitiesInCameraFrustumController` sets every entity's `IsInCameraFrustum` from
+  the rig's position and frustum. Gameplay reads it:
+  - for extra units (`SleepingUnitsController`: they sleep out of view);
+  - for finally dead ones (`IsDeathRevealed`, then `HasDummyView`, which is saved);
+  - for dead ones whose view's visibility changes (`UnitEntityView.OnVisibilityChanged`);
+  - for the dying unit itself (`HandleDeath`, before the controller's next tick). `DeathFxPin`'s `death_fx` now
+    carries this as `view`, and a replay must match it.
+  - The state of extra and dead units (the ids in view and out of view) is noted as `cam_frustum` (`in`, `out`):
+    once at the window's open (tick -1, the state the first ticks read, since `SleepingUnitsController` runs before
+    the frustum controller), then after each of the controller's ticks when it changes.
+  - A replay's state must be the recording's on every tick (its last change at or before the tick, plus the
+    offset). Each recorded change must first be checked on its own tick: one the replay's controller skipped is
+    caught at the next tick's start, and one matched later is refused. A snapshot naming a unit twice is refused
+    at load. Ids are matched group by group (`Sched.SameUnitGroups`): the window's starting units and short ids by
+    id, units made in the window by the binding the root rules and deaths made. A made unit not bound yet is bound
+    only when it is the only one; several unbound ones are only counted, and only while they are all in one group
+    (unbound units in both groups could have swapped unseen, which fails).
+  - It is checked, not pinned: it follows from the camera's position, which no pin sets.
+- **Alushenyrra's isles, checked:** `IslesController.TickCameraRotation` turns the camera's yaw into a direction
+  whose changes drive isle states (their actions, navmesh cuts). Combat locks it, but a window's walks don't. Each
+  change is noted as `cam_isle` (`dir`), and a replay's change must be the recording's next, on its tick plus the
+  offset.
+- The other readers are presentation: overtips, the IK controller, effects, sound, the UI, dialogue camera
+  placement, and the cutscene art controller.
+
+**Tape and damaged-tape test.** All of them are loaded with the recording's tape and validated: fields typed, ordinals
+consecutive, views in tick order. A recording without `camera_gates` among its observers is invalid in its replay
+at once. End record: `camera_scroll_queries`, `camera_command_queries`, `camera_view_changes`.
+
+The plan step `replay:NAME:scroll#K:flip` flips the K-th recorded scroll result (1-based; `Rng.PerturbNote` says
+which), and the replay must then end invalid. `oracle/tools/oracle-fixtures/poc5-tb9.plan.json` (spec
+`poc5-tb9.spec.json`) runs `tb-nearest`: a recording, a replay, and two perturbed replays flipping the first and
+second scroll results. [I] A flipped "still scrolling" makes the turn prepare early, so the root-rule check fails.
+A flipped "done" keeps it scrolling into queries the recording doesn't have, which fails the next query's check.
+-130's drift is intermittent, so the pin's validation can't rely on reproducing it.
+
+### Results
+
+Pending: the main session's captures of `poc5-tb` and `poc5-tb6`, and `poc5-tb9` (the damaged tape).
+
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
 **Everything above describes the earlier mod (`c7117fd` to `ba96d22`), whose recordings do not observe the unmodified game

@@ -288,6 +288,7 @@ internal static class Rng
                         ProjPin.RecordedOn = obs.Any(x => x.Type == JTokenType.String && (string)x == "proj_arrival");
                         PathSync.RecordedCritters = obs.Any(x => x.Type == JTokenType.String && (string)x == "critter_paths");
                         DeathFxPin.RecordedOn = obs.Any(x => x.Type == JTokenType.String && (string)x == "death_effect");
+                        CamPin.RecordedOn = obs.Any(x => x.Type == JTokenType.String && (string)x == "camera_gates");
                     }
                     if (Sched.Window && o["time0"] != null)
                     {
@@ -341,7 +342,9 @@ internal static class Rng
             }
         }
         PerturbNote = null;
-        if (!string.IsNullOrEmpty(perturb))
+        // A camera-gate perturbation (scroll#K:flip) damages that tape instead of a draw (CamPin.Perturb).
+        if (CamPin.Perturb(perturb)) { }
+        else if (!string.IsNullOrEmpty(perturb))
         {
             var parts = perturb.Split(':');
             // N is a tape index, or "first-sim-d20": the first Range(1,21) draw (a d20).

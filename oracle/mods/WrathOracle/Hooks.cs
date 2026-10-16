@@ -68,6 +68,7 @@ internal static class Hooks
             });
             Observe.Tick();
             DeathFxPin.Flush(); // death effect records held while a rule was open
+            CamPin.TickStart(); // a recorded view change the replay missed
         }
         catch (Exception e)
         {
