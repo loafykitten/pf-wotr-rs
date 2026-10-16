@@ -487,7 +487,7 @@ choice against the recording. No unit reads a critter's state; a critter reads t
 
 ### Results
 
-Pending: the main session's captures of `poc5-tb6` (`tb-lizard`) and `poc5-tb` (`tb-nearest`, `tb-focus`).
+Results [M]: `poc5-tb-121` (`tb-lizard`): both of the game's replays valid and tick-exact (same 11,375 ticks and 870 rules as the record run, offset 0, no tape left over; projectiles tracked 4, replay-1 held 1 hit and forced 1, replay-2 forced 1; critter paths 1 and 4). `poc5-tb-122` (`tb-nearest`, `tb-focus`): tick-exact.
 
 ## The death effect's dismemberment, and root rules checked (2026-10-15, stream L)
 
@@ -554,7 +554,7 @@ shift, no long id to bind). `poc5-tb-123` differs only by the dismember rule abo
 
 ### Results
 
-Pending: the main session's captures of `poc5-tb5` (`tb-chain`) and `poc5-tb` (`tb-nearest`, `tb-focus`).
+Results [M]: `poc5-tb-124` (`tb-chain`): both replays tick-exact, 241 root rules checked each, 4 deaths, 3 dismember effects pinned. `poc5-tb-125` (`tb-nearest`, `tb-focus`): tick-exact (110 and 188 root rules; 3 and 2 dismember effects).
 
 ## The initiative tie-break recorded (2026-10-15, stream N)
 
@@ -803,7 +803,16 @@ A flipped "done" keeps it scrolling into queries the recording doesn't have, whi
 
 ### Results
 
-Pending: the main session's captures of `poc5-tb` and `poc5-tb6`, and `poc5-tb9` (the damaged tape).
+Results [M]:
+- `poc5-tb-133` (`tb-nearest`, `tb-focus`): every replay tick-exact; 79 and 246 scroll queries pinned, 7 view changes each.
+- `poc5-tb-135` (`poc5-tb9`, the damaged tape): the plain replay valid (167 scroll queries); with scroll result #1 flipped
+  the replay is invalid at its gate ("turn_status 'none->5671 Preparing' … recording 'Scrolling'"), with #2 flipped at
+  its root rule check. The pin is load-bearing.
+- `poc5-tb-134` (`tb-lizard`): replay-1 tick-exact (455 scroll queries, 19 view changes). **Replay-2 invalid on the view
+  check**: at tick 12321 the dead fly 529A is in the camera's view where the recording had it leave at tick 11800. So the
+  camera's position, presentation, drifts enough to change a gameplay read (dead bodies' reveal, extra units' sleep).
+  Open: pin `IsInCameraFrustum`'s results for these readers (a recorded input, as the scroll gate), rather than only
+  checking them.
 
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 

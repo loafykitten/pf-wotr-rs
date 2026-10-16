@@ -166,4 +166,4 @@ third, and its two cutscene commands are tick-equal in every run [M]. Two indepe
   `CritterMoveAgent`), chosen with presentation draws, checked as a strict request. Critters' requests are now
   identified and delivered natively, owed nothing.
 
-Results on the fixed oracle: pending (the main session records).
+Results on the fixed oracle: `poc5-tb-121` tick-exact in the game; `-129` (every observer) valid in the driven replay on every run once the mesh raycast is in (stream S); `-134` (with the camera gates) has a camera-view drift in one replay (docs/poc5/tb-replay.md, the camera's gates).
