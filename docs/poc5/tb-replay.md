@@ -776,7 +776,9 @@ doesn't need to know.
     once at the window's open (tick -1, the state the first ticks read, since `SleepingUnitsController` runs before
     the frustum controller), then after each of the controller's ticks when it changes.
   - A replay's state must be the recording's on every tick (its last change at or before the tick, plus the
-    offset). Ids are matched group by group (`Sched.SameUnitGroups`): the window's starting units and short ids by
+    offset). Each recorded change must first be checked on its own tick: one the replay's controller skipped is
+    caught at the next tick's start, and one matched later is refused. A snapshot naming a unit twice is refused
+    at load. Ids are matched group by group (`Sched.SameUnitGroups`): the window's starting units and short ids by
     id, units made in the window by the binding the root rules and deaths made. A made unit not bound yet is bound
     only when it is the only one; several unbound ones are only counted, and only while they are all in one group
     (unbound units in both groups could have swapped unseen, which fails).

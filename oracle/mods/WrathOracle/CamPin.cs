@@ -131,6 +131,9 @@ internal static class CamPin
             // The window's open is tick -1.
             if (t < -1 || inV == null || outV == null || (FrustumTape.Count > 0 && FrustumTape[FrustumTape.Count - 1].T >= t))
             { Sched.Invalidate("recording's cam_frustum record lacks a field or is out of order"); return; }
+            // Each unit once (StateDump.AllUnits lists a unit once).
+            if (inV.Concat(outV).Distinct(StringComparer.Ordinal).Count() != inV.Count + outV.Count)
+            { Sched.Invalidate($"recording's cam_frustum record at tick {t} names a unit twice"); return; }
             FrustumTape.Add(new Frustum { T = t, In = inV, Out = outV });
         }
     }
@@ -312,9 +315,9 @@ internal static class CamPin
                 });
             }
             if (!Sched.Replay || Sched.Invalid != null) return;
-            // The recording's state on this tick: its last change at or before it.
-            // Moving past a recorded state needs it checked first: one a replay never compared (a controller tick
-            // it skipped) isn't followed.
+            // The recording's state on this tick: its last change at or before it. Moving past a recorded state needs
+            // it checked first, and a change is first checked on its own tick (plus the offset): a change the replay
+            // makes later (a controller tick it skipped) was read late by the controllers before it.
             while (_frustumPos + 1 < FrustumTape.Count && FrustumTape[_frustumPos + 1].T + Sched.Offset <= now)
             {
                 if (_frustumChecked < _frustumPos)
@@ -326,6 +329,8 @@ internal static class CamPin
             }
             var want = FrustumTape.Count > 0 && FrustumTape[_frustumPos].T + Sched.Offset <= now ? FrustumTape[_frustumPos] : null;
             if (want == null) Sched.Invalidate($"units in the camera's view at tick {now}: the recording has no state for them yet");
+            else if (_frustumChecked < _frustumPos && want.T + Sched.Offset != now)
+                Sched.Invalidate($"the recording's view at tick {want.T} first checked in the replay at tick {now} (offset so far {Sched.Offset})");
             else if (Sched.SameUnitGroups(want.In, want.Out, inView, outView)) _frustumChecked = _frustumPos;
             else
                 Sched.Invalidate($"units in the camera's view at tick {now}: in [{string.Join(",", inView)}], out [{string.Join(",", outView)}]; " +
@@ -364,6 +369,17 @@ internal static class CamPin
             }
         }
         catch (Exception e) { Trace.HookFailed("camera isle direction", e); }
+    }
+
+    // Each tick's start (Hooks.ModeTickPrefix): a recorded view change due on an earlier tick but never checked
+    // (the frustum controller didn't run then) is caught even if the controller doesn't run now either.
+    public static void TickStart()
+    {
+        if (!On || !Sched.Replay || Sched.Invalid != null || FrustumTape.Count == 0) return;
+        var now = Trace.Tick;
+        var i = _frustumChecked + 1;
+        if (i < FrustumTape.Count && FrustumTape[i].T + Sched.Offset < now)
+            Sched.Invalidate($"the recording's view at tick {FrustumTape[i].T} was never checked in the replay (tick {now})");
     }
 
     // Before the window closes (Sched.CheckComplete): every recorded query made.
