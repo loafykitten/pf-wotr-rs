@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use serde_json::{Value as V, json};
-use wr_sim::combat::{oracle::Trace, replay};
+use wr_sim::combat::replay;
 
 const SAVE: &str = "Manual_18_WR_FirstBattle";
 
@@ -577,9 +577,7 @@ fn missing_or_wrong_agent_records_are_reported() {
                     let Some((want, change)) = cases.get(i) else { break };
                     let (mut w, trace) =
                         replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-                    let mut changed =
-                        Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-                    change(&mut changed.records);
+                    let changed = trace.edited(change);
                     let _ = replay::run_with_tape(&mut w, &changed, &trace);
                     let new: Vec<&String> =
                         w.coverage.unsupported.keys().filter(|k| !base.contains(k)).collect();
@@ -718,9 +716,7 @@ fn damage_cases_of(dir: &std::path::Path, run: &str, cases: &[(&str, Change)], v
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some((want, change)) = cases.get(i) else { break };
                     let (mut w, trace) = replay::prepare_world(SAVE, dir, run).expect("prepare");
-                    let mut changed =
-                        Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-                    change(&mut changed.records);
+                    let changed = trace.edited(change);
                     let _ = replay::run_with_tape(&mut w, &changed, &trace);
                     let new: Vec<&String> =
                         w.coverage.unsupported.keys().filter(|k| !base.contains(k)).collect();

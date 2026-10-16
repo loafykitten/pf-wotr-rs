@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde_json::Value as V;
 use serde_json::json;
-use wr_sim::combat::{oracle::Trace, replay};
+use wr_sim::combat::replay;
 
 const SAVE: &str = "Manual_18_WR_FirstBattle";
 const TIE: (&str, &str) = ("poc5-tb-127", "tb-tie");
@@ -162,8 +162,7 @@ fn missing_or_wrong_tie_records_are_reported() {
     // One at a time: each run holds the whole recording (the capture tests' memory rule).
     for (i, (want, change)) in cases.iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         let hit = w.coverage.unsupported.keys().any(|k| k.contains(want));
         if w.valid() || !hit {

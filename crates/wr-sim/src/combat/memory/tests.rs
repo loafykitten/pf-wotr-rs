@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use serde_json::Value;
+use crate::combat::oracle::Rv;
 
 use super::*;
 use crate::combat::oracle::Trace;
@@ -533,7 +533,7 @@ impl Rec<'_> {
         i
     }
 
-    fn unit_of(&mut self, v: &Value) -> Option<u32> {
+    fn unit_of(&mut self, v: &Rv) -> Option<u32> {
         let s = v.as_str().or_else(|| v["$unit"].as_str())?;
         Some(self.id(s))
     }
@@ -605,9 +605,8 @@ fn recorded_memory_changes_reproduce_every_memory_read() {
             (hashes_of(&trace.records), 0)
         } else {
             let rec = Trace::load(&record).expect("the record run").records;
-            let first = |v: &[Value]| {
-                v.iter().find(|r| r["k"] == "begin").and_then(|b| b["frame"].as_i64())
-            };
+            let first =
+                |v: &[Rv]| v.iter().find(|r| r["k"] == "begin").and_then(|b| b["frame"].as_i64());
             let shift = (first(&rec).expect("record frame")
                 - first(&trace.records).expect("frame"))
             .rem_euclid(60);
@@ -654,7 +653,7 @@ fn require_coverage(r: &mut Rec<'_>) {
     }
 }
 
-fn hashes_of(recs: &[Value]) -> HashMap<String, i64> {
+fn hashes_of(recs: &[Rv]) -> HashMap<String, i64> {
     recs.iter()
         .filter(|r| r["k"] == "obs" && r["ev"] == "hash")
         .filter_map(|r| Some((r["u"].as_str()?.to_owned(), r["h"].as_i64()?)))
@@ -663,7 +662,7 @@ fn hashes_of(recs: &[Value]) -> HashMap<String, i64> {
 
 fn checked<'a>(
     content: &'a crate::content::Content,
-    recs: &[Value],
+    recs: &[Rv],
     hashes: HashMap<String, i64>,
     frame_shift: i64,
 ) -> Rec<'a> {
@@ -695,15 +694,16 @@ fn damaged_memory_records_are_caught() {
     let path = wr_paths::repo_root()
         .join("fixtures/captures/oracle/poc5-tb-103/fixtures/tb-focus/record.trace.jsonl.gz");
     let recs = Trace::load(&path).expect("capture").records;
-    let errors = |v: &[Value]| {
+    let errors = |v: &[Rv]| {
         let mut r = checked(&content, v, hashes_of(v), 0);
         require_coverage(&mut r);
         r.errors
     };
     assert_eq!(errors(&recs), Vec::<String>::new());
-    let pos = |f: &dyn Fn(&Value) -> bool| recs.iter().position(f).expect("record");
-    let ev = |r: &Value, e: &str| r["k"] == "obs" && r["ev"] == e;
-    type Damage = Box<dyn Fn(&mut Vec<Value>)>;
+    let pos = |f: &dyn Fn(&Rv) -> bool| recs.iter().position(f).expect("record");
+    let ev = |r: &Rv, e: &str| r["k"] == "obs" && r["ev"] == e;
+    use serde_json::Value as J;
+    type Damage = Box<dyn Fn(&mut Vec<J>)>;
     let first_add = pos(&|r| ev(r, "mem_add"));
     let pair = pos(&|r| {
         ev(r, "uc_v") && r["f"] == "enemies" && r["v"].as_array().is_some_and(|a| a.len() == 2)
@@ -714,7 +714,7 @@ fn damaged_memory_records_are_caught() {
     let row =
         pos(&|r| ev(r, "leave_tick") && r["groups"].as_array().is_some_and(|g| !g.is_empty()));
     let hash = pos(&|r| ev(r, "hash") && r["u"] == "558A");
-    let without = |f: fn(&Value) -> bool| -> Damage { Box::new(move |v| v.retain(|r| !f(r))) };
+    let without = |f: fn(&J) -> bool| -> Damage { Box::new(move |v| v.retain(|r| !f(r))) };
     let cases: Vec<(&str, Damage)> = vec![
         ("no flat-footed reads", without(|r| r["k"] == "env")),
         ("no time records", without(|r| r["k"] == "time")),
@@ -751,15 +751,15 @@ fn damaged_memory_records_are_caught() {
             "a flat-footed memory read flipped",
             Box::new(move |v| {
                 let b = v[env]["target_remembers_initiator"].as_bool().unwrap();
-                v[env]["target_remembers_initiator"] = Value::from(!b);
+                v[env]["target_remembers_initiator"] = J::from(!b);
             }),
         ),
-        ("a clear of another size", Box::new(move |v| v[clear]["n"] = Value::from(99))),
+        ("a clear of another size", Box::new(move |v| v[clear]["n"] = J::from(99))),
         (
             "a friend's hash on another frame",
             Box::new(move |v| {
                 let h = v[hash]["h"].as_i64().unwrap();
-                v[hash]["h"] = Value::from(h + 4);
+                v[hash]["h"] = J::from(h + 4);
             }),
         ),
         (
@@ -770,7 +770,7 @@ fn damaged_memory_records_are_caught() {
                     if let Some(d) = row_field(&s, "dict=").filter(|d| d.contains(',')) {
                         let mut ids = split_ids(d);
                         ids.reverse();
-                        g[1] = Value::from(s.replacen(
+                        g[1] = J::from(s.replacen(
                             &format!("dict={d}"),
                             &format!("dict={}", ids.join(",")),
                             1,
@@ -782,10 +782,14 @@ fn damaged_memory_records_are_caught() {
             }),
         ),
     ];
+    let json: Vec<J> = recs.iter().map(Rv::to_json).collect();
     for (what, damage) in cases {
-        let mut v = recs.clone();
+        let mut v = json.clone();
         damage(&mut v);
-        assert!(!errors(&v).is_empty(), "{what}: not caught");
+        assert!(
+            !errors(&v.iter().map(Rv::from_json).collect::<Vec<_>>()).is_empty(),
+            "{what}: not caught"
+        );
     }
 }
 
@@ -798,7 +802,7 @@ enum Reader {
 }
 
 #[allow(clippy::too_many_lines)]
-fn check_trace(r: &mut Rec<'_>, recs: &[Value]) {
+fn check_trace(r: &mut Rec<'_>, recs: &[Rv]) {
     let mut started = false;
     // The readers' frames: (who, the unit whose group memory a read is of).
     let mut frames: Vec<(Reader, Option<u32>)> = Vec::new();
@@ -1076,7 +1080,7 @@ fn apply_cleanup(r: &mut Rec<'_>, g: &str, gone: &[u32], t: i64) {
 /// Each group row of a `leave_tick` (rows come as changes): its dictionary equals the model's, a
 /// valid cached `UnitsList` equals the dictionary's units in the game, and every group without a row
 /// still holds what its last row showed.
-fn check_rows(r: &mut Rec<'_>, x: &Value, t: i64) {
+fn check_rows(r: &mut Rec<'_>, x: &Rv, t: i64) {
     let mut seen = HashSet::new();
     for row in x["groups"].as_array().into_iter().flatten() {
         let (Some(g), Some(s)) = (row[0].as_str(), row[1].as_str()) else { continue };
@@ -1126,7 +1130,7 @@ fn check_rows(r: &mut Rec<'_>, x: &Value, t: i64) {
 
 /// A `Memory.Enemies` read (engagement, AI, `UnitAttack.UpdateTarget`) against the model's
 /// dictionary filtered as `Enemies` fills its cache (in the game, an enemy of the memory's group).
-fn check_enemies(r: &mut Rec<'_>, x: &Value, t: i64, frame: Option<(Reader, Option<u32>)>) {
+fn check_enemies(r: &mut Rec<'_>, x: &Rv, t: i64, frame: Option<(Reader, Option<u32>)>) {
     let Some((who, Some(u))) = frame else {
         r.fail(t, format!("an enemies read outside a known reader: {x}"));
         return;

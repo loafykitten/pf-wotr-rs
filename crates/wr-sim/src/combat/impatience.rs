@@ -464,7 +464,15 @@ pub fn unit_death(w: &mut World, dead: EntityIdx) {
     }
     let awake = w.combat.awake.clone();
     let active = w.combat.combat_active;
-    let muts = w.events.records.iter().filter(|e| compared_mutation(e.k, &e.fields)).count();
+    let muts = w
+        .events
+        .records
+        .iter()
+        .filter(|e| {
+            let s = |k: &str| e.fields.get(k).and_then(serde_json::Value::as_str);
+            compared_mutation(e.k, s("what"), s("class"))
+        })
+        .count();
     let q = &mut w.combat.impatience.queue;
     q.push_back(Op::Death { dead, active, awake: awake.clone(), muts });
     q.extend(awake.into_iter().map(|u| Op::DeathCheck { dead, u }));
@@ -473,13 +481,11 @@ pub fn unit_death(w: &mut World, dead: EntityIdx) {
 /// A mutation record both T0 streams keep (damage, experience, a fact's attach or detach that
 /// isn't the tutorial's): what a death's records are placed by.
 #[must_use]
-pub fn compared_mutation(k: &str, r: &serde_json::Map<String, serde_json::Value>) -> bool {
+pub fn compared_mutation(k: &str, what: Option<&str>, class: Option<&str>) -> bool {
     k == "mut"
-        && match r.get("what").and_then(serde_json::Value::as_str) {
+        && match what {
             Some("damage" | "xp") => true,
-            Some("fact_attach" | "fact_detach") => {
-                r.get("class").and_then(serde_json::Value::as_str) != Some("Tutorial")
-            }
+            Some("fact_attach" | "fact_detach") => class != Some("Tutorial"),
             _ => false,
         }
 }

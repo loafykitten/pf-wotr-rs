@@ -13,7 +13,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
-use serde_json::Value;
+use crate::combat::oracle::Rv;
 use wr_nav::astar::{Ending, LosQuery, State};
 
 use super::*;
@@ -24,23 +24,23 @@ const CAVES: &str = "bad465e5404604346bdf71ef50b3299a";
 
 use wr_nav::world::NodeId;
 
-fn f(v: &Value) -> f32 {
+fn f(v: &Rv) -> f32 {
     v.as_f64().map_or(f32::NAN, |x| x as f32)
 }
 
-fn v3(v: &Value) -> V3 {
+fn v3(v: &Rv) -> V3 {
     [f(&v[0]), f(&v[1]), f(&v[2])]
 }
 
-fn opt_v3(v: &Value) -> Option<V3> {
+fn opt_v3(v: &Rv) -> Option<V3> {
     if v.is_null() { None } else { Some(v3(v)) }
 }
 
-fn opt_f(v: &Value) -> Option<f32> {
+fn opt_f(v: &Rv) -> Option<f32> {
     if v.is_null() { None } else { Some(f(v)) }
 }
 
-fn pts(v: &Value) -> Vec<V3> {
+fn pts(v: &Rv) -> Vec<V3> {
     v.as_array().map(|a| a.iter().map(v3).collect()).unwrap_or_default()
 }
 
@@ -127,7 +127,7 @@ struct Tally {
 
 struct Fight<'a> {
     label: String,
-    recs: &'a [Value],
+    recs: &'a [Rv],
     nav: CombatNav,
     node_size: f32,
     pos: HashMap<String, V3>,
@@ -147,7 +147,7 @@ struct Fight<'a> {
     /// Whether the unit's last `FindPath` had its result recorded and compared.
     last_find_checked: HashMap<String, bool>,
     /// The requests checked, by `PathSync` key, with their recorded fields.
-    started: HashMap<String, Value>,
+    started: HashMap<String, Rv>,
     /// The path visualizer's last computed path per unit, with its simulation's steps (the
     /// waypoint index each started at, the position it reached); dropped at the unit's next
     /// FindPath or turn start.
@@ -911,7 +911,7 @@ impl Fight<'_> {
                 self.rec_nav.push_back(i);
             }
             if let Some(u) = r["u"].as_str()
-                && let Some(a) = r["s"].get("avoidoff").and_then(Value::as_bool)
+                && let Some(a) = r["s"].get("avoidoff").and_then(Rv::as_bool)
             {
                 self.avoid.insert(u.to_owned(), a);
             }
@@ -1104,10 +1104,10 @@ impl Fight<'_> {
 #[test]
 fn damaged_line_of_sight_transcripts_are_errors() {
     let ok = serde_json::json!([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 0.5, true]]);
-    let got = parse_los(&ok).unwrap();
+    let got = parse_los(&Rv::from(&ok)).unwrap();
     assert_eq!(got.len(), 1);
     assert!(got[0].blocked && got[0].fudge == 0.5 && got[0].to == [4.0, 5.0, 6.0]);
-    assert!(parse_los(&Value::Null).unwrap().is_empty());
+    assert!(parse_los(&Rv::Null).unwrap().is_empty());
     for bad in [
         serde_json::json!({}),
         serde_json::json!([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 0.5]]),
@@ -1118,7 +1118,7 @@ fn damaged_line_of_sight_transcripts_are_errors() {
         serde_json::json!([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], null, false]]),
         serde_json::json!([null]),
     ] {
-        assert!(parse_los(&bad).is_err(), "{bad} accepted");
+        assert!(parse_los(&Rv::from(&bad)).is_err(), "{bad} accepted");
     }
 }
 
@@ -1185,9 +1185,9 @@ struct NavRead {
 }
 
 /// A recording's timer at the window's start and its navigation clock reads.
-fn nav_tape(recs: &[Value]) -> (f32, Vec<NavRead>) {
+fn nav_tape(recs: &[Rv]) -> (f32, Vec<NavRead>) {
     let timer0 = f(&recs[0]["nav_timer0"]);
-    let key = |r: &Value| {
+    let key = |r: &Rv| {
         (r["k"].as_str().unwrap_or("").to_owned(), r["ev"].as_str().unwrap_or("").to_owned())
     };
     let mut out = Vec::new();
@@ -1220,7 +1220,7 @@ fn r_(x: f64) -> f32 {
     x as f32
 }
 
-fn units_of(r: &Value) -> Vec<String> {
+fn units_of(r: &Rv) -> Vec<String> {
     r["units"]
         .as_array()
         .map(|a| a.iter().filter_map(|x| x["unit"].as_str().map(str::to_owned)).collect())

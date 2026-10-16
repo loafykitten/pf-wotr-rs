@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use serde_json::Value as V;
 use serde_json::json;
-use wr_sim::combat::{oracle::Trace, replay};
+use wr_sim::combat::replay;
 
 const SAVE: &str = "Manual_18_WR_FirstBattle";
 
@@ -482,8 +482,7 @@ fn missing_or_wrong_combat_log_records_are_reported() {
     let mut missed = Vec::new();
     for (i, (want, change)) in CASES.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         if w.valid() || !w.coverage.unsupported.keys().any(|k| k.contains(want)) {
             missed.push(format!(
@@ -506,8 +505,8 @@ fn combat_end_before_the_navigation_cleanup_is_reported() {
         return;
     };
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-    let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-    let recs = &mut changed.records;
+    let mut recs = trace.to_json();
+    let recs = &mut recs;
     let at = recs
         .iter()
         .position(|r| {
@@ -529,6 +528,7 @@ fn combat_end_before_the_navigation_cleanup_is_reported() {
         recs.insert(end + 1 + n, r);
     }
     renumber(recs);
+    let changed = trace.from_json(recs);
     let _ = replay::run_with_tape(&mut w, &changed, &trace);
     assert!(
         !w.valid() && w.coverage.unsupported.keys().any(|k| k.contains(L)),

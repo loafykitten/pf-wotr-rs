@@ -579,15 +579,15 @@ fn a_perturbed_tape_diverges() {
         return;
     };
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-    let mut perturbed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+    let mut perturbed = trace.to_json();
     // The first d20 of an attack roll (a draw made inside a nested RuleRollD20 at depth 2).
     let at = perturbed
-        .records
         .iter()
         .position(|r| r["k"] == "draw" && r["m"] == "Range_ii" && r["a"] == json!([1, 21]))
         .expect("a d20");
-    let was = perturbed.records[at]["v"].as_i64().expect("value");
-    perturbed.records[at]["v"] = json!(if was == 1 { 2 } else { 1 });
+    let was = perturbed[at]["v"].as_i64().expect("value");
+    perturbed[at]["v"] = json!(if was == 1 { 2 } else { 1 });
+    let perturbed = trace.from_json(&perturbed);
     let out = replay::run_with_tape(&mut w, &trace, &perturbed);
     assert!(!out.diff.equal, "a changed draw must show");
 }
@@ -636,14 +636,14 @@ fn a_changed_movement_delta_is_reported() {
         return;
     };
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-    let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
+    let mut changed = trace.to_json();
     let at = changed
-        .records
         .iter()
         .position(|r| r["k"] == "obs" && r["ev"] == "cd_move" && r["dt"] == r["dt_out"])
         .expect("a movement tick");
-    let dt: f32 = changed.records[at]["dt"].as_str().unwrap().parse().unwrap();
-    changed.records[at]["dt"] = json!((dt * 2.0).to_string());
+    let dt: f32 = changed[at]["dt"].as_str().unwrap().parse().unwrap();
+    changed[at]["dt"] = json!((dt * 2.0).to_string());
+    let changed = trace.from_json(&changed);
     let out = replay::run_with_tape(&mut w, &changed, &trace);
     assert!(out.cooldowns_recorded > 0);
     assert!(!w.valid());
@@ -725,8 +725,7 @@ fn missing_or_wrong_cooldown_records_are_reported() {
     ];
     for (want, change) in cases {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         assert!(!w.valid(), "{want}");
         assert!(
@@ -958,8 +957,7 @@ fn missing_or_wrong_turn_tick_records_are_reported() {
     ];
     for (want, change) in cases {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         assert!(!w.valid(), "{want}");
         assert!(
@@ -1394,8 +1392,7 @@ fn missing_or_wrong_command_records_are_reported() {
     ];
     for (want, change) in cases {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         assert!(!w.valid(), "{want}");
         assert!(
@@ -1417,7 +1414,7 @@ fn a_bonus_addition_the_rule_never_asked_for_is_unequal() {
         return;
     };
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-    let mut recs = trace.records.clone();
+    let mut recs = trace.to_json();
     let n = recs
         .iter()
         .position(|r| r["k"] == "mut" && r["what"] == "rule_bonus" && r["descriptor"] == 9)
@@ -1429,7 +1426,7 @@ fn a_bonus_addition_the_rule_never_asked_for_is_unequal() {
     for (i, r) in recs.iter_mut().enumerate() {
         r["seq"] = json!(i);
     }
-    let changed = Trace { records: recs, sites: trace.sites.clone() };
+    let changed = trace.from_json(&recs);
     let out = replay::run_with_tape(&mut w, &changed, &trace);
     assert!(!out.diff.equal, "the replay equal to the damaged recording");
 }
@@ -3357,8 +3354,7 @@ fn missing_or_wrong_attack_records_are_reported() {
     ];
     for (n, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let out = replay::run_with_tape(&mut w, &changed, &trace);
         if want == "T0" {
             assert!(!out.diff.equal, "case {n}: the replay equal to the damaged recording");
@@ -3373,16 +3369,17 @@ fn missing_or_wrong_attack_records_are_reported() {
     }
     // A replay's simulation draw without its tape status (round 10).
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "replay-1").expect("prepare");
-    let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-    let start = pos(&changed.records, |r| root_of(r, "RuleAttackWithWeapon", "TriggerAttackRule"));
-    let n = start
-        + changed.records[start..]
-            .iter()
-            .position(|r| r["k"] == "draw" && r["c"] == "sim")
-            .expect("a draw");
-    let o = changed.records[n].as_object_mut().expect("draw");
-    o.remove("forced");
-    o.remove("match");
+    let changed = trace.edited(|recs| {
+        let start = pos(recs, |r| root_of(r, "RuleAttackWithWeapon", "TriggerAttackRule"));
+        let n = start
+            + recs[start..]
+                .iter()
+                .position(|r| r["k"] == "draw" && r["c"] == "sim")
+                .expect("a draw");
+        let o = recs[n].as_object_mut().expect("draw");
+        o.remove("forced");
+        o.remove("match");
+    });
     let _ = replay::run_with_tape(&mut w, &changed, &trace);
     assert!(!w.valid(), "a replay's draw without its tape status");
     assert!(
@@ -3596,8 +3593,7 @@ fn missing_or_wrong_approach_records_are_reported() {
     ];
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         assert!(!w.valid(), "case {i}: {want}");
         assert!(
@@ -3692,8 +3688,7 @@ fn missing_or_wrong_opportunity_records_are_reported() {
     ];
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         assert!(!w.valid(), "case {i}: {want}");
         assert!(
@@ -4202,8 +4197,7 @@ fn missing_or_wrong_ai_records_are_reported() {
     let mut missed = Vec::new();
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
             missed.push(format!(
@@ -4236,7 +4230,7 @@ fn missing_or_wrong_engage_records_are_reported() {
     // disengage, with its count's cooldown write), and a rule handler's provoke.
     let has = |dir: &PathBuf, f: &dyn Fn(&serde_json::Value) -> bool| {
         let (_, t) = replay::prepare_world(SAVE, dir, "record").expect("prepare");
-        t.records.iter().any(f)
+        t.to_json().iter().any(f)
     };
     assert!(has(&aoo_dir, &|r| r["ev"] == "eng_aoo" && r["ret"] == true && r["dis"] == true));
     assert!(has(&aoo_dir, &|r| r["ev"] == "cd_write"
@@ -4673,8 +4667,7 @@ fn missing_or_wrong_engage_records_are_reported() {
     for (dir, cases) in [(&aoo_dir, &cases[..]), (&prov_dir, &provokes[..])] {
         for (i, (want, change)) in cases.iter().enumerate() {
             let (mut w, trace) = replay::prepare_world(SAVE, dir, "record").expect("prepare");
-            let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-            change(&mut changed.records);
+            let changed = trace.edited(change);
             let _ = replay::run_with_tape(&mut w, &changed, &trace);
             if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
                 missed.push(format!(
@@ -4735,15 +4728,16 @@ fn missing_or_wrong_target_records_are_reported() {
         pos(recs, |r| ev(r, "tgt_init"))
     }
     let (_, t) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let t = t.to_json();
     // The fixture has what the cases change.
     for want in [
         "UnitCommands.UpdateCombatTarget",
         "UnitCombatState.ShouldAttackOnDisengage",
         "UnitCombatState.Clear",
     ] {
-        assert!(t.records.iter().any(|r| ev(r, "tgt_w") && caller(r).ends_with(want)), "{want}");
+        assert!(t.iter().any(|r| ev(r, "tgt_w") && caller(r).ends_with(want)), "{want}");
     }
-    assert!(t.records.iter().any(|r| ev(r, "ai_nct") && r["site"] == "UpdateCombatTarget"));
+    assert!(t.iter().any(|r| ev(r, "ai_nct") && r["site"] == "UpdateCombatTarget"));
     fn renumber(recs: &mut [V]) {
         for (n, r) in recs.iter_mut().enumerate() {
             r["seq"] = json!(n);
@@ -5437,8 +5431,7 @@ fn missing_or_wrong_target_records_are_reported() {
     let mut missed = Vec::new();
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
             missed.push(format!(
@@ -5935,8 +5928,7 @@ fn missing_or_wrong_impatience_records_are_reported() {
     let mut missed = Vec::new();
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
             missed.push(format!(
@@ -6106,8 +6098,7 @@ fn missing_or_wrong_memory_additions_are_reported() {
     let mut missed = Vec::new();
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
             missed.push(format!(
@@ -6344,8 +6335,7 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
     let mut missed = Vec::new();
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        change(&mut changed.records);
+        let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
         if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
             missed.push(format!(
@@ -6370,10 +6360,10 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
     ];
     for (i, change) in hash_cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "replay-1").expect("prepare");
-        let mut changed = Trace { records: trace.records.clone(), sites: trace.sites.clone() };
-        if let Some(change) = change {
-            change(&mut changed.records);
-        }
+        let changed = match change {
+            Some(change) => trace.edited(change),
+            None => Trace { records: trace.records.clone(), sites: trace.sites.clone() },
+        };
         let out = replay::run_with_tape(&mut w, &changed, &record);
         let reported = w.coverage.unsupported.keys().any(|k| k.starts_with(M));
         if change.is_none() {

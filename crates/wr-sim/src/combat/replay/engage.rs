@@ -5,7 +5,7 @@
 //! model does ([`super::commands`]). `eng_init` gives the window's initial state; `eng_prov`, a
 //! provoked or forced attack of opportunity, is checked against the sim's queue.
 
-use serde_json::Value as J;
+use crate::combat::oracle::Rv;
 
 use super::Driver;
 use super::commands::{describe, id, is_unit, obs, opt_str, phase_of};
@@ -14,12 +14,12 @@ use crate::combat::engage::{self, AooCheck, EngInputs, EngageCheck};
 use crate::world::{EntityIdx, World};
 
 /// A `float` written round-trip as a string (finite).
-pub(super) fn float(v: &J) -> Option<f32> {
+pub(super) fn float(v: &Rv) -> Option<f32> {
     v.as_str().and_then(|s| s.parse::<f32>().ok()).filter(|f| f.is_finite())
 }
 
 /// Exactly these fields besides the envelope (`seq`, `k`, `t`, `ev`).
-pub(super) fn fields(r: &J, payload: &[&str]) -> bool {
+pub(super) fn fields(r: &Rv, payload: &[&str]) -> bool {
     const BASE: [&str; 4] = ["seq", "k", "t", "ev"];
     r.as_object().is_some_and(|o| {
         o.len() == BASE.len() + payload.len()
@@ -28,13 +28,13 @@ pub(super) fn fields(r: &J, payload: &[&str]) -> bool {
 }
 
 /// A list of units the sim has: `None` when it isn't one (or names another entity).
-fn unit_list(w: &World, v: &J) -> Option<Vec<String>> {
+fn unit_list(w: &World, v: &Rv) -> Option<Vec<String>> {
     v.as_array()?.iter().map(|x| x.as_str().filter(|s| is_unit(w, s)).map(str::to_owned)).collect()
 }
 
 /// `m_AttackedByAooUnits`: null until the unit's first attack of opportunity (no reader tells it
 /// from an empty list).
-fn attacked_list(w: &World, v: &J) -> Option<Vec<String>> {
+fn attacked_list(w: &World, v: &Rv) -> Option<Vec<String>> {
     if v.is_null() { Some(Vec::new()) } else { unit_list(w, v) }
 }
 
@@ -60,14 +60,14 @@ fn aoo_path(rest: &[&str], disengaging: bool) -> bool {
 }
 
 /// A C# `int`.
-fn int(v: &J) -> Option<i32> {
+fn int(v: &Rv) -> Option<i32> {
     v.as_i64().and_then(|x| i32::try_from(x).ok())
 }
 
 impl Driver<'_> {
     /// `eng_init`: a unit's engagement at the window's first tick. Adopted only without history
     /// (both dictionaries empty: a removal's free slot would decide the next one's place).
-    pub(super) fn eng_init(&mut self, w: &mut World, r: &J) {
+    pub(super) fn eng_init(&mut self, w: &mut World, r: &Rv) {
         if !self.eng {
             w.coverage.unsupported("driven replay: an eng_init record without the engage observer");
             return;
@@ -120,7 +120,7 @@ impl Driver<'_> {
     /// `ForceAttackOfOpportunity`, from anywhere: only the rule handlers' provoke is the sim's, the
     /// units provoking compared with its queue at the next engagement tick. False when it isn't
     /// one the sim models.
-    pub(super) fn eng_prov(&mut self, w: &World, r: &J, rule: Option<&'static str>) -> bool {
+    pub(super) fn eng_prov(&mut self, w: &World, r: &Rv, rule: Option<&'static str>) -> bool {
         const FROM: &str = "Kingmaker.Controllers.Combat.UnitCombatEngagementController.ProvokeAttackOfOpportunity < Kingmaker.Controllers.Combat.UnitCombatEngagementController.OnEventDidTrigger < ";
         let unit =
             r["u"].as_str().and_then(|u| w.by_id.get(u).copied()).filter(|e| w.unit(*e).is_some());
@@ -301,7 +301,7 @@ impl EngInputs for Driver<'_> {
         let at = self.eng_leaf(w, "trange", &["u", "v"], &[("u", Some(u))])?;
         let v = &self.trace.records[at]["v"];
         match v {
-            J::Null => Ok(None),
+            Rv::Null => Ok(None),
             v => match float(v).filter(|x| *x >= 0.0) {
                 Some(x) => Ok(Some(x)),
                 None => self.uc_reject(at, "a leaf trange it can't read"),
@@ -312,8 +312,8 @@ impl EngInputs for Driver<'_> {
     fn eng_unit(&mut self, w: &mut World, f: &'static str, u: &str) -> R<Option<String>> {
         let at = self.eng_leaf(w, f, &["u", "v"], &[("u", Some(u))])?;
         let v = match &self.trace.records[at]["v"] {
-            J::Null => None,
-            J::String(s) if is_unit(w, s) => Some(s.clone()),
+            Rv::Null => None,
+            Rv::String(s) if is_unit(w, s) => Some(s.as_str().to_owned()),
             _ => return self.uc_reject(at, format!("a leaf {f} it can't read")),
         };
         self.tgt_read(w, at, f, u, v.as_deref())?;

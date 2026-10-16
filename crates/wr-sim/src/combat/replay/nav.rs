@@ -21,7 +21,6 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use serde_json::Value as J;
 use wr_nav::astar::{Ending, LosQuery, State};
 use wr_nav::query::TurnBasedRequest;
 use wr_nav::world::Kind;
@@ -32,6 +31,7 @@ use super::{Driver, Phase, mode};
 use crate::combat::agent::{PathRequest, V3};
 use crate::combat::ai_sim::{self, MovementSimulator, SimInputs};
 use crate::combat::commands::{Desync, R};
+use crate::combat::oracle::Rv;
 use crate::combat::paths::{self, CombatNav, NavEvent, parse_los};
 use crate::csharp::arith::store_f32;
 use crate::world::{EntityIdx, World};
@@ -193,7 +193,10 @@ pub(crate) fn recording_clock(dir: &std::path::Path) -> Result<(f32, Vec<f32>), 
         if n > 0 && !line.contains("\"nav_clock\"") {
             continue;
         }
-        let r: J = serde_json::from_str(&line).map_err(|e| format!("{}: {e}", path.display()))?;
+        let r = Rv::from(
+            serde_json::from_str::<serde_json::Value>(&line)
+                .map_err(|e| format!("{}: {e}", path.display()))?,
+        );
         if n == 0 {
             timer = f(&r["nav_timer0"]);
         } else if r["k"] == "obs" && r["ev"] == "nav_clock" {
@@ -217,7 +220,7 @@ fn same_pts(a: &[V3], b: &[V3]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| bits3(*x) == bits3(*y))
 }
 
-fn pts(v: &J) -> Option<Vec<V3>> {
+fn pts(v: &Rv) -> Option<Vec<V3>> {
     v.as_array().and_then(|a| a.iter().map(v3).collect())
 }
 
@@ -273,7 +276,7 @@ impl Driver<'_> {
             .and_then(|b| b["observers"].as_array())
             .is_some_and(|a| a.iter().any(|o| o == "phys_probe"))
         {
-            let settings: Vec<&J> = trace
+            let settings: Vec<&Rv> = trace
                 .records
                 .iter()
                 .filter(|r| r["k"] == "obs" && r["ev"] == "ph_settings")
@@ -620,7 +623,7 @@ impl Driver<'_> {
 
     /// A recording's clock read (`nav_clock`): `UpdateNavigationGrid`'s, in the turn controller's
     /// tick.
-    fn nav_clock(&mut self, w: &mut World, r: &J) {
+    fn nav_clock(&mut self, w: &mut World, r: &Rv) {
         if self.replay_mode {
             Self::nav_unsupported(w, "a replay recorded a navigation clock read");
             return;
@@ -742,7 +745,7 @@ impl Driver<'_> {
 
     /// `Path.ReturnPath` (`path_fin`): a request of the sim's agent is searched now, on the grid as
     /// it was when requested, with the recorded line-of-sight answers, and checked.
-    fn nav_path_fin(&mut self, w: &mut World, r: &J) {
+    fn nav_path_fin(&mut self, w: &mut World, r: &Rv) {
         let Some(key) = r["path"].as_str().map(str::to_owned) else {
             Self::nav_unsupported(w, "a path_fin it can't read");
             return;
@@ -792,7 +795,7 @@ impl Driver<'_> {
         }
     }
 
-    fn nav_compute(&mut self, w: &mut World, r: &J, p: &Pending) -> Result<Computed, String> {
+    fn nav_compute(&mut self, w: &mut World, r: &Rv, p: &Pending) -> Result<Computed, String> {
         if !fields(r, &["path", "kind", "err", "cs", "searched", "end", "raw", "los"]) {
             return Err(format!("a path_fin it can't read ({})", describe(r)));
         }
@@ -904,7 +907,7 @@ impl Driver<'_> {
 
     /// `Seeker.OnPathComplete` (`path_seek`): whether the seeker takes the path, runs its
     /// modifiers and calls back.
-    fn nav_path_seek(&mut self, w: &mut World, r: &J) {
+    fn nav_path_seek(&mut self, w: &mut World, r: &Rv) {
         let Some(key) = r["path"].as_str() else {
             Self::nav_unsupported(w, "a path_seek it can't read");
             return;
@@ -954,7 +957,7 @@ impl Driver<'_> {
     }
 
     /// The seeker's modifiers done (`path_mod`): the sim's modified path.
-    fn nav_path_mod(&mut self, w: &mut World, r: &J) {
+    fn nav_path_mod(&mut self, w: &mut World, r: &Rv) {
         let Some(key) = r["path"].as_str() else {
             Self::nav_unsupported(w, "a path_mod it can't read");
             return;
@@ -1175,7 +1178,7 @@ impl Driver<'_> {
     pub(super) fn nav_phys_hit(
         &mut self,
         w: &mut World,
-        r: &J,
+        r: &Rv,
         kind: &str,
         o: V3,
         shape: &[f32],
@@ -1270,7 +1273,7 @@ impl Driver<'_> {
     pub(super) fn nav_phys(
         &mut self,
         w: &mut World,
-        r: &J,
+        r: &Rv,
         kind: &str,
         o: V3,
         shape: &[f32],
@@ -1333,7 +1336,7 @@ impl Driver<'_> {
             )));
         };
         let torso = match (&gr["torso"], prone) {
-            (J::Null, false) => None,
+            (Rv::Null, false) => None,
             (t, true) => {
                 Some(v3(t).ok_or_else(|| Desync("a prone unit without its torso".into()))?)
             }
@@ -1343,9 +1346,9 @@ impl Driver<'_> {
         // captures recorded before it: then only the torso's ray establishes it false).
         let has_fall = gr.as_object().is_some_and(|o| o.contains_key("fall"));
         let fall = match (&gr["fall"], prone) {
-            (J::Null, false) => None,
-            (J::Bool(b), true) => Some(*b),
-            (J::Null, true) if !has_fall => None,
+            (Rv::Null, false) => None,
+            (Rv::Bool(b), true) => Some(*b),
+            (Rv::Null, true) if !has_fall => None,
             _ => {
                 return Err(Desync(format!(
                     "a place-on-ground record's AllowFallingBelowGround it can't read ({})",
@@ -1475,7 +1478,7 @@ impl Driver<'_> {
 
     /// A physics query of the movement simulation outside a step the sim runs: answered by the
     /// sim from its recorded arguments and checked.
-    pub(super) fn nav_phys_alone(&mut self, w: &mut World, r: &J, ctx: PhysCtx) {
+    pub(super) fn nav_phys_alone(&mut self, w: &mut World, r: &Rv, ctx: PhysCtx) {
         let kind = r["fn"].as_str().unwrap_or("").to_owned();
         let shape: Option<Vec<f32>> = if kind == "ray" {
             v3(&r["d"]).map(|d| d.to_vec())
@@ -1614,7 +1617,7 @@ impl Driver<'_> {
     }
 
     /// The step's leaf `leaf` of unit `u` (`ag_v` with `ctx: "sim"`).
-    fn nav_sim_leaf(&mut self, w: &mut World, u: EntityIdx, leaf: &str, keys: &[&str]) -> R<J> {
+    fn nav_sim_leaf(&mut self, w: &mut World, u: EntityIdx, leaf: &str, keys: &[&str]) -> R<Rv> {
         let id = w.entity(u).unique_id.clone();
         let at = self.ag_pull(w, &format!("the simulation's {leaf}"), |x| {
             x["k"] == "obs" && x["ev"] == "ag_v" && x["f"] == leaf
@@ -1874,7 +1877,7 @@ impl SimInputs for SimIn<'_, '_> {
             )));
         }
         let recorded = match &r["v"] {
-            J::Null => None,
+            Rv::Null => None,
             v => Some(
                 v.as_i64()
                     .and_then(|x| i8::try_from(x).ok())

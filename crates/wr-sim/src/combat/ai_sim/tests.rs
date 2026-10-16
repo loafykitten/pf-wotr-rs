@@ -936,7 +936,8 @@ fn every_recorded_simulation_step_reruns_bit_for_bit() {
         if !path.exists() {
             continue;
         }
-        let trace = Trace::load(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        let trace =
+            Trace::load(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display())).to_json();
         let name = format!(
             "{}/{}/{}",
             path.ancestors()
@@ -950,13 +951,12 @@ fn every_recorded_simulation_step_reruns_bit_for_bit() {
         runs += 1;
         // The requested records' format (any of its records: a missing prefix is then reported).
         if trace
-            .records
             .iter()
             .any(|r| is(r, "ag_sim") || is(r, "ag_sim_end") || sim_record(r) && is(r, "ag_v"))
         {
-            check_leaves(&name, &trace.records, &mut t);
+            check_leaves(&name, &trace, &mut t);
         } else {
-            check_older(&name, &trace.records, &mut t);
+            check_older(&name, &trace, &mut t);
         }
     }
     eprintln!(

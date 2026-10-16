@@ -1029,19 +1029,19 @@ fn envelope_errors(recs: &[Value]) -> Vec<String> {
 
 /// A run's check, with the record run's tape and frame (for a replay).
 fn check_run(path: &Path) -> (Vec<String>, BTreeMap<&'static str, usize>) {
-    let trace = Trace::load(path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+    let trace = Trace::load(path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display())).to_json();
     let record = path.with_file_name("record.trace.jsonl.gz");
     let (tape, shift, replay) = if record == path {
         (HashMap::new(), 0, false)
     } else {
-        let rec = Trace::load(&record).expect("the record run").records;
+        let rec = Trace::load(&record).expect("the record run").to_json();
         let shift = (begin_frame(&rec).expect("record frame")
-            - begin_frame(&trace.records).expect("frame"))
+            - begin_frame(&trace).expect("frame"))
         .rem_euclid(60);
         (hashes_of(&rec), shift, true)
     };
-    let mut errors = envelope_errors(&trace.records);
-    let mut c = Check::new(&trace.records, tape, shift, replay);
+    let mut errors = envelope_errors(&trace);
+    let mut c = Check::new(&trace, tape, shift, replay);
     c.run();
     for k in COVERAGE {
         if c.counts.get(k).copied().unwrap_or(0) == 0 {
@@ -1091,7 +1091,7 @@ fn a_damaged_capture_is_caught() {
         .join("fixtures/captures/oracle")
         .join(label)
         .join("fixtures/tb-focus/record.trace.jsonl.gz");
-    let recs = Trace::load(&path).expect("capture").records;
+    let recs = Trace::load(&path).expect("capture").to_json();
     let errors = |v: &[Value]| {
         let mut c = Check::new(v, HashMap::new(), 0, false);
         c.run();

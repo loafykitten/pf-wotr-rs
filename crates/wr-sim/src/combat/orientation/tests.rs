@@ -5,21 +5,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde_json::Value;
+use crate::combat::oracle::Rv;
 
 use super::*;
 use crate::combat::oracle::Trace;
 use crate::csharp::arith::store_f32;
 
-fn f(v: &Value) -> f32 {
+fn f(v: &Rv) -> f32 {
     v.as_f64().map_or(f32::NAN, |x| x as f32)
 }
 
-fn v3(v: &Value) -> V3 {
+fn v3(v: &Rv) -> V3 {
     [f(&v[0]), f(&v[1]), f(&v[2])]
 }
 
-fn v2(v: &Value) -> V2 {
+fn v2(v: &Rv) -> V2 {
     [f(&v[0]), f(&v[1])]
 }
 
@@ -125,7 +125,7 @@ struct Counts {
 
 /// A unit's `m_AngularSpeed` from the agent's recorded states (a serialized field nothing
 /// writes: one value per unit).
-fn angular_speeds(recs: &[Value]) -> Result<HashMap<String, f32>, String> {
+fn angular_speeds(recs: &[Rv]) -> Result<HashMap<String, f32>, String> {
     let mut out: HashMap<String, f32> = HashMap::new();
     for r in recs {
         let (Some(u), Some(ang)) = (r["u"].as_str(), r["s"].get("ang")) else { continue };
@@ -153,7 +153,7 @@ struct Known {
 
 /// One `UnitMoveController.TickUnit` (`recs[i]` its `ag_ctl`, `recs[end]` its `ag_ctl_end`):
 /// the orientation computed from the recorded inputs, compared with the records.
-fn check_ctl(recs: &[Value], i: usize, end: usize, k: &Known, n: &mut Counts) -> Vec<String> {
+fn check_ctl(recs: &[Rv], i: usize, end: usize, k: &Known, n: &mut Counts) -> Vec<String> {
     let Known { dt, tactical, ang, last } = *k;
     let ctl = &recs[i];
     let u = ctl["u"].as_str().unwrap_or("");

@@ -6,6 +6,11 @@ use super::*;
 use crate::combat::turns::tests::{in_combat, reported, unit, world};
 use crate::combat::turns::{TbEvent, sort_units};
 
+/// [`super::load`] of records written as `serde_json::Value`s.
+fn load(w: &mut World, recs: &[J], declared: bool, port: bool) {
+    super::load(w, &recs.iter().map(Rv::from_json).collect::<Vec<_>>(), declared, port);
+}
+
 /// Two units that tie in everything the comparers read before the hashes, in the turn order
 /// `[a, b]`, the port on, no decisions loaded yet.
 fn tied() -> (World, EntityIdx, EntityIdx) {

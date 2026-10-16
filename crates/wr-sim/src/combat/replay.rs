@@ -24,7 +24,7 @@ use std::rc::Rc;
 use serde_json::{Value as J, json};
 
 use super::fire::{self, Cx, DrawSink, Recording};
-use super::oracle::Trace;
+use super::oracle::{Rv, Trace};
 use super::project;
 use super::units::AttackEnv;
 use crate::world::{EntityIdx, World};
@@ -279,8 +279,8 @@ pub struct SortChecks {
     pub members_mismatch: usize,
 }
 
-fn unit_id(v: &J) -> Option<&str> {
-    v.get("$unit").and_then(J::as_str)
+fn unit_id(v: &Rv) -> Option<&str> {
+    v.get("$unit").and_then(Rv::as_str)
 }
 
 fn short(class: &str) -> &str {
@@ -301,14 +301,14 @@ pub mod mode {
 }
 
 /// The end index of the root rule starting at `i` (its `rule_end`).
-fn root_end(recs: &[J], i: usize) -> usize {
+fn root_end(recs: &[Rv], i: usize) -> usize {
     let id = recs[i]["id"].as_i64().unwrap_or(-1);
     (i..recs.len())
         .find(|&j| recs[j]["k"] == "rule_end" && recs[j]["id"].as_i64() == Some(id))
         .unwrap_or(recs.len() - 1)
 }
 
-fn is_root(r: &J) -> bool {
+fn is_root(r: &Rv) -> bool {
     r["k"] == "rule" && r["depth"].as_i64() == Some(0)
 }
 
@@ -342,7 +342,7 @@ fn plan_echoes(t: &Trace) -> (Vec<(usize, usize)>, BTreeMap<String, usize>) {
 
 /// A presentation root may be echoed only if nothing it contains changes state or consumes the
 /// tape: no sim-class draw, no mutation, no nested rule, no attack environment.
-fn echo_span_is_inert(inner: &[J]) -> bool {
+fn echo_span_is_inert(inner: &[Rv]) -> bool {
     inner.iter().all(|r| match r["k"].as_str() {
         Some("draw") => r["c"] == "pres",
         Some("mut" | "env") => false,
@@ -380,9 +380,9 @@ fn plan_origins(t: &Trace) -> HashMap<usize, (usize, Option<Caller>)> {
 /// A root computed at its call site may hold only its own rule's steps and handlers, draws of the
 /// presentation class and at most one `env`, its own (a flat-footed check's, for the same units):
 /// no observation (a combat join), mutation, nested rule, sim draw or handler exception.
-fn origin_span_is_inert(root: &J, inner: &[J]) -> bool {
+fn origin_span_is_inert(root: &Rv, inner: &[Rv]) -> bool {
     let class = short(root["class"].as_str().unwrap_or(""));
-    let own_env = |x: &J| {
+    let own_env = |x: &Rv| {
         class == "RuleCheckTargetFlatFooted"
             && x["rule"] == class
             && unit_id(&x["initiator"]) == unit_id(&root["initiator"])
@@ -399,13 +399,12 @@ fn origin_span_is_inert(root: &J, inner: &[J]) -> bool {
 }
 
 /// The recording's records without the given spans.
-fn without(t: &Trace, spans: &[(usize, usize)]) -> Vec<J> {
+fn without<'t>(t: &'t Trace, spans: &[(usize, usize)]) -> impl Iterator<Item = &'t Rv> {
     t.records
         .iter()
         .enumerate()
         .filter(|(i, _)| !spans.iter().any(|(a, b)| a <= i && i <= b))
-        .map(|(_, r)| r.clone())
-        .collect()
+        .map(|(_, r)| r)
 }
 
 /// The recording's stream, as compared: the compared kinds only, without the echoed and the
@@ -416,13 +415,13 @@ fn oracle_stream(
     unverified: &[(usize, usize)],
     out: &mut Outcome,
 ) -> Vec<J> {
-    let n = |spans: &[(usize, usize)]| project::project_records(t, &without(t, spans)).len();
+    let n = |spans: &[(usize, usize)]| project::project_records(t, without(t, spans)).len();
     let all = n(&[]);
     out.echoed_records = all.saturating_sub(n(echoed));
     out.unverified_records = all.saturating_sub(n(unverified));
-    let kept = without(t, &[echoed, unverified].concat());
+    let spans = [echoed, unverified].concat();
     let mut v = Vec::new();
-    for r in project::project_records(t, &kept) {
+    for r in project::project_records(t, without(t, &spans)) {
         if !compared(&r) {
             continue;
         }
@@ -1281,8 +1280,8 @@ impl<'t> Driver<'t> {
         let declared: Vec<&str> =
             match recs.iter().find(|r| r["k"] == "begin").and_then(|b| b.get("observers")) {
                 None => Vec::new(),
-                Some(J::Array(a)) if a.iter().all(J::is_string) => {
-                    a.iter().filter_map(J::as_str).collect()
+                Some(Rv::Array(a)) if a.iter().all(Rv::is_string) => {
+                    a.iter().filter_map(Rv::as_str).collect()
                 }
                 Some(_) => {
                     w.coverage.unsupported(
@@ -1391,7 +1390,7 @@ impl<'t> Driver<'t> {
         // begin doesn't give the record run's), from its first memory tick.
         let begin = |t: &Trace| t.records.iter().find(|r| r["k"] == "begin").cloned();
         let (tb, ob) = (begin(tape_trace), begin(trace));
-        let frame = |b: &Option<serde_json::Value>| b.as_ref().and_then(|b| b["frame"].as_i64());
+        let frame = |b: &Option<Rv>| b.as_ref().and_then(|b| b["frame"].as_i64());
         d.mem.shift = if !std::ptr::eq(tape_trace, trace) {
             frame(&tb).zip(frame(&ob)).map(|(a, b)| (a - b).rem_euclid(60))
         } else if ob.as_ref().is_some_and(|b| b["mode"] == "record") {
@@ -1586,7 +1585,7 @@ impl<'t> Driver<'t> {
 impl Driver<'_> {
     /// A `clog_*` record (WrathOracle's `combat_log`): an event the sim doesn't raise is queued
     /// from its `clog_q` (an input); the rest are compared when the run ends.
-    fn clog_record(&mut self, w: &mut World, r: &J) {
+    fn clog_record(&mut self, w: &mut World, r: &Rv) {
         if !self.clog {
             w.coverage.unsupported(
                 "combat log: a clog record in a recording that doesn't declare combat_log",
@@ -1646,7 +1645,7 @@ impl Driver<'_> {
     /// `group_state` (the window's first prefix): the groups the sim made after its load
     /// (`UnitGroupsController.Start`, then each frame's tick) against the game's: the same groups
     /// (their list order taken from the recording), members, combat counts and timers.
-    fn group_state(&mut self, w: &mut World, r: &J) {
+    fn group_state(&mut self, w: &mut World, r: &Rv) {
         let Some(groups) = r["groups"].as_array() else { return };
         let ours: Vec<String> = w
             .combat
@@ -1702,7 +1701,7 @@ impl Driver<'_> {
     /// `leave_tick` (`UnitCombatLeaveController.Tick`'s prefix, every call): the gate is checked;
     /// each changed group's combat count, timer and faction caches are checked and its memory
     /// taken.
-    fn leave_tick(&mut self, w: &mut World, r: &J) {
+    fn leave_tick(&mut self, w: &mut World, r: &Rv) {
         // `cmds` rows are changes from empty: from the first `leave_tick` on, a unit without a
         // row has no commands.
         w.combat.groups.commands.get_or_insert_with(HashMap::new);
@@ -1744,7 +1743,7 @@ impl Driver<'_> {
 
     /// `leave_combat` (`UnitEntityData.LeaveCombat`'s prefix): placed by its caller, and the sim's
     /// next `LeaveCombat` must be the same unit's.
-    fn leave_combat(&mut self, w: &mut World, r: &J) {
+    fn leave_combat(&mut self, w: &mut World, r: &Rv) {
         let by = r["by"].as_str().unwrap_or("");
         if by.contains("UnitCombatLeaveController") {
             self.place(w, Phase::Leave, "a LeaveCombat");
@@ -1811,9 +1810,9 @@ impl Driver<'_> {
 
     /// `HandleCombatStart` with the turn port: `m_Units` are the sim's units in combat, with the
     /// recorded surprise flags (they come from commands).
-    fn port_combat_start(&mut self, w: &mut World, r: &J, units: Vec<EntityIdx>) {
+    fn port_combat_start(&mut self, w: &mut World, r: &Rv, units: Vec<EntityIdx>) {
         use super::order::TbUnitInfo;
-        let rec = r["units"].as_array().cloned().unwrap_or_default();
+        let rec = r["units"].as_array().map(<[Rv]>::to_vec).unwrap_or_default();
         let ids: Vec<Option<EntityIdx>> = rec
             .iter()
             .map(|e| e["unit"].as_str().and_then(|id| w.by_id.get(id).copied()))
@@ -2125,7 +2124,7 @@ impl Driver<'_> {
     /// `CombatController.TickTime`'s decision (the `time` record, before the sim's `tick_time`):
     /// without a recorded `StartTurn` this frame, the next unit's time to its turn hasn't run out
     /// (or it was chosen this tick), and the frame's game delta is clamped to that time.
-    fn check_tick_time(&mut self, w: &mut World, r: &J) {
+    fn check_tick_time(&mut self, w: &mut World, r: &Rv) {
         let t = &w.combat.turns;
         let Some(next) = t.next else { return };
         if t.waiting_for_ui > 0 || self.started_this_frame {
@@ -2163,7 +2162,7 @@ impl Driver<'_> {
 
     /// A unit's cooldowns as a `cd_*` record has them before (`b`) the call: a difference from
     /// the sim's is reported and the recorded row taken.
-    fn cd_before(&mut self, w: &mut World, u: EntityIdx, b: &J, what: &str) {
+    fn cd_before(&mut self, w: &mut World, u: EntityIdx, b: &Rv, what: &str) {
         let Some(want) = b.as_str().and_then(parse_cooldowns) else {
             w.coverage
                 .unsupported(format!("driven replay: {what}: its unit's cooldowns are unknown"));
@@ -2182,7 +2181,7 @@ impl Driver<'_> {
 
     /// The sim's cooldowns after a `cd_*` record's call against the recorded ones (`a`): a
     /// difference is reported and the recorded row taken.
-    fn cd_after(&mut self, w: &mut World, u: EntityIdx, a: &J, what: &str) {
+    fn cd_after(&mut self, w: &mut World, u: EntityIdx, a: &Rv, what: &str) {
         let Some(want) = a.as_str().and_then(parse_cooldowns) else {
             w.coverage.unsupported(format!(
                 "driven replay: {what}: its unit's cooldowns after it are unknown"
@@ -2201,7 +2200,7 @@ impl Driver<'_> {
     }
 
     /// The turn's movement stats around a `cd_*` record's call (`sb`, `sa`), likewise.
-    fn stats_check(&mut self, w: &mut World, s: &J, what: &str) {
+    fn stats_check(&mut self, w: &mut World, s: &Rv, what: &str) {
         let Some(want) = s.as_str().and_then(parse_stats) else {
             w.coverage.unsupported(format!(
                 "driven replay: {what}: the turn's movement stats are unknown"
@@ -2269,7 +2268,7 @@ impl Driver<'_> {
 
     /// The turn controller's status and counters against a record's (`st`, `w`, `wfgu`): a
     /// difference is reported and the recorded ones taken.
-    fn tt_check(&mut self, w: &mut World, r: &J, what: &str) {
+    fn tt_check(&mut self, w: &mut World, r: &Rv, what: &str) {
         use super::turn_tick::{Counters, Status};
         let (Some(st), Some(c), Some(wfgu)) = (
             r["st"].as_str().and_then(Status::parse),
@@ -2295,7 +2294,7 @@ impl Driver<'_> {
     }
 
     /// The counters a `tt_ca`/`tt_cw` record has before (`wb`) or after (`wa`) the call.
-    fn tt_counters(&mut self, w: &mut World, v: &J, what: &str) {
+    fn tt_counters(&mut self, w: &mut World, v: &Rv, what: &str) {
         let Some(c) = v.as_str().and_then(super::turn_tick::Counters::parse) else {
             w.coverage.unsupported(format!("driven replay: {what}: counters it can't read"));
             return;
@@ -2332,7 +2331,7 @@ impl Driver<'_> {
     }
 
     /// A record's frame time (`tt`, `tt_ca`, `tt_cw`) against the sim's clock.
-    fn tt_time(&mut self, w: &mut World, r: &J, what: &str) -> Option<super::turn_tick::Time> {
+    fn tt_time(&mut self, w: &mut World, r: &Rv, what: &str) -> Option<super::turn_tick::Time> {
         let Some(t) = r["time"].as_str().and_then(super::turn_tick::Time::parse) else {
             w.coverage.unsupported(format!("driven replay: {what}: a time it can't read"));
             return None;
@@ -2373,7 +2372,7 @@ impl Driver<'_> {
     /// WrathOracle's `tt*` records: `TurnController.Tick`, `Prepare`, `ContinueActing`,
     /// `ContinueWaiting`. The sim computes the status and counters; each record's reads it can't
     /// compute are its inputs, its status and counters checks.
-    fn turn_tick(&mut self, w: &mut World, ev: &str, r: &J) {
+    fn turn_tick(&mut self, w: &mut World, ev: &str, r: &Rv) {
         use super::turn_tick::{self as tt, Stage, Status};
         if ev == "tt_prep" && r["in_tick"].as_bool() == Some(false) {
             self.place(w, Phase::Time, "TurnController.Prepare (in StartTurn)");
@@ -2393,8 +2392,8 @@ impl Driver<'_> {
         let flag = |k: &str| r[k].as_bool();
         // A value the game reads only under a condition: present, `null` where it wasn't read.
         let opt = |k: &str| match r.get(k) {
-            Some(J::Bool(b)) => Some(Some(*b)),
-            Some(J::Null) => Some(None),
+            Some(Rv::Bool(b)) => Some(Some(*b)),
+            Some(Rv::Null) => Some(None),
             _ => None,
         };
         if ev != "tt_able" && w.combat.turns.ctl.stage == Stage::StatusPending {
@@ -2478,7 +2477,7 @@ impl Driver<'_> {
                     w.coverage.unsupported("driven replay: a tt_prep record it can't read");
                     return;
                 };
-                if r.get("mctrl") != Some(&J::Null) {
+                if r.get("mctrl") != Some(&Rv::Null) {
                     w.coverage.unsupported(
                         "TurnController.Prepare: a turn with a mount (or not recorded)",
                     );
@@ -2739,7 +2738,7 @@ impl Driver<'_> {
     }
 
     /// WrathOracle's `cd_*` records: the calls that write units' cooldowns.
-    fn cd_record(&mut self, w: &mut World, ev: &str, r: &J) {
+    fn cd_record(&mut self, w: &mut World, ev: &str, r: &Rv) {
         let u = r["u"]
             .as_str()
             .and_then(|id| w.by_id.get(id).copied())
@@ -2817,8 +2816,8 @@ impl Driver<'_> {
                 let b = |k: &str| r[k].as_bool();
                 // Every input is required; only the speed may be null (the oracle couldn't read it).
                 let speed = match &r["speed"] {
-                    J::Null if r.get("speed").is_some() => Some(None),
-                    J::String(x) => x.parse::<f32>().ok().map(Some),
+                    Rv::Null if r.get("speed").is_some() => Some(None),
+                    Rv::String(x) => x.parse::<f32>().ok().map(Some),
                     _ => None,
                 };
                 let flags = (b("force"), b("near"), b("modify"), b("modify_req"), b("moving"));
@@ -3779,7 +3778,7 @@ impl Driver<'_> {
         if u.is_some() && w.combat.cleared_by_remove.take() == u {
             return;
         }
-        let in_frame = |j: &&J| j["t"] == r["t"];
+        let in_frame = |j: &&Rv| j["t"] == r["t"];
         let next_tb =
             recs[i + 1..].iter().take_while(|j| j["k"] != "tick").find(|j| j["k"] == "tb");
         let prev_tb = recs[..i].iter().rev().take_while(in_frame).find(|j| j["k"] == "tb");
@@ -4281,7 +4280,7 @@ impl Driver<'_> {
 /// The recorded outcomes of the `DistanceDamageBonus` handlers in a span, by fact id: whether
 /// the handler (`OnEventAboutToTrigger`, the `about` phase; its did-trigger handler is empty)
 /// changed its rule (it adds the bonus to the damage bundle only within range).
-fn recorded_distance(span: &[J]) -> HashMap<String, bool> {
+fn recorded_distance(span: &[Rv]) -> HashMap<String, bool> {
     let mut out = HashMap::new();
     for h in span.iter().filter(|r| r["k"] == "h" && r["phase"] == "about") {
         let is = h["class"].as_str().is_some_and(|c| short(c) == "DistanceDamageBonus");
@@ -4413,7 +4412,7 @@ fn has_component(w: &World, u: EntityIdx, short: &str) -> bool {
 /// A `sort` event: `m_Units` ordered by `UnitsOrderComaprer`. The recorded override and
 /// sequence of each unit are inputs (the turn controller's bookkeeping isn't ported); the
 /// order and the rolled initiatives are the sim's.
-fn check_sort(w: &World, r: &J, c: &mut SortChecks) {
+fn check_sort(w: &World, r: &Rv, c: &mut SortChecks) {
     use super::order::{Initiative, TbUnitInfo, order_by, tb_compare};
     let Some(list) = r["units"].as_array() else { return };
     let mut infos: Vec<(TbUnitInfo, Initiative)> = Vec::new();
@@ -4495,7 +4494,7 @@ fn parse_stats(s: &str) -> Option<super::cooldowns::MovementStats> {
     })
 }
 
-fn set_clock(w: &mut World, r: &J) {
+fn set_clock(w: &mut World, r: &Rv) {
     if let (Some(gt), Some(rt)) = (r["game_time"].as_i64(), r["real_time"].as_i64()) {
         w.clock.game_time = crate::csharp::timespan::TimeSpan(gt);
         w.clock.real_time = crate::csharp::timespan::TimeSpan(rt);
@@ -4585,7 +4584,7 @@ fn env_in(
 /// With the engagement modelled, an attack environment's engagement is a check: `EngagedBy` (the
 /// recording's ordinal-sorted ids) and, in turn-based combat, `IsFlanked` (`EngagedBy.Count > 1`
 /// unless `CannotBeFlanked`).
-fn check_engagement_env(w: &mut World, t: EntityIdx, e: &J, flanked: bool) {
+fn check_engagement_env(w: &mut World, t: EntityIdx, e: &Rv, flanked: bool) {
     let Some(x) = w.unit(t).filter(|x| w.combat.engage.on && x.combat.eng.known) else { return };
     let mut sim: Vec<String> =
         x.combat.eng.engaged_by.keys().map(|u| w.entity(u).unique_id.clone()).collect();
@@ -4637,14 +4636,14 @@ fn flat_footed_env(
     Some(env)
 }
 
-fn pos(v: &J) -> Option<[f32; 3]> {
+fn pos(v: &Rv) -> Option<[f32; 3]> {
     let a = v.as_array()?;
     #[allow(clippy::cast_possible_truncation)]
-    let f = |i: usize| a.get(i).and_then(J::as_f64).map(|x| x as f32);
+    let f = |i: usize| a.get(i).and_then(Rv::as_f64).map(|x| x as f32);
     Some([f(0)?, f(1)?, f(2)?])
 }
 
-fn pos_pair(at: &J) -> Option<([f32; 3], [f32; 3])> {
+fn pos_pair(at: &Rv) -> Option<([f32; 3], [f32; 3])> {
     Some((pos(&at["initiator_pos"])?, pos(&at["target_pos"])?))
 }
 

@@ -24,8 +24,8 @@
 
 use std::collections::HashMap;
 
+use super::oracle::Rv;
 use anyhow::{Result, ensure};
-use serde_json::Value as J;
 use wr_nav::astar::Ending;
 use wr_nav::cs::{V3, d, r};
 use wr_nav::query::TurnBasedRequest;
@@ -354,14 +354,13 @@ pub struct LosAnswer {
 /// # Errors
 ///
 /// A transcript that isn't one.
-pub fn parse_los(los: &J) -> std::result::Result<Vec<LosAnswer>, String> {
-    let none = Vec::new();
-    let calls = if los.is_null() {
-        &none
+pub fn parse_los(los: &Rv) -> std::result::Result<Vec<LosAnswer>, String> {
+    let calls: &[Rv] = if los.is_null() {
+        &[]
     } else {
         los.as_array().ok_or_else(|| format!("path_fin los {los}"))?
     };
-    let vec = |v: &J| -> Option<V3> {
+    let vec = |v: &Rv| -> Option<V3> {
         let a = v.as_array().filter(|a| a.len() == 3)?;
         let p = [a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?].map(|x| x as f32);
         p.iter().all(|x| x.is_finite()).then_some(p)

@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 
-use serde_json::Value as J;
+use crate::combat::oracle::Rv;
 
 /// A `mem_q`'s callers (WrathOracle's four frames) from an offensive action: the memory
 /// controller's handler, `RaiseEvents`' callback and the event bus' dispatch.
@@ -21,7 +21,7 @@ const MEM_Q_ACT: &str = "UnitMemoryController.AddToMemory<UnitMemoryController.H
 
 /// A `mem_q` is the sim's call `want`: its observer and target, and (while the memory is the
 /// sim's) the target's `Peaceful` it read and whether the queue took the pair.
-fn is_call(w: &World, r: &J, want: Option<imp::MemoryCall>) -> bool {
+fn is_call(w: &World, r: &Rv, want: Option<imp::MemoryCall>) -> bool {
     want.is_some_and(|c| {
         r["o"].as_str() == Some(w.entity(c.observer).unique_id.as_str())
             && r["tgt"].as_str() == Some(w.entity(c.target).unique_id.as_str())
@@ -31,7 +31,7 @@ fn is_call(w: &World, r: &J, want: Option<imp::MemoryCall>) -> bool {
 }
 
 /// A `mem_q` of its writer's shape, of frame `tick`, from `callers`, that didn't throw.
-fn mem_q_shape(r: &J, tick: i64, callers: &str) -> bool {
+fn mem_q_shape(r: &Rv, tick: i64, callers: &str) -> bool {
     fields(r, &["o", "tgt", "peaceful", "queued", "exc", "by"])
         && r["t"].as_i64() == Some(tick)
         && r["exc"] == false
@@ -51,26 +51,26 @@ use crate::rng::CallSite;
 use crate::world::{EntityIdx, World};
 
 /// A unit list: `None` when it isn't one (or names an entity the sim doesn't have as a unit).
-fn units(w: &World, v: &J) -> Option<Vec<Option<EntityIdx>>> {
+fn units(w: &World, v: &Rv) -> Option<Vec<Option<EntityIdx>>> {
     v.as_array()?
         .iter()
         .map(|x| match x {
-            J::Null => Some(None),
-            J::String(s) if is_unit(w, s) => Some(w.by_id.get(s.as_str()).copied()),
+            Rv::Null => Some(None),
+            Rv::String(s) if is_unit(w, s) => Some(w.by_id.get(s.as_str()).copied()),
             _ => None,
         })
         .collect()
 }
 
-fn unit_or_null(w: &World, v: &J) -> Option<Option<EntityIdx>> {
+fn unit_or_null(w: &World, v: &Rv) -> Option<Option<EntityIdx>> {
     match v {
-        J::Null => Some(None),
-        J::String(s) if is_unit(w, s) => Some(w.by_id.get(s.as_str()).copied()),
+        Rv::Null => Some(None),
+        Rv::String(s) if is_unit(w, s) => Some(w.by_id.get(s.as_str()).copied()),
         _ => None,
     }
 }
 
-fn unit_of(w: &World, v: &J) -> Option<EntityIdx> {
+fn unit_of(w: &World, v: &Rv) -> Option<EntityIdx> {
     unit_or_null(w, v).flatten()
 }
 
@@ -90,7 +90,7 @@ const STATE: [&str; 11] = [
 ];
 
 /// A recorded state: `None` when it can't be read.
-fn parse_state(w: &World, r: &J) -> Option<UnitImpatience> {
+fn parse_state(w: &World, r: &Rv) -> Option<UnitImpatience> {
     let set = |k: &str| {
         let mut s = crate::csharp::hashset::CsHashSet::default();
         for u in units(w, &r[k])? {
@@ -115,7 +115,7 @@ fn parse_state(w: &World, r: &J) -> Option<UnitImpatience> {
 }
 
 /// Whether recorded state `r` is the sim's `s` (each set in its order and with its used slots).
-fn state_equal(w: &World, r: &J, s: &UnitImpatience) -> bool {
+fn state_equal(w: &World, r: &Rv, s: &UnitImpatience) -> bool {
     let slots = |k: &str, n: usize| r[k].as_u64() == Some(n as u64);
     let list = |k: &str, set: &crate::csharp::hashset::CsHashSet<EntityIdx>| {
         units(w, &r[k]).is_some_and(|v| v == set.iter().collect::<Vec<_>>())
@@ -135,7 +135,7 @@ fn state_equal(w: &World, r: &J, s: &UnitImpatience) -> bool {
 }
 
 /// An `imp_s`'s fields: the state's and `at`'s own.
-fn state_fields(r: &J, extra: &[&str]) -> bool {
+fn state_fields(r: &Rv, extra: &[&str]) -> bool {
     let mut all: Vec<&str> = vec!["at"];
     all.extend(STATE);
     all.extend(extra);
@@ -279,8 +279,13 @@ impl Driver<'_> {
             let before = self.trace.records[..i]
                 .iter()
                 .filter(|x| {
-                    x.as_object()
-                        .is_some_and(|o| imp::compared_mutation(x["k"].as_str().unwrap_or(""), o))
+                    x.as_object().is_some_and(|o| {
+                        imp::compared_mutation(
+                            x["k"].as_str().unwrap_or(""),
+                            o.get("what").and_then(Rv::as_str),
+                            o.get("class").and_then(Rv::as_str),
+                        )
+                    })
                 })
                 .count();
             if before != *muts {
@@ -316,7 +321,7 @@ impl Driver<'_> {
 
     /// A unit's `SetLifeState` goes on after its death's notification: none of that death's
     /// impatience records may still be due (`uc_x` record `r`).
-    pub(super) fn imp_death_window(&mut self, w: &mut World, r: &J) {
+    pub(super) fn imp_death_window(&mut self, w: &mut World, r: &Rv) {
         if !self.imp || self.uc_skipping {
             return;
         }
@@ -336,7 +341,7 @@ impl Driver<'_> {
         }
     }
 
-    fn imp_match(&mut self, w: &mut World, r: &J, handler: Option<bool>) -> R<()> {
+    fn imp_match(&mut self, w: &mut World, r: &Rv, handler: Option<bool>) -> R<()> {
         // (`HandleUnitDestroyed` calls `HandleUnitDeath`: the replay doesn't model destruction.)
         if r["fn"] == "HandleUnitDestroyed" {
             return Err(Desync("a destruction's handler (not modelled)".into()));
@@ -364,8 +369,8 @@ impl Driver<'_> {
             }
             Op::Bother { u: x, b, cond, damage } => {
                 let vis = match &r["vis"] {
-                    J::Null => None,
-                    J::Bool(v) => Some(*v),
+                    Rv::Null => None,
+                    Rv::Bool(v) => Some(*v),
                     _ => return Err(mismatch()),
                 };
                 // The visibility is read only when the unit is in combat and the other its enemy.
@@ -422,7 +427,7 @@ impl Driver<'_> {
     /// it queued is the memory queue's, which isn't wired: taken as recorded. Anything else (an
     /// offensive action's outside its rule, `StartCombat`, a random encounter, a dungeon) is
     /// reported.
-    pub(super) fn mem_q_outside(&mut self, w: &mut World, r: &J) {
+    pub(super) fn mem_q_outside(&mut self, w: &mut World, r: &Rv) {
         let want = w.combat.impatience.memory_acts.as_mut().and_then(VecDeque::pop_front);
         let ok = mem_q_shape(r, self.tick, MEM_Q_ACT) && is_call(w, r, want);
         if ok {
@@ -461,7 +466,7 @@ impl Driver<'_> {
             return;
         }
         // The rules seen (id: class, initiator, target) and the open handlers (class, rule, phase).
-        let mut rules: std::collections::HashMap<i64, (String, J, J)> =
+        let mut rules: std::collections::HashMap<i64, (String, Rv, Rv)> =
             std::collections::HashMap::new();
         let mut handlers: Vec<(String, i64, String)> = Vec::new();
         for k in start..=end {
@@ -512,7 +517,7 @@ impl Driver<'_> {
                             .flatten()
                             .filter(|(rc, ..)| rc.rsplit('.').next() == Some("RuleAttackRoll"))
                     });
-                    let unit = |v: &J| v.get("$unit").cloned().unwrap_or(J::Null);
+                    let unit = |v: &Rv| v.get("$unit").cloned().unwrap_or(Rv::Null);
                     let pair = (r["o"].clone(), r["tgt"].clone());
                     let shape = mem_q_shape(r, self.tick, MEM_Q_OFFENSIVE);
                     let placed = rule.is_some_and(|(_, a, t)| {
@@ -538,7 +543,7 @@ impl Driver<'_> {
                     let placed = handlers.last().is_some_and(|(class, rule, phase)| {
                         let Some((rc, a, t)) = rules.get(rule) else { return false };
                         let rc = rc.rsplit('.').next().unwrap_or("");
-                        let unit = |v: &J| v.get("$unit").cloned().unwrap_or(J::Null);
+                        let unit = |v: &Rv| v.get("$unit").cloned().unwrap_or(Rv::Null);
                         phase == "did"
                             && r["t"].as_i64() == Some(self.tick)
                             && match (class.as_str(), r["ev"].as_str(), r["at"].as_str(), rc) {
@@ -811,7 +816,7 @@ impl Driver<'_> {
 
     /// Whatever the impatience observer writes (its observations, entries, leaves, draws), with
     /// the observer or not.
-    pub(super) fn imp_family(&self, r: &J) -> bool {
+    pub(super) fn imp_family(&self, r: &Rv) -> bool {
         match r["k"].as_str() {
             Some("obs") => {
                 r["ev"].as_str().is_some_and(|e| e.starts_with("imp_") || e.starts_with("uc_imp"))
@@ -828,7 +833,7 @@ impl Driver<'_> {
 
     /// The controller's next record, taken where its code makes it (nothing else is recorded in
     /// its code): it must be the very next one.
-    fn imp_next(&mut self, w: &mut World, what: &str, want: impl Fn(&J) -> bool) -> R<usize> {
+    fn imp_next(&mut self, w: &mut World, what: &str, want: impl Fn(&Rv) -> bool) -> R<usize> {
         let r = self.trace.records.get(self.i);
         if !r.is_some_and(&want) {
             let d = r.map_or_else(|| "its end".to_owned(), describe);
@@ -896,7 +901,7 @@ impl Driver<'_> {
             None => r["m"] == "Range_ii" && r["a"] == serde_json::json!([0, 100]),
             Some(m) => {
                 #[allow(clippy::cast_possible_truncation)]
-                let f = |x: &J| x.as_f64().map(|v| (v as f32).to_bits());
+                let f = |x: &Rv| x.as_f64().map(|v| (v as f32).to_bits());
                 r["m"] == "Range_ff"
                     && r["a"].as_array().is_some_and(|a| {
                         a.len() == 2
@@ -912,7 +917,7 @@ impl Driver<'_> {
             && r["h"] == 0
             && r.get("ctx").is_none()
             && r.get("forced").is_some() == self.replay_mode
-            && super::commands::draw_ok(r, &self.trace.sites)
+            && super::commands::draw_ok(&r.to_json(), &self.trace.sites)
             && args_ok;
         if !ok {
             let d = describe(r);
@@ -926,7 +931,7 @@ impl Driver<'_> {
     }
 
     /// A draw of the impatience controller's (a lifecycle record with the observer).
-    pub(super) fn imp_draw_record(&self, r: &J) -> bool {
+    pub(super) fn imp_draw_record(&self, r: &Rv) -> bool {
         self.imp
             && r["k"] == "draw"
             && (r["site"].as_i64().is_some_and(|s| self.imp_sites.contains(&s))
@@ -934,7 +939,7 @@ impl Driver<'_> {
     }
 
     /// After a desync, a skipped impatience draw: the tape's too, to keep the site's queue in step.
-    pub(super) fn imp_skip_draw(&self, w: &mut World, r: &J) {
+    pub(super) fn imp_skip_draw(&self, w: &mut World, r: &Rv) {
         let Some(site) = self.trace.site_key(r).as_deref().and_then(site_of) else { return };
         if r["m"] == "Range_ii" {
             let _ = w.rng.range_int(site, 0, 100);
@@ -997,7 +1002,7 @@ impl ImpInputs for Driver<'_> {
         let at = self.imp_leaf(w, "iotw", &["c", "v"])?;
         let r = &self.trace.records[at];
         let v: Option<Vec<bool>> =
-            r["v"].as_array().and_then(|a| a.iter().map(J::as_bool).collect());
+            r["v"].as_array().and_then(|a| a.iter().map(Rv::as_bool).collect());
         match (id(&r["c"]) == Some(c), v) {
             (true, Some(v)) => Ok(v),
             _ => self.uc_reject(

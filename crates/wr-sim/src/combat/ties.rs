@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use serde_json::Value as J;
+use super::oracle::Rv;
 
 use crate::world::{EntityIdx, World};
 
@@ -70,7 +70,7 @@ pub struct TieDecision {
 impl TieDecision {
     /// A strict reading of an `init_tie` record: every field present with its type and in its
     /// domain, and the result the one the hashes give.
-    fn parse(r: &J) -> Option<(i64, Self, i32, i32)> {
+    fn parse(r: &Rv) -> Option<(i64, Self, i32, i32)> {
         let t = r["t"].as_i64().filter(|t| *t >= 0)?;
         let cmp = match r["cmp"].as_str()? {
             "turn" => TieCmp::Turn,
@@ -125,9 +125,9 @@ fn unneeded(w: &mut World, n: usize, what: &str) {
 /// Reads the run's `init_tie` records when its begin record declares `init_ties` (`declared`)
 /// and the turn port runs (`port`: the sorts are the sim's), and turns the decisions on;
 /// otherwise a recording must have none.
-pub fn load(w: &mut World, recs: &[J], declared: bool, port: bool) {
+pub fn load(w: &mut World, recs: &[Rv], declared: bool, port: bool) {
     let ours =
-        |r: &&J| r["k"] == "obs" && matches!(r["ev"].as_str(), Some("init_tie" | "init_tie_bad"));
+        |r: &&Rv| r["k"] == "obs" && matches!(r["ev"].as_str(), Some("init_tie" | "init_tie_bad"));
     if !declared {
         if recs.iter().any(|r| ours(&r)) {
             w.coverage.unsupported(
