@@ -684,9 +684,9 @@ fn driven_agent_replays_are_valid() {
 }
 
 /// Driven replays run at once by the physics and paths tests (each holds a capture and a world:
-/// several GB; `WR_TEST_REPLAYS`, default 2, so a test can't take the machine's memory).
+/// several GB; `WR_TEST_REPLAYS`, default 1: one heavy job stays under ~9 GB).
 fn replays_at_once() -> usize {
-    std::env::var("WR_TEST_REPLAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(2).max(1)
+    std::env::var("WR_TEST_REPLAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1)
 }
 
 /// The capture with WrathOracle's `paths` the physics and path records are damaged in.
@@ -1143,6 +1143,17 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
                 "kind": "XPath", "err": false, "cs": 2, "searched": 1, "end": null, "raw": [],
                 "los": []});
             recs.insert(at + 1, fin);
+            recs.insert(at + 1, start);
+            renumber(recs);
+        }),
+        ("a path_seek the sim didn't request", |recs| {
+            let at = later(recs, |r| ev(r, "turn_tick"));
+            let t = recs[at]["t"].clone();
+            let start = json!({"k": "obs", "t": t, "ev": "path_start", "path": "unestablished#1",
+                "strict": true, "e": [0.0, 0.0, 0.0]});
+            let seek = json!({"k": "obs", "t": t, "ev": "path_seek", "path": "unestablished#1",
+                "accepted": true, "mods": true, "cb": true});
+            recs.insert(at + 1, seek);
             recs.insert(at + 1, start);
             renumber(recs);
         }),

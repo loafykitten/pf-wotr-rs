@@ -2312,7 +2312,7 @@ impl AgentInputs for Driver<'_> {
                 if start["fn"] == "find" {
                     self.ags.finding.insert(q.key.clone());
                 }
-                self.nav_request(w, q, start["fn"] == "find");
+                self.nav_request(w, u, q, start["fn"] == "find");
                 let rq = &r["rq"];
                 let ending = match q.approach {
                     Some(a) => {

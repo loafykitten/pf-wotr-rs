@@ -146,7 +146,7 @@ pub struct NavDriver {
     clock: Option<f32>,
     tape: Option<VecDeque<f32>>,
     /// The last `FindPath` request made (the AI's `ScorePath` reads its path next).
-    last_find: Option<String>,
+    last_find: Option<(String, EntityIdx)>,
     /// Each requester's seeker: its current path (`Seeker.path`, the last request it started),
     /// and the path each request replaced.
     seeker: HashMap<String, String>,
@@ -364,6 +364,17 @@ impl Driver<'_> {
                 ),
             }
         };
+    }
+
+    /// A path whose recorded return isn't the sim's to compute: a critter's, one whose request
+    /// was taken from the recording, one the sim couldn't compute (reported), outside synchronized
+    /// turn-based combat or carried from real time.
+    fn nav_exempt(&self, w: &World, key: &str) -> bool {
+        self.ags.nav.critters.contains(key)
+            || self.ags.nav.taken.contains(key)
+            || self.ags.nav.failed.contains_key(key)
+            || self.ags.carried.contains(key)
+            || !(w.combat.turn_based && self.ags.synced)
     }
 
     /// A path whose request the window started (`path_start`) or carried from real time.
@@ -636,9 +647,9 @@ impl Driver<'_> {
 
     /// A request the sim's agent made (`ag_req_end`'s): its search waits for the recording's
     /// return (`path_fin`, with the line-of-sight answers).
-    pub(super) fn nav_request(&mut self, w: &mut World, q: &PathRequest, find: bool) {
+    pub(super) fn nav_request(&mut self, w: &mut World, u: EntityIdx, q: &PathRequest, find: bool) {
         if find {
-            self.ags.nav.last_find = Some(q.key.clone());
+            self.ags.nav.last_find = Some((q.key.clone(), u));
         }
         if !self.ags.nav.paths {
             return;
@@ -820,10 +831,16 @@ impl Driver<'_> {
         }
         // `PathTo` sets `distanceXZ` after `StartPath`: a worker may have searched without it.
         if p.req.distance_xz {
-            let (alt, _, _) = compute(&TurnBasedRequest { distance_xz: false, ..p.req });
+            let (alt, alt_mismatch, alt_asked) =
+                compute(&TurnBasedRequest { distance_xz: false, ..p.req });
             if !same_pts(&alt.vector_path, &got.vector_path)
                 || !same_pts(&alt.raw, &got.raw)
                 || alt.search.state != got.search.state
+                || alt.search.searched_nodes != got.search.searched_nodes
+                || alt.search.end_node != got.search.end_node
+                || alt.search.los_unknown.is_some()
+                || alt_mismatch.is_some()
+                || alt_asked != asked
             {
                 return Err("the result depends on when PathTo set distanceXZ".into());
             }
@@ -893,12 +910,15 @@ impl Driver<'_> {
             .is_some_and(|(who, _)| self.ags.nav.seeker.get(who).map(String::as_str) == Some(key));
         let known = self.nav_known(key);
         let tick = self.tick;
+        let exempt = self.nav_exempt(w, key);
         let Some(c) = self.ags.nav.computed.get_mut(key) else {
             if !known {
                 Self::nav_unsupported(
                     w,
                     format!("{key}: a path_seek of a path no request started"),
                 );
+            } else if !exempt {
+                Self::nav_unsupported(w, format!("{key}: a path_seek the sim didn't request"));
             }
             return;
         };
@@ -935,9 +955,12 @@ impl Driver<'_> {
         }
         let known = self.nav_known(key);
         let tick = self.tick;
+        let exempt = self.nav_exempt(w, key);
         let Some(c) = self.ags.nav.computed.get_mut(key) else {
             if !known {
                 Self::nav_unsupported(w, format!("{key}: a path_mod of a path no request started"));
+            } else if !exempt {
+                Self::nav_unsupported(w, format!("{key}: a path_mod the sim didn't request"));
             }
             return;
         };
@@ -1060,6 +1083,7 @@ impl Driver<'_> {
     /// one, the sim's path of its `FindPath`.
     pub(super) fn nav_ai_path(
         &mut self,
+        w: &World,
         fake: bool,
         error: bool,
         state: i64,
@@ -1069,9 +1093,13 @@ impl Driver<'_> {
             return Ok(());
         }
         // (Each `ScorePath` reads the path of its own `FindPath`, once.)
-        let Some(key) = self.ags.nav.last_find.take() else {
+        let Some((key, unit)) = self.ags.nav.last_find.take() else {
             return Err(Desync("ScorePath's path without the sim's FindPath".into()));
         };
+        // (`context.Unit.View.AgentASP.FindPath`: the AI's own unit's.)
+        if crate::combat::ai::context_unit(w) != Some(unit) {
+            return Err(Desync(format!("ScorePath's path {key} isn't the AI's unit's request")));
+        }
         if self.ags.nav.failed.contains_key(&key) {
             return Ok(());
         }
