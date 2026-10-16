@@ -59,6 +59,7 @@ internal static class Fixture
         PathSync.ResetWindow();
         ProjPin.ResetWindow();
         DeathFxPin.ResetWindow();
+        CamPin.ResetWindow();
         TieObs.ResetWindow();
         Sched.CaptureStartUnits();
         TurnBased.ResetWindow();
@@ -143,6 +144,8 @@ internal static class Fixture
             // The pins need the recording's records: projectile arrivals, and critters' requests keyed apart.
             if (ProjPin.Installed && !ProjPin.RecordedOn)
                 Sched.Invalidate("the recording has no projectile arrivals (observer proj_arrival): re-record");
+            if (CamPin.Installed && !CamPin.RecordedOn)
+                Sched.Invalidate("the recording has no camera gates (observer camera_gates): re-record");
             if (DeathFxPin.Installed && !DeathFxPin.RecordedOn)
                 Sched.Invalidate("the recording has no death effects (observer death_effect): re-record");
             if (PathSync.CritterIdOk && !PathSync.RecordedCritters)
@@ -232,6 +235,9 @@ internal static class Fixture
                 j.Prop("death_effect_pins", DeathFxPin.Pinned);
                 j.Prop("dismember_effects", DeathFxPin.Inits);
                 j.Prop("root_rules_checked", Sched.RootsChecked);
+                j.Prop("camera_scroll_queries", CamPin.Scrolls);
+                j.Prop("camera_command_queries", CamPin.Commands);
+                j.Prop("camera_view_changes", CamPin.FrustumChanges);
                 j.Prop("init_tie_compares_turn", TieObs.TurnCompares);
                 j.Prop("init_tie_compares_prepare", TieObs.PrepareCompares);
                 j.Prop("init_ties_turn", TieObs.TurnTies);
@@ -339,6 +345,7 @@ internal static class Fidelity
         PathSync.Install(h);
         ProjPin.Install(h);
         DeathFxPin.Install(h);
+        CamPin.Install(h);
         InputPin.Install(h);
         Observe.Install(h);
         GroupObs.Install(h);
@@ -360,6 +367,8 @@ internal static class Fidelity
         if (ProjPin.Installed) Observers.Add("proj_arrival");
         // Death effects' dismember decisions and DismemberUnitFX's buff (death_fx, dismember; DeathFxPin.cs).
         if (DeathFxPin.Installed) Observers.Add("death_effect");
+        // The camera's gates on gameplay: the turn's scroll, cutscene camera commands' completion, the view (CamPin.cs).
+        if (CamPin.Installed) Observers.Add("camera_gates");
         // The initiative comparers' identity-hash decisions (init_tie; TieObs.cs).
         if (TieObs.Installed) Observers.Add("init_ties");
         if (PathSync.CritterIdOk) Observers.Add("critter_paths");

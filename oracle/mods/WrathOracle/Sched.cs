@@ -172,6 +172,7 @@ internal static class Sched
         PathSync.CheckComplete();
         ProjPin.CheckComplete();
         DeathFxPin.CheckComplete();
+        CamPin.CheckComplete();
         WallClock.CheckComplete();
         if (Invalid != null) return;
         if (_gatePos < _gates.Count) Invalidate($"replay ended with {_gates.Count - _gatePos} recorded gates unused (next: {_gates[_gatePos].Ev} '{_gates[_gatePos].D}' at tick {_gates[_gatePos].T})");
@@ -241,6 +242,7 @@ internal static class Sched
             // Projectile launches and hits (ProjPin.cs), death effects (DeathFxPin.cs).
             ProjPin.TapeRecord(o);
             DeathFxPin.TapeRecord(o);
+            CamPin.TapeRecord(o);
             if ((string)o["ev"] == "path_start")
                 PathSync.AddStartTape((string)o["path"], o["e"] is JArray e && e.Count == 3 ? new UnityEngine.Vector3((float)e[0], (float)e[1], (float)e[2]) : (UnityEngine.Vector3?)null, (bool?)o["strict"] ?? true);
             // Gates carry "g": true; other records use "g" for other things (the memory observer: a group id).
