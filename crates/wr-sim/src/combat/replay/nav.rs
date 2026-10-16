@@ -157,6 +157,8 @@ pub struct NavDriver {
     /// The last step the sim ran (`maxMoveLength`, its result, the simulator after it), not yet
     /// read by the AI.
     last_step: Option<(i64, EntityIdx, f32, bool, MovementSimulator)>,
+    /// Each path's last return record (`path_fin`, `path_seek`, `path_mod`).
+    returned_at: HashMap<String, usize>,
     /// The recorded `path_to`/`path_done` waiting for the sim's `PathTo`/`OnPathComplete`.
     path_to: Option<usize>,
     path_done: Option<usize>,
@@ -280,23 +282,7 @@ impl Driver<'_> {
             .and_then(|b| b["observers"].as_array())
             .is_some_and(|a| a.iter().any(|o| o == "paths"));
         if !declared {
-            // (Its records without its declaration: a damaged begin record.)
-            if trace.records.iter().any(|r| {
-                r["k"] == "obs"
-                    && matches!(
-                        r["ev"].as_str(),
-                        Some(
-                            "nav_guo"
-                                | "nav_update"
-                                | "nav_tags"
-                                | "path_fin"
-                                | "path_seek"
-                                | "path_mod"
-                        )
-                    )
-            }) {
-                Self::nav_unsupported(w, "observer paths' records without its declaration");
-            }
+            // (Its records without its declaration: `paths_undeclared`, checked at the start.)
             return;
         }
         if !self.ags.strict {
@@ -555,9 +541,17 @@ impl Driver<'_> {
                 }
             }
             "path_to" | "path_done" => {}
-            "path_fin" => self.nav_path_fin(w, r),
-            "path_seek" => self.nav_path_seek(w, r),
-            "path_mod" => self.nav_path_mod(w, r),
+            "path_fin" | "path_seek" | "path_mod" => {
+                match ev {
+                    "path_fin" => self.nav_path_fin(w, r),
+                    "path_seek" => self.nav_path_seek(w, r),
+                    _ => self.nav_path_mod(w, r),
+                }
+                // (A callback's prefix comes after its return's records.)
+                if let Some(k) = r["path"].as_str() {
+                    self.ags.nav.returned_at.insert(k.to_owned(), i);
+                }
+            }
             _ => {}
         }
     }
@@ -1443,13 +1437,26 @@ impl Driver<'_> {
 
     /// `OnPathComplete(Path)`'s recorded prefix (`path_done`): the delivered path's error, count,
     /// end and `GetTotalLength()`, the sim's.
-    pub(super) fn nav_path_done(&mut self, w: &World, u: EntityIdx, err: bool, v: &[V3]) -> R<()> {
+    pub(super) fn nav_path_done(
+        &mut self,
+        w: &World,
+        u: EntityIdx,
+        key: &str,
+        err: bool,
+        v: &[V3],
+    ) -> R<()> {
         if !self.ags.nav.paths {
             return Ok(());
         }
         let Some(at) = self.ags.nav.path_done.take() else {
             return Err(Desync("OnPathComplete without its path_done".into()));
         };
+        // `Path.ReturnPath` runs the seeker's modifiers, then its callback (`OnPathComplete`).
+        if self.ags.nav.computed.contains_key(key)
+            && self.ags.nav.returned_at.get(key).is_none_or(|j| at < *j)
+        {
+            return Err(Desync(format!("{key}: OnPathComplete's path_done before its return")));
+        }
         let r = &self.trace.records[at];
         if r["t"].as_i64() != Some(self.tick) {
             return Err(Desync(format!(

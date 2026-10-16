@@ -1153,6 +1153,13 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             recs.insert(at + 1, r);
             renumber(recs);
         }),
+        ("OnPathComplete's path_done before its return", |recs| {
+            let fin = fin_of_done(recs);
+            let at = fin + recs[fin..].iter().position(|r| ev(r, "path_done")).unwrap();
+            let r = recs.remove(at);
+            recs.insert(fin, r);
+            renumber(recs);
+        }),
         ("the recording's path_to", |recs| {
             let at = tb(recs, |r| ev(r, "path_to"));
             recs[at]["radius"] = json!(0.25);

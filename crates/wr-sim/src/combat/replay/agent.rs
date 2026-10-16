@@ -2200,7 +2200,7 @@ impl AgentInputs for Driver<'_> {
         let r = self.ag_take(w, u, "ag_done", "OnPathComplete")?;
         // `OnPathComplete(p, forcedPath)`'s prefix (`path_done`, right before `ag_done`): its
         // path's.
-        self.nav_path_done(w, u, error, &p.points)?;
+        self.nav_path_done(w, u, &p.key, error, &p.points)?;
         // The path's contents (a delivered one's are the record's own; a `ForcedPath` is
         // constructed `Complete`).
         let pts: Option<Vec<V3>> = r["v"].as_array().and_then(|v| v.iter().map(v3).collect());

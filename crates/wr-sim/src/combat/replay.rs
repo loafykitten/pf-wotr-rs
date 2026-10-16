@@ -1458,6 +1458,26 @@ impl<'t> Driver<'t> {
             d.nav_start(w);
         }
         // The paths' records need the driven agent (`agent_sync` and its chain).
+        // Observer `paths`' records without its declaration (a damaged begin record).
+        let paths_records = recs.iter().any(|r| {
+            r["k"] == "obs"
+                && matches!(
+                    r["ev"].as_str(),
+                    Some(
+                        "nav_guo"
+                            | "nav_update"
+                            | "nav_tags"
+                            | "path_fin"
+                            | "path_seek"
+                            | "path_mod"
+                    )
+                )
+        });
+        if paths_records && !declared.contains(&"paths") {
+            w.coverage.unsupported(
+                "driven replay: paths: observer paths' records without its declaration",
+            );
+        }
         if !d.ag && declared.contains(&"paths") {
             w.coverage.unsupported(
                 "driven replay: paths: observer paths without the driven agent (agent_sync and the impatience, targets, engage, ai, command and turn records)",

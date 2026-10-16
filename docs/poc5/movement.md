@@ -348,7 +348,7 @@ taking the path if it is still the seeker's latest request, from the window's `p
 (`path_mod`), and
 every delivery: `OnPathComplete` (`ag_done`) **runs on the sim's path** (the recorded one a check, as is its
 prefix's `path_done`: error, count, end, `GetTotalLength()`; `PathTo`'s prefix `path_to` is checked against the sim's
-call; a prefix is used in its frame), FindPath's callback
+call; a prefix is used in its frame, a callback's after its return's records), FindPath's callback
 (`ag_findclr`) must be one the seeker makes, and the AI's `ScorePath` read (`uc_v path`) must be the sim's path of that `ScorePath`'s own `FindPath`
 (each read takes its request once), or,
 when `FixPathIfTooShort` made a fake path, the sim's path must be one it replaces (fewer than two points, or two
@@ -401,7 +401,7 @@ rays over the meshes would check one), each answer taken from the recording and 
 The coverage line (`wr-combat replay`): `physics and paths: physics queries computed ... simulation steps ... paths
 computed ... deliveries checked ... graph events matched ...`.
 
-`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 66
+`missing_or_wrong_physics_and_path_records_are_reported` (`poc5_agent.rs`) damages `poc5-tb-114/tb-nearest` 67
 ways (its first replay twice: the timer's refresh removed, a return moved a frame before its callback;
 `poc5-tb-123` once: the AI reading a step of the frame before; `poc5-tb-118` four ways: the AI reading a step other
 than the sim's, or another unit's, its steps' records removed, its grid read changed), each reported: the agent's, a simulation step's and a
@@ -413,7 +413,8 @@ a path no request started, its end node, its modifiers changed or missing, the s
 modifiers, no callback), a stray `path_seek`, the delivered path, a definition, the AI's read, a fake path where
 `FixPathIfTooShort` keeps the path, `path_done`'s length, the record itself or its frame,
 the callback's kind, a pending definition after the return, a turn start's graph records before its entry, a
-return of another kind no request of the sim's made, a critter's request under a unit's key, `path_to`'s radius, a step's delta; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
+return of another kind no request of the sim's made, a critter's request under a unit's key, a
+callback's prefix before its return, `path_to`'s radius, a step's delta; a queued object's extents, centre and flags, an application's erosion, a refresh's hash, an object
 missing, a refresh repeated, the clock read missing or another, the timer negative, the observer undeclared or declared
 without `agent_sync`, a refresh moved into the next frame, a graph update's id unreadable, a definition of another
 kind of path (complete, or pending before the request's registration), a unit's corpulence reads all changed, the query settings. `driven_agent_replays_are_valid` replays `-113` to `-117` (every run)
