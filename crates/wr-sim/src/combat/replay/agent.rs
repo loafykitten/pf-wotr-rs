@@ -83,16 +83,24 @@ fn critter_phys(r: &J) -> bool {
         None => return false,
     }
     let c = &r["critter"];
-    let name = |k: &str| c[k].as_str().is_some_and(|x| !x.is_empty());
+    // An identified object (`PhysProbe.WritePath`/`WriteId`): scene, hierarchy path, sibling path.
+    let placed = |o: &J| {
+        ["scene", "path"].iter().all(|k| o[*k].as_str().is_some_and(|x| !x.is_empty()))
+            && o["sib"].as_array().is_some_and(|a| a.iter().all(J::is_u64))
+    };
+    // The collider hit (`WriteId`): placed, its type and instance id.
+    let col = &r["col"];
+    let collider = col.as_object().is_some_and(|o| o.len() == 5)
+        && placed(col)
+        && col["type"].as_str().is_some_and(|x| !x.is_empty())
+        && col["iid"].is_i64();
     let finite3 = |v: &J| v3(v).is_some_and(|p| p.iter().all(|x| x.is_finite()));
     let query = match r["fn"].as_str() {
         Some("ray") => v3(&r["d"]).map(bits3) == Some(bits3([0.0, -1.0, 0.0])),
         _ => f(&r["r"]).map(f32::to_bits) == Some(0.4f32.to_bits()),
     };
     let result = r["hit"] == false
-        || (f(&r["dist"]).is_some_and(f32::is_finite)
-            && finite3(&r["pt"])
-            && r["col"].as_object().is_some_and(|o| !o.is_empty()));
+        || (f(&r["dist"]).is_some_and(f32::is_finite) && finite3(&r["pt"]) && collider);
     r["ctx"] == "critter"
         && query
         && result
@@ -102,9 +110,7 @@ fn critter_phys(r: &J) -> bool {
         && fields(r, &keys)
         && r["u"].is_null()
         && c.as_object().is_some_and(|o| o.len() == 3)
-        && name("scene")
-        && name("path")
-        && c["sib"].as_array().is_some_and(|a| a.iter().all(J::is_u64))
+        && placed(c)
 }
 
 /// A required boolean (a missing, null or mistyped value isn't `false`).
@@ -2631,7 +2637,8 @@ mod critter_phys_tests {
         json!({"seq": 1, "k": "obs", "t": 5, "ev": "ag_phys", "fn": "ray", "ctx": "critter", "u": null,
             "critter": {"scene": "S", "path": "Critters/Tarantula", "sib": [0]},
             "o": [0.0, 2.0, 0.0], "d": [0.0, -1.0, 0.0], "max": 100.0, "mask": 2099457, "hit": true,
-            "dist": 2.0, "pt": [0.0, 0.0, 0.0], "col": {"type": "TerrainCollider"}})
+            "dist": 2.0, "pt": [0.0, 0.0, 0.0],
+            "col": {"scene": "S", "path": "TERRAIN", "sib": [], "type": "TerrainCollider", "iid": 1672364}})
     }
 
     #[test]
@@ -2672,6 +2679,14 @@ mod critter_phys_tests {
             |r| r["col"] = json!(null),
             |r| r["pt"] = json!([0.0, 0.0]),
             |r| r["dist"] = json!("2"),
+            |r| r["col"] = json!({"type": null}),
+            |r| r["col"] = json!({"arbitrary": true}),
+            |r| r["col"]["type"] = json!(null),
+            |r| r["col"]["iid"] = json!("1"),
+            |r| {
+                r["col"].as_object_mut().unwrap().remove("path");
+            },
+            |r| r["col"]["sib"] = json!(null),
         ];
         for (i, d) in damage.iter().enumerate() {
             let mut r = ray();
