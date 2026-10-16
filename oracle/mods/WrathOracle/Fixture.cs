@@ -348,6 +348,8 @@ internal static class Fidelity
         if (Observers.Count == 0) Observers.AddRange(new[] { "groups", "cooldowns", "turn_ticks", "commands", "attacks", "approach", "ai", "engage", "targets", "impatience" });
         if (CommandObs.AgOn) Observers.Add("agent");
         if (CommandObs.AgSyncOn) Observers.Add("agent_sync");
+        // The place-on-ground step's view position, reads and rays (ag_ground vafter/fly/prone/torso, ag_phys ctx ground).
+        if (CommandObs.AgOn) Observers.Add("ground_view");
         if (CommandObs.MemOn) Observers.Add("memory");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
         if (CommandObs.PathsOn) Observers.Add("paths");

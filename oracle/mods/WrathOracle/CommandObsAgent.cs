@@ -26,7 +26,8 @@ namespace WrathOracle;
 //    the view's IsCommandsPreventMovement, MaxSpeed, FlyHeight, the cutscene's control of the unit, the gamepad
 //    setting), with the agent's unit; in UnitMoveController.TickUnit, the unit state's CanMove and CanRotate;
 //  - ag_phys: each physics query in UnitMovementAgentBase.Move (Physics.Raycast, PhysicUtils.HeuristicDiscCastDown)
-//    with its arguments and result (and since phys_probe, the collider hit: col, PhysProbe.WriteId), and the context: the tick ("tick", with the unit), ScorePath's simulation ("sim"),
+//    with its arguments and result (and since phys_probe, the collider hit: col, PhysProbe.WriteId), and the context: the tick ("tick", with the unit), ScorePath's simulation ("sim"), the place-on-ground step's
+//    rays ("ground", with the unit; since ground_view),
 //    a critter's movement ("critter", with the critter: its scene, hierarchy and sibling path; CritterMoveAgent.TickMovement
 //    moves a critter's transform through the same static Move, docs/poc5/tb-replay.md "Critters' ground rays") or another
 //    caller ("other", with its caller chain: origin);
@@ -56,7 +57,10 @@ namespace WrathOracle;
 //  - ag_rot: UnitEntityData.UpdateSlowRotation's inputs (m_Orientation, DesiredOrientation, maxAngle);
 //  - ag_findclr: FindPath's callback (the AI's path delivered: m_RequestedFindPath cleared), with the path;
 //  - ag_enable: UnitMovementAgent.OnEnable/OnDisable (the agent joins or leaves AllAgents; its index after);
-//  - ag_ground: UnitPlaceOnGroundController.TickUnit (physics: an input for now), the position before and after;
+//  - ag_ground: UnitPlaceOnGroundController.TickUnit, the position before and after, and (since ground_view) what the
+//    sim needs to compute it: the view's position after (`vafter`: the view takes the computed position even when the
+//    position's setter keeps the old one), FlyHeight, the view's IsProne and, when prone, CenterTorso's position; its
+//    raycasts are ag_phys with ctx "ground" and the unit;
 //  - ag_pathdef: a path's definition the first time the window refers to it (PathSync key, or an observer id for a path
 //    PathSync didn't see), with its points, error and CompleteState, so paths carried into the window are known;
 //  - ag_v isdone: each Path.IsDone() the agent evaluates (PathTo, FindPath, IsReallyMoving, PathFailed), with the path;
@@ -400,6 +404,10 @@ internal static partial class CommandObs
         AccessTools.FieldRefAccess<UnitEntityData, Vector3>("m_Position");
 
     private static UnitEntityData _groundUnit;
+    // UnitPlaceOnGroundController.TickUnit's reads at its start (FlyHeight, the view's IsProne, CenterTorso's position).
+    private static float _groundFly;
+    private static bool _groundProne;
+    private static Vector3? _groundTorso;
 
     public static void AgPosPrefix(UnitEntityData __instance, Vector3 value)
     {
@@ -761,6 +769,12 @@ internal static partial class CommandObs
         {
             critter = _critter.transform;
             return "critter";
+        }
+        // UnitPlaceOnGroundController.TickUnit's rays (outside any agent entry and critter).
+        if (AgCtx.Count == 0 && _critterDepth == 0 && _groundUnit != null)
+        {
+            u = _groundUnit.UniqueId;
+            return "ground";
         }
         if (AgCtx.Count == 0 || _critterDepth > 0)
         {
@@ -1175,7 +1189,22 @@ internal static partial class CommandObs
     {
         __state = null;
         _groundUnit = data;
-        try { if (AgObserved() && data != null) __state = data.Position; }
+        _groundFly = 0f;
+        _groundProne = false;
+        _groundTorso = null;
+        try
+        {
+            if (!AgObserved() || data == null) return;
+            __state = data.Position;
+            _groundFly = data.FlyHeight;
+            // (Plain reads: an auto-property, the bone's transform or the view's own.)
+            var view = data.View;
+            if (view != null)
+            {
+                _groundProne = view.IsProne;
+                if (_groundProne) _groundTorso = view.CenterTorso.position;
+            }
+        }
         catch (Exception e) { Trace.HookFailed("observe ag_ground", e); }
     }
 
@@ -1189,7 +1218,18 @@ internal static partial class CommandObs
             var before = __state.Value;
             var after = data.Position;
             var inCtl = ReferenceEquals(_ctlUnit, data);
-            AgObs("ag_ground", j => { j.Prop("u", u); j.Prop("ctl", inCtl); j.Prop("pos", before); j.Prop("after", after); });
+            var view = data.View;
+            Vector3? vafter = view != null ? view.transform.position : (Vector3?)null;
+            var fly = _groundFly;
+            var prone = _groundProne;
+            var torso = _groundTorso;
+            AgObs("ag_ground", j =>
+            {
+                j.Prop("u", u); j.Prop("ctl", inCtl); j.Prop("pos", before); j.Prop("after", after);
+                j.Key("vafter"); if (vafter.HasValue) j.Vec(vafter.Value); else j.W.WriteNull();
+                j.Prop("fly", fly); j.Prop("prone", prone);
+                j.Key("torso"); if (torso.HasValue) j.Vec(torso.Value); else j.W.WriteNull();
+            });
         }
         catch (Exception e) { Trace.HookFailed("observe ag_ground", e); }
     }
@@ -1204,6 +1244,7 @@ internal static partial class CommandObs
         var move = AgBase.GetMethods(all).Single(m => m.Name == "Move" && m.GetParameters().Length == 5);
         var moveUnit = M(AgBase, "MoveUnit");
         var tick = M(Ag, "TickMovement");
+        var ground = M(typeof(UnitPlaceOnGroundController), "TickUnit");
         var sim = M(Ag, "SimulateTickMovementForTurnBased");
         var can = M(Ag, "CanMoveInTurnBased");
         var slow = M(Ag, "SlowDown");
@@ -1223,6 +1264,8 @@ internal static partial class CommandObs
         {
             (move, typeof(Physics), nameof(Physics.Raycast), raycastArgs, nameof(TapAgRaycast), 1),
             (move, typeof(PhysicUtils), nameof(PhysicUtils.HeuristicDiscCastDown), discArgs, nameof(TapAgDiscCast), 1),
+            // The place-on-ground step's rays: the first, the loop's, the prone torso's.
+            (ground, typeof(Physics), nameof(Physics.Raycast), raycastArgs, nameof(TapAgRaycast), 3),
             (moveUnit, typeof(UnitEntityData), "get_FlyHeight", Type.EmptyTypes, nameof(TapAgFlyHeight), 1),
             (tick, typeof(UnitAnimationManager), "get_IsPreventingMovement", Type.EmptyTypes, nameof(TapAgAnimPrevents), 1),
             (tick, typeof(UnitEntityView), "get_IsCommandsPreventMovement", Type.EmptyTypes, nameof(TapAgCommandsPrevent), 1),
