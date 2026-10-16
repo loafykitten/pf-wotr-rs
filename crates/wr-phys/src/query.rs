@@ -6,17 +6,19 @@
 //! `ePOSITION | eNORMAL | eUV` (`eMESH_BOTH_SIDES` only with `Physics.queriesHitBackfaces`,
 //! false by default) and a filter that keeps the shapes whose layer is in the mask (and
 //! triggers per `queriesHitTriggers`); a +inf distance becomes `FLT_MAX`. PhysX then tests the
-//! shapes whose bounds the ray crosses, each with the distance shrunk to the closest hit so
-//! far, and returns the closest. With one shape hit the result doesn't depend on that order;
-//! with more it may (a shrunk distance changes a height field's trace), so that case fails
-//! closed, as does any query that may touch a collider kind not verified yet.
+//! shapes whose bounds the ray crosses, in its pruner's order, each with the distance shrunk to
+//! the closest hit so far, keeping a hit when its distance is `<=` that distance. The pruner's
+//! order isn't modelled: the query is run in every order of the shapes that can hit (the height
+//! field, which a shorter ray can make hit, and each mesh that hits the whole ray: a mesh's
+//! raycast only loses hits as the ray shortens), and a query whose answer depends on the order
+//! fails closed, as does any query that may touch a collider kind not verified yet.
 
 use std::borrow::Cow;
 use std::fmt;
 
+use crate::bv4::MeshScale;
 use crate::conservative::{self, M4};
-use crate::hf::RayHit;
-use crate::px::{Transform, Vec3};
+use crate::px::{Quat, Transform, Vec3};
 use crate::{ShapeKind, World};
 
 /// The closest hit: `RaycastHit.distance` and `.point`, and the shape's index in the world.
@@ -66,6 +68,13 @@ enum Prepared {
         err: f64,
         lo: [f64; 3],
         hi: [f64; 3],
+    },
+    /// A mesh with its recorded transform: the BV4 raycast as the player runs it, under every
+    /// sign of the recorded zeros (the recording doesn't keep them).
+    MeshExact {
+        poses: Vec<Transform>,
+        scale: MeshScale,
+        layer: u32,
     },
     Other {
         lo: [f64; 3],
@@ -118,7 +127,17 @@ impl<'w> Scene<'w> {
                     let half = f64x3(*size).map(|x| x.abs() * 0.5);
                     Prepared::Box { m, center, half }
                 }
-                ShapeKind::Mesh { local_to_world, vertices, triangles, geom_epsilon } => {
+                ShapeKind::Mesh { runtime: Some(r), .. } => Prepared::MeshExact {
+                    poses: zero_sign_variants(r.position, r.rotation),
+                    scale: MeshScale {
+                        scale: Vec3::from_array(r.lossy_scale),
+                        rotation: Quat::IDENTITY,
+                    },
+                    layer: r.layer,
+                },
+                ShapeKind::Mesh { local_to_world, mesh, runtime: None, .. } => {
+                    let (vertices, triangles) = (&mesh.vertices, &mesh.triangles);
+                    let geom_epsilon = &mesh.geom_epsilon;
                     let m = M4::from_f32(local_to_world);
                     let w: Vec<[f64; 3]> = vertices.iter().map(|v| m.point(f64x3(*v))).collect();
                     let tris: Vec<[[f64; 3]; 3]> = triangles
@@ -202,15 +221,23 @@ impl<'w> Scene<'w> {
                 "{fields} height fields in the mask (the scene query's shape order)"
             )));
         }
-        let mut hits: Vec<(usize, RayHit)> = Vec::new();
+        // The shapes that can hit: the height field (a shorter ray can turn its miss into a
+        // hit) and each mesh that hits the whole ray.
+        let mut candidates: Vec<usize> = Vec::new();
         for (i, (s, p)) in self.world.shapes.iter().zip(&self.prepared).enumerate() {
-            let inside = in_mask(s.layer, mask);
-            if s.visual_layer_move && inside != in_mask(VISUAL_LAYER, mask) {
-                return Err(QueryError::Unsupported(format!(
-                    "{}: in the mask on layer {} and not on {VISUAL_LAYER} (the load's layer move)",
-                    s.name, s.layer
-                )));
-            }
+            let inside = if let Prepared::MeshExact { layer, .. } = p {
+                // The recorded layer, after the load's move.
+                in_mask(*layer, mask)
+            } else {
+                let inside = in_mask(s.layer, mask);
+                if s.visual_layer_move && inside != in_mask(VISUAL_LAYER, mask) {
+                    return Err(QueryError::Unsupported(format!(
+                        "{}: in the mask on layer {} and not on {VISUAL_LAYER} (the load's layer move)",
+                        s.name, s.layer
+                    )));
+                }
+                inside
+            };
             if !inside {
                 continue;
             }
@@ -220,35 +247,94 @@ impl<'w> Scene<'w> {
                     s.name
                 )));
             }
-            match (&s.kind, p) {
-                (ShapeKind::HeightField { pose, field }, Prepared::HeightField { bounds }) => {
-                    // `MultiQueryCallback` keeps a blocking hit only when `distance <= shrunk`
-                    // (`max` here): faceHit's distance, recomputed from the rounded point, can
-                    // exceed the traced length.
-                    if let Some(h) = field.raycast_in(*bounds, *pose, o, dir, max, false)
-                        && h.distance <= max
-                    {
-                        hits.push((i, h));
+            match p {
+                Prepared::HeightField { .. } => candidates.push(i),
+                Prepared::MeshExact { .. } => {
+                    if self.shape_hit(i, o, dir, max)?.is_some() {
+                        candidates.push(i);
                     }
                 }
-                (_, prep) => {
+                prep => {
                     if may_touch(prep, f64x3(origin), f64::from(max)) {
                         return Err(QueryError::Unverified { shape: s.name.clone() });
                     }
                 }
             }
         }
-        match hits.as_slice() {
-            [] => Ok(None),
-            [(i, h)] => Ok(Some(RaycastHit {
-                distance: h.distance,
-                point: h.position.to_array(),
-                shape: *i,
-            })),
-            _ => Err(QueryError::Unsupported(format!(
-                "a ray hitting {} height fields (the scene query's shape order)",
-                hits.len()
-            ))),
+        if candidates.len() > MAX_CANDIDATES {
+            return Err(QueryError::Unsupported(format!(
+                "{} shapes the ray may hit (the scene query's shape order)",
+                candidates.len()
+            )));
+        }
+        // `MultiQueryCallback` in every order: each shape gets the distance shrunk to the closest
+        // hit so far and its hit is kept when `distance <= shrunk` (the height field's distance,
+        // recomputed from the rounded point, can exceed the traced length).
+        let mut answer: Option<Option<RaycastHit>> = None;
+        let mut order = candidates.clone();
+        let mut more = true;
+        while more {
+            let mut shrunk = max;
+            let mut best: Option<RaycastHit> = None;
+            for &i in &order {
+                if let Some((distance, point)) = self.shape_hit(i, o, dir, shrunk)?
+                    && distance <= shrunk
+                {
+                    best = Some(RaycastHit { distance, point, shape: i });
+                    shrunk = distance;
+                }
+            }
+            match &answer {
+                None => answer = Some(best),
+                Some(a) if same_hit(*a, best) => {}
+                Some(a) => {
+                    return Err(QueryError::Unsupported(format!(
+                        "the scene query's shape order decides the hit ({a:?} or {best:?})"
+                    )));
+                }
+            }
+            more = next_permutation(&mut order);
+        }
+        Ok(answer.flatten())
+    }
+
+    /// Shape `i`'s raycast as `MultiQueryCallback` makes it, `max` the shrunk distance: the
+    /// height field's or the mesh's under every sign of its recorded zeros (all equal, or the
+    /// query fails closed).
+    fn shape_hit(
+        &self,
+        i: usize,
+        o: Vec3,
+        dir: Vec3,
+        max: f32,
+    ) -> Result<Option<(f32, [f32; 3])>, QueryError> {
+        let s = &self.world.shapes[i];
+        match (&s.kind, &self.prepared[i]) {
+            (ShapeKind::HeightField { pose, field }, Prepared::HeightField { bounds }) => Ok(field
+                .raycast_in(*bounds, *pose, o, dir, max, false)
+                .map(|h| (h.distance, h.position.to_array()))),
+            (ShapeKind::Mesh { mesh, .. }, Prepared::MeshExact { poses, scale, .. }) => {
+                let mut first: Option<Option<(f32, [f32; 3])>> = None;
+                for pose in poses {
+                    // Unity's hit flags: `ePOSITION | eNORMAL | eUV`; the geometry single-sided.
+                    let h = crate::bv4::raycast_triangle_mesh(
+                        mesh, scale, false, *pose, o, dir, max, HIT_FLAGS,
+                    )
+                    .map(|h| (h.distance, h.position.to_array()));
+                    match first {
+                        None => first = Some(h),
+                        Some(f) if key(f) == key(h) => {}
+                        Some(_) => {
+                            return Err(QueryError::Unsupported(format!(
+                                "the sign of a zero in {}'s recorded transform decides the hit",
+                                s.name
+                            )));
+                        }
+                    }
+                }
+                Ok(first.flatten())
+            }
+            _ => unreachable!("only height fields and recorded meshes are computed"),
         }
     }
 
@@ -285,10 +371,56 @@ fn in_mask(layer: u32, mask: i32) -> bool {
     layer < 32 && (mask as u32 >> layer) & 1 != 0
 }
 
+/// Unity's raycast hit flags: `ePOSITION | eNORMAL | eUV` (back faces not hit).
+const HIT_FLAGS: u16 = 0xb;
+
+/// The most shapes whose orders a query tries (5! orders).
+const MAX_CANDIDATES: usize = 5;
+
+/// A hit compared bit for bit (the shape too: the caller checks the collider).
+fn key(h: Option<(f32, [f32; 3])>) -> Option<(u32, [u32; 3])> {
+    h.map(|(d, p)| (d.to_bits(), p.map(f32::to_bits)))
+}
+
+fn same_hit(a: Option<RaycastHit>, b: Option<RaycastHit>) -> bool {
+    a.map(|h| (h.shape, key(Some((h.distance, h.point)))))
+        == b.map(|h| (h.shape, key(Some((h.distance, h.point)))))
+}
+
+/// The next permutation in lexicographic order; false (and `v` back to sorted) after the last.
+pub(crate) fn next_permutation(v: &mut [usize]) -> bool {
+    let Some(i) = (1..v.len()).rev().find(|&i| v[i - 1] < v[i]) else {
+        v.reverse();
+        return false;
+    };
+    let j = (i..v.len()).rev().find(|&j| v[j] > v[i - 1]).expect("v[i] qualifies");
+    v.swap(i - 1, j);
+    v[i..].reverse();
+    true
+}
+
+/// The pose PhysX may hold for a recorded position and rotation: every sign of each zero
+/// component (the recording writes a zero without its sign).
+pub(crate) fn zero_sign_variants(position: [f32; 3], rotation: [f32; 4]) -> Vec<Transform> {
+    let mut v: Vec<f32> = rotation.iter().chain(&position).copied().collect();
+    let zeros: Vec<usize> = (0..v.len()).filter(|&k| v[k] == 0.0).collect();
+    let mut out = Vec::with_capacity(1 << zeros.len());
+    for signs in 0u32..1 << zeros.len() {
+        for (b, &k) in zeros.iter().enumerate() {
+            v[k] = if signs >> b & 1 == 0 { 0.0 } else { -0.0 };
+        }
+        out.push(Transform {
+            q: Quat { x: v[0], y: v[1], z: v[2], w: v[3] },
+            p: Vec3::new(v[4], v[5], v[6]),
+        });
+    }
+    out
+}
+
 fn may_touch(p: &Prepared, o: [f64; 3], max: f64) -> bool {
     const DOWN: [f64; 3] = [0.0, -1.0, 0.0];
     match p {
-        Prepared::HeightField { .. } => false,
+        Prepared::HeightField { .. } | Prepared::MeshExact { .. } => false,
         Prepared::Box { m, center, half } => {
             conservative::ray_hits_box(o, DOWN, max, m, *center, *half)
         }
@@ -339,6 +471,6 @@ pub fn raycast_height_field(
     origin: [f32; 3],
     dir: [f32; 3],
     max: f32,
-) -> Option<RayHit> {
+) -> Option<crate::hf::RayHit> {
     field.raycast(pose, Vec3::from_array(origin), Vec3::from_array(dir), max, false)
 }

@@ -4817,6 +4817,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "glam 0.34.1",
  "lz4_flex",
  "lzma-rs",
