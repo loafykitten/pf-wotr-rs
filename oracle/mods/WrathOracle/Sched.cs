@@ -301,28 +301,40 @@ internal static class Sched
     // A long id the window made (run-specific), not one existing at its open.
     private static bool Made(string id) => id != null && id.Length > 8 && !StartUnits.Contains(id);
 
-    // Whether the recording's ids `rec` and the replay's `now` name the same units, one to one (SameUnit's rules:
-    // existing and short ids equal, made ids bound; ids unbound so far are bound in order).
-    public static bool SameUnits(IList<string> rec, IList<string> now)
+    // Whether the recording's two groups of unit ids (recIn, recOut: units in and out of the camera's view) and the
+    // replay's name the same units in the same groups. Existing and short ids must be the same id in the same group,
+    // made ids bound before (roots, deaths) must land in the same group. Made ids not bound yet have no identity
+    // to follow: one per side in the same group is bound; several in one group only on both sides are counted;
+    // unbound ones in both groups are ambiguous (a swap couldn't be told) and fail.
+    public static bool SameUnitGroups(IList<string> recIn, IList<string> recOut, IList<string> nowIn, IList<string> nowOut)
     {
-        if (rec.Count != now.Count) return false;
-        var rest = new List<string>(now);
-        var unbound = new List<string>();
-        foreach (var r in rec)
+        var restIn = new List<string>(nowIn);
+        var restOut = new List<string>(nowOut);
+        var unboundIn = 0;
+        var unboundOut = 0;
+        bool Take(IList<string> rec, List<string> rest, ref int unbound)
         {
-            if (!Made(r)) { if (!rest.Remove(r) || Made(r)) return false; }
-            else if (RootBind.TryGetValue(r, out var b)) { if (!rest.Remove(b)) return false; }
-            else unbound.Add(r);
+            foreach (var r in rec)
+            {
+                if (!Made(r)) { if (!rest.Remove(r)) return false; }
+                else if (RootBind.TryGetValue(r, out var b)) { if (!rest.Remove(b)) return false; }
+                else unbound++;
+            }
+            return true;
         }
-        foreach (var r in unbound)
+        if (!Take(recIn, restIn, ref unboundIn) || !Take(recOut, restOut, ref unboundOut)) return false;
+        // What's left on the replay's side must be made ids no recorded id is bound to, as many as the recording's.
+        if (restIn.Concat(restOut).Any(x => !Made(x) || RootBindBack.ContainsKey(x))) return false;
+        if (restIn.Count != unboundIn || restOut.Count != unboundOut) return false;
+        if (unboundIn > 0 && unboundOut > 0) return false;
+        if (unboundIn + unboundOut == 1)
         {
-            var x = rest.FirstOrDefault(m => Made(m) && !RootBindBack.ContainsKey(m));
-            if (x == null) return false;
-            RootBind[r] = x;
-            RootBindBack[x] = r;
-            rest.Remove(x);
+            var r = (recIn.Concat(recOut)).First(x => Made(x) && !RootBind.ContainsKey(x));
+            var x2 = restIn.Concat(restOut).First();
+            RootBind[r] = x2;
+            RootBindBack[x2] = r;
         }
-        return rest.Count == 0;
+        return true;
     }
 
     // ---- inputs ----

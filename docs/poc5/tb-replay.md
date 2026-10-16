@@ -761,9 +761,10 @@ doesn't need to know.
   - Each call is noted as `cam_cmd` (`cmd`: the command's type and blueprint; `n`: its ordinal for that command;
     `player`: the cutscene player's id; `v`).
   - A replay's call must be the recording's next for that command, on its tick plus the offset, and of the same
-    player. Players are bound one to one as units are, so two players of one cutscene can't trade results. It
-    returns the recorded result without running the original, which reads nothing else. The replay's own record
-    says `pin`.
+    player. A command queried for a second player in the window (a copy of the cutscene; players take random ids)
+    has no identity to follow: the record says `ambiguous`, which makes a recording unfollowable and a replay
+    invalid. It returns the recorded result without running the original, which reads nothing else. The replay's
+    own record says `pin`.
 - **The camera's view, checked:** `EntitiesInCameraFrustumController` sets every entity's `IsInCameraFrustum` from
   the rig's position and frustum. Gameplay reads it:
   - for extra units (`SleepingUnitsController`: they sleep out of view);
@@ -775,8 +776,10 @@ doesn't need to know.
     once at the window's open (tick -1, the state the first ticks read, since `SleepingUnitsController` runs before
     the frustum controller), then after each of the controller's ticks when it changes.
   - A replay's state must be the recording's on every tick (its last change at or before the tick, plus the
-    offset). Ids are matched one to one (`Sched.SameUnits`): the window's starting units and short ids by id,
-    units made in the window bound.
+    offset). Ids are matched group by group (`Sched.SameUnitGroups`): the window's starting units and short ids by
+    id, units made in the window by the binding the root rules and deaths made. A made unit not bound yet is bound
+    only when it is the only one; several unbound ones are only counted, and only while they are all in one group
+    (unbound units in both groups could have swapped unseen, which fails).
   - It is checked, not pinned: it follows from the camera's position, which no pin sets.
 - **Alushenyrra's isles, checked:** `IslesController.TickCameraRotation` turns the camera's yaw into a direction
   whose changes drive isle states (their actions, navmesh cuts). Combat locks it, but a window's walks don't. Each
