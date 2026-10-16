@@ -268,3 +268,34 @@ Per run, the same for the record run and both replays:
     unreadable;
   - a setter by an unknown caller whose result isn't its value;
   - a read changed.
+
+### What stays an input, and what's left
+
+- **Inputs, by cause:**
+  - the point of a writer the sim doesn't run (the roaming controller's next point for a sleeping unit: 1 to 4
+    writes per fight; the angle itself is the sim's);
+  - whether the attack of opportunity's animation handle was made (presentation: the gate of its `LookAt`);
+  - the desired orientation at the window's start (`ag_init`) and where real time ends (`ag_sync`);
+  - writes in real time, which isn't ported;
+  - a point a class's own `GetTargetPoint` gives: counted, none in these fights.
+- **Reported where reached, not modelled:** riders' and mounts' writes (`LookAt`/`ForceLookAt` of a rider, the
+  rider's copy in `TickUnit`), `TurnToTarget` overrides other than `UnitMoveTo`'s, the paused `ForceLookAt`s.
+- **Left:**
+  - port the roaming controller in combat replays, so its writes' points are computed too;
+  - `-131`'s other reports, which belong to other streams: box and mesh raycasts, the dropped loot, its combat log,
+    a prone rider's turn;
+  - WrathOracle's `ReferenceEquals` hardening in `LookPre` (after review, on this branch) is in no build yet. It
+    only replaces a null test that read the descriptor.
+
+Reviews (gpt-6.1-sol, high):
+- The observer, one round: the synchronization's order, the scan failing closed, re-transpilation, the `==`
+  operator.
+- The sim, two rounds:
+  - records inside rule spans, now audited at the end;
+  - the attack of opportunity's peek;
+  - turn-based writes before the synchronization;
+  - unknown callers;
+  - the state after a reported record or read, which now carries on;
+  - the optional write in older captures;
+  - the validity test's T0 check.
+- Then one pass on the final state.
