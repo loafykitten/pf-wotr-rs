@@ -50,15 +50,37 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     decisions are recorded inputs; tb-tie (`-127`) valid.
   - **Memory guards** (the Mac froze out of memory once): `scripts/heavy.sh` for every heavy run, capture tests serial
     (`.config/nextest.toml`), stream builds at 4 jobs. A long capture's replay peaked at ~8.5 GB; ~2 GB since stream O (`docs/poc5/replay-memory.md`).
-  - Valid on every run: `-95`, `-96`, `-109`, `-111` to `-117`, `-120`, `-122/tb-focus`, `-123` to `-127`.
-    Not valid: `-121` (tb-lizard: the AI's ability actions, stream P), `-122/tb-nearest` (a tie recorded before
-    `init_ties`; superseded by `-127`), `-118`/`-119` (superseded). POC-5 suites 27/27.
-  - Running: M (physics and paths behind the agent in the driven replay), O (the replay's memory), P (the AI's
-    ability actions for tb-lizard).
-  - Captures: `-111` (memory), `-112` (+ `phys_probe`), `-113` (+ `agent_sync`), `-114` (+ `paths`), `-115` to `-117`
-    (+ `combat_log`), `-118`..`-120` (stream J's fights), `-121`/`-122` (projectile and critter pins), `-123`
-    (+ `inspect_reveal`), `-124`/`-125` (+ `death_effect`, root rules), `-126`/`-127` (+ `init_ties`; `-127` tb-tie).
-    Sim regression unchanged (`cache/regress/out-post-d`).
+  - *The AI's cast actions* (stream P, `docs/poc5/ai-abilities.md`): `BlueprintAiCastSpell` scored; the cast command.
+  - *Critter rays, camera gates* (stream L, `docs/poc5/tb-replay.md`): critters' ground rays classified; the turn's
+    camera-scroll gate and cutscene camera commands pinned (`CamPin`, observer `camera_gates`); the camera's view of
+    extra and dead units checked. Open: `-134`'s replay-2 fails the view check (camera drift changes a dead body's
+    reveal): pin the frustum results for those readers instead of only checking them.
+  - *The agent's physics and paths in the driven replay* (stream M, `combat/replay/nav.rs`, `docs/poc5/movement.md`):
+    physics queries, the AI's simulation steps, the turn-based grid and paths, place-on-ground (observer `ground_view`).
+  - *The mesh raycast* (stream S, `crates/wr-phys/src/bv4.rs`, `docs/poc5/physics.md`): PhysX's BV4 triangle-mesh raycast
+    from the arm64 player, bit for bit on 26M rays; the physics file is format 2 and takes the recorded transforms
+    (`wr-import phys-pack … --colliders <a trace with ph_col>`). Boxes' Unity pose mapping still unverified.
+  - *Facing* (stream T, `docs/poc5/orientation.md`, observer `look`): `DesiredOrientation` computed from `LookAt`,
+    `ForceLookAt` and the orientation writers. Stopped at wrap-up after a clean review, before its final checks: the
+    main session's merge sweep is its verification.
+  - *Combat log tooltips* (stream Q): every recorded attack and damage tooltip equal.
+  - *Manual_10* (stream R, `docs/poc3/manual10-facts.md`): area parts' suppression; one-sided facts 17 -> 0. The 13
+    restarted companion toggles need Drezen's scene (`CompanionSpawner`s), not cached.
+  - *Replay memory* (stream O, `docs/poc5/replay-memory.md`): compact `Rv` records; a long replay peaks at ~2 GB (was
+    ~9-10 GB) and runs ~40% faster, outputs byte-identical.
+  - **Memory guards**: `scripts/heavy.sh` for every heavy run, capture tests serial (`.config/nextest.toml`), stream
+    builds at 4 jobs.
+  - **Valid on every run** after the final merges (sweep at wrap-up; `check.sh` 614 tests, POC-5 suites 32/32): `-95`,
+    `-96`, `-109`, `-111`..`-117`, `-120`, `-122/tb-focus`, `-123`..`-127`, `-129` (tb-lizard, every observer), `-132`,
+    `-133` (with facing and the camera gates).
+  - Not valid: `-122/tb-nearest` (a tie recorded before `init_ties`; `-127` covers ties), `-118`/`-119`/`-121`/`-128`
+    (superseded tb-chain/tb-lizard captures from older observers), `-130/tb-nearest` (the camera-scroll drift the pin
+    now fixes), `-134` (the camera-view drift, open).
+  - Captures this session up to `-135`: `-129` tb-lizard with every observer through `ground_view`; `-131`/`-132` with
+    `look`; `-133`..`-135` with `camera_gates` (`-135` the flipped-scroll test, `poc5-tb9`). Saves Ember could make (an
+    enemy walking several steps, impatience's hard target, iterative attacks): `docs/poc5/fixtures.md`.
+  - Next: the camera-view pin (`-134`); box colliders' pose mapping; Drezen's scene cache for Manual_10's companions;
+    LookAt's remaining inputs (T's doc); then PLAN's list below.
 - **The movement agent (twenty-second session, `docs/poc5/movement.md`): `TickMovement` exact against the game.**
   WrathOracle's new observer `agent` (`CommandObsAgent.cs`, three gpt-6.1-sol review rounds) records the agent's state,
   leaves, physics queries, path requests and completions; `poc5-tb-100` to `-103` (Manual_18, both fights) are clean.

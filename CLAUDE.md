@@ -27,10 +27,11 @@ survey and notes on other rewrites.
     math ported from `UnityPlayer.dylib` and checked against it, `native_check.rs`); turn-based paths too
     (`docs/poc5/paths.md`, observer `paths`, `poc5-tb-114`: every request exact). The sim's input is the area's nav
     file (`cache/sim/nav/<guid>.wrnav`, format 2, written by `wr-import nav-pack`, also from `scripts/scene-cache.sh`).
-  - The movement agent (`docs/poc5/movement.md`): `TickMovement` bit-identical on every recorded tick, and computed in
-    the driven replay (`poc5-tb-113` valid with the agent driven). Physics (`crates/wr-phys`, `docs/poc5/physics.md`: the terrain's
-    raycasts exact; `wr-import phys-pack`) and memory (`docs/poc5/memory.md`: the controller's tick exact) are ported
-    but not yet wired in. PLAN's "Where things stand" lists this session's streams and captures (`poc5-tb-111` to `-117`).
+  - The movement agent (`docs/poc5/movement.md`): computed in the driven replay with its physics (`crates/wr-phys`:
+    terrain, boxes and triangle meshes exact against the player), paths, the AI's simulation steps, place-on-ground and
+    facing (`docs/poc5/orientation.md`); memory (`docs/poc5/memory.md`), spells, the combat log with its tooltips and
+    initiative ties are computed too. PLAN's "Where things stand" lists the twenty-second session's streams, the
+    captures (`poc5-tb-111` to `-135`) and what's open (the camera-view pin for `-134`).
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in
     parallel (recordings, POC-6 render comparisons, Metal captures of the original), never timing. Setup, sync and
