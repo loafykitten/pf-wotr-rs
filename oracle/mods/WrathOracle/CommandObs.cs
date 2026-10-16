@@ -1692,5 +1692,8 @@ internal static partial class CommandObs
 
         // What turn-based paths are computed on and with (observer "paths", CommandObsPaths.cs).
         InstallPaths(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+
+        // Units' orientation writes (observer "look", CommandObsLook.cs).
+        InstallLook(h);
     }
 }

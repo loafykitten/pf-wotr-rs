@@ -350,6 +350,8 @@ internal static class Fidelity
         if (CommandObs.AgSyncOn) Observers.Add("agent_sync");
         // The place-on-ground step's view position, reads and rays (ag_ground vafter/fly/prone/torso, ag_phys ctx ground).
         if (CommandObs.AgOn) Observers.Add("ground_view");
+        // Every write of a unit's DesiredOrientation and m_Orientation outside TickUnit's own (ag_look; CommandObsLook.cs).
+        if (CommandObs.LookOn) Observers.Add("look");
         if (CommandObs.MemOn) Observers.Add("memory");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
         if (CommandObs.PathsOn) Observers.Add("paths");
