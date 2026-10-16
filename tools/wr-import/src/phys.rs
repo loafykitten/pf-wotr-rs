@@ -48,6 +48,8 @@ pub struct MeshReport {
     pub render_vertices: usize,
     pub cooked_triangles: usize,
     pub render_triangles: usize,
+    /// The BV4 tree's packed nodes.
+    pub tree_nodes: usize,
 }
 
 fn vec3(v: &Value, key: &str) -> Result<[f32; 3]> {
@@ -98,7 +100,7 @@ pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackRe
                         center: vec3(v, "m_Center")?,
                         size: vec3(v, "m_Size")?,
                     },
-                    "MeshCollider" => mesh_shape(universe, s, v, m, &name, &mut rep)?,
+                    "MeshCollider" => mesh_shape(universe, s, v, &g, m, &name, &mut rep)?,
                     "TerrainCollider" => terrain_shape(universe, s, v, &g, &name)?,
                     _ => {
                         // Spheres, capsules and controllers: Unity scales the radius by the
@@ -120,6 +122,7 @@ pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackRe
                 *rep.by_kind.entry(kind_key).or_default() += 1;
                 world.shapes.push(Shape {
                     name,
+                    sibling_path: g.sibling_path.clone(),
                     layer,
                     is_trigger,
                     visual_layer_move: g.name.contains("_!Visual"),
@@ -189,6 +192,7 @@ fn mesh_shape(
     universe: &Universe,
     s: &SceneData,
     v: &Value,
+    g: &crate::scene::GoSnapshot,
     m: [f32; 16],
     name: &str,
     rep: &mut PackReport,
@@ -217,28 +221,186 @@ fn mesh_shape(
     let render_pos = positions(&render);
     let render_set: std::collections::HashSet<[u32; 3]> =
         render_pos.iter().map(|p| p.map(f32::to_bits)).collect();
-    let same = cooked.vertices.iter().filter(|p| render_set.contains(&p.map(f32::to_bits))).count();
+    let mesh = cooked.mesh;
+    let same = mesh.vertices.iter().filter(|p| render_set.contains(&p.map(f32::to_bits))).count();
     let render_tris: u32 = render.submeshes.iter().map(|sm| sm.index_count / 3).sum();
+    // `mGeomEpsilon` as cooking computes it from the local bounds (2^-22 of the largest absolute
+    // coordinate), against the cooked value the raycast uses.
+    let extent = mesh.vertices.iter().flatten().fold(0.0f32, |a, &x| a.max(x.abs()));
+    ensure!(
+        mesh.geom_epsilon.to_bits() == (extent * 2f32.powi(-22)).to_bits(),
+        "{name}: cooked mGeomEpsilon {} isn't 2^-22 of the largest coordinate {extent}",
+        mesh.geom_epsilon
+    );
     rep.meshes.push(MeshReport {
         mesh: mesh_name,
         version: cooked.version,
         midphase: cooked.midphase,
-        cooked_vertices: cooked.vertices.len(),
+        cooked_vertices: mesh.vertices.len(),
         cooked_in_render: same,
         render_vertices: render_pos.len(),
-        cooked_triangles: cooked.triangles.len(),
+        cooked_triangles: mesh.triangles.len(),
         render_triangles: render_tris as usize,
+        tree_nodes: mesh.tree.nodes.len(),
     });
-    // `mGeomEpsilon` as `MeshBuilder` computes it from the local bounds (2^-22 of the largest
-    // absolute coordinate).
-    let extent = cooked.vertices.iter().flatten().fold(0.0f32, |a, &x| a.max(x.abs()));
-    let geom_epsilon = extent * 2f32.powi(-22);
+    let w = g.world;
     Ok(ShapeKind::Mesh {
         local_to_world: m,
-        vertices: cooked.vertices,
-        triangles: cooked.triangles,
-        geom_epsilon,
+        pose: Transform {
+            q: Quat { x: w.rotation[0], y: w.rotation[1], z: w.rotation[2], w: w.rotation[3] },
+            p: Vec3::from_array(w.position),
+        },
+        lossy_scale: w.lossy_scale,
+        mesh,
+        runtime: None,
     })
+}
+
+/// What [`apply_recorded_colliders`] found.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ColliderReport {
+    /// Mesh shapes given their recorded transform.
+    pub meshes: usize,
+    /// Of those, the importer's own position, rotation (zeros' signs aside) and lossy scale
+    /// equal to the recording's, bit for bit.
+    pub position_equal: usize,
+    pub rotation_equal: usize,
+    pub lossy_equal: usize,
+    /// Mesh shapes left out: recorded disabled.
+    pub disabled: Vec<String>,
+    /// Mesh shapes recorded with a zero scale, left without a recorded transform.
+    pub degenerate: Vec<String>,
+}
+
+/// Gives every mesh shape the transform and layer a recording's `ph_col` records hold for it
+/// (WrathOracle's `phys_probe`): one record per shape, matched by scene, hierarchy path,
+/// sibling path and type, active, not a trigger, non-convex, with the importer's cooking
+/// options, and close to the importer's transform (the identity check; the values used are
+/// the recording's). A mesh recorded disabled is left out of the world.
+pub fn apply_recorded_colliders(
+    world: &mut World,
+    trace: &std::path::Path,
+    source: &str,
+) -> Result<ColliderReport> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(trace).with_context(|| format!("opening {}", trace.display()))?;
+    let reader: Box<dyn BufRead> = if trace.extension().is_some_and(|e| e == "gz") {
+        Box::new(std::io::BufReader::new(flate2::read::GzDecoder::new(f)))
+    } else {
+        Box::new(std::io::BufReader::new(f))
+    };
+    let mut cols: Vec<serde_json::Value> = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if !line.contains("\"ph_col\"") {
+            continue;
+        }
+        let r: serde_json::Value = serde_json::from_str(&line)?;
+        if r["k"] == "obs" && r["ev"] == "ph_col" {
+            cols.push(r);
+        }
+    }
+    ensure!(!cols.is_empty(), "{}: no ph_col records (observer phys_probe)", trace.display());
+    // Floats are written round-trip ("R"): the nearest f32 is the game's value.
+    let fv = |v: &serde_json::Value, what: &str| -> Result<f32> {
+        let x = v.as_f64().with_context(|| format!("{what}: not a number"))?;
+        #[allow(clippy::cast_possible_truncation)]
+        let y = x as f32;
+        ensure!(y.is_finite(), "{what}: {x} isn't a finite f32");
+        Ok(y)
+    };
+    let arr = |v: &serde_json::Value, n: usize, what: &str| -> Result<Vec<f32>> {
+        let a = v.as_array().with_context(|| format!("{what}: not an array"))?;
+        ensure!(a.len() == n, "{what}: {} values", a.len());
+        a.iter().map(|x| fv(x, what)).collect()
+    };
+    let mut rep = ColliderReport::default();
+    let mut dropped = Vec::new();
+    for (i, s) in world.shapes.iter_mut().enumerate() {
+        let ShapeKind::Mesh { pose, lossy_scale, runtime, .. } = &mut s.kind else { continue };
+        let found: Vec<&serde_json::Value> = cols
+            .iter()
+            .filter(|c| {
+                c["type"] == "MeshCollider"
+                    && format!(
+                        "{}:{} (MeshCollider)",
+                        c["scene"].as_str().unwrap_or(""),
+                        c["path"].as_str().unwrap_or("")
+                    ) == s.name
+                    && c["sib"].as_array().is_some_and(|a| {
+                        a.iter().map(serde_json::Value::as_u64).collect::<Vec<_>>()
+                            == s.sibling_path
+                                .iter()
+                                .map(|&x| Some(u64::from(x)))
+                                .collect::<Vec<_>>()
+                    })
+            })
+            .collect();
+        let [c] = found.as_slice() else {
+            bail!("{}: {} ph_col records match it", s.name, found.len());
+        };
+        let name = &s.name;
+        ensure!(c["active"] == true, "{name}: recorded inactive");
+        if c["enabled"] == false {
+            // Disabled at load (a loot corpse's collider): not in PhysX's scene.
+            rep.disabled.push(name.clone());
+            dropped.push(i);
+            continue;
+        }
+        ensure!(c["enabled"] == true, "{name}: no enabled flag");
+        ensure!(
+            c["trigger"].as_bool() == Some(s.is_trigger),
+            "{name}: recorded trigger flag differs"
+        );
+        ensure!(c["convex"] == false, "{name}: recorded convex");
+        ensure!(c["cooking"] == 30, "{name}: recorded cooking options {}", c["cooking"]);
+        let layer = u32::try_from(c["layer"].as_u64().context("layer")?)?;
+        ensure!(
+            layer == s.layer || (s.visual_layer_move && layer == 11),
+            "{name}: recorded on layer {layer}, the scene says {}",
+            s.layer
+        );
+        let p = arr(&c["pos"], 3, "pos")?;
+        let q = arr(&c["rot"], 4, "rot")?;
+        let l = arr(&c["lossy"], 3, "lossy")?;
+        let ours = [pose.p.x, pose.p.y, pose.p.z];
+        let ourq = [pose.q.x, pose.q.y, pose.q.z, pose.q.w];
+        let close = |a: &[f32], b: &[f32]| {
+            a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-4 * (1.0 + x.abs()))
+        };
+        ensure!(
+            close(&p, &ours) && close(&q, &ourq) && close(&l, lossy_scale),
+            "{name}: recorded transform {p:?} {q:?} {l:?} isn't the scene's {ours:?} {ourq:?} {lossy_scale:?}"
+        );
+        // Zeros compare equal whatever their sign (the recording doesn't keep it).
+        let same = |a: &[f32], b: &[f32]| {
+            a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits() || (*x == 0.0 && *y == 0.0))
+        };
+        if l.contains(&0.0) {
+            // A collapsed scale (a loot corpse's collider): not a valid PhysX geometry; the
+            // conservative test answers for it.
+            rep.degenerate.push(name.clone());
+            continue;
+        }
+        rep.meshes += 1;
+        rep.position_equal += usize::from(same(&p, &ours));
+        rep.rotation_equal += usize::from(same(&q, &ourq));
+        rep.lossy_equal += usize::from(same(&l, lossy_scale));
+        *runtime = Some(wr_phys::MeshRuntime {
+            position: [p[0], p[1], p[2]],
+            rotation: [q[0], q[1], q[2], q[3]],
+            lossy_scale: [l[0], l[1], l[2]],
+            layer,
+            source: source.to_owned(),
+        });
+    }
+    let mut idx = 0;
+    world.shapes.retain(|_| {
+        idx += 1;
+        !dropped.contains(&(idx - 1))
+    });
+    world.validate()?;
+    Ok(rep)
 }
 
 fn positions(m: &crate::pack::mesh::DecodedMesh) -> Vec<[f32; 3]> {
@@ -257,17 +419,22 @@ fn positions(m: &crate::pack::mesh::DecodedMesh) -> Vec<[f32; 3]> {
         .collect()
 }
 
-/// A PhysX 4.1 cooked triangle mesh: its vertices and triangles (the midphase, materials,
-/// remap and adjacency that follow aren't needed here).
+/// A PhysX 4.1 cooked triangle mesh as `Gu::MeshFactory`'s `loadMeshData` reads it: the
+/// header and the BVH34 mesh the raycast needs (vertices, triangles in the tree's order,
+/// `mGeomEpsilon`, the tree); materials, the face remap, adjacencies and the extra triangle
+/// data are read past (no raycast distance or point depends on them).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CookedMesh {
     pub version: u32,
     pub midphase: u32,
-    pub vertices: Vec<[f32; 3]>,
-    pub triangles: Vec<[u32; 3]>,
+    pub mesh: wr_phys::bv4::Bv4Mesh,
+    /// The cooked local bounds (`mAABB`).
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
 }
 
-/// Decodes the head of `Gu::MeshFactory`'s `loadMeshData` stream (little-endian only).
+/// Decodes a little-endian `NXS`/`MESH` stream with the BVH34 midphase (the BVH33 R-tree
+/// isn't ported) and checks it whole, as `loadMeshData` and `BV4Tree::load` read it.
 pub fn decode_cooked_mesh(b: &[u8]) -> Result<CookedMesh> {
     struct Reader<'a> {
         b: &'a [u8],
@@ -283,28 +450,40 @@ pub fn decode_cooked_mesh(b: &[u8]) -> Result<CookedMesh> {
         fn dword(&mut self) -> Result<u32> {
             Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
         }
+        fn float(&mut self) -> Result<f32> {
+            Ok(f32::from_bits(self.dword()?))
+        }
+        fn vec3(&mut self) -> Result<[f32; 3]> {
+            Ok([self.float()?, self.float()?, self.float()?])
+        }
+        fn count(&mut self, n: usize, size: usize) -> Result<&'a [u8]> {
+            self.take(n.checked_mul(size).context("cooked mesh size overflows")?)
+        }
     }
+    const IMSF_MATERIALS: u32 = 1 << 0;
+    const IMSF_FACE_REMAP: u32 = 1 << 1;
+    const IMSF_8BIT: u32 = 1 << 2;
+    const IMSF_16BIT: u32 = 1 << 3;
+    const IMSF_ADJACENCIES: u32 = 1 << 4;
+    const IMSF_GRB_DATA: u32 = 1 << 5;
     let mut r = Reader { b, at: 0 };
     let nxs = r.take(4)?;
     ensure!(&nxs[..3] == b"NXS", "not a PhysX stream");
     ensure!(nxs[3] & 1 == 1, "big-endian cooked data isn't supported");
     ensure!(r.take(4)? == b"MESH", "not a triangle mesh");
     let version = r.dword()?;
-    ensure!(version >= 14, "mesh format version {version} (PhysX 4.1 writes 15)");
+    ensure!(version == 15, "mesh format version {version} (PhysX 4.1 writes 15)");
     let midphase = r.dword()?;
-    ensure!(midphase <= 1, "unknown midphase {midphase}");
+    ensure!(midphase == 1, "midphase {midphase} (only BVH34 is ported)");
     let flags = r.dword()?;
+    ensure!(flags & !0x3f == 0, "unknown serialization flags {flags:#x}");
+    ensure!(flags & IMSF_GRB_DATA == 0, "GPU data in the cooked mesh isn't read");
     let nv = r.dword()? as usize;
     let nt = r.dword()? as usize;
-    let mut take = |n: usize| r.take(n);
     let mut vertices = Vec::with_capacity(nv.min(b.len() / 12));
     for _ in 0..nv {
-        let raw = take(12)?;
-        let f = |k: usize| f32::from_le_bytes(raw[4 * k..4 * k + 4].try_into().expect("4 bytes"));
-        vertices.push([f(0), f(1), f(2)]);
+        vertices.push(r.vec3()?);
     }
-    const IMSF_8BIT: u32 = 1 << 2;
-    const IMSF_16BIT: u32 = 1 << 3;
     let isz = if flags & IMSF_8BIT != 0 {
         1
     } else if flags & IMSF_16BIT != 0 {
@@ -312,7 +491,7 @@ pub fn decode_cooked_mesh(b: &[u8]) -> Result<CookedMesh> {
     } else {
         4
     };
-    let raw = take(nt.checked_mul(3 * isz).context("triangle count overflows")?)?;
+    let raw = r.count(nt, 3 * isz)?;
     let idx = |i: usize| -> u32 {
         match isz {
             1 => u32::from(raw[i]),
@@ -322,8 +501,63 @@ pub fn decode_cooked_mesh(b: &[u8]) -> Result<CookedMesh> {
     };
     let triangles: Vec<[u32; 3]> =
         (0..nt).map(|t| [idx(3 * t), idx(3 * t + 1), idx(3 * t + 2)]).collect();
-    ensure!(triangles.iter().flatten().all(|&i| (i as usize) < nv), "triangle index out of range");
-    Ok(CookedMesh { version, midphase, vertices, triangles })
+    if flags & IMSF_MATERIALS != 0 {
+        r.count(nt, 2)?;
+    }
+    if flags & IMSF_FACE_REMAP != 0 {
+        // `readIndices(maxIndex, ...)`: bytes, words or dwords by the largest index.
+        let max = r.dword()?;
+        let width = if max <= 0xff {
+            1
+        } else if max <= 0xffff {
+            2
+        } else {
+            4
+        };
+        r.count(nt, width)?;
+    }
+    if flags & IMSF_ADJACENCIES != 0 {
+        r.count(nt, 12)?;
+    }
+    // `BV4Tree::load`.
+    ensure!(r.take(4)? == b"BV4 ", "no BV4 tree");
+    let tree_version = r.dword()?;
+    ensure!(tree_version == 3, "BV4 tree version {tree_version} (PhysX 4.1 writes 3)");
+    let center = r.vec3()?;
+    let extents_magnitude = r.float()?;
+    let init_data = r.dword()?;
+    let min_coeff = r.vec3()?;
+    let max_coeff = r.vec3()?;
+    let quantized = r.dword()?;
+    ensure!(quantized == 1, "a non-quantized BV4 tree (the player reads quantized nodes only)");
+    let nb_nodes = r.dword()? as usize;
+    let raw = r.count(nb_nodes, 16)?;
+    let word = |i: usize| u32::from_le_bytes(raw[4 * i..4 * i + 4].try_into().expect("4 bytes"));
+    let nodes: Vec<[u32; 4]> = (0..nb_nodes)
+        .map(|n| [word(4 * n), word(4 * n + 1), word(4 * n + 2), word(4 * n + 3)])
+        .collect();
+    let geom_epsilon = r.float()?;
+    let aabb_min = r.vec3()?;
+    let aabb_max = r.vec3()?;
+    let extra = r.dword()? as usize;
+    ensure!(extra == 0 || extra == nt, "{extra} extra triangle bytes for {nt} triangles");
+    r.count(extra, 1)?;
+    ensure!(r.at == b.len(), "{} bytes after the cooked mesh", b.len() - r.at);
+    let mesh = wr_phys::bv4::Bv4Mesh {
+        vertices,
+        triangles,
+        geom_epsilon,
+        tree: wr_phys::bv4::Bv4Tree {
+            center,
+            extents_magnitude,
+            init_data,
+            min_coeff,
+            max_coeff,
+            nodes,
+        },
+    };
+    mesh.validate()?;
+    Ok(CookedMesh { version, midphase, mesh, aabb_min, aabb_max })
 }
 
 fn terrain_shape(
@@ -420,23 +654,57 @@ mod tests {
                 _ => b.extend_from_slice(&i.to_le_bytes()),
             }
         }
+        let nt = idx.len() / 3;
+        if flags & 1 != 0 {
+            b.extend(std::iter::repeat_n(0u8, 2 * nt)); // materials
+        }
+        if flags & 2 != 0 {
+            b.extend_from_slice(&300u32.to_le_bytes()); // remap, as words
+            b.extend(std::iter::repeat_n(0u8, 2 * nt));
+        }
+        if flags & 16 != 0 {
+            b.extend(std::iter::repeat_n(0xffu8, 12 * nt)); // adjacencies
+        }
+        b.extend_from_slice(b"BV4 ");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        for x in [1.0f32, 2.0, 3.0, 4.0] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b.extend_from_slice(&0u32.to_le_bytes()); // init data
+        for x in [0.5f32; 6] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b.extend_from_slice(&1u32.to_le_bytes()); // quantized
+        b.extend_from_slice(&0u32.to_le_bytes()); // no nodes: brute force
+        let eps = 8.0f32 * 2f32.powi(-22);
+        for x in [eps, 0.0, 1.0, 2.0, 6.0, 7.0, 8.0] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b.extend_from_slice(&0u32.to_le_bytes()); // extra triangle data
         b
     }
 
     #[test]
     fn cooked_meshes_decode_with_each_index_width() {
         let v = [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0]];
-        for flags in [4, 8, 0] {
+        for flags in [4, 8, 0, 4 | 1 | 2 | 16] {
             let m = decode_cooked_mesh(&stream(flags, &v, &[0, 2, 1])).unwrap();
             assert_eq!((m.version, m.midphase), (15, 1));
-            assert_eq!(m.vertices, v);
-            assert_eq!(m.triangles, [[0, 2, 1]]);
+            assert_eq!(m.mesh.vertices, v);
+            assert_eq!(m.mesh.triangles, [[0, 2, 1]]);
+            assert_eq!(m.mesh.tree.center, [1.0, 2.0, 3.0]);
+            assert_eq!(m.mesh.geom_epsilon, 8.0 * 2f32.powi(-22));
+            assert_eq!((m.aabb_min, m.aabb_max), ([0.0, 1.0, 2.0], [6.0, 7.0, 8.0]));
         }
         assert!(decode_cooked_mesh(&stream(8, &v, &[0, 3, 1])).is_err(), "index out of range");
         let s = stream(8, &v, &[0, 2, 1]);
         assert!(decode_cooked_mesh(&s[..s.len() - 1]).is_err(), "truncated");
+        assert!(decode_cooked_mesh(&[s.as_slice(), &[0]].concat()).is_err(), "trailing byte");
         let mut bad = s.clone();
         bad[4] = b'X';
         assert!(decode_cooked_mesh(&bad).is_err(), "not a mesh");
+        let mut bvh33 = s.clone();
+        bvh33[12] = 0;
+        assert!(decode_cooked_mesh(&bvh33).is_err(), "the BVH33 midphase isn't ported");
     }
 }

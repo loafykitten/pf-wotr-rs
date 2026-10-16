@@ -255,6 +255,31 @@ fn tb_request(q: &PathRequest) -> TurnBasedRequest {
     }
 }
 
+/// A `ph_col` record of a mesh collider (observer `phys_probe`).
+fn recorded_mesh(r: &Rv) -> Option<wr_phys::RecordedMesh> {
+    let floats = |v: &Rv, n: usize| -> Option<Vec<f32>> {
+        let a = v.as_array().filter(|a| a.len() == n)?;
+        a.iter().map(f).collect()
+    };
+    let (p, q, l) = (floats(&r["pos"], 3)?, floats(&r["rot"], 4)?, floats(&r["lossy"], 3)?);
+    Some(wr_phys::RecordedMesh {
+        name: format!("{}:{} (MeshCollider)", r["scene"].as_str()?, r["path"].as_str()?),
+        sibling_path: r["sib"]
+            .as_array()?
+            .iter()
+            .map(|x| x.as_u64().and_then(|x| u32::try_from(x).ok()))
+            .collect::<Option<_>>()?,
+        present: r["active"].as_bool()? && r["enabled"].as_bool()?,
+        layer: u32::try_from(r["layer"].as_u64()?).ok()?,
+        position: [p[0], p[1], p[2]],
+        rotation: [q[0], q[1], q[2], q[3]],
+        lossy_scale: [l[0], l[1], l[2]],
+        trigger: r["trigger"].as_bool()?,
+        convex: r["convex"].as_bool()?,
+        cooking: r["cooking"].as_i64()?,
+    })
+}
+
 impl Driver<'_> {
     fn nav_unsupported(w: &mut World, what: impl std::fmt::Display) {
         w.coverage.unsupported(format!("driven replay: paths: {what}"));
@@ -289,6 +314,27 @@ impl Driver<'_> {
                 w.coverage.unsupported(
                     "driven replay: physics: the query settings (ph_settings) aren't wr-phys's (back faces not hit)",
                 );
+            }
+            // The meshes' transforms in the physics file, recorded from another run, are this
+            // run's (`ph_col`).
+            let recorded: Option<Vec<wr_phys::RecordedMesh>> = trace
+                .records
+                .iter()
+                .filter(|r| r["k"] == "obs" && r["ev"] == "ph_col" && r["type"] == "MeshCollider")
+                .map(recorded_mesh)
+                .collect();
+            let checked = match recorded {
+                None => Err("a ph_col record without its fields".to_owned()),
+                Some(cols) => match self.nav_scene(w) {
+                    // A missing physics file is reported by the queries.
+                    Err(_) => Ok(()),
+                    Ok(scene) => scene.world().check_recorded_meshes(&cols),
+                },
+            };
+            if let Err(e) = checked {
+                w.coverage.unsupported(format!(
+                    "driven replay: physics: the recorded colliders (ph_col) aren't the physics file's: {e}"
+                ));
             }
         }
         let declared = begin
@@ -1211,9 +1257,8 @@ impl Driver<'_> {
             }
             .map(|h| {
                 h.map(|h| {
-                    let name = scene.world().shapes[h.shape].name.clone();
-                    let n = scene.world().shapes.iter().filter(|s| s.name == name).count();
-                    (h, name, n == 1)
+                    let s = &scene.world().shapes[h.shape];
+                    (h, s.name.clone(), s.sibling_path.clone())
                 })
             }),
         };
@@ -1231,7 +1276,7 @@ impl Driver<'_> {
         };
         let same = match (&got, recorded) {
             (None, None) => true,
-            (Some((h, name, unique)), Some((d, _))) => {
+            (Some((h, name, sib)), Some((d, _))) => {
                 let col = &r["col"];
                 let theirs = format!(
                     "{}:{} ({})",
@@ -1239,17 +1284,16 @@ impl Driver<'_> {
                     col["path"].as_str().unwrap_or("?"),
                     col["type"].as_str().unwrap_or("?")
                 );
-                // The importer's name (`scene:path (type)`) must be one collider's; the sibling
-                // path (`sib`) has an index per ancestor below the root.
-                let depth = col["path"].as_str().map_or(0, |p| p.split('/').count());
+                // The importer's name (`scene:path (type)`) and sibling path (`sib`, an index
+                // per ancestor below the root) are the collider's.
                 let sib_ok = col["sib"].as_array().is_some_and(|a| {
-                    a.len() + 1 == depth && a.iter().all(|x| x.as_u64().is_some())
+                    a.len() == sib.len()
+                        && a.iter().zip(sib).all(|(x, s)| x.as_u64() == Some(u64::from(*s)))
                 });
                 h.distance.to_bits() == d.to_bits()
                     && v3(&r["pt"]).map(bits3) == Some(bits3(h.point))
                     && *name == theirs
                     && sib_ok
-                    && *unique
             }
             _ => false,
         };

@@ -379,8 +379,9 @@ torso's ray is required when `fall` is false and reported when it's true; in a c
 torso ray establishes it false, and a prone step without one is reported. Captures before `ground_view` keep the step an
 input, so `-128` reports the view's difference. `-129` (tb-lizard, Ember's `Manual_18`, recorded with `ground_view`)
 computes 7 steps per run, view included, with no report (its 300 prone steps are in spans taken from the recording,
-their rays checked as span physics); it is valid but for the cave wall's mesh queries (1,511 to 1,513 per run,
-`Unverified`, fail-closed as on `-121`).
+their rays checked as span physics); it was valid but for the cave wall's mesh queries (1,511 to 1,513 per run,
+`Unverified`, fail-closed as on `-121`), and is valid on every run since stream S computes them
+(`docs/poc5/physics.md`, "Triangle meshes").
 
 **Still inputs:** when a path is delivered (`PathSync`), line of sight (search and simulation), the units'
 corpulences, `MaxSpeed`/`FlyHeight` in the simulation, the Unity clock the navigation timer reads (a replay's are
@@ -418,7 +419,8 @@ graph events that differ only because the sim's turn order differs there (an ini
 identity, reported by the turn port: its `m_Units` order is the boxes' order); `-121/tb-lizard` (three fights,
 7,994 queries, 1,593 steps, 86 paths, 556 graph events) reports 802 agent and simulation queries near a cave wall
 whose ray may touch its mesh collider (`Unverified`: the BVH34 mesh raycast isn't ported; `phys_probe`'s `ph_probe`
-rays over the meshes would check one), each answer taken from the recording and reported.
+rays over the meshes would check one), each answer taken from the recording and reported. Stream S has since
+ported the mesh raycast (`docs/poc5/physics.md`, "Triangle meshes"): those queries are computed and none is reported.
 
 The coverage line (`wr-combat replay`): `physics and paths: physics queries computed ... simulation steps ... paths
 computed ... deliveries checked ... graph events matched ...`.

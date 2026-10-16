@@ -63,6 +63,11 @@ enum Cmd {
         /// The area blueprint's guid.
         #[arg(long)]
         guid: String,
+        /// A recording of the area with observer `phys_probe` (`*.trace.jsonl.gz`): its
+        /// `ph_col` records give the mesh colliders the transforms the game holds, without
+        /// which a query that may touch a mesh fails closed.
+        #[arg(long)]
+        colliders: Option<PathBuf>,
     },
     /// Runs a path query on an area's graph cache.
     Path {
@@ -165,10 +170,32 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::PhysPack { area, guid } => {
+        Cmd::PhysPack { area, guid, colliders } => {
             let t = Instant::now();
             let a = wr_import::oracle_diff::load_area_scenes(&area)?;
-            let (world, rep) = wr_import::phys::build(&a.universe, &a.scenes)?;
+            let (mut world, mut rep) = wr_import::phys::build(&a.universe, &a.scenes)?;
+            if let Some(trace) = &colliders {
+                // The recording's name under the captures folder, for reports.
+                let given = trace.to_string_lossy();
+                let source = given.rsplit_once("captures/oracle/").map_or_else(
+                    || trace.file_name().map_or_else(String::new, |n| n.to_string_lossy().into()),
+                    |(_, rest)| rest.to_owned(),
+                );
+                let c = wr_import::phys::apply_recorded_colliders(&mut world, trace, &source)?;
+                eprintln!(
+                    "recorded transforms from {source}: {} meshes (the importer's own equal: position {}, rotation {}, lossy scale {}); left out, recorded disabled: {:?}; zero scale, left unrecorded: {:?}",
+                    c.meshes,
+                    c.position_equal,
+                    c.rotation_equal,
+                    c.lossy_equal,
+                    c.disabled,
+                    c.degenerate
+                );
+                rep.shapes = world.shapes.len();
+                if let Some(n) = rep.by_kind.get_mut("mesh") {
+                    *n -= c.disabled.len();
+                }
+            }
             let mut scenes: Vec<String> = a.scenes.iter().map(|s| s.bundle.clone()).collect();
             scenes.dedup();
             let file = wr_phys::PhysFile { area: guid.clone(), scenes, world };

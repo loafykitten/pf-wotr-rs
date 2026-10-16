@@ -1179,6 +1179,13 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
             let at = pos(recs, |r| ev(r, "ph_settings"));
             recs[at]["hit_backfaces"] = json!(true);
         }),
+        ("the recorded colliders (ph_col) aren't the physics file's", |recs| {
+            // A cave wall's lossy scale a few ulps off (the meshes' transforms are recorded).
+            let at = pos(recs, |r| {
+                ev(r, "ph_col") && r["path"].as_str().is_some_and(|p| p.contains("cave_wall_01"))
+            });
+            recs[at]["lossy"][0] = json!(1.000_001);
+        }),
         ("a return (path_fin) without its delivery (path_ret)", |recs| {
             // A path_fin of a request moved before its request: the request is a second.
             let fin = fin_of_done(recs);

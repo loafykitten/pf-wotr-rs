@@ -26,6 +26,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 pub mod boxes;
+pub mod bv4;
 pub mod conservative;
 pub mod hf;
 #[cfg(test)]
@@ -38,7 +39,7 @@ pub use query::{QueryError, RaycastHit};
 /// File magic: `WRPHYS`, then NULs and the format generation.
 pub const MAGIC: [u8; 8] = *b"WRPHYS\0\x01";
 /// Bumped whenever [`PhysFile`] or anything it holds changes incompatibly.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const HEADER_LEN: usize = 32;
 
 /// An area's colliders.
@@ -62,6 +63,9 @@ pub struct World {
 pub struct Shape {
     /// The GameObject's hierarchy path and the collider class, for reports.
     pub name: String,
+    /// The GameObject's sibling indices below its root (`Transform.GetSiblingIndex()`): with
+    /// the scene and path, they identify it where names repeat.
+    pub sibling_path: Vec<u32>,
     /// The GameObject's layer (as the game runs it).
     pub layer: u32,
     pub is_trigger: bool,
@@ -72,24 +76,123 @@ pub struct Shape {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // a few hundred shapes per area, read once
 pub enum ShapeKind {
     /// A `TerrainCollider`: the height field and the actor's pose.
     HeightField { pose: px::Transform, field: hf::HeightField },
     /// A `BoxCollider` (`center`, `size`) under its GameObject's `localToWorldMatrix`.
     Box { local_to_world: [f32; 16], center: [f32; 3], size: [f32; 3] },
-    /// A non-convex `MeshCollider`: the triangles PhysX cooked (the mesh's
-    /// `m_BakedTriangleCollisionMesh`) under the GameObject's `localToWorldMatrix`.
+    /// A non-convex `MeshCollider`: the BVH34 mesh PhysX cooked (the mesh's
+    /// `m_BakedTriangleCollisionMesh`) under the GameObject's transform: its
+    /// `localToWorldMatrix`, and its world pose and lossy scale as the importer computes them;
+    /// with `runtime`, the transform the game was recorded holding, which the queries use.
     Mesh {
         local_to_world: [f32; 16],
-        vertices: Vec<[f32; 3]>,
-        triangles: Vec<[u32; 3]>,
-        /// `mGeomEpsilon` as cooking computes it: the largest absolute vertex coordinate
-        /// times 2^-22 (BV4's barycentric enlargement).
-        geom_epsilon: f32,
+        pose: px::Transform,
+        lossy_scale: [f32; 3],
+        mesh: bv4::Bv4Mesh,
+        runtime: Option<MeshRuntime>,
     },
     /// Another collider kind (capsule, sphere, character controller, convex mesh): a
     /// world-space box sure to enclose it, enough to fail closed.
     Other { class: String, min: [f32; 3], max: [f32; 3] },
+}
+
+/// A mesh collider as the game holds it, recorded by WrathOracle's `phys_probe` (`ph_col`):
+/// Unity gives PhysX the GameObject's world position and rotation as the static actor's pose
+/// (the shape's local pose identity) and its lossy scale as the geometry's `PxMeshScale`
+/// (identity rotation), which every recorded probe of a mesh establishes (`docs/poc5/physics.md`).
+/// The importer's own world transforms aren't Unity's to the bit (the lossy scale in
+/// particular), so these are recorded inputs. The recording's JSON writes a zero without its
+/// sign: a query whose answer depends on a zero component's sign fails closed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeshRuntime {
+    /// `Transform.position`, `.rotation` (`x, y, z, w`), `.lossyScale`.
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub lossy_scale: [f32; 3],
+    /// The GameObject's layer at run time (the load moves `*_!Visual` objects to 11).
+    pub layer: u32,
+    /// The recording it came from, for reports.
+    pub source: String,
+}
+
+/// A mesh collider as a recording names it (observer `phys_probe`'s `ph_col`), to check a
+/// physics file's recorded transforms against another run's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedMesh {
+    /// `scene:path (MeshCollider)`, as the importer names shapes.
+    pub name: String,
+    pub sibling_path: Vec<u32>,
+    /// Active in the hierarchy and enabled.
+    pub present: bool,
+    pub layer: u32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub lossy_scale: [f32; 3],
+    pub trigger: bool,
+    pub convex: bool,
+    /// `MeshCollider.cookingOptions`.
+    pub cooking: i64,
+}
+
+impl World {
+    /// The recording's mesh colliders against the meshes' recorded transforms: each mesh with
+    /// one is recorded exactly once, present, on its layer, with its transform (zeros' signs
+    /// aside, which the recording doesn't keep), its trigger flag, non-convex and with the
+    /// baked mesh's cooking options; and every present mesh collider of the world's scenes is
+    /// one of its shapes (the units' colliders, in other scenes, aren't modelled).
+    pub fn check_recorded_meshes(&self, recorded: &[RecordedMesh]) -> Result<(), String> {
+        for s in &self.shapes {
+            if let ShapeKind::Mesh { runtime: Some(_), .. } = s.kind {
+                let n = recorded
+                    .iter()
+                    .filter(|c| c.name == s.name && c.sibling_path == s.sibling_path)
+                    .count();
+                if n != 1 {
+                    return Err(format!("{} {:?}: recorded {n} times", s.name, s.sibling_path));
+                }
+            }
+        }
+        let same = |a: &[f32], b: &[f32]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(x, y)| x.to_bits() == y.to_bits() || (*x == 0.0 && *y == 0.0))
+        };
+        let scene = |name: &str| name.split(':').next().unwrap_or("").to_owned();
+        let scenes: std::collections::HashSet<String> =
+            self.shapes.iter().map(|s| scene(&s.name)).collect();
+        for c in recorded.iter().filter(|c| scenes.contains(&scene(&c.name))) {
+            let shape =
+                self.shapes.iter().find(|s| s.name == c.name && s.sibling_path == c.sibling_path);
+            match shape.map(|s| (s, &s.kind)) {
+                None if c.present => {
+                    return Err(format!(
+                        "{} {:?}: not in the physics file",
+                        c.name, c.sibling_path
+                    ));
+                }
+                Some((s, ShapeKind::Mesh { runtime: Some(r), .. }))
+                    if !c.present
+                        || c.trigger != s.is_trigger
+                        || c.convex
+                        || c.cooking != 30
+                        || c.layer != r.layer
+                        || !same(&c.position, &r.position)
+                        || !same(&c.rotation, &r.rotation)
+                        || !same(&c.lossy_scale, &r.lossy_scale) =>
+                {
+                    return Err(format!(
+                        "{} {:?}: recorded {c:?}, the physics file's (from {}) {r:?}",
+                        c.name, c.sibling_path, r.source
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// FNV-1a, 64 bit (detects truncation and stale or torn files, not tampering).
@@ -199,12 +302,22 @@ impl World {
                         field.columns
                     );
                 }
-                ShapeKind::Mesh { vertices, triangles, .. } => {
-                    ensure!(
-                        triangles.iter().flatten().all(|&i| (i as usize) < vertices.len()),
-                        "{}: triangle index out of range",
-                        s.name
-                    );
+                ShapeKind::Mesh { mesh, runtime, .. } => {
+                    mesh.validate().with_context(|| s.name.clone())?;
+                    if let Some(r) = runtime {
+                        let all = r.position.iter().chain(&r.rotation).chain(&r.lossy_scale);
+                        ensure!(
+                            all.clone().all(|x| x.is_finite()),
+                            "{}: a recorded transform that isn't finite",
+                            s.name
+                        );
+                        ensure!(
+                            r.lossy_scale.iter().all(|&x| x != 0.0),
+                            "{}: a recorded scale of zero",
+                            s.name
+                        );
+                        ensure!(r.layer < 32, "{}: recorded layer {}", s.name, r.layer);
+                    }
                 }
                 ShapeKind::Box { .. } | ShapeKind::Other { .. } => {}
             }
