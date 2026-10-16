@@ -480,6 +480,24 @@ fn a_shape_the_pruner_may_skip_fails_closed() {
     assert!(!matches!(r, Ok(Some(_))), "{r:?}");
     // Near by, the same square is surely tested.
     assert!(scene.raycast_down([1.1, 10.0, 1.4], 100.0, 1).unwrap().is_some());
+    // An 8 m square 1e8 m out in its own space, translated back: PhysX's bounds keep the
+    // operands' rounding (about ±4 m), so a ray 2 m inside the f64 bounds isn't surely tested.
+    let mut far = recorded_square("far", [-1.0e8, 0.0, 0.0], 0);
+    if let ShapeKind::Mesh { mesh, .. } = &mut far.kind {
+        mesh.vertices = vec![
+            [1.0e8, 0.0, 0.0],
+            [1.0e8, 0.0, 8.0],
+            [1.0e8 + 8.0, 0.0, 0.0],
+            [1.0e8 + 8.0, 0.0, 8.0],
+        ];
+        mesh.geom_epsilon = 1.0e8 * 2f32.powi(-22);
+        mesh.tree.center = [1.0e8 + 4.0, 0.0, 4.0];
+        mesh.tree.extents_magnitude = 32f32.sqrt();
+    }
+    let w = World { shapes: vec![far] };
+    let scene = Scene::new(&w);
+    let r = scene.raycast_down([6.0, 10.0, 2.0], 100.0, 1);
+    assert!(!matches!(r, Ok(Some(_))), "{r:?}");
 }
 
 #[test]

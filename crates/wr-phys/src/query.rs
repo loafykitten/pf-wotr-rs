@@ -55,9 +55,11 @@ enum Prepared {
     /// The field's local bounds (PhysX keeps them with the height field).
     HeightField {
         bounds: crate::px::Bounds,
-        /// Its world bounds, in `f64` (whether PhysX's pruner surely tests it).
+        /// Its world bounds, in `f64` (whether PhysX's pruner surely tests it), and the
+        /// magnitude of the operands PhysX computes its own bounds from.
         lo: [f64; 3],
         hi: [f64; 3],
+        operands: f64,
     },
     Box {
         m: M4,
@@ -78,9 +80,10 @@ enum Prepared {
         poses: Vec<Transform>,
         scale: MeshScale,
         layer: u32,
-        /// Its vertices' world bounds, in `f64`.
+        /// Its vertices' world bounds, in `f64`, and the operands' magnitude (as above).
         lo: [f64; 3],
         hi: [f64; 3],
+        operands: f64,
     },
     Other {
         lo: [f64; 3],
@@ -138,7 +141,12 @@ impl<'w> Scene<'w> {
                         place(*pose, [1.0; 3], local)
                     });
                     let (lo, hi) = aabb(corners);
-                    Prepared::HeightField { bounds, lo, hi }
+                    let operands = [bounds.min, bounds.max, pose.p]
+                        .iter()
+                        .map(|v| abs_max(&v.to_array()))
+                        .sum::<f64>()
+                        * 3.0;
+                    Prepared::HeightField { bounds, lo, hi, operands }
                 }
                 ShapeKind::Box { local_to_world, center, size } => {
                     let m = M4::from_f32(local_to_world);
@@ -151,6 +159,9 @@ impl<'w> Scene<'w> {
                     let s = f64x3(r.lossy_scale);
                     let (lo, hi) =
                         aabb(mesh.vertices.iter().map(|v| place(poses[0], s, f64x3(*v))));
+                    let local = mesh.vertices.iter().map(abs_max).fold(0.0, f64::max);
+                    let operands =
+                        3.0 * local * abs_max(&r.lossy_scale) + 3.0 * abs_max(&r.position);
                     Prepared::MeshExact {
                         poses,
                         scale: MeshScale {
@@ -160,6 +171,7 @@ impl<'w> Scene<'w> {
                         layer: r.layer,
                         lo,
                         hi,
+                        operands,
                     }
                 }
                 ShapeKind::Mesh { local_to_world, mesh, runtime: None, .. } => {
@@ -351,17 +363,20 @@ impl<'w> Scene<'w> {
 
     /// Does the straight-down ray from `o` over `max` surely reach shape `i`'s bounds, so that
     /// PhysX's pruner tests it whatever its own bounds (they enclose the shape's) and rounding?
-    /// Inside the bounds shrunk by a tolerance well above the `f32` rounding of the
-    /// coordinates involved.
+    /// Across the bounds (the ray inside them sideways, its span over their height) by a
+    /// tolerance well above the `f32` rounding of everything involved: the ray's coordinates
+    /// and the operands PhysX computes its bounds from (a large local coordinate cancelling a
+    /// translation leaves its error in a small world coordinate).
     fn surely_tested(&self, i: usize, o: Vec3, max: f32) -> bool {
-        let (lo, hi) = match &self.prepared[i] {
-            Prepared::HeightField { lo, hi, .. } | Prepared::MeshExact { lo, hi, .. } => (lo, hi),
+        let (lo, hi, operands) = match &self.prepared[i] {
+            Prepared::HeightField { lo, hi, operands, .. }
+            | Prepared::MeshExact { lo, hi, operands, .. } => (lo, hi, *operands),
             _ => return false,
         };
         let o = f64x3(o.to_array());
         let max = f64::from(max);
         let size = lo.iter().chain(hi).chain(&o).fold(max, |a, x| a.max(x.abs()));
-        let tol = 1e-5 * size + 1e-5;
+        let tol = 1e-5 * (size + operands) + 1e-5;
         (0..3).all(|k| k == 1 || (lo[k] + tol < o[k] && o[k] < hi[k] - tol))
             && o[1] - max + tol <= hi[1]
             && lo[1] <= o[1] - tol
@@ -463,6 +478,11 @@ fn place(pose: Transform, s: [f64; 3], v: [f64; 3]) -> [f64; 3] {
     let ut = cross(u, t);
     let p = f64x3(pose.p.to_array());
     [0, 1, 2].map(|k| v[k] + q[3] * t[k] + ut[k] + p[k])
+}
+
+/// The largest magnitude of a vector's components.
+fn abs_max(v: &[f32; 3]) -> f64 {
+    v.iter().fold(0.0f64, |a, x| a.max(f64::from(x.abs())))
 }
 
 fn aabb(points: impl Iterator<Item = [f64; 3]>) -> ([f64; 3], [f64; 3]) {
