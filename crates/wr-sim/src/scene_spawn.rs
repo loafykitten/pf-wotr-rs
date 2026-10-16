@@ -182,13 +182,19 @@ fn spawn(w: &mut World, id: &str, view: &ViewInfo) -> Option<EntityIdx> {
     let outer_ctx = w.coverage.context.take();
     w.coverage.context = Some(w.entity(e).unique_id.clone());
     // `new UnitEntityData(view)` with a default `UnitSpawningData`: the view is the
-    // blueprint's prefab (`ShouldSpawnOptimizedDummy` is false without spawning flags, unless
-    // an area part's bounds say otherwise: reported).
-    if crate::scene::area_has_parts(w) {
-        w.coverage
-            .unsupported("EntityCreationController.ShouldSpawnOptimizedDummy: area part bounds");
-    }
-    let prefab = blueprint_prefab(&bp);
+    // blueprint's prefab, or the optimization dummy when the spawner (`transform.position`, in
+    // the area's state) is outside the loaded area part's mechanic bounds
+    // (`ShouldSpawnOptimizedDummy`, `area_parts`; reported when they aren't known).
+    let outside = match crate::area_parts::outside_mechanic_bounds(w, view.position) {
+        Ok(o) => o,
+        Err(_) => {
+            w.coverage.unsupported(
+                "EntityCreationController.ShouldSpawnOptimizedDummy: area part bounds",
+            );
+            false
+        }
+    };
+    let prefab = if outside { dummy_prefab(w) } else { blueprint_prefab(&bp) };
     let in_game = prefab_in_game(w, prefab.as_deref());
     let outer = std::mem::take(&mut w.build);
     crate::spawn::construct(w, e, &bp, None, in_game);

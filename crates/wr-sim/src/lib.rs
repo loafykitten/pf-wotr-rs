@@ -14,6 +14,7 @@
 //! - [`hydrate`], [`sheet`], [`manifest`]: loading a save, the character-sheet dump, the
 //!   required-versus-implemented manifest.
 
+pub mod area_parts;
 pub mod armor;
 pub mod combat;
 pub mod compare;

@@ -171,14 +171,20 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
     let outer = w.build;
     let flags = std::mem::replace(&mut w.build, BuildFlags { do_not_create_items: true, ..outer });
     // `EntityCreator.SpawnUnit`: the view comes from the spawning data's prefab
-    // (`m_PrefabId`), else the blueprint's, or from the optimization dummy when the unit spawns
-    // hidden and simplified (`ShouldSpawnOptimizedDummy`; an area part's bounds aren't
-    // modelled: reported).
-    if crate::scene::area_has_parts(w) {
-        w.coverage
-            .unsupported("EntityCreationController.ShouldSpawnOptimizedDummy: area part bounds");
-    }
-    let prefab = if p.optimized_hide && !p.is_in_game {
+    // (`m_PrefabId`), else the blueprint's, or from the optimization dummy
+    // (`ShouldSpawnOptimizedDummy`: the placeholder's state is never the cross-scene one here)
+    // when the unit spawns hidden and simplified, or outside the loaded area part's mechanic
+    // bounds (`area_parts`; reported when they aren't known).
+    let outside = match crate::area_parts::outside_mechanic_bounds(w, p.position) {
+        Ok(o) => o,
+        Err(_) => {
+            w.coverage.unsupported(
+                "EntityCreationController.ShouldSpawnOptimizedDummy: area part bounds",
+            );
+            false
+        }
+    };
+    let prefab = if (p.optimized_hide && !p.is_in_game) || outside {
         crate::scene_spawn::dummy_prefab(w)
     } else {
         p.prefab_id.clone().or_else(|| crate::scene_spawn::blueprint_prefab(&bp))
@@ -1151,6 +1157,14 @@ fn awake_or_recorded(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake 
 }
 
 pub fn awake_state(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake {
+    awake_state_in(w, u, party, false)
+}
+
+/// [`awake_state`] in the first frame after the load, when `SuppressEntitiesController`'s
+/// first tick has just evaluated every entity against the loaded area part's mechanic bounds
+/// ([`crate::area_parts::suppressed_at_load`]); in later frames suppression (in an area with
+/// parts) is reported.
+fn awake_state_in(w: &mut World, u: EntityIdx, party: &[EntityIdx], at_load: bool) -> Awake {
     let Some(x) = w.unit(u) else { return Awake::No };
     if !w.entity(u).is_in_game || w.entity(u).is_disposed {
         return Awake::No;
@@ -1163,8 +1177,14 @@ pub fn awake_state(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake {
     let (companion, in_pit, summoned) =
         (has("UnitPartCompanion"), has("UnitPartInPit"), has("UnitPartSummonedMonster"));
     if crate::scene::area_has_parts(w) {
-        w.coverage.unsupported("SleepingUnitsController: suppressed units (area parts)");
-        return Awake::Unknown;
+        match crate::area_parts::suppressed_at_load(w, u) {
+            Ok(true) if at_load => return Awake::No,
+            Ok(false) if at_load => {}
+            _ => {
+                w.coverage.unsupported("SleepingUnitsController: suppressed units (area parts)");
+                return Awake::Unknown;
+            }
+        }
     }
     if companion {
         if area_hides_party(w) {
@@ -1420,17 +1440,21 @@ pub fn report_assumed_awake(w: &mut World) {
 /// wakes it on a change from the default origin (`Wake()`: `AwakeTimer = 0`, which the
 /// controller counts down only after this tick), so the checks after the timer (death, combat,
 /// an extra's camera, cutscene control, the fog of war, commands) don't apply: such a unit is
-/// awake unless one before it puts it to sleep (out of the game, a fake blueprint, suppressed:
-/// [`awake_state`]'s, which report suppression in an area with parts as unknown; a companion
-/// while the party is hidden). A unit at the origin isn't woken: [`awake_state`].
+/// awake unless one before it puts it to sleep (out of the game, a fake blueprint, suppressed
+/// by the first tick of `SuppressEntitiesController` in an area with parts, which is unknown
+/// when the loaded part's bounds are; a companion while the party is hidden). A unit at the
+/// origin isn't woken: [`awake_state`].
 fn awake_after_spawn(w: &mut World, u: EntityIdx, party: &[EntityIdx]) -> Awake {
     let woken = w.unit(u).is_some_and(|x| {
         // `Vector3 !=`: a squared distance from the origin of at least 1e-10.
         let [a, b, c] = x.position.map(f64::from);
         a * a + b * b + c * c >= 9.999_999_44e-11
     });
-    let state = awake_state(w, u, party);
-    if !woken || state == Awake::No || crate::scene::area_has_parts(w) {
+    let state = awake_state_in(w, u, party, true);
+    if !woken
+        || state == Awake::No
+        || (crate::scene::area_has_parts(w) && crate::area_parts::suppressed_at_load(w, u).is_err())
+    {
         return state;
     }
     Awake::Yes

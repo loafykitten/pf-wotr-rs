@@ -1950,3 +1950,113 @@ fn a_quiet_zone_entry_at_load_is_not_reported() {
     assert_eq!(inside, vec![eligible]);
     assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
 }
+
+/// An area with parts: an area (0xA1, its own bounds around the origin) and a part (0xA2,
+/// around x = 100, its mechanic bounds overridden smaller), with their `AreaPartBounds` as
+/// extracted.
+fn area_with_part(w: &mut World) {
+    use crate::area_parts::{AREA_BOUNDS_SCHEMA, AreaBoundsTable, AreaPartBoundsAsset, Bounds};
+    let b = |c: [f32; 3], e: [f32; 3]| Bounds { center: c, extents: e };
+    let asset = |d: Bounds, mech: Option<Bounds>| AreaPartBoundsAsset {
+        name: String::new(),
+        path_id: 0,
+        default_bounds: d,
+        override_mechanic_bounds: mech.is_some(),
+        mechanic_bounds: mech.unwrap_or(b([0.0; 3], [25.0; 3])),
+        override_local_map_bounds: false,
+        local_map_bounds: b([0.0; 3], [25.0; 3]),
+    };
+    let mut table = AreaBoundsTable { schema: AREA_BOUNDS_SCHEMA.into(), ..Default::default() };
+    table.bounds.insert(1, asset(b([0.0; 3], [10.0; 3]), None));
+    table
+        .bounds
+        .insert(2, asset(b([100.0, 0.0, 0.0], [10.0; 3]), Some(b([100.0, 0.0, 0.0], [5.0; 3]))));
+    w.scene.area_bounds = Some(Rc::new(table));
+    insert(
+        w,
+        0xA2,
+        "Kingmaker.Blueprints.Area.BlueprintAreaPart",
+        &[("m_Bounds", Node::AssetIndex(2))],
+    );
+    insert(
+        w,
+        0xA1,
+        "Kingmaker.Blueprints.Area.BlueprintArea",
+        &[("m_Bounds", Node::AssetIndex(1)), ("m_Parts", Node::Seq(vec![Node::BpRef(Guid(0xA2))]))],
+    );
+    w.player.area = Some(Guid(0xA1));
+    w.player.area_part = Some(Guid(0xA1));
+}
+
+/// `LoadAreaCoroutine` loads the part whose local map holds the main character (here not the
+/// saved one: reported, as the etudes read the saved part), and `SuppressEntitiesController`'s
+/// first tick suppresses the area's units outside its mechanic bounds in x and z (0.1 slack),
+/// never a cross-scene unit; `ShouldSpawnOptimizedDummy` tests them in 3D. Suppressed units
+/// sleep in the first frame; later frames still report suppression.
+#[test]
+fn an_area_parts_mechanic_bounds_suppress_units_at_load() {
+    use crate::area_parts::{LoadedPart, establish, outside_mechanic_bounds, suppressed_at_load};
+    use crate::spawn::{Awake, awake_state};
+    let (mut w, mc) = world();
+    area_with_part(&mut w);
+    w.main_character = Some(mc);
+    w.unit_mut(mc).expect("unit").position = [103.0, 0.0, 0.0];
+    w.player.cross_scene_units.push(mc);
+    establish(&mut w);
+    assert!(
+        matches!(w.scene.loaded_part, LoadedPart::Known { part, .. } if part == Guid(0xA2)),
+        "{:?}",
+        w.scene.loaded_part
+    );
+    assert!(!w.coverage.valid(), "a part other than the saved one is reported");
+    w.coverage = world().0.coverage;
+    let edge = area_unit(&mut w, "edge", [105.05, 50.0, -5.05], true);
+    let out = area_unit(&mut w, "out", [105.2, 0.0, 0.0], true);
+    let far = area_unit(&mut w, "far", [0.0, 0.0, 0.0], true);
+    w.player.area_units.retain(|u| *u != far);
+    w.player.cross_scene_units.push(far);
+    assert_eq!(suppressed_at_load(&w, edge), Ok(false), "within the slack, y ignored");
+    assert_eq!(suppressed_at_load(&w, out), Ok(true));
+    assert_eq!(suppressed_at_load(&w, far), Ok(false), "the cross-scene state is never suppressed");
+    assert_eq!(outside_mechanic_bounds(&w, [100.0, 5.0, 0.0]), Ok(false));
+    assert_eq!(outside_mechanic_bounds(&w, [100.0, 5.5, 0.0]), Ok(true), "3D");
+    assert_eq!(outside_mechanic_bounds(&w, [105.05, 0.0, 0.0]), Ok(true), "no slack");
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    // Later frames: suppression isn't followed.
+    assert_eq!(awake_state(&mut w, out, &[]), Awake::Unknown);
+    assert!(!w.coverage.valid());
+}
+
+/// `FindLocalMapBoundsContainsPoint`: the area when its own local map holds the point; else
+/// the closest by `ManhattanDistance2D`, the area first among equals. Without the extracted
+/// bounds nothing is established, and suppression is unknown.
+#[test]
+fn the_loaded_area_part_falls_back_to_the_closest_and_fails_closed() {
+    use crate::area_parts::{LoadedPart, establish, suppressed_at_load};
+    let (mut w, mc) = world();
+    area_with_part(&mut w);
+    w.main_character = Some(mc);
+    w.player.cross_scene_units.push(mc);
+    let part = |w: &World| match &w.scene.loaded_part {
+        LoadedPart::Known { part, .. } => Some(*part),
+        _ => None,
+    };
+    w.unit_mut(mc).expect("unit").position = [10.05, 0.0, 0.0];
+    establish(&mut w);
+    assert_eq!(part(&w), Some(Guid(0xA1)), "inside the area's own local map");
+    // 40 from both (|50 - 0| - 10, |50 - 100| - 10): the area stays.
+    w.unit_mut(mc).expect("unit").position = [50.0, 0.0, 0.0];
+    establish(&mut w);
+    assert_eq!(part(&w), Some(Guid(0xA1)), "a tie keeps the area");
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    w.player.area_part = Some(Guid(0xA2));
+    w.unit_mut(mc).expect("unit").position = [60.0, 0.0, 0.0];
+    establish(&mut w);
+    assert_eq!(part(&w), Some(Guid(0xA2)), "the closer part");
+    assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
+    w.scene.area_bounds = None;
+    establish(&mut w);
+    assert!(matches!(w.scene.loaded_part, LoadedPart::Unknown(_)));
+    let u = area_unit(&mut w, "u", [100.0, 0.0, 0.0], true);
+    assert!(suppressed_at_load(&w, u).is_err());
+}
