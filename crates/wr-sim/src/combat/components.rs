@@ -1318,7 +1318,7 @@ fn distance_damage_bonus(w: &mut World, c: CompRef, rule: &mut dyn RuleEvent, ab
         }
     };
     if applies && let Some(first) = evt.bundle.first_mut() {
-        first.add_modifier_target_related(Bonus::desc(bonus, MD::UntypedStackable));
+        first.add_modifier_target_related(Bonus::desc(bonus, MD::UntypedStackable).of(c.fact));
     }
 }
 
@@ -1773,6 +1773,7 @@ mod tests {
             is_target_flat_footed: false,
             result: 0,
             bonuses: BonusList::default(),
+            stat_mods: Vec::new(),
         };
         ac_bonus_calculate_ac_about(w, c, &mut r);
         // (`AddModifier(.., Fact, ..)`: the component's fact is the bonus's source.)

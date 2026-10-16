@@ -17,6 +17,7 @@
 
 pub mod check;
 pub mod strings;
+pub mod tips;
 
 use std::collections::HashMap;
 
@@ -329,6 +330,8 @@ pub struct AttackRollLog {
     /// `AttackIndexForLog ?? RuleAttackWithWeapon?.AttackNumber ?? -1` and the count alike
     /// (`None`: made by a `RuleAttackWithWeapon` the log didn't see open).
     pub numbers: Option<(i32, i32)>,
+    /// `AttackBonusRule` and `ACRule` as the tooltip reads them (`None`: not triggered).
+    pub rules: Option<Box<(tips::AttackBonusRule, tips::AcRule)>>,
 }
 
 /// What `DamageLogMessage.GetData` reads of a `RuleDealDamage`.
@@ -344,6 +347,8 @@ pub struct DealDamageLog {
     /// A weapon attack's damage (`Reason.Fact` is null, nothing is redirected, no saving throw
     /// halves it); other damage isn't ported.
     pub weapon_attack: bool,
+    /// What the tooltip reads.
+    pub tip: tips::DamageRule,
 }
 
 /// A log event.
@@ -567,6 +572,7 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
             is_sneak_attack: r.is_sneak_attack,
             suspend,
             numbers,
+            rules: r.log_rules.clone(),
             is_critical_roll: r.is_critical_roll,
             target_critical_ac: r.target_critical_ac,
             confirmation: if !r.is_critical_roll {
@@ -605,6 +611,16 @@ fn payload_of(w: &mut World, rule: &mut dyn RuleEvent, ev: usize) -> Payload {
             damage_without_reduction: r.damage_without_reduction,
             any_half: r.bundle.iter().any(|d| d.half),
             weapon_attack: r.link.weapon_attack && !explicit_reason,
+            tip: tips::DamageRule {
+                results: r.result_list.clone(),
+                // `DamageBundle.WeaponDamage` (the bundle's first damage when it has a weapon) is
+                // the first value's source.
+                first_is_weapon_damage: r.weapon_item.is_some() && !r.result_list.is_empty(),
+                weapon: r.weapon_item,
+                difficulty_modifier: r.difficulty_modifier,
+                damage_before_difficulty: r.damage_before_difficulty,
+                result: r.result,
+            },
         }));
     }
     if let Some(r) = any.downcast_ref::<crate::combat::initiative::RuleInitiativeRoll>() {
@@ -1165,31 +1181,107 @@ fn attack_data_in_scope(w: &mut World, a: &AttackRollLog) -> Result<Option<Msg0>
         s.push(' ');
         s.push_str(&suffix(w, "SneakSuffix")?);
     }
-    // The tooltip's part that changes the context (its text isn't made): a critical roll's
-    // confirmation (`CriticalConfirmationBonus` 0: the sim's confirmation adds none), then `DC` back
-    // to the target's AC. (Concealment never fails in the sim; fortification is reported.)
-    if !a.auto_miss && !a.auto_hit && a.is_critical_roll {
+    let tooltip = attack_tooltip(w, a)?;
+    let icon = icon(w);
+    let color = color_of(w, "GameLog/Attack")?;
+    // An empty tooltip (an auto miss or hit: no breakdown) makes no template: `CombatLogMessage`
+    // makes `TooltipTemplateSimple(null, message)`.
+    let tip = if tooltip.is_empty() {
+        Tip::Simple { cls: "TooltipTemplateSimple", header: None, desc: Some(s.clone()) }
+    } else {
+        Tip::Simple {
+            cls: "TooltipTemplateCombatLogMessage",
+            header: Some(s.clone()),
+            desc: Some(tooltip),
+        }
+    };
+    Ok(Some(Msg0 { text: s, color, icon, tip }))
+}
+
+/// `AttackLogMessage.GetData`'s tooltip, with the context changes it makes as it goes (a
+/// critical roll's confirmation: `Roll`, `D20`, `Modifier`, `DC`, then `DC` back to the
+/// target's AC). The sim's rolls have no mirror images (`HitMirrorImageIndex` 0), parry or
+/// fortification roll (reported by the rule); `CriticalConfirmationBonus` is 0.
+fn attack_tooltip(w: &mut World, a: &AttackRollLog) -> Result<String, TextError> {
+    let mut sb = String::new();
+    if a.auto_miss || a.auto_hit {
+        return Ok(sb);
+    }
+    let t = |w: &World, k: &str| text_of(w, &format!("GameLog/Attack/{k}"));
+    // `ConcealmentStatus`: Pass 1, Fail 2 (the context's, which can outlive one message).
+    let concealment = w.game_log.ctx.concealment;
+    if concealment == 2 {
+        sb.push_str(&t(w, "TooltipConcealmentFail")?);
+        sb.push('\n');
+        sb.push_str(&t(w, "TooltipResultMiss")?);
+        return Ok(sb);
+    }
+    if w.game_log.ctx.attack_number >= 0 && w.game_log.ctx.attacks_count > 1 {
+        sb.push_str(&t(w, "TooltipAttackNumber")?);
+        sb.push('\n');
+    }
+    if concealment == 1 {
+        sb.push_str(&t(w, "TooltipConcealmentPass")?);
+        sb.push('\n');
+    }
+    let crit_miss_empty = strings(w)?
+        .key("GameLog/Attack/TooltipAttackRollCriticalMiss")
+        .map_err(TextError::Unsupported)?
+        .is_empty();
+    if a.d20 == 20 {
+        sb.push_str(&t(w, "TooltipAttackRollNatural20")?);
+    } else if a.d20 == 1 && !crit_miss_empty {
+        sb.push_str(&t(w, "TooltipAttackRollCriticalMiss")?);
+    } else {
+        sb.push_str(&t(w, "TooltipAttackRoll")?);
+    }
+    sb.push('\n');
+    if a.is_hit {
+        sb.push_str(&t(w, "TooltipResultHit")?);
+    } else if a.d20 == 1 {
+        sb.push_str(&t(w, "TooltipResultCriticalMiss")?);
+    } else {
+        sb.push_str(&t(w, "TooltipResultMiss")?);
+    }
+    if a.is_critical_roll {
         let conf = match &a.confirmation {
             Roll::Known(r, _) => r.result,
             Roll::ResultOnly(v) => *v,
             Roll::Null => 0,
         };
-        let c = &mut w.game_log.ctx;
-        c.roll = crate::csharp::arith::add(conf, a.attack_bonus);
-        c.d20 = a.confirmation.clone();
-        c.modifier = a.attack_bonus;
-        c.dc = a.target_ac;
+        {
+            let c = &mut w.game_log.ctx;
+            c.roll = crate::csharp::arith::add(conf, a.attack_bonus);
+            c.d20 = a.confirmation.clone();
+            c.modifier = a.attack_bonus;
+            c.dc = a.target_critical_ac;
+        }
+        sb.push_str("\n\n");
+        sb.push_str(&t(
+            w,
+            if conf == 20 { "TooltipCritRollNatural20" } else { "TooltipCritRoll" },
+        )?);
+        w.game_log.ctx.dc = a.target_ac;
+        sb.push('\n');
+        sb.push_str(&t(
+            w,
+            if a.is_critical_confirmed {
+                "TooltipResultCritConfirmed"
+            } else {
+                "TooltipResultCritUnconfirmed"
+            },
+        )?);
     }
-    let icon = icon(w);
-    let color = color_of(w, "GameLog/Attack")?;
-    // An auto miss has no breakdown (`AutoMiss`: the tooltip's text is empty, the template null):
-    // `CombatLogMessage` makes `TooltipTemplateSimple(null, message)`.
-    let tip = if a.auto_miss {
-        Tip::Simple { cls: "TooltipTemplateSimple", header: None, desc: Some(s.clone()) }
-    } else {
-        Tip::NotPorted("TooltipTemplateCombatLogMessage")
+    sb.push_str("\n\n");
+    let Some(rules) = a.rules.as_deref() else {
+        return Err(TextError::Unsupported(
+            "an attack roll's AttackBonusRule and ACRule (not kept)".into(),
+        ));
     };
-    Ok(Some(Msg0 { text: s, color, icon, tip }))
+    tips::append_attack_bonus(w, &mut sb, &rules.0)?;
+    sb.push('\n');
+    tips::append_armor_class(w, &mut sb, &rules.1)?;
+    Ok(sb)
 }
 
 /// `rule.Weapon.Wielder == null ? rule.Reason.Name : rule.Weapon.Name`.
@@ -1245,9 +1337,21 @@ fn damage_data(w: &mut World, d: &DealDamageLog) -> Result<Option<Msg0>, TextErr
         if text.is_empty() {
             return Ok(None);
         }
+        // `Count = Result` again, then the tooltip (no redirection: `Target` stays).
+        w.game_log.ctx.count = d.result;
+        let tooltip = tips::damage_tooltip(w, &d.tip)?;
         let icon = icon(w);
         let color = color_of(w, "GameLog/Damage")?;
-        Ok(Some(Msg0 { text, color, icon, tip: Tip::NotPorted("TooltipTemplateCombatLogMessage") }))
+        let tip = if tooltip.is_empty() {
+            Tip::Simple { cls: "TooltipTemplateSimple", header: None, desc: Some(text.clone()) }
+        } else {
+            Tip::Simple {
+                cls: "TooltipTemplateCombatLogMessage",
+                header: Some(text.clone()),
+                desc: Some(tooltip),
+            }
+        };
+        Ok(Some(Msg0 { text, color, icon, tip }))
     })();
     w.game_log.release();
     r

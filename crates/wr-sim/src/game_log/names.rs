@@ -1,7 +1,8 @@
 //! Names the log shows (decompiled, not copied: `Kingmaker.Items/ItemEntity.cs` `Name`,
 //! `Kingmaker.Blueprints.Items/BlueprintItem.cs` `Name`/`NonIdentifiedName`,
 //! `Kingmaker.Blueprints.Items.Weapons/BlueprintItemWeapon.cs` `Name`,
-//! `GetEnchantmentPrefixes`/`GetEnchantmentSuffixes`).
+//! `GetEnchantmentPrefixes`/`GetEnchantmentSuffixes`, `BlueprintItemArmor.cs` and
+//! `BlueprintItemShield.cs` `Name`/`DefaultNonIdentifiedName`).
 
 use wr_text::TextError;
 
@@ -20,12 +21,20 @@ fn bp(w: &World, g: wr_content::Guid) -> Result<std::rc::Rc<crate::content::Blue
 }
 
 /// A `LocalizedString` field as a string, converted in the log's scope (a null field is
-/// `"<null>"`, as the implicit conversion writes it).
+/// `"<null>"`, as the implicit conversion writes it). Its key is `GetActualKey`'s: a `Shared`
+/// string's when it has one (the zip's form names it; the runtime pack's `m_Key` already holds
+/// it, and an empty one is resolved through the shared strings' table, reported when missing).
 fn loc(w: &World, v: View<'_>, field: &str) -> Result<String, TextError> {
-    match v.obj(field) {
-        Some(s) => super::localized(w, s.str("m_Key").unwrap_or("")),
-        None => Ok("<null>".to_owned()),
-    }
+    let Some(s) = v.obj(field) else { return Ok("<null>".to_owned()) };
+    let key = s.str("m_Key").unwrap_or("");
+    let shared = match s.node("Shared") {
+        Some(wr_content::node::Node::SharedString(Some(r))) => Some(r.key.to_string()),
+        Some(wr_content::node::Node::AssetIndex(_)) if key.is_empty() => {
+            crate::text::shared_string_key(w, s, "Shared")?
+        }
+        _ => None,
+    };
+    super::localized(w, shared.as_deref().unwrap_or(key))
 }
 
 /// A blueprint's `LocalizedString` field, converted in the log's scope.
@@ -93,14 +102,19 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
         if is_set(w, v, "m_NonIdentifiedNameText")? {
             return loc(w, v, "m_NonIdentifiedNameText");
         }
-        // `DefaultNonIdentifiedName`: a weapon's is its type's `DefaultName`.
-        if v.is("BlueprintItemWeapon") {
+        // `DefaultNonIdentifiedName`: a weapon's or armour's is its type's `DefaultName`, a
+        // shield's its armour component's type's.
+        if v.is("BlueprintItemWeapon") || v.is("BlueprintItemArmor") {
             let ty = bp(
                 w,
-                v.guid("m_Type")
-                    .ok_or_else(|| TextError::Unsupported("weapon without type".into()))?,
+                v.guid("m_Type").ok_or_else(|| {
+                    TextError::Unsupported("weapon or armour without type".into())
+                })?,
             )?;
             return loc(w, ty.view(), "m_DefaultNameText");
+        }
+        if v.is("BlueprintItemShield") {
+            return armor_component_type_name(w, v);
         }
         return Err(TextError::Unsupported(format!(
             "an unidentified item's default name (UnidentifiedItemNames; item {}{})",
@@ -109,7 +123,35 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
         )));
     }
     let base = loc(w, v, "m_DisplayNameText")?;
-    if !v.is("BlueprintItemWeapon") || !base.is_empty() {
+    if !base.is_empty() {
+        return Ok(base);
+    }
+    // `BlueprintItemArmor.Name`: the type's default name; `BlueprintItemShield.Name`: its armour
+    // component's name (its own, else its type's default name); `BlueprintItemEquipmentUsable.Name`:
+    // a prefix and its ability's name (not ported).
+    if v.is("BlueprintItemArmor") {
+        let ty = bp(
+            w,
+            v.guid("m_Type").ok_or_else(|| TextError::Unsupported("armour without type".into()))?,
+        )?;
+        return loc(w, ty.view(), "m_DefaultNameText");
+    }
+    if v.is("BlueprintItemShield") {
+        let a = bp(
+            w,
+            v.guid("m_ArmorComponent")
+                .ok_or_else(|| TextError::Unsupported("shield without armour component".into()))?,
+        )?;
+        let own = loc(w, a.view(), "m_DisplayNameText")?;
+        if !own.is_empty() {
+            return Ok(own);
+        }
+        return armor_component_type_name(w, v);
+    }
+    if v.is("BlueprintItemEquipmentUsable") {
+        return Err(TextError::Unsupported("a usable item without a name of its own".into()));
+    }
+    if !v.is("BlueprintItemWeapon") {
         return Ok(base);
     }
     // `BlueprintItemWeapon.Name`: the type's default name with the enchantments' prefixes
@@ -142,4 +184,21 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
         return Ok(type_name);
     }
     Err(TextError::Unsupported("a weapon without a name, default name or type name".into()))
+}
+
+/// A shield's `ArmorComponent.Type.DefaultName`.
+fn armor_component_type_name(w: &World, shield: View<'_>) -> Result<String, TextError> {
+    let a = bp(
+        w,
+        shield
+            .guid("m_ArmorComponent")
+            .ok_or_else(|| TextError::Unsupported("shield without armour component".into()))?,
+    )?;
+    let ty = bp(
+        w,
+        a.view()
+            .guid("m_Type")
+            .ok_or_else(|| TextError::Unsupported("armour without type".into()))?,
+    )?;
+    loc(w, ty.view(), "m_DefaultNameText")
 }
