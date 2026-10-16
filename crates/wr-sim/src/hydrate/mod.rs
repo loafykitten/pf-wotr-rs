@@ -1281,6 +1281,7 @@ pub fn hydrate(
 
     ld.w.scene.cache = area.as_deref().and_then(crate::scene::SceneCache::load);
     ld.w.scene.unit_prefabs = crate::scene_spawn::load_unit_prefabs();
+    ld.w.scene.area_bounds = crate::area_parts::AreaBoundsTable::load_default();
 
     // ---- deserialization ----
     let mut party_units = Vec::new();
@@ -1464,7 +1465,9 @@ pub fn hydrate(
 
     // ---- the area's scene states: `AreaPersistentState.PostLoad` post-loads the main state
     // and every loaded additional state, then `SceneLoader` matches each active scene's state
-    // with its scene and turns it on ----
+    // with its scene and turns it on; `LoadAreaCoroutine` has chosen the area part by then ----
+    w.coverage.context = None;
+    crate::area_parts::establish(&mut w);
     let spawned = load_area_states(&mut w, &states);
     // `Game.AfterSceneLoaderFinishedArea`: the creation queue joins the scene state there,
     // then controllers tick (the activatable-abilities controller restarts stopped toggles).

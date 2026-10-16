@@ -483,6 +483,11 @@ pub struct SceneState {
     /// Unit prefabs' `IsInGameBySettings` by asset GUID (`cache/sim/unit-prefabs.json`,
     /// [`crate::scene_spawn::load_unit_prefabs`]); `None` when the table wasn't built.
     pub unit_prefabs: Option<Rc<HashMap<String, Option<bool>>>>,
+    /// Area parts' bounds (`cache/sim/area-bounds.json`, [`crate::area_parts`]); `None` when
+    /// the table wasn't extracted.
+    pub area_bounds: Option<Rc<crate::area_parts::AreaBoundsTable>>,
+    /// The loaded area's part and its mechanic bounds ([`crate::area_parts::establish`]).
+    pub loaded_part: crate::area_parts::LoadedPart,
 }
 
 /// A saved `CutscenePlayerData` (`Kingmaker.AreaLogic.Cutscenes/CutscenePlayerData.cs`).

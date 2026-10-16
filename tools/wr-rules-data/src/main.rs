@@ -26,6 +26,7 @@ use wr_content::node::Node;
 use wr_import::unity::bundle::Bundle;
 use wr_import::unity::serialized::{SerializedFile, class_id};
 use wr_import::unity::value::Value;
+use wr_sim::area_parts::{AREA_BOUNDS_SCHEMA, AreaBoundsTable, AreaPartBoundsAsset, Bounds};
 use wr_sim::difficulty::{
     DifficultyPreset, DifficultyPresetAsset, DifficultyPresetsList, RULES_DATA_SCHEMA, RulesData,
     StatsAdjustmentPreset,
@@ -45,6 +46,9 @@ struct Cli {
     /// The log strings' output (default `cache/sim/log-strings.json`).
     #[arg(long)]
     log_strings_out: Option<PathBuf>,
+    /// The area parts' bounds' output (default `cache/sim/area-bounds.json`).
+    #[arg(long)]
+    area_bounds_out: Option<PathBuf>,
 }
 
 /// `BlueprintRoot`.
@@ -93,6 +97,7 @@ fn main() -> Result<()> {
     let mut found: Option<(String, DifficultyPresetsList, i64)> = None;
     let mut shared: Option<SharedStrings> = None;
     let mut log: Option<LogStrings> = None;
+    let mut area: Option<AreaBoundsTable> = None;
     for node in &bundle.header.nodes {
         if node.path.ends_with(".resS") || node.path.ends_with(".resource") {
             continue;
@@ -125,6 +130,7 @@ fn main() -> Result<()> {
             settings_ui(&f, entries, ix, &mut l)?;
         }
         log = Some(l);
+        area = Some(area_bounds(&f, entries, &node.path, &script)?);
         let idx = usize::try_from(asset_index)?;
         let entry = entries.get(idx).context("asset index out of range")?;
         let p = entry.get("Asset").and_then(Value::as_pptr).context("entry Asset")?;
@@ -181,6 +187,18 @@ fn main() -> Result<()> {
         containers.len(),
         if log.containers.contains_key("SettingsRoot") { ", SettingsRoot" } else { "" },
         lpath.display()
+    );
+    let area = area.context("no area bounds")?;
+    let apath = cli.area_bounds_out.unwrap_or_else(AreaBoundsTable::default_path);
+    if let Some(d) = apath.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&apath, serde_json::to_string_pretty(&area)?)?;
+    eprintln!(
+        "area bounds: {} AreaPartBounds ({} entries in other files) -> {}",
+        area.bounds.len(),
+        area.source.get("entries_in_other_files").and_then(serde_json::Value::as_u64).unwrap_or(0),
+        apath.display()
     );
     eprintln!(
         "DifficultyPresetsList: {} presets, {} stats-adjustment presets -> {}",
@@ -497,4 +515,86 @@ fn presets_list(f: &SerializedFile<'_>, v: &Value, path_id: i64) -> Result<Diffi
         mob_experience_coeffs: mob,
         preset_asset_indices: BTreeMap::new(),
     })
+}
+
+/// An `AreaPartBounds` (its `MonoScript` may be in another file, so also by shape: the
+/// default bounds with the mechanic and local-map overrides).
+fn is_area_part_bounds(v: &Value, script: &dyn Fn(&Value) -> Option<String>) -> bool {
+    if let Some(s) = script(v) {
+        return s == "AreaPartBounds";
+    }
+    [
+        "m_DefaultBounds",
+        "m_OverrideMechanicBounds",
+        "m_MechanicBounds",
+        "m_OverrideLocalMapBounds",
+        "m_LocalMapBounds",
+        "m_OverrideFogOfWarBounds",
+    ]
+    .iter()
+    .all(|k| v.get(k).is_some())
+}
+
+/// A serialized `Bounds` (`m_Center`, `m_Extent`).
+fn bounds(v: &Value, k: &str) -> Result<Bounds> {
+    let b = v.get(k).with_context(|| format!("field {k}"))?;
+    Ok(Bounds {
+        center: b.get("m_Center").and_then(Value::vec3).with_context(|| format!("{k}.m_Center"))?,
+        extents: b
+            .get("m_Extent")
+            .and_then(Value::vec3)
+            .with_context(|| format!("{k}.m_Extent"))?,
+    })
+}
+
+/// Every `BlueprintReferencedAssets` entry that is an `AreaPartBounds` in this file (a
+/// `BlueprintAreaPart.m_Bounds` in the runtime pack is such an index), with the bounds the
+/// mechanics read; entries in other files are counted.
+fn area_bounds(
+    f: &SerializedFile<'_>,
+    entries: &[Value],
+    file: &str,
+    script: &dyn Fn(&Value) -> Option<String>,
+) -> Result<AreaBoundsTable> {
+    let mut out = BTreeMap::new();
+    let mut elsewhere = 0u64;
+    for (i, e) in entries.iter().enumerate() {
+        let Some(p) = e.get("Asset").and_then(Value::as_pptr) else { continue };
+        if p.path_id == 0 {
+            continue;
+        }
+        if p.file_id != 0 {
+            elsewhere += 1;
+            continue;
+        }
+        let Some(o) = f.object(p.path_id) else { continue };
+        if o.class_id != class_id::MONO_BEHAVIOUR {
+            continue;
+        }
+        let v = f.read(o)?;
+        if !is_area_part_bounds(&v, script) {
+            continue;
+        }
+        let ctx = || format!("entry {i}: AreaPartBounds");
+        out.insert(
+            i32::try_from(i)?,
+            AreaPartBoundsAsset {
+                name: v.str_at("m_Name").unwrap_or_default().to_owned(),
+                path_id: p.path_id,
+                default_bounds: bounds(&v, "m_DefaultBounds").with_context(ctx)?,
+                override_mechanic_bounds: boolf(&v, "m_OverrideMechanicBounds")
+                    .with_context(ctx)?,
+                mechanic_bounds: bounds(&v, "m_MechanicBounds").with_context(ctx)?,
+                override_local_map_bounds: boolf(&v, "m_OverrideLocalMapBounds")
+                    .with_context(ctx)?,
+                local_map_bounds: bounds(&v, "m_LocalMapBounds").with_context(ctx)?,
+            },
+        );
+    }
+    let mut source = BTreeMap::new();
+    source.insert("bundle".into(), serde_json::json!("Bundles/blueprint.assets"));
+    source.insert("serialized_file".into(), serde_json::json!(file));
+    source.insert("entries".into(), serde_json::json!(entries.len()));
+    source.insert("entries_in_other_files".into(), serde_json::json!(elsewhere));
+    Ok(AreaBoundsTable { schema: AREA_BOUNDS_SCHEMA.into(), source, bounds: out })
 }
