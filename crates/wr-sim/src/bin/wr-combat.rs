@@ -311,7 +311,7 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
     );
     let n = &out.nav;
     println!(
-        "physics and paths: physics queries computed {} (agent {}, movement simulation {}, spans taken from the recording {}; taken {}), simulation steps {} (grid reads checked {}, taken {}); paths computed {} (line-of-sight answers taken {}), deliveries checked {}, paths the agent took from the sim {}; graph events matched {}, turn starts {}, removals {}, tag refreshes {} (navigation clock reads taken {})",
+        "physics and paths: physics queries computed {} (agent {}, movement simulation {}, spans taken from the recording {}; taken {}), simulation steps {} (grid reads checked {}, taken {}); paths computed {} (line-of-sight answers taken {}), deliveries checked {}, paths the agent took from the sim {}; graph events matched {}, turn starts {}, removals {}, tag refreshes {} (navigation clock reads taken {}); place-on-ground steps computed {} (rays {})",
         n.phys_tick + n.phys_sim + n.phys_span,
         n.phys_tick,
         n.phys_sim,
@@ -328,7 +328,9 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         n.turn_starts,
         n.removals,
         n.refreshes,
-        n.clock_reads
+        n.clock_reads,
+        n.ground_steps,
+        n.phys_ground
     );
     if let Some(c) = &out.clog {
         println!(

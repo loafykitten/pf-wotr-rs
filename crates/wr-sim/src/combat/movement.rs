@@ -21,7 +21,14 @@ pub trait MoveInputs: AgentInputs {
     /// `UnitPlaceOnGroundController.ForcedTick(unit)` (physics): the unit's position after.
     /// `required`: `TickUnit` calls it (the view stood elsewhere); else it may (a unit going
     /// prone or on an elevator, which the sim doesn't model): `None` when it didn't.
-    fn place_on_ground(&mut self, w: &mut World, u: EntityIdx, required: bool) -> R<Option<V3>>;
+    /// The unit's position after and the view's (the view takes the computed position even where
+    /// the unit's setter keeps the old one).
+    fn place_on_ground(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        required: bool,
+    ) -> R<Option<(V3, V3)>>;
     /// `UpdateSlowRotation(maxAngle)`'s `DesiredOrientation` (set by code the sim doesn't port
     /// yet: `LookAt`); `orientation` and `max_angle` are the sim's, to check.
     fn desired_orientation(
@@ -91,10 +98,10 @@ pub fn tick_unit(w: &mut World, u: EntityIdx, inp: &mut dyn MoveInputs) -> R<()>
         if sq > 0.0 {
             unit.combat.agent.pos = pos;
         }
-        if let Some(after) = inp.place_on_ground(w, u, sq > 0.0)? {
+        if let Some((after, view)) = inp.place_on_ground(w, u, sq > 0.0)? {
             let unit = w.unit_mut(u).ok_or_else(|| Desync("no unit".into()))?;
             unit.position = after;
-            unit.combat.agent.pos = after;
+            unit.combat.agent.pos = view;
         }
     }
     if inp.saddled_unit(w, u)? {

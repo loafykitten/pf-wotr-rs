@@ -361,6 +361,18 @@ from the recording and one carried from real time keep the recording's path; any
 whatever its kind, is reported, as is a `path_seek` or `path_mod` of a path the sim didn't request. Captures without `paths` (up to `-113`) take the
 recorded paths as before (A2); `paths` declared without the driven agent's chain is reported.
 
+**The place-on-ground step** (`UnitPlaceOnGroundController.TickUnit`, from `UnitMoveController.TickUnit` when the
+view stood elsewhere, or its own controller). `poc5-tb-128` showed why it can't stay an input as recorded: a unit standing
+still (`529A`, 215 frames) has its view 4.5e-6 m above its position. The step computes the ground position, sets the
+view's transform to it and then `data.Position` to it, whose setter keeps the old position when `Vector3 ==` holds
+(within about 1e-5 m), so the view and the unit differ; `ag_ground` recorded only the unit's position after. WrathOracle
+now records, declared `ground_view` (`CommandObsAgent.cs`, written in this stream, not yet recorded), the view's position
+after (`vafter`), `FlyHeight`, the view's `IsProne` and its torso's position when prone, and the step's rays as `ag_phys`
+with ctx `ground`; with it the sim runs the step (`nav_ground`): the ray from 50 m above (else 5, 10, .. 95 m above), the
+prone torso's ray and its clamp, the unit raised by the difference and `FlyHeight` (an input), the view given the result
+and the unit the setter's, every ray `wr-phys`'s and checked, the result checked against `after` and `vafter`. Captures
+before it keep the step an input, so `-128` reports the view's difference until it is re-recorded.
+
 **Still inputs:** when a path is delivered (`PathSync`), line of sight (search and simulation), the units'
 corpulences, `MaxSpeed`/`FlyHeight` in the simulation, the Unity clock the navigation timer reads (a replay's are
 its recording's), `FixPathIfTooShort`'s fake path, `FindPath`'s arguments, critters' paths and physics, the path visualizer's replacement paths (the commands' `FollowPrecomputedPath`

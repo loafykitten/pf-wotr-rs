@@ -44,6 +44,9 @@ pub struct NavCounts {
     /// (the physics file missing, an unverified collider: each reported).
     pub phys_tick: usize,
     pub phys_sim: usize,
+    /// The place-on-ground step's rays (`ground_view`), and the steps computed.
+    pub phys_ground: usize,
+    pub ground_steps: usize,
     /// Queries inside spans taken from the recording (real time: the agent's code isn't run),
     /// answered by the sim from their recorded arguments and checked.
     pub phys_span: usize,
@@ -76,6 +79,8 @@ pub enum PhysCtx {
     Agent,
     Simulation,
     Span,
+    /// `UnitPlaceOnGroundController.TickUnit`'s (`ground_view`).
+    Ground,
     /// Another caller's (`ctx: "other"`: a critter's move, presentation): the sim doesn't use the
     /// answer, so one `wr-phys` can't give is taken, not reported; one it gives is checked.
     Other,
@@ -159,6 +164,8 @@ pub struct NavDriver {
     last_step: Option<(i64, EntityIdx, f32, bool, MovementSimulator)>,
     /// Each path's last return record (`path_fin`, `path_seek`, `path_mod`).
     returned_at: HashMap<String, usize>,
+    /// The recording declares `ground_view`: the place-on-ground step is the sim's.
+    pub ground_view: bool,
     /// The recorded `path_to`/`path_done` waiting for the sim's `PathTo`/`OnPathComplete`.
     path_to: Option<usize>,
     path_done: Option<usize>,
@@ -256,6 +263,9 @@ impl Driver<'_> {
     pub(super) fn nav_start(&mut self, w: &mut World) {
         let trace = self.trace;
         let begin = trace.records.iter().find(|r| r["k"] == "begin");
+        self.ags.nav.ground_view = begin
+            .and_then(|b| b["observers"].as_array())
+            .is_some_and(|a| a.iter().any(|o| o == "ground_view"));
         // The global query settings `wr-phys` answers with (observer `phys_probe`): back faces
         // not hit (a mesh's would be; the terrain's rays come from above). Triggers fail closed
         // there either way.
@@ -1162,7 +1172,7 @@ impl Driver<'_> {
     /// `HeuristicDiscCastDown` with `wr-phys`, checked against the recorded hit, distance, point
     /// and collider. A query `wr-phys` can't answer exactly is reported and the recording's taken.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn nav_phys(
+    pub(super) fn nav_phys_hit(
         &mut self,
         w: &mut World,
         r: &J,
@@ -1172,10 +1182,13 @@ impl Driver<'_> {
         max: f32,
         mask: i32,
         ctx: PhysCtx,
-    ) -> R<Option<f32>> {
+    ) -> R<Option<(f32, V3)>> {
         let hit = r["hit"].as_bool().ok_or_else(|| Desync("a query without its hit".into()))?;
         let recorded = if hit {
-            Some(f(&r["dist"]).ok_or_else(|| Desync("a hit without its distance".into()))?)
+            Some((
+                f(&r["dist"]).ok_or_else(|| Desync("a hit without its distance".into()))?,
+                v3(&r["pt"]).ok_or_else(|| Desync("a hit without its point".into()))?,
+            ))
         } else {
             None
         };
@@ -1215,7 +1228,7 @@ impl Driver<'_> {
         };
         let same = match (&got, recorded) {
             (None, None) => true,
-            (Some((h, name, unique)), Some(d)) => {
+            (Some((h, name, unique)), Some((d, _))) => {
                 let col = &r["col"];
                 let theirs = format!(
                     "{}:{} ({})",
@@ -1247,8 +1260,182 @@ impl Driver<'_> {
             PhysCtx::Agent => self.out.nav.phys_tick += 1,
             PhysCtx::Simulation => self.out.nav.phys_sim += 1,
             PhysCtx::Span | PhysCtx::Other => self.out.nav.phys_span += 1,
+            PhysCtx::Ground => self.out.nav.phys_ground += 1,
         }
-        Ok(got.map(|(h, ..)| h.distance))
+        Ok(got.map(|(h, ..)| (h.distance, h.point)))
+    }
+
+    /// [`Self::nav_phys_hit`]'s distance.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn nav_phys(
+        &mut self,
+        w: &mut World,
+        r: &J,
+        kind: &str,
+        o: V3,
+        shape: &[f32],
+        max: f32,
+        mask: i32,
+        ctx: PhysCtx,
+    ) -> R<Option<f32>> {
+        Ok(self.nav_phys_hit(w, r, kind, o, shape, max, mask, ctx)?.map(|(d, _)| d))
+    }
+
+    /// One of the place-on-ground step's rays (`ag_phys` with ctx "ground", the unit's): straight
+    /// down from `o`, 100 m, the walkable mask; the sim's answer (distance, point).
+    fn nav_ground_ray(&mut self, w: &mut World, u: EntityIdx, o: V3) -> R<Option<(f32, V3)>> {
+        let id = w.entity(u).unique_id.clone();
+        let at = self.ag_pull(w, "the place-on-ground step's ray", |x| {
+            x["k"] == "obs" && x["ev"] == "ag_phys"
+        })?;
+        let trace = self.trace;
+        let r = &trace.records[at];
+        const DOWN: V3 = [0.0, -1.0, 0.0];
+        if r["u"].as_str() != Some(id.as_str())
+            || r["ctx"] != "ground"
+            || r["fn"] != "ray"
+            || v3(&r["o"]).map(bits3) != Some(bits3(o))
+            || v3(&r["d"]).map(bits3) != Some(bits3(DOWN))
+            || f(&r["max"]).map(f32::to_bits) != Some(100.0f32.to_bits())
+            || r["mask"].as_i64() != Some(2_099_457)
+        {
+            return Err(Desync(format!(
+                "the place-on-ground step's ray from {o:?}: the recording has {}",
+                describe(r)
+            )));
+        }
+        self.nav_phys_hit(w, r, "ray", o, &DOWN, 100.0, 2_099_457, PhysCtx::Ground)
+    }
+
+    /// `UnitPlaceOnGroundController.TickUnit(unit, (0, 50, 0), 100)` with WrathOracle's
+    /// `ground_view`: a ray down from 50 m above the unit (else from 5, 10, .. 95 m above, until
+    /// one hits), for a prone unit one from its torso (its position an input: the bone isn't
+    /// modelled; the prone action's `AllowFallingBelowGround`, which skips it, an input), the unit
+    /// raised by the difference and its `FlyHeight` (an input). The view takes the position; the
+    /// unit's setter keeps the old one when `Vector3 ==` holds. Returns (the unit's position, the
+    /// view's), checked against the step's record (`ag_ground`: `after`, `vafter`).
+    pub(super) fn nav_ground(&mut self, w: &mut World, u: EntityIdx, ctl: bool) -> R<(V3, V3)> {
+        let trace = self.trace;
+        let id = w.entity(u).unique_id.clone();
+        // Its record follows the rays: the reads it made at its start.
+        let g = trace.records[self.i..]
+            .iter()
+            .take_while(|x| x["k"] != "tick")
+            .position(|x| x["k"] == "obs" && x["ev"] == "ag_ground" && x["u"] == id.as_str())
+            .map(|k| self.i + k)
+            .ok_or_else(|| Desync("the place-on-ground step without its record".into()))?;
+        let gr = &trace.records[g];
+        let (Some(fly), Some(prone)) = (f(&gr["fly"]), gr["prone"].as_bool()) else {
+            return Err(Desync(format!(
+                "a place-on-ground record it can't read ({})",
+                describe(gr)
+            )));
+        };
+        let torso = match (&gr["torso"], prone) {
+            (J::Null, false) => None,
+            (t, true) => {
+                Some(v3(t).ok_or_else(|| Desync("a prone unit without its torso".into()))?)
+            }
+            _ => return Err(Desync("a torso of a unit not prone".into())),
+        };
+        self.ag_input("the place-on-ground step's FlyHeight");
+        let pos = w.unit(u).ok_or_else(|| Desync("no unit".into()))?.position;
+        // `(position + startOffset) ?? Vector3.up`: the offset (0, 50, 0).
+        let mut num = 0.0f32;
+        let o = [pos[0] + 0.0, pos[1] + 50.0, pos[2] + 0.0];
+        if let Some((_, pt)) = self.nav_ground_ray(w, u, o)? {
+            num = pt[1] - pos[1];
+        } else {
+            for i in 1..20 {
+                // `Vector3.up * 5f * i`, then `position + vector`.
+                let k = i as f32;
+                let v = [0.0 * 5.0 * k, 5.0 * k, 0.0 * 5.0 * k];
+                let o = [pos[0] + v[0], pos[1] + v[1], pos[2] + v[2]];
+                if let Some((_, pt)) = self.nav_ground_ray(w, u, o)? {
+                    num = pt[1] - pos[1];
+                    break;
+                }
+            }
+        }
+        if let Some(t) = torso {
+            let next = self.ag_peek();
+            let ray = next.is_some_and(|x| {
+                x["ev"] == "ag_phys" && x["ctx"] == "ground" && x["u"] == id.as_str()
+            });
+            if ray {
+                let o = [t[0] + 0.0, t[1] + 1.0, t[2] + 0.0];
+                if let Some((_, pt)) = self.nav_ground_ray(w, u, o)? {
+                    // `Mathf.Clamp(hit.y - torso.y, num, Mathf.Max(num, 0f) + 0.5f)`.
+                    let value = pt[1] - t[1];
+                    let hi = store_f32(f64::from(num.max(0.0)) + 0.5);
+                    num = if value < num {
+                        num
+                    } else if value > hi {
+                        hi
+                    } else {
+                        value
+                    };
+                }
+            } else {
+                self.ag_input("the prone action's AllowFallingBelowGround");
+            }
+        }
+        let mut p = pos;
+        p[1] += num;
+        p[1] += fly;
+        let after = crate::combat::orientation::set_position(pos, p);
+        let at = self.ag_pull(w, "the place-on-ground step's end", |x| {
+            x["k"] == "obs" && x["ev"] == "ag_ground"
+        })?;
+        let r = &trace.records[at];
+        if r["u"].as_str() != Some(id.as_str())
+            || r["ctl"].as_bool() != Some(ctl)
+            || v3(&r["pos"]).map(bits3) != Some(bits3(pos))
+            || v3(&r["after"]).map(bits3) != Some(bits3(after))
+            || v3(&r["vafter"]).map(bits3) != Some(bits3(p))
+            || !fields(r, &["u", "ctl", "pos", "after", "vafter", "fly", "prone", "torso"])
+        {
+            return Err(Desync(format!(
+                "the place-on-ground step: the sim's unit at {after:?}, view at {p:?}; the recording's {}",
+                describe(r)
+            )));
+        }
+        self.out.nav.ground_steps += 1;
+        Ok((after, p))
+    }
+
+    /// The place-on-ground controller's own step (outside `UnitMoveController.TickUnit`), from
+    /// its first ray (`ground_view`). Returns the next record.
+    pub(super) fn nav_ground_entry(&mut self, w: &mut World, i: usize) -> usize {
+        let trace = self.trace;
+        let r = &trace.records[i];
+        let Some(u) = r["u"].as_str().and_then(|x| w.by_id.get(x).copied()) else {
+            w.coverage.unsupported("driven replay: agent: a place-on-ground ray of no unit");
+            return i + 1;
+        };
+        self.i = i;
+        match self.nav_ground(w, u, false) {
+            Ok((after, view)) => {
+                if let Some(x) = w.unit_mut(u) {
+                    x.position = after;
+                    x.combat.agent.pos = view;
+                }
+            }
+            Err(d) => {
+                w.coverage.unsupported(format!("driven replay: agent: {}", d.0));
+                // The step's records, up to its end, are skipped.
+                while let Some(x) = trace.records.get(self.i) {
+                    if x["k"] == "tick" {
+                        break;
+                    }
+                    self.i += 1;
+                    if x["ev"] == "ag_ground" {
+                        break;
+                    }
+                }
+            }
+        }
+        self.i
     }
 
     /// A physics query of the movement simulation outside a step the sim runs: answered by the

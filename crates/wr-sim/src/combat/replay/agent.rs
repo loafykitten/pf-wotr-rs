@@ -468,7 +468,13 @@ impl Driver<'_> {
     fn ag_skip_stop(&mut self, w: &mut World, r: &J) {
         // A physics query of the span: the sim's answer to its recorded arguments, checked.
         if r["k"] == "obs" && r["ev"] == "ag_phys" {
-            self.nav_phys_alone(w, r, super::nav::PhysCtx::Span);
+            // (A critter's or another caller's: the sim never uses the answer.)
+            let ctx = if critter_phys(r) || r["ctx"] == "other" {
+                super::nav::PhysCtx::Other
+            } else {
+                super::nav::PhysCtx::Span
+            };
+            self.nav_phys_alone(w, r, ctx);
         }
         if self.ag_slow_draw(r) {
             let _ = w.rng.range_float(crate::rng::sites::AGENT_SLOW_DOWN, 0.2, 0.3);
@@ -556,7 +562,7 @@ impl Driver<'_> {
     }
 
     /// The next record a pull would stop at, not consumed.
-    fn ag_peek(&self) -> Option<J> {
+    pub(super) fn ag_peek(&self) -> Option<J> {
         self.trace.records[self.i..].iter().find(|r| self.ag_stop(r)).cloned()
     }
 
@@ -673,6 +679,13 @@ impl Driver<'_> {
             "ag_done" => return self.ag_entry(w, i, AgEntry::Done),
             "ag_call" => return self.ag_entry(w, i, AgEntry::Call),
             // The place-on-ground step outside a `TickUnit` (its own controller): physics, an input.
+            // The place-on-ground controller's own step (`ground_view`: its rays come first).
+            "ag_phys" if r["ctx"] == "ground" && self.ags.nav.ground_view => {
+                return self.nav_ground_entry(w, i);
+            }
+            "ag_ground" if self.ags.nav.ground_view => {
+                Self::ag_unsupported(w, "a place-on-ground step without its rays");
+            }
             "ag_ground" => {
                 let u = r["u"].as_str().and_then(|x| w.by_id.get(x).copied());
                 let (pos, after) = (v3(&r["pos"]), v3(&r["after"]));
@@ -2551,9 +2564,33 @@ impl MoveInputs for Driver<'_> {
     fn interrupt_move(&mut self, _: &mut World, _: EntityIdx) -> R<()> {
         Err(Desync("TickUnit interrupts a move it can't make (UnitCommands.InterruptMove from the controller isn't wired)".into()))
     }
-    fn place_on_ground(&mut self, w: &mut World, u: EntityIdx, required: bool) -> R<Option<V3>> {
+    fn place_on_ground(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        required: bool,
+    ) -> R<Option<(V3, V3)>> {
         let id = self.ag_unit_id(w, u);
         let next = self.ag_peek();
+        // With `ground_view` the step is the sim's, from its first ray.
+        if self.ags.nav.ground_view {
+            let ray = next.as_ref().is_some_and(|r| {
+                r["ev"] == "ag_phys" && r["ctx"] == "ground" && r["u"].as_str() == Some(id.as_str())
+            });
+            if ray {
+                return self.nav_ground(w, u, true).map(Some);
+            }
+            if required {
+                return Err(Desync(
+                    "TickUnit places a unit on the ground; the recording has no ray".into(),
+                ));
+            }
+            if next.is_some_and(|r| r["ev"] == "ag_ground" && r["u"].as_str() == Some(id.as_str()))
+            {
+                return Err(Desync("a place-on-ground step without its rays".into()));
+            }
+            return Ok(None);
+        }
         let here =
             next.is_some_and(|r| r["ev"] == "ag_ground" && r["u"].as_str() == Some(id.as_str()));
         if !here {
@@ -2576,7 +2613,7 @@ impl MoveInputs for Driver<'_> {
             return Err(Desync("the place-on-ground step starts from another position".into()));
         }
         v3(&r["after"])
-            .map(Some)
+            .map(|a| Some((a, a)))
             .ok_or_else(|| Desync("ag_ground without its position after".into()))
     }
     fn desired_orientation(
