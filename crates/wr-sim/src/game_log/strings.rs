@@ -43,13 +43,17 @@ impl LogStrings {
         Ok(s)
     }
 
-    /// A container's field, by a `/`-separated path (`GameLog/Attack/Message`).
+    /// A container's field, by a `/`-separated path (`GameLog/Attack/Message`; an array's
+    /// element by its index, `Stats/Entries/3/Text`).
     #[must_use]
     pub fn get(&self, path: &str) -> Option<&J> {
         let mut parts = path.split('/');
         let mut v = self.containers.get(parts.next()?)?;
         for p in parts {
-            v = v.get(p)?;
+            v = match v {
+                J::Array(a) => a.get(p.parse::<usize>().ok()?)?,
+                _ => v.get(p)?,
+            };
         }
         Some(v)
     }

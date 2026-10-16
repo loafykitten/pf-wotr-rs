@@ -671,8 +671,9 @@ impl RuleEvent for RuleCalculateWeaponStats {
         let add_mods: Vec<_> =
             w.stats(self.initiator).v(StatType::AdditionalDamage).modifiers().collect();
         for m in add_mods {
-            let (v, desc) = (w.mods[m.i()].value, w.mods[m.i()].desc);
-            d.add_modifier(Bonus::desc(v, desc));
+            // `new Modifier(modifier.ModValue, modifier.Source, modifier.ModDescriptor)`.
+            let (v, desc, src) = (w.mods[m.i()].value, w.mods[m.i()].desc, w.mods[m.i()].source);
+            d.add_modifier(Bonus { fact: src, ..Bonus::desc(v, desc) });
         }
         d.add_modifier(Bonus::stat(num2, stat));
         d.add_modifier(Bonus::desc(self.enhancement.total(), MD::Enhancement));
@@ -840,6 +841,8 @@ pub struct RuleCalculateAC {
     pub is_target_flat_footed: bool,
     pub result: i32,
     pub bonuses: BonusList,
+    /// `StatModifiersAtTheMoment` (the combat log's tooltip reads it; made while the log is on).
+    pub stat_mods: Vec<crate::game_log::tips::StatMod>,
 }
 
 impl RuleEvent for RuleCalculateAC {
@@ -886,7 +889,7 @@ impl RuleEvent for RuleCalculateAC {
         // `using (AC.GetTemporaryModifiersScope(AllBonuses))` (RuleCalculateAC.cs:56–75):
         // the flat-footed check and the AC read happen with the rule's bonuses applied.
         let rule_mods: Vec<_> =
-            self.bonuses.0.iter().map(|b| (b.value, b.descriptor, None)).collect();
+            self.bonuses.0.iter().map(|b| (b.value, b.descriptor, b.fact)).collect();
         let scope = crate::stats::ops::open_temporary_scope(w, t, StatType::AC, &rule_mods);
         let mut ff = RuleCheckTargetFlatFooted {
             base: RuleBase::default(),
@@ -909,6 +912,16 @@ impl RuleEvent for RuleCalculateAC {
         } else {
             w.coverage.unsupported("RuleCalculateAC: AC stat kind");
         }
+        // `StatModifiersAtTheMoment = GetDisplayArmorModifiers(aC, IsTargetFlatFooted, touch)`,
+        // inside the scope.
+        if w.game_log.on {
+            self.stat_mods = crate::game_log::tips::display_armor_modifiers(
+                w,
+                t,
+                self.is_target_flat_footed,
+                self.attack_type.is_touch(),
+            );
+        }
         crate::stats::ops::close_temporary_scope(w, t, StatType::AC, &scope);
     }
     rule_boilerplate!();
@@ -930,6 +943,8 @@ pub struct RuleCalculateAttackBonusWithoutTarget {
     /// `Reason.Rule as RuleAttackWithWeapon`: `Some(IsFullAttack)` when the attack bonus is
     /// part of a weapon attack, `None` for another reason.
     pub reason_full_attack: Option<bool>,
+    /// `StatModifiersAtTheMoment` (the combat log's tooltip reads it; made while the log is on).
+    pub stat_mods: Vec<crate::game_log::tips::StatMod>,
 }
 
 impl RuleEvent for RuleCalculateAttackBonusWithoutTarget {
@@ -973,6 +988,16 @@ impl RuleEvent for RuleCalculateAttackBonusWithoutTarget {
         let num = s.modified_value;
         if disabled {
             w.coverage.unsupported("AdditionalAttackBonus with disabled bonuses");
+        }
+        // `StatModifiersBreakdown.GetDisplayModifiers(additionalAttackBonus)` (an enhancement
+        // modifier it would drop is reported below).
+        if w.game_log.on {
+            self.stat_mods = crate::game_log::tips::display_modifiers(
+                w,
+                u,
+                StatType::AdditionalAttackBonus,
+                true,
+            );
         }
         // `(int)WeaponStats.Enhancement > 0`: the enhancement is added unless the stat's own
         // display list already has a larger or equal non-stacking enhancement modifier (which
@@ -1118,6 +1143,10 @@ pub struct RuleAttackRoll {
     pub is_critical_confirmed: bool,
     pub critical_confirmation_d20: i32,
     pub is_sneak_attack: bool,
+    /// `AttackBonusRule` and `ACRule` as the combat log's tooltip reads them (kept while the
+    /// log is on).
+    pub log_rules:
+        Option<Box<(crate::game_log::tips::AttackBonusRule, crate::game_log::tips::AcRule)>>,
 }
 
 impl RuleAttackRoll {
@@ -1250,6 +1279,7 @@ impl RuleEvent for RuleAttackRoll {
                     is_target_flat_footed: false,
                     result: 0,
                     bonuses: BonusList::default(),
+                    stat_mods: Vec::new(),
                 };
                 trigger_any(w, &mut ac, |r| {
                     Some(json!({"Result": r.result, "IsTargetFlatFooted": r.is_target_flat_footed}))
@@ -1271,6 +1301,7 @@ impl RuleEvent for RuleAttackRoll {
                         bonuses: BonusList::default(),
                         result: 0,
                         reason_full_attack: self.reason_full_attack,
+                        stat_mods: Vec::new(),
                     },
                     target_is_flanked: self.target_is_flanked,
                     ignore_ranged_penalty: false,
@@ -1280,6 +1311,25 @@ impl RuleEvent for RuleAttackRoll {
                 };
                 trigger_any(w, &mut ab, |r| Some(json!({"Result": r.result})));
                 self.attack_bonus = ab.result;
+                if w.game_log.on {
+                    // `AttackBonusRule.AllBonuses`: its own, then its inner rule's.
+                    let all_bonuses =
+                        ab.bonuses.0.iter().chain(ab.inner.bonuses.0.iter()).copied().collect();
+                    self.log_rules = Some(Box::new((
+                        crate::game_log::tips::AttackBonusRule {
+                            result: ab.result,
+                            all_bonuses,
+                            stat_mods: std::mem::take(&mut ab.inner.stat_mods),
+                        },
+                        crate::game_log::tips::AcRule {
+                            result: ac.result,
+                            flat_footed: ac.is_target_flat_footed,
+                            touch: self.attack_type.is_touch(),
+                            target: t,
+                            stat_mods: std::mem::take(&mut ac.stat_mods),
+                        },
+                    )));
+                }
                 let d = d20(w, a);
                 self.d20 = d.result();
                 let success = self.is_success_roll(w, self.d20);
@@ -1319,6 +1369,7 @@ impl RuleEvent for RuleAttackRoll {
                         is_target_flat_footed: false,
                         result: 0,
                         bonuses: BonusList::default(),
+                        stat_mods: Vec::new(),
                     };
                     trigger_any(w, &mut cac, |r| {
                         Some(
@@ -1664,6 +1715,8 @@ pub struct RuleDealDamage {
     pub weapon_item: Option<EntityIdx>,
     /// The attacker's and the target's positions when the attack was rolled.
     pub positions: Option<([f32; 3], [f32; 3])>,
+    /// `ResultList` (kept while the combat log is on: its tooltip reads it).
+    pub result_list: Vec<DamageValue>,
 }
 
 impl RuleDealDamage {
@@ -1691,6 +1744,7 @@ impl RuleDealDamage {
             weapon_category: None,
             weapon_item: None,
             positions: None,
+            result_list: Vec::new(),
         }
     }
 
@@ -1774,6 +1828,9 @@ impl RuleEvent for RuleDealDamage {
             if v.source.type_desc.ty == 3 {
                 direct = arith::add(direct, f);
             }
+        }
+        if w.game_log.on {
+            self.result_list = calc.calculated.clone();
         }
         // `MinHPAfterDamage` is unset on these paths.
         self.damage_before_difficulty = self.result;
@@ -2036,6 +2093,7 @@ impl RuleEvent for RuleAttackWithWeapon {
             is_critical_confirmed: false,
             critical_confirmation_d20: 0,
             is_sneak_attack: false,
+            log_rules: None,
         };
         trigger_any(w, &mut roll, |r| Some(r.result_json()));
         self.attack_hit = Some(roll.is_hit());
@@ -2175,6 +2233,7 @@ mod tests {
             is_target_flat_footed: false,
             result: 0,
             bonuses: BonusList::default(),
+            stat_mods: Vec::new(),
         };
         trigger_any(w, &mut r, |_| None);
         r

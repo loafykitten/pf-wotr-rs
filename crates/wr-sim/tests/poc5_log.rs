@@ -13,12 +13,13 @@ use wr_sim::combat::{oracle::Trace, replay};
 const SAVE: &str = "Manual_18_WR_FirstBattle";
 
 /// The captures with `combat_log` (each fight's record and two replays), with each fight's
-/// recorded messages; `poc5-tb-117`'s fight is the damaged one.
-const CAPTURES: [(&str, &str, usize); 4] = [
-    ("poc5-tb-115", "tb-nearest", 25),
-    ("poc5-tb-115", "tb-focus", 27),
-    ("poc5-tb-116", "tb-hold", 27),
-    ("poc5-tb-117", "tb-solo", 27),
+/// recorded messages and tooltips (initiative, attack and damage: every one compared);
+/// `poc5-tb-117`'s fight is the damaged one.
+const CAPTURES: [(&str, &str, usize, usize); 4] = [
+    ("poc5-tb-115", "tb-nearest", 25, 17),
+    ("poc5-tb-115", "tb-focus", 27, 19),
+    ("poc5-tb-116", "tb-hold", 27, 19),
+    ("poc5-tb-117", "tb-solo", 27, 18),
 ];
 
 fn fixture_in(capture: &str, name: &str) -> Option<PathBuf> {
@@ -38,7 +39,7 @@ fn fixture_in(capture: &str, name: &str) -> Option<PathBuf> {
 #[test]
 #[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-115..-117 captures"]
 fn every_recorded_message_is_the_sims() {
-    for (cap, fight, messages) in CAPTURES {
+    for (cap, fight, messages, tips) in CAPTURES {
         let Some(dir) = fixture_in(cap, fight) else {
             eprintln!("{cap}/{fight} not present: skipped");
             continue;
@@ -52,6 +53,7 @@ fn every_recorded_message_is_the_sims() {
             let c = out.clog.expect("the combat log is modelled");
             assert_eq!(c.messages, [messages, messages], "{cap}/{fight}/{run}");
             assert_eq!((c.messages_equal, c.differences), (messages, 0), "{cap}/{fight}/{run}");
+            assert_eq!((c.tips_equal, c.tips_not_ported), (tips, 0), "{cap}/{fight}/{run}");
             assert_eq!(c.queued[0], c.queued[1], "{cap}/{fight}/{run}");
             assert_eq!(c.ticks[0], c.ticks[1], "{cap}/{fight}/{run}");
         }
@@ -75,6 +77,41 @@ fn first_msg(recs: &[V], th: &str) -> usize {
     recs.iter().position(|r| r["ev"] == "clog_msg" && r["th"] == th).expect("a clog_msg")
 }
 
+/// The first message of a thread with its tooltip's description changed (the change must
+/// change it).
+fn edit_tip(recs: &mut [V], th: &str, f: impl Fn(&str) -> String) {
+    let at = first_msg(recs, th);
+    let d = recs[at]["tip"]["d"].as_str().expect("a tooltip").to_owned();
+    let e = f(&d);
+    assert_ne!(d, e, "the damage changes the tooltip");
+    recs[at]["tip"]["d"] = json!(e);
+}
+
+/// The first line after the first line containing `after` that has the colour markup removed.
+fn drop_line(d: &str, after: &str) -> String {
+    let lines: Vec<&str> = d.split('\n').collect();
+    let start = lines.iter().position(|l| l.contains(after)).expect("the header");
+    let at = (start + 1..lines.len()).find(|&i| lines[i].contains("<color")).expect("a line");
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .map(|(_, l)| *l)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The two first nonempty lines after the first line containing `after`, swapped.
+fn swap_after(d: &str, after: &str) -> String {
+    let mut lines: Vec<&str> = d.split('\n').collect();
+    let start = lines.iter().position(|l| l.contains(after)).expect("the header");
+    let next: Vec<usize> =
+        (start + 1..lines.len()).filter(|&i| !lines[i].trim().is_empty()).take(2).collect();
+    assert_eq!(next.len(), 2, "two lines to swap");
+    lines.swap(next[0], next[1]);
+    lines.join("\n")
+}
+
 fn renumber(recs: &mut [V]) {
     for (n, r) in recs.iter_mut().enumerate() {
         r["seq"] = json!(n);
@@ -89,7 +126,7 @@ const P: &str = "can't be placed";
 type Change = fn(&mut Vec<V>);
 
 /// The damaged recordings, each with the report it must make.
-const CASES: [(&str, Change); 54] = [
+const CASES: [(&str, Change); 62] = [
     // Messages.
     (L, |recs| {
         let at = nth(recs, "clog_msg", 3);
@@ -135,6 +172,22 @@ const CASES: [(&str, Change); 54] = [
         let at = first_msg(recs, "AttackLogThread");
         recs[at]["tip"] = V::Null;
     }),
+    // Attack and damage tooltips (the sim's): a wrong bonus, a missing line, a reordered
+    // breakdown, another source's name, another header; a damage's dice modification, its roll
+    // result, its bonus's breakdown reordered.
+    (L, |recs| edit_tip(recs, "AttackLogThread", |d| d.replacen(">+", ">+1", 1))),
+    (L, |recs| edit_tip(recs, "AttackLogThread", |d| drop_line(d, "Armor Class"))),
+    (L, |recs| edit_tip(recs, "AttackLogThread", |d| swap_after(d, "<b>Attack Bonus"))),
+    (L, |recs| edit_tip(recs, "AttackLogThread", |d| d.replacen("Dexterity", "Strength", 1))),
+    (L, |recs| {
+        let at = first_msg(recs, "AttackLogThread");
+        recs[at]["tip"]["h"] = json!("x");
+    }),
+    (L, |recs| edit_tip(recs, "DamageDealtLogThread", |d| d.replacen("-> 1d6", "-> 1d8", 1))),
+    (L, |recs| {
+        edit_tip(recs, "DamageDealtLogThread", |d| d.replacen("Roll result: ", "Roll result: 1", 1))
+    }),
+    (L, |recs| edit_tip(recs, "DamageDealtLogThread", |d| swap_after(d, "Damage result"))),
     // Ticks.
     (L, |recs| {
         let at = nth(recs, "clog_tick", 2);
@@ -391,14 +444,14 @@ const CASES: [(&str, Change); 54] = [
 #[test]
 #[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-117 capture"]
 fn missing_or_wrong_combat_log_records_are_reported() {
-    let (cap, fight, _) = CAPTURES[3];
+    let (cap, fight, _, tips) = CAPTURES[3];
     let Some(dir) = fixture_in(cap, fight) else {
         eprintln!("{cap}/{fight} not present: skipped");
         return;
     };
     let (out, w) = replay::run_fixture(SAVE, &dir, "record").expect("replay");
     assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
-    assert!(out.clog.is_some_and(|c| c.differences == 0 && c.tips_equal == 7));
+    assert!(out.clog.is_some_and(|c| c.differences == 0 && c.tips_equal == tips));
     let mut missed = Vec::new();
     for (i, (want, change)) in CASES.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
@@ -420,7 +473,7 @@ fn missing_or_wrong_combat_log_records_are_reported() {
 #[test]
 #[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-115 capture"]
 fn combat_end_before_the_navigation_cleanup_is_reported() {
-    let (cap, fight, _) = CAPTURES[0];
+    let (cap, fight, _, _) = CAPTURES[0];
     let Some(dir) = fixture_in(cap, fight) else {
         eprintln!("{cap}/{fight} not present: skipped");
         return;

@@ -12,6 +12,10 @@
 //! `SharedStringAsset` field as its index into the same list, so for every entry that is a
 //! `SharedStringAsset`, the key its string resolves to (`LocalizedString.GetActualKey`:
 //! `m_Key`, or the end of its `Shared` chain).
+//!
+//! And `cache/sim/log-strings.json` ([`LogStrings`]): `BlueprintRoot.LocalizedTexts`' string
+//! containers, plus `SettingsRoot` (`BlueprintRoot.SettingsRoot.Settings`' `DamageToParty` and
+//! `EnemyCriticalHits` entities, whose texts the combat log's damage tooltip reads).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -76,6 +80,12 @@ fn main() -> Result<()> {
     ensure!(asset_index >= 0, "m_DifficultyList is null");
     // `LocalizedTexts`' string containers (each an asset index).
     let containers = localized_texts_containers(&root)?;
+    // `BlueprintRoot.SettingsRoot` (`UISettingsRoot`, another asset index): the settings' UI texts
+    // the combat log's damage tooltip reads.
+    let settings_root = match field_node(&root, "SettingsRoot") {
+        Some(Node::AssetIndex(i)) if i >= 0 => Some(i),
+        _ => None,
+    };
 
     // 2. blueprint.assets: find BlueprintReferencedAssets and follow the index.
     let assets = bundles.join("blueprint.assets");
@@ -110,7 +120,11 @@ fn main() -> Result<()> {
         let Some(refs) = referenced else { continue };
         let entries = refs.get("m_Entries").and_then(Value::as_array).context("m_Entries")?;
         shared = Some(shared_strings(&f, entries, &node.path, &script)?);
-        log = Some(log_strings(&f, entries, &containers, &node.path)?);
+        let mut l = log_strings(&f, entries, &containers, &node.path)?;
+        if let Some(ix) = settings_root {
+            settings_ui(&f, entries, ix, &mut l)?;
+        }
+        log = Some(l);
         let idx = usize::try_from(asset_index)?;
         let entry = entries.get(idx).context("asset index out of range")?;
         let p = entry.get("Asset").and_then(Value::as_pptr).context("entry Asset")?;
@@ -162,9 +176,10 @@ fn main() -> Result<()> {
     }
     std::fs::write(&lpath, serde_json::to_string_pretty(&log)?)?;
     eprintln!(
-        "log strings: {} of {} LocalizedTexts containers -> {}",
-        log.containers.len(),
+        "log strings: {} of {} LocalizedTexts containers{} -> {}",
+        containers.iter().filter(|(n, _)| log.containers.contains_key(n)).count(),
         containers.len(),
+        if log.containers.contains_key("SettingsRoot") { ", SettingsRoot" } else { "" },
         lpath.display()
     );
     eprintln!(
@@ -244,13 +259,57 @@ fn shared_strings(
     Ok(SharedStrings { schema: SHARED_STRINGS_SCHEMA.into(), source, keys })
 }
 
+/// A blueprint object's field by name.
+fn field_node(o: &wr_content::node::Object, name: &str) -> Option<Node> {
+    let t = wr_content::schema::ty(o.ty);
+    t.fields.iter().position(|f| f.name == name).map(|i| o.fields[i].clone())
+}
+
+/// `UISettingsRoot.Settings`' entities the combat log reads (`DamageToParty`,
+/// `EnemyCriticalHits`), each followed to its object, as the container `SettingsRoot`
+/// (`{"Settings": {name: entity}}`). Skipped when the root or an entity is in another file.
+fn settings_ui(
+    f: &SerializedFile<'_>,
+    entries: &[Value],
+    ix: i32,
+    log: &mut LogStrings,
+) -> Result<()> {
+    let Some(p) = entries
+        .get(usize::try_from(ix)?)
+        .and_then(|e| e.get("Asset"))
+        .and_then(Value::as_pptr)
+        .filter(|p| p.file_id == 0 && p.path_id != 0)
+    else {
+        eprintln!("log strings: BlueprintRoot.SettingsRoot isn't in this file: skipped");
+        return Ok(());
+    };
+    let root = f.read(f.object(p.path_id).context("SettingsRoot object")?)?;
+    let settings = root.get("Settings").context("UISettingsRoot.Settings")?;
+    let mut out = serde_json::Map::new();
+    for name in ["DamageToParty", "EnemyCriticalHits"] {
+        let Some(q) = settings
+            .get(name)
+            .and_then(Value::as_pptr)
+            .filter(|q| q.file_id == 0 && q.path_id != 0)
+        else {
+            eprintln!("log strings: UISettingsRoot.Settings.{name} isn't in this file: skipped");
+            continue;
+        };
+        let v = f.read(f.object(q.path_id).with_context(|| format!("Settings.{name}"))?)?;
+        out.insert(name.to_owned(), container_json(f, &v)?);
+    }
+    log.containers.insert(
+        "SettingsRoot".into(),
+        serde_json::json!({ "Settings": serde_json::Value::Object(out) }),
+    );
+    log.source.insert("settings_root_asset_index".into(), serde_json::json!(ix));
+    Ok(())
+}
+
 /// `BlueprintRoot.LocalizedTexts`' fields that are single Unity objects (the string
 /// containers), with their `BlueprintReferencedAssets` index.
 fn localized_texts_containers(root: &wr_content::node::Object) -> Result<Vec<(String, i32)>> {
-    let field = |o: &wr_content::node::Object, name: &str| -> Option<Node> {
-        let t = wr_content::schema::ty(o.ty);
-        t.fields.iter().position(|f| f.name == name).map(|i| o.fields[i].clone())
-    };
+    let field = field_node;
     let Some(Node::Object(lt)) = field(root, "LocalizedTexts") else {
         bail!("BlueprintRoot.LocalizedTexts missing")
     };
