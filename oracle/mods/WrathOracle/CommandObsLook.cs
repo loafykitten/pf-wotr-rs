@@ -75,7 +75,8 @@ internal static partial class CommandObs
         var b = new LookBefore();
         try
         {
-            if (!LookObserved() || u == null) return b;
+            // (ReferenceEquals: UnitEntityData overloads ==, which reads the descriptor.)
+            if (!LookObserved() || ReferenceEquals(u, null)) return b;
             // Where real time just ended, the synchronization's snapshot first: it shows the state before the write.
             AgCheckTb(false);
             b.U = u.UniqueId;

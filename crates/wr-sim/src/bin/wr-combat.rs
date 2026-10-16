@@ -309,6 +309,20 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.ag_rows,
         out.ag_inputs
     );
+    let l = &out.look;
+    println!(
+        "orientation: DesiredOrientation reads computed {} (taken {}); writes computed {:?} (points taken {}; attack of opportunity's LookAt made {}, not made {}), writes by code the sim doesn't run {:?} (angles computed {}), taken in real time {}, snapshots differing {}",
+        l.reads_checked,
+        l.reads_taken,
+        l.computed,
+        l.points_taken,
+        l.aoo_made,
+        l.aoo_not_made,
+        l.outside,
+        l.outside_angles,
+        l.real_time,
+        l.snapshots_taken
+    );
     let n = &out.nav;
     println!(
         "physics and paths: physics queries computed {} (agent {}, movement simulation {}, spans taken from the recording {}; taken {}), simulation steps {} (grid reads checked {}, taken {}); paths computed {} (line-of-sight answers taken {}), deliveries checked {}, paths the agent took from the sim {}; graph events matched {}, turn starts {}, removals {}, tag refreshes {} (navigation clock reads taken {}); place-on-ground steps computed {} (rays {})",

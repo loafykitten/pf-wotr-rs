@@ -3,8 +3,10 @@
 //! `UpdateSlowRotation`, `HasMotionThisTick`, `UnitMoveController.TickUnit`'s write from the
 //! agent's `MoveDirection` and `UnitMovementAgent.InitMoveDirection`, with the managed Unity
 //! members they use (`Quaternion.eulerAngles`, `Quaternion.Euler`, `Mathf.MoveTowardsAngle`,
-//! `DeltaAngle`, `Repeat`, `MoveTowards`). Pure functions: the driver integration comes with
-//! `UnitMoveController`.
+//! `DeltaAngle`, `Repeat`, `MoveTowards`), and the writes outside `TickUnit`:
+//! `GetLookAtAngle`, `LookAt`, `ForceLookAt` and the setters ([`Orientation::write`]). Pure
+//! functions: `combat::movement` runs `TickUnit`'s, the commands their `TurnToTarget`s and
+//! `UnitMoveTo.OnAction`'s, and the driven replay checks each against WrathOracle's `ag_look`.
 //!
 //! Arithmetic is the game's Mono's ([`crate::csharp::arith`]): each `float` expression in
 //! double, rounded where it is stored (a local, a field, an argument or a return).
@@ -168,6 +170,87 @@ pub fn has_motion(position: V3, previous: V3) -> bool {
 #[must_use]
 pub fn max_angle(delta_time: f32, angular_speed: f32) -> f32 {
     store_f32(d(delta_time) * d(angular_speed))
+}
+
+/// `UnitEntityData.GetLookAtAngle(point)`: `point.y = Position.y`; when `point == Position`
+/// (`Vector3 ==`) the unit's `DesiredOrientation`, else `Quaternion.LookRotation(point -
+/// Position).eulerAngles.y` (the difference's components each rounded at the constructor).
+#[must_use]
+pub fn look_at_angle(position: V3, desired: f32, mut point: V3) -> f32 {
+    point[1] = position[1];
+    if vec3_eq(point, position) {
+        return desired;
+    }
+    let diff = [0, 1, 2].map(|i| store_f32(d(point[i]) - d(position[i])));
+    look_angle(diff)
+}
+
+/// What writes a unit's orientation outside `UnitMoveController.TickUnit` (WrathOracle's
+/// `ag_look` `fn`): `UnitEntityData.LookAt(point)`, `ForceLookAt(point)`, the `Orientation`
+/// setter, the `DesiredOrientation` setter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookFn {
+    LookAt,
+    ForceLookAt,
+    Orientation,
+    Desired,
+}
+
+impl LookFn {
+    /// WrathOracle's name (`ag_look`'s `fn`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::LookAt => "LookAt",
+            Self::ForceLookAt => "ForceLookAt",
+            Self::Orientation => "Orientation",
+            Self::Desired => "DesiredOrientation",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::LookAt, Self::ForceLookAt, Self::Orientation, Self::Desired]
+            .into_iter()
+            .find(|f| f.name() == s)
+    }
+
+    /// Whether its argument is a point (`LookAt`, `ForceLookAt`), else a value (the setters).
+    #[must_use]
+    pub fn takes_point(self) -> bool {
+        matches!(self, Self::LookAt | Self::ForceLookAt)
+    }
+}
+
+/// A call's argument: the point looked at, or the value set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LookArg {
+    Point(V3),
+    Value(f32),
+}
+
+impl Orientation {
+    /// `f(arg)` of a unit at `position` without a saddled unit (a rider's `LookAt` and
+    /// `ForceLookAt` turn its mount too: not modelled). `None`: the argument isn't `f`'s kind.
+    #[must_use]
+    pub fn write(self, f: LookFn, arg: LookArg, position: V3) -> Option<Self> {
+        let mut o = self;
+        match (f, arg) {
+            // `DesiredOrientation = GetLookAtAngle(point)`.
+            (LookFn::LookAt, LookArg::Point(p)) => {
+                o.desired = look_at_angle(position, o.desired, p);
+            }
+            // `Orientation = GetLookAtAngle(point)` (the view's rotation when paused:
+            // presentation).
+            (LookFn::ForceLookAt, LookArg::Point(p)) => {
+                o.set(look_at_angle(position, o.desired, p))
+            }
+            (LookFn::Orientation, LookArg::Value(v)) => o.set(v),
+            (LookFn::Desired, LookArg::Value(v)) => o.desired = v,
+            _ => return None,
+        }
+        Some(o)
+    }
 }
 
 /// `UnitMoveController.TickUnit`'s write once the agent moved the unit (`flag`): when

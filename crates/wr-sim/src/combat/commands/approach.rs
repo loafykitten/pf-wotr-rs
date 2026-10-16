@@ -129,8 +129,10 @@ pub fn tick_approaching<I: Inputs>(w: &mut World, inp: &mut I, c: u32) -> R<()> 
     if !should_approach(w, inp, c)? {
         cmd_mut(w, c)?.s.finished_approaching = true;
         inp.call(w, &Call::Stop { unit: uid, c: Some(c) })?;
-        // `TurnToTarget()` (the orientation) isn't modelled.
-        super::answer(w, inp, "stt", c)?;
+        // `if (!flag && ShouldTurnToTarget) TurnToTarget()` (`flag`, a rider, returned above).
+        if super::answer(w, inp, "stt", c)? {
+            super::turn_to_target(w, inp, c, super::LookSite::TickApproaching)?;
+        }
         if cmd(w, c)?.s.move_unit {
             let v = inp.approach_draw(w, c)?;
             let Ok(t) = TimeSpan::from_seconds(f64::from(v))

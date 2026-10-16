@@ -185,6 +185,8 @@ pub struct Outcome {
     pub ag_inputs: std::collections::BTreeMap<String, usize>,
     /// The physics queries and turn-based paths the sim computed (`replay/nav.rs`).
     pub nav: nav::NavCounts,
+    /// Units' orientation writes and `DesiredOrientation` reads (`replay/look.rs`).
+    pub look: look::LookCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
     /// messages against the recording's ([`crate::game_log::check`]).
     pub clog: Option<crate::game_log::check::Summary>,
@@ -1456,6 +1458,7 @@ impl<'t> Driver<'t> {
             };
             d.nav_start(w);
         }
+        d.look_start(w);
         // The paths' records need the driven agent (`agent_sync` and its chain).
         // Observer `paths`' records without its declaration (a damaged begin record).
         let paths_records = recs.iter().any(|r| {
@@ -4652,6 +4655,7 @@ mod ai;
 mod commands;
 mod engage;
 mod impatience;
+mod look;
 mod memory;
 mod nav;
 mod spells;

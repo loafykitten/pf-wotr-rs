@@ -29,13 +29,15 @@ pub trait MoveInputs: AgentInputs {
         u: EntityIdx,
         required: bool,
     ) -> R<Option<(V3, V3)>>;
-    /// `UpdateSlowRotation(maxAngle)`'s `DesiredOrientation` (set by code the sim doesn't port
-    /// yet: `LookAt`); `orientation` and `max_angle` are the sim's, to check.
+    /// `UpdateSlowRotation(maxAngle)`'s `DesiredOrientation` read: `desired` is the sim's (its
+    /// writers: `docs/poc5/orientation.md`), `orientation` and `max_angle` too; the answer is the
+    /// value used (the sim's, checked, or the recording's where the writes aren't recorded).
     fn desired_orientation(
         &mut self,
         w: &mut World,
         u: EntityIdx,
         orientation: f32,
+        desired: f32,
         max_angle: f32,
     ) -> R<f32>;
     /// `Game.Instance.IsPaused`.
@@ -109,8 +111,8 @@ pub fn tick_unit(w: &mut World, u: EntityIdx, inp: &mut dyn MoveInputs) -> R<()>
     }
     let unit = w.unit(u).ok_or_else(|| Desync("no unit".into()))?;
     let max = orientation::max_angle(dt, unit.combat.agent.angular);
-    let value = unit.orientation;
-    let desired = inp.desired_orientation(w, u, value, max)?;
+    let (value, desired) = (unit.orientation, unit.combat.desired_orientation);
+    let desired = inp.desired_orientation(w, u, value, desired, max)?;
     let mut o = Orientation { value, desired };
     let can_rotate = inp.can_rotate(w, u)?;
     o.update_slow_rotation(max, can_rotate);

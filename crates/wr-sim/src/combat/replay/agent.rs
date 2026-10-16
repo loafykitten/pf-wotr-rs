@@ -145,7 +145,7 @@ pub(super) fn boolean(r: &Rv, k: &str, what: &str) -> R<bool> {
 
 /// The caller of the hooked method in a recorded call chain (`origin`, innermost first): the
 /// frame after `skip` frames.
-fn caller(origin: &str, skip: usize) -> String {
+pub(super) fn caller(origin: &str, skip: usize) -> String {
     let frame = origin.split(" < ").nth(skip).unwrap_or("?");
     let mut parts: Vec<&str> = frame.rsplit('.').take(2).collect();
     parts.reverse();
@@ -412,6 +412,8 @@ pub(super) struct AgDriver {
     pub ending: bool,
     /// The physics and paths the sim computes (`replay/nav.rs`).
     pub nav: super::nav::NavDriver,
+    /// Units' orientation writes (`replay/look.rs`).
+    pub look: super::look::LookDriver,
 }
 
 impl Default for AgDriver {
@@ -451,6 +453,7 @@ impl Default for AgDriver {
             rows_checked: None,
             ending: false,
             nav: super::nav::NavDriver::default(),
+            look: super::look::LookDriver::default(),
         }
     }
 }
@@ -482,7 +485,10 @@ impl Driver<'_> {
         r["k"] == "obs"
             && r["ev"].as_str().is_some_and(|e| {
                 (e.starts_with("ag_")
-                    && !matches!(e, "ag_pathdef" | "ag_findclr" | "ag_enable" | "ag_pos"))
+                    && !matches!(
+                        e,
+                        "ag_pathdef" | "ag_findclr" | "ag_enable" | "ag_pos" | "ag_look"
+                    ))
                     || e == "cd_move"
                     || e == "path_start"
             })
@@ -509,6 +515,17 @@ impl Driver<'_> {
         }
         if self.ag_slow_draw(r) {
             let _ = w.rng.range_float(crate::rng::sites::AGENT_SLOW_DOWN, 0.2, 0.3);
+        }
+        // `UpdateSlowRotation`'s read in a span taken from the recording: the `DesiredOrientation`
+        // the span's `TickUnit` left (its `Orientation` setter's), taken like the span's
+        // orientation.
+        if r["k"] == "obs"
+            && r["ev"] == "ag_rot"
+            && let (Some(u), Some(d)) =
+                (r["u"].as_str().and_then(|x| w.by_id.get(x).copied()), f(&r["desired"]))
+            && let Some(unit) = w.unit_mut(u)
+        {
+            unit.combat.desired_orientation = d;
         }
         if r["k"] == "obs" && r["ev"] == "path_start" {
             self.ag_count_request(r);
@@ -705,6 +722,7 @@ impl Driver<'_> {
             "ag_enable" => self.ag_enable(w, r),
             "ag_findclr" => self.ag_findclr(w, r),
             "ag_pos" => self.ag_pos(w, r),
+            "ag_look" => self.look_outside(w, r),
             "ag_ctl" => return self.ag_entry(w, i, AgEntry::Ctl),
             "ag_req" => return self.ag_entry(w, i, AgEntry::Req),
             "ag_done" => return self.ag_entry(w, i, AgEntry::Done),
@@ -1032,6 +1050,11 @@ impl Driver<'_> {
             self.ags.prev_known.insert(u);
         }
         if let Some(d) = desired {
+            if sync && self.ags.look.on && unit.combat.desired_orientation.to_bits() != d.to_bits()
+            {
+                self.out.look.snapshots_taken += 1;
+            }
+            let unit = w.unit_mut(u).expect("a unit");
             unit.combat.desired_orientation = d;
         }
         self.ags.has.insert(u);
@@ -1153,6 +1176,7 @@ impl Driver<'_> {
         self.ag_block_close(w);
         self.ag_batch_close(w);
         self.nav_finish(w);
+        self.look_finish(w);
     }
 
     /// An entry: the sim's code runs, pulling its records; on a desync the entry's remaining
@@ -2652,6 +2676,7 @@ impl MoveInputs for Driver<'_> {
         w: &mut World,
         u: EntityIdx,
         value: f32,
+        desired: f32,
         max_angle: f32,
     ) -> R<f32> {
         let r = self.ag_take(w, u, "ag_rot", "UpdateSlowRotation")?;
@@ -2664,8 +2689,9 @@ impl MoveInputs for Driver<'_> {
                 describe(&r)
             )));
         }
-        self.ag_input("DesiredOrientation");
-        f(&r["desired"]).ok_or_else(|| Desync("ag_rot without its desired orientation".into()))
+        let recorded = f(&r["desired"])
+            .ok_or_else(|| Desync("ag_rot without its desired orientation".into()))?;
+        self.look_read(w, desired, recorded)
     }
     fn paused(&mut self, w: &mut World) -> R<bool> {
         Ok(w.combat.commands_paused)
