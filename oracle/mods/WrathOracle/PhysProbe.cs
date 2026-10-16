@@ -100,15 +100,20 @@ internal static class PhysProbe
     internal static void WriteId(Json j, Collider c)
     {
         if (c == null) { j.Prop("type", (string)null); return; }
-        var t = c.transform;
+        WritePath(j, c.transform);
+        j.Prop("type", c.GetType().Name); j.Prop("iid", c.GetInstanceID());
+    }
+
+    // A transform's identity: scene, hierarchy path, sibling path.
+    internal static void WritePath(Json j, Transform t)
+    {
         var names = new List<string>();
         var sib = new List<int>();
         for (var x = t; x != null; x = x.parent) { names.Add(x.name); if (x.parent != null) sib.Add(x.GetSiblingIndex()); }
         names.Reverse(); sib.Reverse();
         var path = new StringBuilder();
         for (var i = 0; i < names.Count; i++) { if (i > 0) path.Append('/'); path.Append(names[i]); }
-        j.Prop("scene", c.gameObject.scene.name); j.Prop("path", path.ToString());
+        j.Prop("scene", t.gameObject.scene.name); j.Prop("path", path.ToString());
         j.Arr("sib"); foreach (var s in sib) j.W.WriteValue(s); j.EndArr();
-        j.Prop("type", c.GetType().Name); j.Prop("iid", c.GetInstanceID());
     }
 }

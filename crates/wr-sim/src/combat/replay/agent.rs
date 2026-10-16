@@ -652,6 +652,15 @@ impl Driver<'_> {
                 }
             }
             "ag_phys" if r["ctx"] == "sim" => self.ag_input("physics (the AI's simulation)"),
+            // A critter's ground ray (`CritterMoveAgent.TickMovement`, the static `Move`; WrathOracle names
+            // the critter): presentation, no unit's.
+            "ag_phys"
+                if r["ctx"] == "critter"
+                    && r["u"].is_null()
+                    && r["critter"]["path"].is_string() =>
+            {
+                self.ag_input("a critter's ground ray (presentation)")
+            }
             "ag_sim" | "ag_sim_end" => self.ag_input("the AI's simulation steps"),
             "ag_v" if r["ctx"] == "sim" => self.ag_input("the AI's simulation reads"),
             _ => Self::ag_unsupported(

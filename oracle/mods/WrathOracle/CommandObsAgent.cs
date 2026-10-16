@@ -26,8 +26,10 @@ namespace WrathOracle;
 //    the view's IsCommandsPreventMovement, MaxSpeed, FlyHeight, the cutscene's control of the unit, the gamepad
 //    setting), with the agent's unit; in UnitMoveController.TickUnit, the unit state's CanMove and CanRotate;
 //  - ag_phys: each physics query in UnitMovementAgentBase.Move (Physics.Raycast, PhysicUtils.HeuristicDiscCastDown)
-//    with its arguments and result (and since phys_probe, the collider hit: col, PhysProbe.WriteId), and the context: the tick ("tick", with the unit), ScorePath's simulation ("sim")
-//    or another caller ("other");
+//    with its arguments and result (and since phys_probe, the collider hit: col, PhysProbe.WriteId), and the context: the tick ("tick", with the unit), ScorePath's simulation ("sim"),
+//    a critter's movement ("critter", with the critter: its scene, hierarchy and sibling path; CritterMoveAgent.TickMovement
+//    moves a critter's transform through the same static Move, docs/poc5/tb-replay.md "Critters' ground rays") or another
+//    caller ("other", with its caller chain: origin);
 //  - ag_req / ag_req_end: PathTo and FindPath, their arguments, the state before and after, and the request made
 //    (RequestedPath's PathSync key and kind);
 //  - ag_done / ag_done_end: OnPathComplete(p, forcedPath) with the path (PathSync key, kind, vectorPath, error,
@@ -733,13 +735,48 @@ internal static partial class CommandObs
 
     // ---- physics in Move ----
 
-    private static string PhysCtx(out string u)
+    // A critter's movement in progress (CritterMoveAgent.TickMovement, from the critter's own Update; never inside a
+    // unit agent's entry, which runs in Game.Tick).
+    private static Kingmaker.Visual.Critters.CritterMoveAgent _critter;
+    private static int _critterDepth;
+
+    public static void AgCritterPrefix(Kingmaker.Visual.Critters.CritterMoveAgent __instance)
     {
-        u = null;
-        if (AgCtx.Count == 0) return "other";
+        _critterDepth++;
+        _critter = _critterDepth == 1 ? __instance : null; // nested: not one critter's (other, with its origin)
+    }
+
+    public static Exception AgCritterFinalizer(Exception __exception)
+    {
+        if (--_critterDepth <= 0) { _critterDepth = 0; _critter = null; }
+        return __exception;
+    }
+
+    // The query's context: a unit agent's entry, a critter's movement (positively: inside CritterMoveAgent.TickMovement and
+    // no unit agent's entry), or "other" with the caller chain.
+    private static string PhysCtx(out string u, out Transform critter, out string origin)
+    {
+        u = null; critter = null; origin = null;
+        if (AgCtx.Count == 0 && _critterDepth == 1 && _critter)
+        {
+            critter = _critter.transform;
+            return "critter";
+        }
+        if (AgCtx.Count == 0 || _critterDepth > 0)
+        {
+            origin = Origin();
+            return "other";
+        }
         var (a, ctx) = AgCtx[AgCtx.Count - 1];
         u = UnitOfAgent(a);
         return ctx;
+    }
+
+    private static void PhysCtxProps(Json j, string ctx, string u, Transform critter, string origin)
+    {
+        j.Prop("ctx", ctx); j.Prop("u", u);
+        if (critter != null) { j.Key("critter"); j.W.WriteStartObject(); PhysProbe.WritePath(j, critter); j.W.WriteEndObject(); }
+        if (origin != null) j.Prop("origin", origin);
     }
 
     public static bool TapAgRaycast(Vector3 origin, Vector3 direction, out RaycastHit hitInfo, float maxDistance, int layerMask)
@@ -749,13 +786,13 @@ internal static partial class CommandObs
         {
             if (AgObserved())
             {
-                var ctx = PhysCtx(out var u);
+                var ctx = PhysCtx(out var u, out var critter, out var caller);
                 var d = hitInfo.distance;
                 var pt = hitInfo.point;
                 var col = hit ? hitInfo.collider : null;
                 AgObs("ag_phys", j =>
                 {
-                    j.Prop("fn", "ray"); j.Prop("ctx", ctx); j.Prop("u", u); j.Prop("o", origin); j.Prop("d", direction);
+                    j.Prop("fn", "ray"); PhysCtxProps(j, ctx, u, critter, caller); j.Prop("o", origin); j.Prop("d", direction);
                     j.Prop("max", maxDistance); j.Prop("mask", layerMask); j.Prop("hit", hit);
                     if (hit) { j.Prop("dist", d); j.Prop("pt", pt); j.Key("col"); j.W.WriteStartObject(); PhysProbe.WriteId(j, col); j.W.WriteEndObject(); }
                 });
@@ -772,13 +809,13 @@ internal static partial class CommandObs
         {
             if (AgObserved())
             {
-                var ctx = PhysCtx(out var u);
+                var ctx = PhysCtx(out var u, out var critter, out var caller);
                 var d = hitInfo.distance;
                 var pt = hitInfo.point;
                 var col = hit ? hitInfo.collider : null;
                 AgObs("ag_phys", j =>
                 {
-                    j.Prop("fn", "disc"); j.Prop("ctx", ctx); j.Prop("u", u); j.Prop("o", origin); j.Prop("r", radius);
+                    j.Prop("fn", "disc"); PhysCtxProps(j, ctx, u, critter, caller); j.Prop("o", origin); j.Prop("r", radius);
                     j.Prop("max", maxDistance); j.Prop("mask", layerMask); j.Prop("hit", hit);
                     if (hit) { j.Prop("dist", d); j.Prop("pt", pt); j.Key("col"); j.W.WriteStartObject(); PhysProbe.WriteId(j, col); j.W.WriteEndObject(); }
                 });
@@ -1291,6 +1328,7 @@ internal static partial class CommandObs
         patch(M(Ag, "OnEnable"), null, nameof(AgEnablePostfix), null);
         patch(M(Ag, "OnDisable"), null, nameof(AgEnablePostfix), null);
         patch(M(typeof(UnitPlaceOnGroundController), "TickUnit"), nameof(AgGroundPrefix), null, nameof(AgGroundFinalizer));
+        patch(M(typeof(Kingmaker.Visual.Critters.CritterMoveAgent), "TickMovement"), nameof(AgCritterPrefix), null, nameof(AgCritterFinalizer));
         patch(M(typeof(UnitEntityData), nameof(UnitEntityData.UpdateSlowRotation)), nameof(AgRotPrefix), null, null);
         patch(M(typeof(ObstaclesHelper), nameof(ObstaclesHelper.ConnectToGroups)), nameof(AgConnectPrefix), null, nameof(AgConnectFinalizer));
         foreach (var n in new[] { "OnMovementInterrupted", "OnMovementComplete", "OnMovementWaypointUpdate" })
@@ -1314,6 +1352,8 @@ internal static partial class CommandObs
     internal static void ResetAgentWindow()
     {
         AgCtx.Clear();
+        _critter = null;
+        _critterDepth = 0;
         _ctlUnit = null;
         _groundUnit = null;
         _pathIds = new ConditionalWeakTable<Path, PathBox>();
