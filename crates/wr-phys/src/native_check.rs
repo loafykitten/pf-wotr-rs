@@ -29,6 +29,15 @@ const RAYCAST_MESH: (usize, &str) = (0x1326018, "ff8300d1fd7b01a9fd430091e70306a
 const RAYCAST_MESH_BV4: (usize, &str) = (0x13e68bc, "ff8305d1eb2b0e6de9230f6dfc6f10a9");
 /// `BV4_RaycastSingle`.
 const BV4_RAYCAST_SINGLE: (usize, &str) = (0x13e2420, "fc6fbaa9fa6701a9f85f02a9f65703a9");
+/// Unity's `Transform::TransformPoint` (the icall `Transform::TransformPoint_Injected` at
+/// `0x82efe8` calls it): the transform's `TransformHierarchy` (at 0x38) and index (0x40); the
+/// hierarchy's job fence (0x0), local transforms (0x18: 48 bytes each, `t`, `q`, `s` as
+/// four-float vectors) and parent indices (0x20); the result through `x8`.
+const TRANSFORM_POINT: (usize, &str) = (0x6744c0, "f657bda9f44f01a9fd7b02a9fd830091");
+/// `BoxCollider`'s half extents from a scale and a second factor (`(1, 1, 1)` from
+/// `BoxCollider::Create` and `set_size`): `m_Size` at 0x7c; with no shape (0x48) and no
+/// list node (0x88) it only computes; the result through `x8`.
+const BOX_EXTENTS: (usize, &str) = (0x6b5280, "e923bc6df65701a9f44f02a9fd7b03a9");
 
 /// `PxBoxGeometry`.
 #[repr(C)]
@@ -106,6 +115,8 @@ impl Player {
             RAYCAST_MESH,
             RAYCAST_MESH_BV4,
             BV4_RAYCAST_SINGLE,
+            TRANSFORM_POINT,
+            BOX_EXTENTS,
         ] {
             // SAFETY: inside the loaded image's text segment.
             let have = unsafe { std::slice::from_raw_parts((p.base + off) as *const u8, 16) };
@@ -192,6 +203,67 @@ impl Player {
         let fun: RaycastFn<BoxGeometry> = unsafe { std::mem::transmute(self.base + RAYCAST_BOX.0) };
         let n = fun(&geom, &pose7, &origin.to_array(), &dir.to_array(), max, &flags, 1, &mut hit);
         (n == 1).then_some((hit.distance, hit.position))
+    }
+}
+
+/// Returned through `x8` (a composite over 16 bytes): the callee writes only the first 12
+/// bytes, so it is received as `MaybeUninit` and only those are read.
+#[repr(C)]
+struct Indirect([f32; 6]);
+
+/// The three floats the callee wrote.
+fn written(out: &std::mem::MaybeUninit<Indirect>) -> [f32; 3] {
+    let p = out.as_ptr().cast::<f32>();
+    // SAFETY: the callee initialised the first three floats of the return storage.
+    unsafe { [p.read(), p.add(1).read(), p.add(2).read()] }
+}
+
+impl Player {
+    /// The player's `Transform::TransformPoint(p)` for a hierarchy whose local transforms run
+    /// from the root down (`chain`, the transform's own last).
+    fn transform_point(&self, chain: &[crate::boxes::LocalTrs], p: [f32; 3]) -> [f32; 3] {
+        // `TransformX` per level: t, q, s as float4 (the fourth lanes zero).
+        let locals: Vec<[[f32; 4]; 3]> = chain
+            .iter()
+            .map(|l| {
+                let [x, y, z] = l.position;
+                let [sx, sy, sz] = l.scale;
+                [[x, y, z, 0.0], l.rotation, [sx, sy, sz, 0.0]]
+            })
+            .collect();
+        let parents: Vec<i32> = (0..chain.len() as i32).map(|i| i - 1).collect();
+        let mut hierarchy = [0usize; 8];
+        hierarchy[3] = locals.as_ptr() as usize;
+        hierarchy[4] = parents.as_ptr() as usize;
+        let mut transform = [0usize; 9];
+        transform[7] = hierarchy.as_ptr() as usize;
+        transform[8] = chain.len() - 1;
+        // SAFETY: the function reads the transform's hierarchy and index, the hierarchy's fence
+        // (zero: no job to wait for), locals and parents, the point; it writes 12 bytes at x8.
+        let fun: extern "C" fn(*const usize, *const [f32; 3]) -> std::mem::MaybeUninit<Indirect> =
+            unsafe { std::mem::transmute(self.base + TRANSFORM_POINT.0) };
+        let out = fun(transform.as_ptr(), &p);
+        drop((locals, parents));
+        written(&out)
+    }
+
+    /// The player's box half extents for `size` under `lossy` (the second factor one).
+    fn box_extents(&self, size: [f32; 3], lossy: [f32; 3]) -> [f32; 3] {
+        let mut collider = [0u8; 0x100];
+        for (k, v) in size.iter().enumerate() {
+            collider[0x7c + 4 * k..0x80 + 4 * k].copy_from_slice(&v.to_le_bytes());
+        }
+        let one = [1.0f32; 3];
+        // SAFETY: with no shape and no list node the function only reads `m_Size` and its two
+        // vectors, and writes 12 bytes at x8.
+        let fun: extern "C" fn(
+            *const u8,
+            *const [f32; 3],
+            *const [f32; 3],
+        ) -> std::mem::MaybeUninit<Indirect> =
+            unsafe { std::mem::transmute(self.base + BOX_EXTENTS.0) };
+        let out = fun(collider.as_ptr(), &lossy, &one);
+        written(&out)
     }
 }
 
@@ -830,4 +902,92 @@ fn frecpe_and_frecps_match_the_hardware() {
             assert!(same(want, got), "frecps({a:e}, {b:e}): {want:e} vs {got:e}");
         }
     }
+}
+
+/// A float of any magnitude and sign: often a round or special value (zero of either sign, one,
+/// a tiny or subnormal value), else spread over many binades.
+fn any_float(r: &mut Rng) -> f32 {
+    let sign = if r.below(2) == 0 { 1.0 } else { -1.0 };
+    sign * match r.below(8) {
+        0 => [0.0, 1.0, 0.5, f32::EPSILON, 1e-9, 1e-40, 0.257_168_6, 100.0][r.below(8) as usize],
+        1 => r.range(0.0, 2.0e-7),
+        _ => r.range(1.0, 2.0) * 2f32.powi(r.below(40) as i32 - 20),
+    }
+}
+
+#[test]
+#[ignore = "needs builds/arm64-oracle (the player's UnityPlayer.dylib)"]
+fn transform_point_and_box_extents_match_the_player() {
+    use crate::boxes::{LocalTrs, transform_point};
+    let p = Player::load();
+    let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+    let n = env_count("WR_PHYS_TRANSFORM_POINTS", 1_000_000);
+    let mut bad = Vec::new();
+    for _ in 0..n {
+        let depth = 1 + r.below(5) as usize;
+        let chain: Vec<LocalTrs> = (0..depth)
+            .map(|_| {
+                let q = match r.below(4) {
+                    0 => Quat::IDENTITY,
+                    1 => {
+                        // About one axis (zeros in the other components).
+                        let (s, c) = r.range(-3.2, 3.2).sin_cos();
+                        let mut q = [0.0, 0.0, 0.0, c];
+                        q[r.below(3) as usize] = s;
+                        Quat { x: q[0], y: q[1], z: q[2], w: q[3] }
+                    }
+                    _ => random_quat(&mut r),
+                };
+                let scale = match r.below(4) {
+                    0 => [1.0; 3],
+                    1 => {
+                        let s = any_float(&mut r);
+                        [s; 3]
+                    }
+                    _ => [any_float(&mut r), any_float(&mut r), any_float(&mut r)],
+                };
+                let size = [1.0, 100.0, 10_000.0][r.below(3) as usize];
+                LocalTrs {
+                    position: [r.range(-size, size), r.range(-size, size), r.range(-size, size)],
+                    rotation: [q.x, q.y, q.z, q.w],
+                    scale,
+                }
+            })
+            .collect();
+        let pt = if r.below(4) == 0 {
+            [0.0; 3]
+        } else {
+            [any_float(&mut r), any_float(&mut r), any_float(&mut r)]
+        };
+        let want = p.transform_point(&chain, pt);
+        let got = transform_point(&chain, pt);
+        let same = |a: [f32; 3], b: [f32; 3]| {
+            a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
+        };
+        if !same(want, got) && bad.len() < 20 {
+            bad.push(format!("TransformPoint {chain:?} {pt:?}: player {want:?}, ours {got:?}"));
+        }
+        let size = [any_float(&mut r), any_float(&mut r), any_float(&mut r)];
+        let lossy = [any_float(&mut r), any_float(&mut r), any_float(&mut r)];
+        let want = p.box_extents(size, lossy);
+        let rt = crate::boxes::BoxRuntime {
+            world_center: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            lossy_scale: lossy,
+            position: [0.0; 3],
+            layer: 0,
+            source: String::new(),
+        };
+        let got = rt.half_extents(size).to_array();
+        if !same(want, got) && bad.len() < 40 {
+            bad.push(format!(
+                "half extents of {size:?} under {lossy:?}: player {want:?}, ours {got:?}"
+            ));
+        }
+    }
+    for b in &bad {
+        eprintln!("  {b}");
+    }
+    assert!(bad.is_empty(), "{} differ", bad.len());
+    eprintln!("{n} TransformPoint calls and {n} box extents bit-identical");
 }

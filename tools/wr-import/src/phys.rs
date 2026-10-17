@@ -66,7 +66,9 @@ fn bool_of(v: &Value, key: &str) -> Option<bool> {
 
 /// Builds the world from the area's scenes.
 pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackReport)> {
-    let mut world = World::default();
+    let mut world =
+        World { scenes: scenes.iter().map(|s| s.scene.clone()).collect(), ..World::default() };
+    world.scenes.dedup();
     let mut rep = PackReport::default();
     for s in scenes {
         for g in s.game_objects() {
@@ -95,10 +97,28 @@ pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackRe
                     bail!("{name}: a sheared transform (Unity's shape isn't established)");
                 }
                 let kind = match class {
+                    // A collider under a Rigidbody is posed relative to the body (not
+                    // modelled; none in the caves).
+                    "BoxCollider" | "MeshCollider"
+                        if s.in_parents(g.path_id, "Rigidbody")
+                            || s.in_parents(g.path_id, "ArticulationBody") =>
+                    {
+                        bail!("{name}: under a Rigidbody (its shape's pose isn't established)")
+                    }
                     "BoxCollider" => ShapeKind::Box {
                         local_to_world: m,
                         center: vec3(v, "m_Center")?,
                         size: vec3(v, "m_Size")?,
+                        chain: s
+                            .local_chain(g.path_id)
+                            .iter()
+                            .map(|t| wr_phys::boxes::LocalTrs {
+                                position: t.position.to_array(),
+                                rotation: t.rotation.to_array(),
+                                scale: t.scale.to_array(),
+                            })
+                            .collect(),
+                        runtime: None,
                     },
                     "MeshCollider" => mesh_shape(universe, s, v, &g, m, &name, &mut rep)?,
                     "TerrainCollider" => terrain_shape(universe, s, v, &g, &name)?,
@@ -270,6 +290,12 @@ pub struct ColliderReport {
     pub disabled: Vec<String>,
     /// Mesh shapes recorded with a zero scale, left without a recorded transform.
     pub degenerate: Vec<String>,
+    /// Box shapes given their recorded transform.
+    pub boxes: usize,
+    /// Box shapes left out (recorded inactive or disabled), and left without a recorded transform because
+    /// the mapping isn't established for them (with the reason).
+    pub boxes_disabled: Vec<String>,
+    pub boxes_unestablished: Vec<String>,
 }
 
 /// Gives every mesh shape the transform and layer a recording's `ph_col` records hold for it
@@ -277,6 +303,11 @@ pub struct ColliderReport {
 /// sibling path and type, active, not a trigger, non-convex, with the importer's cooking
 /// options, and close to the importer's transform (the identity check; the values used are
 /// the recording's). A mesh recorded disabled is left out of the world.
+///
+/// Every box shape likewise (matched by its centre and size too: a GameObject can have several),
+/// with its world centre computed as Unity's `TransformPoint` from the scene's local transforms,
+/// which must place the GameObject where the recording has it; a box the mapping isn't
+/// established for ([`wr_phys::boxes::BoxRuntime::established`]) keeps the conservative test.
 pub fn apply_recorded_colliders(
     world: &mut World,
     trace: &std::path::Path,
@@ -316,7 +347,106 @@ pub fn apply_recorded_colliders(
     };
     let mut rep = ColliderReport::default();
     let mut dropped = Vec::new();
+    let sib_of = |c: &serde_json::Value| -> Option<Vec<u32>> {
+        c["sib"]
+            .as_array()?
+            .iter()
+            .map(|x| x.as_u64().and_then(|x| u32::try_from(x).ok()))
+            .collect()
+    };
+    let name_of = |c: &serde_json::Value| {
+        format!(
+            "{}:{} ({})",
+            c["scene"].as_str().unwrap_or(""),
+            c["path"].as_str().unwrap_or(""),
+            c["type"].as_str().unwrap_or("")
+        )
+    };
     for (i, s) in world.shapes.iter_mut().enumerate() {
+        if let ShapeKind::Box { local_to_world, center, size, chain, runtime } = &mut s.kind {
+            // Bit-equal, zeros of either sign equal (the recording doesn't keep a zero's sign).
+            let same_bits = |a: &[f32], b: &[f32]| {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b)
+                        .all(|(x, y)| x.to_bits() == y.to_bits() || (*x == 0.0 && *y == 0.0))
+            };
+            let found: Vec<&serde_json::Value> = cols
+                .iter()
+                .filter(|c| {
+                    c["type"] == "BoxCollider"
+                        && name_of(c) == s.name
+                        && sib_of(c).as_ref() == Some(&s.sibling_path)
+                        && arr(&c["center"], 3, "center").is_ok_and(|x| same_bits(&x, center))
+                        && arr(&c["size"], 3, "size").is_ok_and(|x| same_bits(&x, size))
+                })
+                .collect();
+            let [c] = found.as_slice() else {
+                bail!("{}: {} ph_col records match it", s.name, found.len());
+            };
+            let name = &s.name;
+            ensure!(
+                c["active"].is_boolean() && c["enabled"].is_boolean(),
+                "{name}: no active or enabled flag"
+            );
+            if c["active"] == false || c["enabled"] == false {
+                // Deactivated or disabled at load (an interaction's collider): not in PhysX's
+                // scene.
+                rep.boxes_disabled.push(name.clone());
+                dropped.push(i);
+                continue;
+            }
+            ensure!(
+                c["trigger"].as_bool() == Some(s.is_trigger),
+                "{name}: recorded trigger flag differs"
+            );
+            let layer = u32::try_from(c["layer"].as_u64().context("layer")?)?;
+            ensure!(
+                layer == s.layer || (s.visual_layer_move && layer == 11),
+                "{name}: recorded on layer {layer}, the scene says {}",
+                s.layer
+            );
+            let p = arr(&c["pos"], 3, "pos")?;
+            let q = arr(&c["rot"], 4, "rot")?;
+            let l = arr(&c["lossy"], 3, "lossy")?;
+            let ours = [local_to_world[12], local_to_world[13], local_to_world[14]];
+            ensure!(
+                p.iter().zip(&ours).all(|(x, y)| (x - y).abs() <= 1e-4 * (1.0 + x.abs())),
+                "{name}: recorded position {p:?} isn't the scene's {ours:?}"
+            );
+            let r = wr_phys::boxes::BoxRuntime {
+                world_center: wr_phys::boxes::transform_point(chain, *center),
+                rotation: [q[0], q[1], q[2], q[3]],
+                lossy_scale: [l[0], l[1], l[2]],
+                position: [p[0], p[1], p[2]],
+                layer,
+                source: source.to_owned(),
+            };
+            match r.established(chain, *center, *size) {
+                Ok(()) => {
+                    rep.boxes += 1;
+                    *runtime = Some(r);
+                }
+                // The conservative test then answers with the scene's geometry, which must
+                // enclose the game's.
+                Err(e) => {
+                    ensure!(
+                        wr_phys::boxes::placement_agrees(
+                            local_to_world,
+                            chain,
+                            *center,
+                            r.position,
+                            r.rotation,
+                            r.lossy_scale
+                        ),
+                        "{name} {:?}: the recorded transform {p:?} {q:?} {l:?} isn't the scene's ({e}), and the conservative test can't stand in",
+                        s.sibling_path
+                    );
+                    rep.boxes_unestablished.push(format!("{name} {:?}: {e}", s.sibling_path));
+                }
+            }
+            continue;
+        }
         let ShapeKind::Mesh { pose, lossy_scale, runtime, .. } = &mut s.kind else { continue };
         let found: Vec<&serde_json::Value> = cols
             .iter()

@@ -255,15 +255,26 @@ fn tb_request(q: &PathRequest) -> TurnBasedRequest {
     }
 }
 
-/// A `ph_col` record of a mesh collider (observer `phys_probe`).
-fn recorded_mesh(r: &Rv) -> Option<wr_phys::RecordedMesh> {
+/// A `ph_col` record of a mesh or box collider (observer `phys_probe`).
+fn recorded_collider(r: &Rv) -> Option<wr_phys::RecordedCollider> {
     let floats = |v: &Rv, n: usize| -> Option<Vec<f32>> {
         let a = v.as_array().filter(|a| a.len() == n)?;
         a.iter().map(f).collect()
     };
     let (p, q, l) = (floats(&r["pos"], 3)?, floats(&r["rot"], 4)?, floats(&r["lossy"], 3)?);
-    Some(wr_phys::RecordedMesh {
-        name: format!("{}:{} (MeshCollider)", r["scene"].as_str()?, r["path"].as_str()?),
+    let kind = match r["type"].as_str()? {
+        "MeshCollider" => wr_phys::RecordedKind::Mesh {
+            convex: r["convex"].as_bool()?,
+            cooking: r["cooking"].as_i64()?,
+        },
+        "BoxCollider" => {
+            let (c, s) = (floats(&r["center"], 3)?, floats(&r["size"], 3)?);
+            wr_phys::RecordedKind::Box { center: [c[0], c[1], c[2]], size: [s[0], s[1], s[2]] }
+        }
+        _ => return None,
+    };
+    Some(wr_phys::RecordedCollider {
+        name: format!("{}:{} ({})", r["scene"].as_str()?, r["path"].as_str()?, r["type"].as_str()?),
         sibling_path: r["sib"]
             .as_array()?
             .iter()
@@ -275,8 +286,7 @@ fn recorded_mesh(r: &Rv) -> Option<wr_phys::RecordedMesh> {
         rotation: [q[0], q[1], q[2], q[3]],
         lossy_scale: [l[0], l[1], l[2]],
         trigger: r["trigger"].as_bool()?,
-        convex: r["convex"].as_bool()?,
-        cooking: r["cooking"].as_i64()?,
+        kind,
     })
 }
 
@@ -315,20 +325,24 @@ impl Driver<'_> {
                     "driven replay: physics: the query settings (ph_settings) aren't wr-phys's (back faces not hit)",
                 );
             }
-            // The meshes' transforms in the physics file, recorded from another run, are this
-            // run's (`ph_col`).
-            let recorded: Option<Vec<wr_phys::RecordedMesh>> = trace
+            // The meshes' and boxes' transforms in the physics file, recorded from another run,
+            // are this run's (`ph_col`).
+            let recorded: Option<Vec<wr_phys::RecordedCollider>> = trace
                 .records
                 .iter()
-                .filter(|r| r["k"] == "obs" && r["ev"] == "ph_col" && r["type"] == "MeshCollider")
-                .map(recorded_mesh)
+                .filter(|r| {
+                    r["k"] == "obs"
+                        && r["ev"] == "ph_col"
+                        && (r["type"] == "MeshCollider" || r["type"] == "BoxCollider")
+                })
+                .map(recorded_collider)
                 .collect();
             let checked = match recorded {
                 None => Err("a ph_col record without its fields".to_owned()),
                 Some(cols) => match self.nav_scene(w) {
                     // A missing physics file is reported by the queries.
                     Err(_) => Ok(()),
-                    Ok(scene) => scene.world().check_recorded_meshes(&cols),
+                    Ok(scene) => scene.world().check_recorded_colliders(&cols),
                 },
             };
             if let Err(e) = checked {

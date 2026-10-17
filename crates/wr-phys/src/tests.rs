@@ -19,6 +19,7 @@ fn flat_field(height: i16) -> HeightField {
 
 fn terrain_world(field: HeightField) -> World {
     World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "terrain".into(),
             sibling_path: Vec::new(),
@@ -44,6 +45,8 @@ fn sample_file() -> PhysFile {
             ],
             center: [0.0; 3],
             size: [1.0; 3],
+            chain: Vec::new(),
+            runtime: None,
         },
     });
     world.shapes.push(recorded_square("square", [30.0, 0.0, 0.0], 0));
@@ -220,6 +223,7 @@ fn small_mesh(
 fn meshes_and_other_shapes_fail_closed() {
     let id = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
     let world = World {
+        scenes: Vec::new(),
         shapes: vec![
             Shape {
                 name: "mesh".into(),
@@ -260,6 +264,7 @@ fn meshes_and_other_shapes_fail_closed() {
     // A sliver beside a far triangle: its f32 arithmetic can hit outside its own bounds, inside
     // the mesh's (the player's BV4_RaycastSingle hits this at 0.5).
     let sliver = World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "sliver".into(),
             sibling_path: Vec::new(),
@@ -288,6 +293,7 @@ fn meshes_and_other_shapes_fail_closed() {
     ));
     // The sliver with an unused vertex widening PhysX's bounds.
     let unused = World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "unused".into(),
             sibling_path: Vec::new(),
@@ -329,6 +335,7 @@ fn meshes_and_other_shapes_fail_closed() {
     // A long ray far out: the origin's rounding, amplified by the triangle's angle (the player's
     // midphase hits at 999996.625).
     let long = World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "long".into(),
             sibling_path: Vec::new(),
@@ -433,8 +440,10 @@ fn a_tie_between_shapes_fails_closed() {
 fn recorded_colliders_are_checked_against_the_file() {
     let mut s = recorded_square("S:Static/sq (MeshCollider)", [1.0, 0.0, 2.0], 11);
     s.sibling_path = vec![3];
-    let w = World { shapes: vec![s] };
-    let good = RecordedMesh {
+    let mut b = recorded_box("S:Static/b (BoxCollider)", [1.0, 2.0, 3.0], [0.0, 0.5, 0.0]);
+    b.sibling_path = vec![4];
+    let w = World { shapes: vec![s, b.clone()], scenes: Vec::new() };
+    let good = RecordedCollider {
         name: "S:Static/sq (MeshCollider)".into(),
         sibling_path: vec![3],
         present: true,
@@ -443,38 +452,176 @@ fn recorded_colliders_are_checked_against_the_file() {
         rotation: [0.0, 0.0, -0.0, 1.0],
         lossy_scale: [1.0; 3],
         trigger: false,
-        convex: false,
-        cooking: 30,
+        kind: RecordedKind::Mesh { convex: false, cooking: 30 },
     };
-    assert_eq!(w.check_recorded_meshes(std::slice::from_ref(&good)), Ok(()));
-    assert!(w.check_recorded_meshes(&[]).is_err(), "unrecorded");
-    assert!(w.check_recorded_meshes(&[good.clone(), good.clone()]).is_err(), "twice");
-    let other_scene = RecordedMesh { name: "T:Unit/c (MeshCollider)".into(), ..good.clone() };
-    assert_eq!(w.check_recorded_meshes(&[good.clone(), other_scene]), Ok(()), "another scene");
-    let changes: [fn(&mut RecordedMesh); 7] = [
+    let ShapeKind::Box { center, size, runtime: Some(r), .. } = &b.kind else { unreachable!() };
+    let good_box = RecordedCollider {
+        name: "S:Static/b (BoxCollider)".into(),
+        sibling_path: vec![4],
+        present: true,
+        layer: r.layer,
+        position: r.position,
+        rotation: r.rotation,
+        lossy_scale: r.lossy_scale,
+        trigger: false,
+        kind: RecordedKind::Box { center: *center, size: *size },
+    };
+    let both = [good.clone(), good_box.clone()];
+    assert_eq!(w.check_recorded_colliders(&both), Ok(()));
+    assert!(w.check_recorded_colliders(&[]).is_err(), "unrecorded");
+    assert!(w.check_recorded_colliders(std::slice::from_ref(&good)).is_err(), "the box unrecorded");
+    assert!(
+        w.check_recorded_colliders(&[good.clone(), good.clone(), good_box.clone()]).is_err(),
+        "twice"
+    );
+    let other_scene = RecordedCollider { name: "T:Unit/c (MeshCollider)".into(), ..good.clone() };
+    assert_eq!(
+        w.check_recorded_colliders(&[good.clone(), good_box.clone(), other_scene]),
+        Ok(()),
+        "another scene"
+    );
+    let changes: [fn(&mut RecordedCollider); 7] = [
         |c| c.lossy_scale[0] = 1.000_000_1,
         |c| c.position[2] = 2.000_000_2,
         |c| c.layer = 0,
         |c| c.present = false,
         |c| c.trigger = true,
-        |c| c.convex = true,
-        |c| c.cooking = 14,
+        |c| c.kind = RecordedKind::Mesh { convex: true, cooking: 30 },
+        |c| c.kind = RecordedKind::Mesh { convex: false, cooking: 14 },
     ];
     for (k, change) in changes.iter().enumerate() {
         let mut c = good.clone();
         change(&mut c);
-        assert!(w.check_recorded_meshes(&[c]).is_err(), "change {k} accepted");
+        assert!(w.check_recorded_colliders(&[c, good_box.clone()]).is_err(), "change {k} accepted");
+    }
+    let box_changes: [fn(&mut RecordedCollider); 6] = [
+        |c| c.lossy_scale[1] = 1.000_000_1,
+        |c| c.rotation[3] = 0.999_999_9,
+        |c| c.layer = 0,
+        |c| c.present = false,
+        |c| c.trigger = true,
+        // Another box of the same GameObject: this one is then unrecorded.
+        |c| c.kind = RecordedKind::Box { center: [0.0; 3], size: [1.0; 3] },
+    ];
+    for (k, change) in box_changes.iter().enumerate() {
+        let mut c = good_box.clone();
+        change(&mut c);
+        assert!(w.check_recorded_colliders(&[good.clone(), c]).is_err(), "box change {k} accepted");
     }
     let mut extra = good.clone();
-    extra.sibling_path = vec![4];
-    assert!(w.check_recorded_meshes(&[good, extra]).is_err(), "a mesh the file doesn't have");
+    extra.sibling_path = vec![5];
+    assert!(
+        w.check_recorded_colliders(&[good, good_box, extra]).is_err(),
+        "a mesh the file doesn't have"
+    );
+}
+
+/// A 2 x 1 x 4 box (centre `center`) on a GameObject at `position` under a root at the origin,
+/// unrotated and unscaled, recorded on layer 8.
+fn recorded_box(name: &str, position: [f32; 3], center: [f32; 3]) -> Shape {
+    let chain = vec![
+        boxes::LocalTrs { position: [0.0; 3], rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] },
+        boxes::LocalTrs { position, rotation: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3] },
+    ];
+    let size = [2.0, 1.0, 4.0];
+    let mut m = [0.0f32; 16];
+    (m[0], m[5], m[10], m[15]) = (1.0, 1.0, 1.0, 1.0);
+    m[12..15].copy_from_slice(&position);
+    Shape {
+        name: name.into(),
+        sibling_path: Vec::new(),
+        layer: 8,
+        is_trigger: false,
+        visual_layer_move: false,
+        kind: ShapeKind::Box {
+            local_to_world: m,
+            center,
+            size,
+            runtime: Some(boxes::BoxRuntime {
+                world_center: boxes::transform_point(&chain, center),
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                lossy_scale: [1.0; 3],
+                position,
+                layer: 8,
+                source: "test".into(),
+            }),
+            chain,
+        },
+    }
+}
+
+#[test]
+fn a_recorded_box_is_computed() {
+    // The terrain at 2 over [0, 6]², a box with its top at 3.5 over [1, 3] x [0, 4].
+    let mut w = terrain_world(flat_field(4));
+    w.shapes.push(recorded_box("box", [2.0, 2.5, 2.0], [0.0, 0.5, 0.0]));
+    let scene = Scene::new(&w);
+    let hit = scene.raycast_down([2.5, 7.0, 1.0], 100.0, 1 << 8).unwrap().unwrap();
+    assert_eq!((hit.distance, hit.point, hit.shape), (3.5, [2.5, 3.5, 1.0], 1));
+    // Beside it; ending above it; from inside it (PhysX's hit at distance 0, which Unity's
+    // post-filter drops: the terrain below).
+    let hit = scene.raycast_down([3.5, 7.0, 1.0], 100.0, 1 << 8).unwrap().unwrap();
+    assert_eq!((hit.distance, hit.shape), (5.0, 0));
+    assert_eq!(scene.raycast_down([2.5, 7.0, 1.0], 3.0, 1 << 8).unwrap(), None);
+    let hit = scene.raycast_down([2.5, 3.0, 1.0], 100.0, 1 << 8).unwrap().unwrap();
+    assert_eq!((hit.distance, hit.point, hit.shape), (1.0, [2.5, 2.0, 1.0], 0));
+    // From exactly on its top: distance 0 too.
+    let hit = scene.raycast_down([2.5, 3.5, 1.0], 100.0, 1 << 8).unwrap().unwrap();
+    assert_eq!((hit.distance, hit.shape), (1.5, 0));
+    // A box whose mapping isn't established (an ancestor rotated) keeps the conservative test.
+    let mut b = recorded_box("rotated parent", [2.0, 2.5, 2.0], [0.0, 0.5, 0.0]);
+    if let ShapeKind::Box { chain, .. } = &mut b.kind {
+        chain[0].rotation = [0.0, 0.6, 0.0, 0.8];
+    }
+    w.shapes[1] = b;
+    let scene = Scene::new(&w);
+    assert!(matches!(
+        scene.raycast_down([2.5, 7.0, 1.0], 100.0, 1 << 8),
+        Err(QueryError::Unverified { .. })
+    ));
+}
+
+#[test]
+fn the_box_mapping_is_unitys() {
+    // TransformPoint(center), not position + rotation * (lossy * center); the rotation as PhysX
+    // normalises it; half extents |size * lossy| / 2. A tilted, non-uniformly scaled box under
+    // a translated root (Static/tower_wood_trash_04 (2) [453] in the caves, whose probes'
+    // distances need the first two: `docs/poc5/physics.md`).
+    let chain = [
+        boxes::LocalTrs {
+            position: [67.316_185, -14.138_412, 6.578_766],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        },
+        boxes::LocalTrs {
+            position: [49.237_022, 53.973_633, 127.707_03],
+            rotation: [0.116_654_08, -0.706_635_36, 0.038_710_81, 0.696_821_2],
+            scale: [1.0, 1.0, 0.257_168_6],
+        },
+    ];
+    let center = [0.100_269_49, 0.031_055_193, -1.674_569_3e-8];
+    let p = boxes::transform_point(&chain, [0.0; 3]);
+    assert_eq!(p, [116.553_21, 39.835_22, 134.2858], "Transform.position as recorded");
+    let c = boxes::transform_point(&chain, center);
+    // The actor's position plus the rotated, scaled centre rounds the other way in x.
+    assert_eq!(c[0].to_bits(), 116.546_25f32.to_bits());
+    let rot = Quat { x: 0.116_654_08, y: -0.706_635_36, z: 0.038_710_81, w: 0.696_821_2 };
+    let lossy = [1.0, 0.999_999_94, 0.257_168_62];
+    let alt =
+        rot.rotate(Vec3::new(center[0] * lossy[0], center[1] * lossy[1], center[2] * lossy[2]));
+    assert_eq!(alt.x + p[0], 116.546_24, "the actor's pose and the shape's local one, composed");
+    let q = boxes::px_normalized([0.023_362_182, -0.291_294_8, 0.011_831_824, 0.956_274_8]);
+    assert_eq!([q.x, q.y, q.z, q.w], [0.023_362_184, -0.291_294_84, 0.011_831_826, 0.956_274_9]);
+    // An ancestor that rotates or scales isn't covered.
+    assert!(chain[0].is_translation() && !chain[1].is_translation());
 }
 
 #[test]
 fn a_shape_the_pruner_may_skip_fails_closed() {
     // From 1e8 m up, the ray ending 8 m above the square: the mesh's raycast, rounding at that
     // scale, can report a hit the player's pruner never asks for (its segment stops short).
-    let w = World { shapes: vec![recorded_square("square", [0.0, 0.0, 0.0], 0)] };
+    let w =
+        World { shapes: vec![recorded_square("square", [0.0, 0.0, 0.0], 0)], scenes: Vec::new() };
     let scene = Scene::new(&w);
     let r = scene.raycast_down([1.119_281_8, 1.0e8, 1.425_916_6], 99_999_992.0, 1);
     assert!(!matches!(r, Ok(Some(_))), "{r:?}");
@@ -494,13 +641,14 @@ fn a_shape_the_pruner_may_skip_fails_closed() {
         mesh.tree.center = [1.0e8 + 4.0, 0.0, 4.0];
         mesh.tree.extents_magnitude = 32f32.sqrt();
     }
-    let w = World { shapes: vec![far] };
+    let w = World { shapes: vec![far], scenes: Vec::new() };
     let scene = Scene::new(&w);
     let r = scene.raycast_down([6.0, 10.0, 2.0], 100.0, 1);
     assert!(!matches!(r, Ok(Some(_))), "{r:?}");
     // Another shape 1e8 m out (on another layer): the pruner's node over both rounds at that
     // scale and can cut the square off.
-    let mut w = World { shapes: vec![recorded_square("near", [-2.0, 0.0, 0.0], 0)] };
+    let mut w =
+        World { shapes: vec![recorded_square("near", [-2.0, 0.0, 0.0], 0)], scenes: Vec::new() };
     w.shapes.push(recorded_square("far", [1.0e8, 0.0, 0.0], 5));
     let scene = Scene::new(&w);
     let r = scene.raycast_down([-1.0, 10.0, 1.4], 100.0, 1);
@@ -590,6 +738,10 @@ struct Tally {
     /// `Unverified` for a mesh), and of those, mesh hits.
     near_mesh: usize,
     mesh_hits: usize,
+    /// Likewise for boxes (what the file answered `Unverified` for a box before their recorded
+    /// transforms), and box hits.
+    near_box: usize,
+    box_hits: usize,
     exact: usize,
     point_exact: usize,
     collider_exact: usize,
@@ -601,6 +753,9 @@ struct Tally {
     /// Records whose recorded collider is a mesh, and of those computed exactly.
     mesh_records: usize,
     mesh_records_exact: usize,
+    /// Records whose recorded collider is a box, and of those computed exactly.
+    box_records: usize,
+    box_records_exact: usize,
 }
 
 impl std::ops::AddAssign for Tally {
@@ -610,6 +765,10 @@ impl std::ops::AddAssign for Tally {
         self.probes += o.probes;
         self.near_mesh += o.near_mesh;
         self.mesh_hits += o.mesh_hits;
+        self.near_box += o.near_box;
+        self.box_hits += o.box_hits;
+        self.box_records += o.box_records;
+        self.box_records_exact += o.box_records_exact;
         self.exact += o.exact;
         self.point_exact += o.point_exact;
         self.collider_exact += o.collider_exact;
@@ -622,12 +781,15 @@ impl std::ops::AddAssign for Tally {
     }
 }
 
-/// The world without the meshes' recorded transforms: their queries go to the conservative test.
-fn conservative_world(w: &World) -> World {
+/// The world without the meshes' recorded transforms (`boxes`: the boxes' too): their queries
+/// go to the conservative test.
+fn conservative_world(w: &World, boxes: bool) -> World {
     let mut w = w.clone();
     for s in &mut w.shapes {
-        if let ShapeKind::Mesh { runtime, .. } = &mut s.kind {
-            *runtime = None;
+        match &mut s.kind {
+            ShapeKind::Mesh { runtime, .. } => *runtime = None,
+            ShapeKind::Box { runtime, .. } if boxes => *runtime = None,
+            _ => {}
         }
     }
     w
@@ -654,8 +816,10 @@ fn every_recorded_query_is_computed_exactly() {
     let t0 = std::time::Instant::now();
     let file = PhysFile::read(&path_for("bad465e5404604346bdf71ef50b3299a")).unwrap();
     let scene = Scene::new(&file.world);
-    let old = conservative_world(&file.world);
+    let old = conservative_world(&file.world, false);
     let old_scene = Scene::new(&old);
+    let older = conservative_world(&file.world, true);
+    let older_scene = Scene::new(&older);
     eprintln!("physics file read and prepared in {:?}", t0.elapsed());
     // faceHit's distance can exceed the traced length; the scene query drops such a hit.
     let (o, max) = ([128.67328, 62.99409, 67.102905], 21.423319);
@@ -672,6 +836,7 @@ fn every_recorded_query_is_computed_exactly() {
     // a query the sim makes, so failing closed there isn't a failure).
     let (mut total, mut total_probes) = (Tally::default(), Tally::default());
     let mut failures = Vec::new();
+    let mut samples = Vec::new();
     let mut failed_closed = std::collections::BTreeMap::<String, usize>::new();
     for path in captures() {
         let gz = fs::File::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -718,6 +883,11 @@ fn every_recorded_query_is_computed_exactly() {
                 Err(QueryError::Unverified { shape }) if shape.ends_with("(MeshCollider)")
             );
             t.near_mesh += usize::from(near_mesh);
+            let near_box = matches!(
+                run(&older_scene),
+                Err(QueryError::Unverified { shape }) if shape.ends_with("(BoxCollider)")
+            );
+            t.near_box += usize::from(near_box);
             let want = r["hit"].as_bool().unwrap().then(|| (f(&r["dist"]), v3(&r["pt"])));
             let what = format!(
                 "{}/{} t={} {} {kind} from {o:?}",
@@ -727,16 +897,18 @@ fn every_recorded_query_is_computed_exactly() {
                 r["ev"],
             );
             let mesh_record = r["col"]["type"] == "MeshCollider";
+            let box_record = r["col"]["type"] == "BoxCollider";
             t.mesh_records += usize::from(mesh_record);
+            t.box_records += usize::from(box_record);
             if let Ok(Some(h)) = &got
-                && mesh_record
                 && want.is_some_and(|(d, pt)| {
                     h.distance.to_bits() == d.to_bits()
                         && h.point.map(f32::to_bits) == pt.map(f32::to_bits)
                         && same_collider(&r, &file.world.shapes[h.shape])
                 })
             {
-                t.mesh_records_exact += 1;
+                t.mesh_records_exact += usize::from(mesh_record);
+                t.box_records_exact += usize::from(box_record);
             }
             match (got, want) {
                 (Err(e), _) => {
@@ -750,16 +922,21 @@ fn every_recorded_query_is_computed_exactly() {
                         }
                         QueryError::Unsupported(s) => s.split(" (").next().unwrap_or("").into(),
                     };
-                    let box_only = class == "unverified (BoxCollider)";
                     let source = if probe {
                         "ph_probe".to_owned()
                     } else {
                         format!("ag_phys {}", r["ctx"].as_str().unwrap_or("?"))
                     };
                     *failed_closed.entry(format!("{source}: {class}")).or_default() += 1;
-                    // Boxes aren't this test's (stream D's open item); a probe is a check of
-                    // the colliders, not a query the sim makes.
-                    if !probe && !box_only {
+                    // A probe is a check of the colliders, not a query the sim makes; neither
+                    // is presentation code's query (a critter's, `other`), which the driven
+                    // replay takes from the recording when it fails closed.
+                    let presentation = matches!(r["ctx"].as_str(), Some("critter" | "other"));
+                    if probe || presentation {
+                        if samples.len() < 12 {
+                            samples.push(format!("{what}: {e}"));
+                        }
+                    } else {
                         failures.push(format!("{what}: {e}"));
                     }
                 }
@@ -789,6 +966,7 @@ fn every_recorded_query_is_computed_exactly() {
                     }
                     let shape = &file.world.shapes[h.shape];
                     t.mesh_hits += usize::from(matches!(shape.kind, ShapeKind::Mesh { .. }));
+                    t.box_hits += usize::from(matches!(shape.kind, ShapeKind::Box { .. }));
                     // Records before `col` (`poc5-tb-100` to `-105`) don't name the collider.
                     if r.get("col").is_none() || same_collider(&r, shape) {
                         t.collider_exact += 1;
@@ -812,6 +990,9 @@ fn every_recorded_query_is_computed_exactly() {
     eprintln!("total: {total:?}; {} distinct queries", distinct.len());
     eprintln!("probes: {total_probes:?}");
     eprintln!("failed closed: {failed_closed:#?}");
+    for x in &samples {
+        eprintln!("  (failed closed) {x}");
+    }
     for x in failures.iter().take(30) {
         eprintln!("  {x}");
     }
@@ -828,4 +1009,82 @@ fn quat_helpers_are_inverse() {
     assert!(
         (back.x - v.x).abs() < 1e-5 && (back.y - v.y).abs() < 1e-5 && (back.z - v.z).abs() < 1e-5
     );
+}
+
+#[test]
+fn what_the_recordings_dont_cover_isnt_computed_or_accepted() {
+    // A box whose own rotation or scale isn't the recorded one (changed at load): its centre
+    // computed from the scene wouldn't be the game's.
+    let b = recorded_box("b", [2.0, 2.5, 2.0], [1.0, 0.5, 0.0]);
+    let ShapeKind::Box { center, size, chain, runtime: Some(r), .. } = &b.kind else {
+        unreachable!()
+    };
+    assert_eq!(r.established(chain, *center, *size), Ok(()));
+    let mut scaled = r.clone();
+    scaled.lossy_scale = [2.0, 1.0, 1.0];
+    assert!(scaled.established(chain, *center, *size).is_err());
+    let mut turned = r.clone();
+    turned.rotation = [0.0, 0.6, 0.0, 0.8];
+    assert!(turned.established(chain, *center, *size).is_err());
+    let mut negative = r.clone();
+    negative.lossy_scale = [-1.0, 1.0, 1.0];
+    assert!(negative.established(chain, *center, *size).is_err());
+    // A box without a recorded transform: the recording must agree with the scene's layer.
+    let mut plain = b.clone();
+    if let ShapeKind::Box { runtime, .. } = &mut plain.kind {
+        *runtime = None;
+    }
+    plain.name = "S:b (BoxCollider)".into();
+    let w = World { shapes: vec![plain], scenes: vec!["S".into(), "T".into()] };
+    let rec = RecordedCollider {
+        name: "S:b (BoxCollider)".into(),
+        sibling_path: Vec::new(),
+        present: true,
+        layer: 8,
+        position: [2.0, 2.5, 2.0],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        lossy_scale: [1.0; 3],
+        trigger: false,
+        kind: RecordedKind::Box { center: [1.0, 0.5, 0.0], size: [2.0, 1.0, 4.0] },
+    };
+    assert_eq!(w.check_recorded_colliders(std::slice::from_ref(&rec)), Ok(()));
+    let moved = RecordedCollider { layer: 0, ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[moved]).is_err(), "another layer");
+    // Scaled, turned or moved at run time: the scene's box no longer encloses the game's.
+    let scaled = RecordedCollider { lossy_scale: [100.0, 1.0, 1.0], ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[scaled]).is_err(), "scaled");
+    let turned = RecordedCollider { rotation: [0.0, 0.6, 0.0, 0.8], ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[turned]).is_err(), "turned");
+    let shifted = RecordedCollider { position: [2.0, 2.5, 2.001], ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[shifted]).is_err(), "shifted");
+    let rounded = RecordedCollider { lossy_scale: [1.000_000_1, 0.999_999_94, 1.0], ..rec.clone() };
+    assert_eq!(w.check_recorded_colliders(&[rounded]), Ok(()), "the game's rounding");
+    // A hierarchy whose large translations cancel: the matrix is the identity, but the game's
+    // TransformPoint places the centre elsewhere (x = 8, not 10).
+    let chain = [
+        boxes::LocalTrs {
+            position: [-1.0e8, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [2.0, 1.0, 1.0],
+        },
+        boxes::LocalTrs {
+            position: [5.0e7, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [0.5, 1.0, 1.0],
+        },
+    ];
+    let mut id = [0.0f32; 16];
+    (id[0], id[5], id[10], id[15]) = (1.0, 1.0, 1.0, 1.0);
+    assert_eq!(boxes::transform_point(&chain, [10.0, 0.0, 0.0])[0], 8.0);
+    assert!(!boxes::placement_agrees(
+        &id,
+        &chain,
+        [10.0, 0.0, 0.0],
+        [0.0; 3],
+        [0.0, 0.0, 0.0, 1.0],
+        [1.0; 3]
+    ));
+    // A scene whose every collider was left out still has its recordings checked.
+    let other = RecordedCollider { name: "T:c (BoxCollider)".into(), ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[rec, other]).is_err(), "a collider the file lacks");
 }

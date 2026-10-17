@@ -60,6 +60,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   - *The mesh raycast* (stream S, `crates/wr-phys/src/bv4.rs`, `docs/poc5/physics.md`): PhysX's BV4 triangle-mesh raycast
     from the arm64 player, bit for bit on 26M rays; the physics file is format 2 and takes the recorded transforms
     (`wr-import phys-pack … --colliders <a trace with ph_col>`). Boxes' Unity pose mapping still unverified.
+  - *Boxes* (stream boxes, `crates/wr-phys/src/boxes.rs`, `docs/poc5/physics.md` "Boxes"): `TransformPoint(center)`
+    and PhysX's normalised rotation, `max(|lossy * size| / 2, FLT_EPSILON)`, Unity's distance-0 post-filter; every
+    probe and `ag_phys` query exact or failing closed (25 presentation queries left, none wrong). Physics file format 3.
   - *Facing* (stream T, `docs/poc5/orientation.md`, observer `look`): `DesiredOrientation` computed from `LookAt`,
     `ForceLookAt` and the orientation writers. Stopped at wrap-up after a clean review, before its final checks: the
     main session's merge sweep is its verification.

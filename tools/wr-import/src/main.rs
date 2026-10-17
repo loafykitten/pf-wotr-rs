@@ -64,8 +64,8 @@ enum Cmd {
         #[arg(long)]
         guid: String,
         /// A recording of the area with observer `phys_probe` (`*.trace.jsonl.gz`): its
-        /// `ph_col` records give the mesh colliders the transforms the game holds, without
-        /// which a query that may touch a mesh fails closed.
+        /// `ph_col` records give the mesh and box colliders the transforms the game holds,
+        /// without which a query that may touch one fails closed.
         #[arg(long)]
         colliders: Option<PathBuf>,
     },
@@ -191,9 +191,16 @@ fn main() -> Result<()> {
                     c.disabled,
                     c.degenerate
                 );
+                eprintln!(
+                    "  {} boxes; left out, recorded disabled: {:?}; the mapping not established, left unrecorded: {:#?}",
+                    c.boxes, c.boxes_disabled, c.boxes_unestablished
+                );
                 rep.shapes = world.shapes.len();
                 if let Some(n) = rep.by_kind.get_mut("mesh") {
                     *n -= c.disabled.len();
+                }
+                if let Some(n) = rep.by_kind.get_mut("box") {
+                    *n -= c.boxes_disabled.len();
                 }
             }
             let mut scenes: Vec<String> = a.scenes.iter().map(|s| s.bundle.clone()).collect();
