@@ -170,31 +170,47 @@ test can take an earlier unmodelled miss on the same pair for a later member's r
 
 - `UnitVisionRangeController.Tick` (modes Default, Dialog, Cutscene, Rest; not Pause), for each unit of
   `State.AwakeUnits` in order: clear its set; skip it if `IsExtra`; else `OverlapCapsule(pos - up * 2r, pos + up * 2r, r,
-  mask 1 << 23)` on the entity-bounds physics scene with `r = VisionRangeMeters`, and add each hit's unit. The set is a
-  `HashSet` refilled after a `Clear`, so it enumerates in the overlap's order. `IsSleeping`'s setter (either way) and
-  `OnDispose` clear it too.
-- `EntityBoundsController.Tick` (registered just before it, also in Pause): one `SphereCollider` per entity with bounds, on a
-  private object in that scene (unit scale 1). A unit's radius is `Max(0.05, Corpulence)` (`View.Corpulence`: the prefab's
-  `m_Corpulence` times the size scale, at least 0.5); it is made at the view's position, its transform is set to
-  `entity.Position` in each tick for the entities whose position changed (all of them on the first tick), and
-  `EntityViewBase.UpdateViewActive` sets `enabled = ShouldBeEnumeratedByEntityPoolEnumerator` (`IsInGame` and not
-  suppressed) the moment either changes. `Physics.autoSyncTransforms` is off [M, the begin record: `physics_auto_sync`
-  false], so a transform change reaches PhysX at the next physics step (`FixedUpdate`, before the frame's controllers).
+  mask 1 << 23)` on the entity-bounds physics scene with `r = VisionRangeMeters`, and add each hit's unit (fake units
+  included: the hits aren't filtered). The set is a `HashSet` refilled after a `Clear`, so it enumerates in the overlap's
+  order. `IsSleeping`'s setter (either way) and `OnDispose` clear it too.
+- `EntityBoundsController.Tick` (registered just before it, also in Pause): one `SphereCollider` per entity of
+  `State.EntitiesWithBounds` (`RequiresSphereBoundsCollider`: units, fake ones too, map objects, cutscene anchors; in
+  the order they joined their states), on a private object in that scene with unit scale. The first tick walks the pool
+  through `EntityPoolEnumerator`, which skips what isn't `ShouldBeEnumeratedByEntityPoolEnumerator` (`IsInGame` and not
+  suppressed): a unit hidden since the load gets its collider only when it comes into the game (`TryAddToUpdateList`, on
+  `HandleObjectInGameChanged`), after the others. Later ticks handle the update list (entities whose position,
+  game state or size changed). A unit's collider is made with `Max(0.05, Corpulence * view.lossyScale)`
+  (`Corpulence` is `View.Corpulence`: the prefab's `m_Corpulence` times the size scale, at least 0.5) at the origin
+  (`AddComponent` before the position is set), and in the same call set to `Max(0.05, Corpulence)` if that differs by more
+  than 0.05 (the collider's own scale is 1); later calls do the same against the radius it has. Its transform is set
+  to `entity.Position` in every call. `EntityViewBase.UpdateViewActive` sets `enabled =
+  ShouldBeEnumeratedByEntityPoolEnumerator` the moment `IsInGame` or `Suppressed` change, but returns early while the view
+  fade-hides (`m_IsFadeHide`, set by `FadeHide`, which `HideUnit` with `Fade` calls): the collider keeps its state until the
+  fade ends. The collider is destroyed with its view (`OnDestroy`); a disposed entity's view is destroyed at once, after
+  1.8 s (`FadeOutAndDestroy`) or not at all, by its kind. `Physics.autoSyncTransforms` is off [M, the begin
+  record: `physics_auto_sync` false], so a transform change reaches PhysX at the next physics step (`FixedUpdate`, before
+  the frame's controllers).
 - PhysX's capsule-against-sphere overlap: the squared distance from the sphere's centre to the capsule's segment against
   the squared sum of the radii, in `f32` (`Gu::distancePointSegmentSquared`; ported, not read from PhysX).
 
 ### What the sim does
 
-`BoundsUnit`/`Bounds::tick` keep each collider's transform and PhysX's copy (taken from the transform when the frame ran
-a step); `Bounds::overlap` answers the query in the colliders' order (the pool's: `scene::units_pool`, a collider made
-later is appended). The replay's inputs the sim doesn't have are the recording's (see below): each unit's corpulence, the
-frames that run a physics step, the awake units. The unit positions are `Vw::pos` after the movement (the driven agent's,
-else the observation rows). Each frame's phase computes every awake unit's overlap and compares it, when the frame has a
-`vis` record for the unit, with the set the record gives (the last record's set plus its `add`/`rem`), and otherwise with
-the set the last record left (no record means no change; the first record of a unit is always written). A difference is
-reported (`driven replay: vision: the vision range of X differs ...`) and the recording's set is the one the run goes on
-with, as every reader here. Units put to sleep lose their set. `UnitGroup.ExtractNearUnits` (the memory controller's
-`near` leaf) is the union of the group members' sets in the overlap's order, checked against the leaf (`vis_near_union`).
+`Bounds::tick` keeps each collider's transform and PhysX's copy (taken from the transform when the frame ran a step) and
+the radius rules; `Bounds::overlap` answers the query in the colliders' order. The population is `scene::units_with_bounds`
+(the units of `State.Units`' order, fake ones too; map objects and anchors have colliders on another layer and are left out,
+which doesn't change the units' relative order). The first tick makes colliders only for the units in the game, a unit
+that comes into the game later gets its collider then (appended: the update list's order is taken to be the pool's); a
+collider whose entity has left the pool is removed and **reported** (when its view is destroyed isn't modelled). An
+entity hidden with a fade (`HideUnit` with `Fade`, noted by `scene_spawn::hide_unit`) has an *unknown* `enabled` until it
+is in the game again: its pairs in reach are decided by the recording. The replay's inputs the sim doesn't have are the
+recording's (see below): each unit's corpulence, the frames that run a physics step, the awake units. The unit positions
+are `Vw::pos` after the movement (the driven agent's, else the observation rows). Each frame's phase computes every awake
+unit's overlap and compares it, when the frame has a `vis` record for the unit, with the set the record gives (the last
+record's set plus its `add`/`rem`), and otherwise with the set the last record left (no record means no change; the first
+record of a unit is always written). A difference is reported (`driven replay: vision: the vision range of X differs
+...`) and the recording's set is the one the run goes on with, as every reader here. Units put to sleep lose their set.
+`UnitGroup.ExtractNearUnits` (the memory controller's `near` leaf) is the union of the group members' sets in the
+overlap's order, checked against the leaf (`vis_near_union`, counted among `mem_leaf_checked`'s `near`).
 
 ### What the recordings show [M]
 
@@ -210,86 +226,104 @@ The hypotheses and their results (the first by a script on the party's 5,010 obs
 2. **The collider's position** is its transform at the last physics step: the previous tick's in a frame that runs a
    step, the tick before in one that doesn't. Which frames run none follows the physics clock `phi = Time.time -
    Time.fixedTime` (WrathOracle's `PhysicsPhase`): the begin record's `fixed_phase0` plus each tick's scaled `delta`
-   (the oracle's fast-forward stretches run at time scale 3, `delta` 0.05 s, three fixed steps in two frames or so,
-   which moves the phase; the fixed step is `fixed_delta_time`). Differences against the recordings over the 36 record
-   runs: a step in every frame, 683 (1 to 36 a run, 543 of them one static pair of `-133`/tb-nearest); the clock advanced
-   by the fixed frame time, 682; **the clock advanced by each tick's scaled delta, 0**. (The first guess, that a frame
-   in six has no step by the begin record's phase, is right except where the time scale moved the phase.)
-3. **The collider's radius** is `Max(0.05, Corpulence)` exactly. An intermediate version allowed every collider an offset
-   of up to 5 cm from it (the view's scale, which the collider keeps unless more than 0.05 off) and left the pairs that
-   offset leaves open to the recording (20 to 66 a run of the 100,000 to 1 million pairs, each answered by the
-   recording, with 0 differences once the clock was right). With no tolerance, 109 runs: 0 differences, 0 pairs left
-   to the recording. The sim has no unit's corpulence (`View.Corpulence` needs the prefab's
-   `m_Corpulence` and the size scale: not imported) so it is the recording's: the last `corp` read (`uc_v`, `ag_v`) at or
-   before the frame, else the unit's first read after it (counted per unit and frame in the run's line: the party's
-   corpulence before its first fight read; a size effect would change it, `-120`'s is read again). A unit with no read at
-   all would have an unknown radius (at least 0.5, `Radius::Unknown`): the pairs that range decides are the sim's, the
-   others the recording's; none occurred (0 such pairs in all runs).
+   (the oracle's fast-forward stretches run at time scale 3, `delta` 0.05 s, which moves the phase; the fixed step is
+   `fixed_delta_time`). Differences against the recordings over the 36 record runs (with the first version of the radius
+   rule, a 5 cm tolerance): a step in every frame, 683 (1 to 36 a run, 543 of them one static pair of
+   `-133`/tb-nearest); the clock advanced by the fixed frame time, 682; **the clock advanced by each tick's scaled
+   delta, 0**. (A frame in six without a step by the begin record's phase alone is right until the time scale moves the
+   phase.)
+3. **The collider's radius** is `Max(0.05, Corpulence)` in every pair the recordings can test: with the radius exactly the
+   corpulence (the view's scale assumed 1, see below), 109 runs have 0 differences, including 123 pair-frames within 1 mm
+   of the capsule's surface. The corpulence is the recording's: the last `corp` read (`uc_v`, `ag_v`) in the stream before
+   the record the phase is placed at (a size change applied later in the frame, in a phase after the vision
+   controller's, stays out of the tick); a unit with no read yet has an *unknown* radius (at least 0.5, at most
+   `MAX_CORPULENCE` 4 assumed): the pairs that range decides are the sim's, the others the recording's. The party's
+   corpulence before the first fight read, and every unit nobody reads, are such units: 6.0 million unit-frames in the 109
+   runs and 147,756 pairs (0.8% of the pairs) decided by the recording. Computing `Corpulence` (the unit prefab's
+   `m_Corpulence`, which `wr-import unit-prefabs` doesn't extract yet, times the size scale of `Descriptor.State.Size`,
+   `OriginalSize`, the progression's scale percent and the pet coefficient) would close that.
 4. **The enabled flag** is the sim's `is_in_game` (a unit that dies leaves everybody's set in the frame the recording
-   shows). A collider made in a tick after the first (a spawn) is at the origin until the next step [C, unit-tested, **not
-   exercised**: no run makes a collider after its first frame, the run's line counts them].
+   shows); suppression doesn't exist in an area without parts (the vision run refuses areas with parts). Fade-hidden
+   views, collider creation after the first frame and destruction with the entity are modelled [C] and unit-tested,
+   **not exercised**: no run has a fade-hidden unit (0 unit-frames), makes a collider after its first frame (0) or
+   loses an entity.
 5. **The margin** (item 3 of the task): the closest approach of any pair, over all runs, to the capsule's surface is
-   **27 um** (`-131`); 7,259 pairs of the 22.5 million computed (all 109 runs) are within 1 cm and 125 within 1 mm, in
-   sets that agree. `f32` against exact arithmetic: **0** of the 22.5 million pairs decide differently, so PhysX's
-   rounding doesn't matter for these captures (the sim decides in `f32` as PhysX does; the exact margin is only logged).
+   **27 um** (`-131`); 7,108 pair-frames of the 18.9 million with a known corpulence are within 1 cm and 123 within
+   1 mm, in sets that agree. `f32` against exact arithmetic: **0** of them decide differently, so PhysX's rounding doesn't
+   matter for these captures (the sim decides in `f32` as PhysX does; the exact margin is only logged).
 6. **The order.** The recorded `near` leaves' first member's prefix gives that member's set order exactly: over five
-   captures (`-111`, `-120`, `-123`, `-129`, `-136`) there is one static total order, never a conflict: the party first, then the other units of the area by id, that is the
-   pool order [`State.Units.All`: the units of the cross-scene state, then the area's]. The sim's overlap in the colliders'
-   order (created in pool order, a later collider appended) reproduces **every** recorded `near` leaf: 385,005 of 385,005
-   in the record runs of `-111` and later (1,218,083 in all 109 runs; `-95`, `-96` and `-109` have no `memory` observer),
-   so the order is no longer an input either. (Why PhysX returns the colliders in creation order for this scene isn't
-   established; it holds for every capture here, which have at most 21 colliders.)
+   captures (`-111`, `-120`, `-123`, `-129`, `-136`) there is one static total order, never a conflict: the party first,
+   then the other units of the area by id, that is the pool order [`State.Units.All`: the units of the cross-scene state,
+   then the area's]. The sim's overlap in the colliders' order (made in pool order, a later collider appended) reproduces
+   **every** recorded `near` leaf: 385,005 of 385,005 in the record runs of `-111` and later (1,218,083 in all 109 runs;
+   `-95`, `-96` and `-109` have no `memory` observer), so the order is no longer an input either. (Why PhysX returns the
+   colliders in creation order for this scene isn't established; it holds for every capture here, which have at most
+   21 colliders.)
+
+### Assumptions that remain, and what each could decide
+
+- **The view's scale is 1.** The creation radius is `Max(0.05, Corpulence * view scale)` and stays unless more than 0.05
+  from the corpulence; the sim has no view scale (the prefab's root scale times the size scale) and uses 1
+  (`ASSUMED_VIEW_SCALE`; the rule itself, the hysteresis and the later updates are modelled and unit-tested). A scale
+  other than 1 could decide the pairs within 5 cm of the capsule's surface: 15,883 pair-frames in the 36 record runs
+  (50,455 in all 109), of which every one equals the recording's with scale 1, among them 123 within 1 mm: a scale off
+  by 1% of a 0.5 m radius would have flipped some of those. An intermediate version that allowed a +-5 cm offset per
+  collider, calibrated by the recording, found the same (all equal) and left 20 to 66 pairs a run to the recording.
+- **The corpulence** before a unit's first read (above): 48,869 pairs in the 36 record runs.
+- **The physics clock** is computed from `fixed_phase0` and the tick deltas (an inference that makes 109 runs equal; the
+  oracle doesn't record the steps).
+- **The update list's order** for colliders made after the first tick (pool order assumed): 0 such colliders.
+- **Fade and disposal**: 0 occurrences, reported or unknown-flagged as described.
 
 ### Results [M]
 
 `wr-combat replay <capture>/fixtures/<fight> --run <run>` prints the counts after `vision range:`. Record runs (a fight's
 replays have the counts of their own length). **Every run of all 24 captures** (`-95`, `-96`, `-109`, `-111` to `-117`,
-`-120`, `-122` to `-127`, `-129`, `-131` to `-136`: 109 runs) is as valid as before (only `-122`/tb-nearest's initiative
-tie is not) with the sets computed and equal to the recording's:
+`-120`, `-122` to `-127`, `-129`, `-131` to `-136`: 109 runs, on the result of merging `poc` at 88bba63) is as valid as
+before (only `-122`/tb-nearest's initiative tie is not) with the sets computed and equal to the recording's:
 
-| capture / fight (record run) | sets computed (awake unit, frame) | of which changes (`vis` records) | pairs | within 1 cm | within 1 mm | closest (um) | near-unit unions equal |
-|---|---|---|---|---|---|---|---|
-| -95 tb-focus | 20,641 | 53 | 139,971 | 8 | 0 | 2,227 | 0 |
-| -95 tb-nearest | 20,817 | 56 | 140,862 | 8 | 0 | 1,242 | 0 |
-| -96 tb-hold | 17,394 | 55 | 115,188 | 11 | 0 | 2,652 | 0 |
-| -109 tb-focus | 15,050 | 56 | 96,426 | 9 | 0 | 4,465 | 0 |
-| -109 tb-nearest | 13,755 | 52 | 85,694 | 7 | 0 | 1,489 | 0 |
-| -111 tb-focus | 18,612 | 61 | 123,154 | 12 | 1 | 266 | 7,400 |
-| -111 tb-nearest | 20,805 | 59 | 140,598 | 12 | 1 | 266 | 8,087 |
-| -112 tb-focus | 22,918 | 62 | 153,985 | 16 | 2 | 266 | 8,969 |
-| -112 tb-nearest | 15,109 | 55 | 100,885 | 9 | 0 | 1,489 | 5,924 |
-| -113 tb-focus | 14,532 | 50 | 93,266 | 12 | 1 | 174 | 6,047 |
-| -113 tb-nearest | 13,019 | 52 | 80,532 | 9 | 0 | 1,489 | 5,567 |
-| -114 tb-focus | 21,320 | 46 | 137,342 | 15 | 0 | 1,489 | 8,649 |
-| -114 tb-nearest | 18,574 | 56 | 113,058 | 13 | 3 | 266 | 7,916 |
-| -115 tb-focus | 15,663 | 48 | 101,902 | 7 | 1 | 450 | 6,365 |
-| -115 tb-nearest | 18,677 | 52 | 115,764 | 13 | 0 | 1,052 | 7,766 |
-| -116 tb-hold | 19,214 | 52 | 121,592 | 11 | 0 | 1,489 | 7,802 |
-| -117 tb-solo | 18,734 | 52 | 122,095 | 10 | 1 | 266 | 7,412 |
-| -120 tb-cast | 18,693 | 46 | 118,012 | 8 | 0 | 1,489 | 7,598 |
-| -122 tb-focus | 18,260 | 53 | 115,515 | 15 | 2 | 266 | 6,592 |
-| -122 tb-nearest | 19,336 | 47 | 125,126 | 162 | 0 | 3,527 | 7,635 |
-| -123 tb-chain | 36,097 | 90 | 224,026 | 28 | 2 | 185 | 15,676 |
-| -124 tb-chain | 37,531 | 84 | 232,281 | 24 | 1 | 140 | 15,676 |
-| -125 tb-focus | 24,357 | 47 | 159,352 | 14 | 1 | 266 | 9,884 |
-| -125 tb-nearest | 14,390 | 54 | 89,252 | 561 | 0 | 1,489 | 5,801 |
-| -126 tb-focus | 15,918 | 57 | 100,389 | 7 | 0 | 1,489 | 6,380 |
-| -126 tb-nearest | 19,581 | 57 | 132,912 | 11 | 0 | 1,144 | 7,619 |
-| -127 tb-tie | 20,422 | 55 | 137,900 | 12 | 1 | 266 | 7,949 |
-| -129 tb-lizard | 87,004 | 185 | 668,199 | 69 | 10 | 70 | 38,016 |
-| -131 tb-lizard | 110,856 | 128 | 1,030,743 | 36 | 1 | 27 | 50,813 |
-| -132 tb-focus | 21,824 | 62 | 148,097 | 14 | 1 | 266 | 8,489 |
-| -132 tb-nearest | 16,091 | 52 | 101,640 | 7 | 0 | 1,489 | 6,734 |
-| -133 tb-focus | 29,145 | 64 | 199,268 | 21 | 3 | 266 | 11,063 |
-| -133 tb-nearest | 16,254 | 51 | 105,188 | 1,091 | 0 | 2,110 | 6,590 |
-| -134 tb-lizard | 88,670 | 179 | 708,106 | 68 | 5 | 87 | 39,141 |
-| -135 tb-nearest | 21,826 | 53 | 152,417 | 16 | 2 | 266 | 8,097 |
-| -136 tb-lizard | 82,357 | 160 | 615,071 | 49 | 2 | 457 | 37,348 |
-| all 36 record runs | 1,003,446 | 2,441 | 7,145,808 | 2,395 | 41 | 27 | 385,005 |
+| capture / fight (record run) | sets computed | changes (`vis` records) | pairs, known corpulence | within 5 cm | within 1 cm | within 1 mm | closest (um) | pairs of unknown corpulence (recording's) | near-unit unions equal |
+|---|---|---|---|---|---|---|---|---|---|
+| -95 tb-focus | 20,641 | 53 | 128,664 | 34 | 6 | 0 | 2,738 | 1,119 | 0 |
+| -95 tb-nearest | 20,817 | 56 | 129,547 | 1,039 | 7 | 0 | 1,242 | 1,124 | 0 |
+| -96 tb-hold | 17,394 | 55 | 104,767 | 29 | 10 | 0 | 2,652 | 1,048 | 0 |
+| -109 tb-focus | 15,050 | 56 | 86,005 | 33 | 8 | 0 | 4,465 | 1,048 | 0 |
+| -109 tb-nearest | 13,755 | 52 | 75,387 | 32 | 6 | 0 | 1,489 | 1,033 | 0 |
+| -111 tb-focus | 18,612 | 61 | 111,847 | 64 | 11 | 1 | 266 | 1,121 | 7,400 |
+| -111 tb-nearest | 20,805 | 59 | 125,959 | 55 | 11 | 1 | 266 | 1,911 | 8,087 |
+| -112 tb-focus | 22,918 | 62 | 142,660 | 1,017 | 15 | 2 | 266 | 1,119 | 8,969 |
+| -112 tb-nearest | 15,109 | 55 | 90,530 | 33 | 6 | 0 | 1,489 | 1,040 | 5,924 |
+| -113 tb-focus | 14,532 | 50 | 83,093 | 37 | 11 | 1 | 174 | 950 | 6,047 |
+| -113 tb-nearest | 13,019 | 52 | 70,199 | 36 | 8 | 0 | 1,489 | 1,035 | 5,567 |
+| -114 tb-focus | 21,320 | 46 | 126,993 | 36 | 14 | 0 | 1,489 | 1,038 | 8,649 |
+| -114 tb-nearest | 18,574 | 56 | 98,952 | 52 | 11 | 3 | 266 | 1,856 | 7,916 |
+| -115 tb-focus | 15,663 | 48 | 91,539 | 25 | 7 | 1 | 450 | 1,042 | 6,365 |
+| -115 tb-nearest | 18,677 | 52 | 105,393 | 47 | 10 | 0 | 1,489 | 1,044 | 7,766 |
+| -116 tb-hold | 19,214 | 52 | 111,243 | 43 | 9 | 0 | 1,489 | 1,037 | 7,802 |
+| -117 tb-solo | 18,734 | 52 | 106,913 | 35 | 8 | 1 | 266 | 2,107 | 7,412 |
+| -120 tb-cast | 18,693 | 46 | 107,705 | 29 | 8 | 0 | 1,489 | 1,038 | 7,598 |
+| -122 tb-focus | 18,260 | 53 | 101,272 | 55 | 15 | 2 | 266 | 1,891 | 6,592 |
+| -122 tb-nearest | 19,336 | 47 | 115,003 | 190 | 160 | 0 | 6,293 | 944 | 7,635 |
+| -123 tb-chain | 36,097 | 90 | 192,391 | 122 | 28 | 2 | 185 | 1,122 | 15,676 |
+| -124 tb-chain | 37,531 | 84 | 195,400 | 351 | 22 | 1 | 140 | 2,833 | 15,676 |
+| -125 tb-focus | 24,357 | 47 | 141,707 | 45 | 12 | 1 | 266 | 3,065 | 9,884 |
+| -125 tb-nearest | 14,390 | 54 | 79,163 | 586 | 560 | 0 | 1,489 | 942 | 5,801 |
+| -126 tb-focus | 15,918 | 57 | 90,238 | 28 | 7 | 0 | 1,489 | 953 | 6,380 |
+| -126 tb-nearest | 19,581 | 57 | 121,613 | 772 | 9 | 0 | 1,144 | 1,120 | 7,619 |
+| -127 tb-tie | 20,422 | 55 | 126,517 | 43 | 10 | 1 | 266 | 1,122 | 7,949 |
+| -129 tb-lizard | 87,004 | 185 | 483,792 | 4,238 | 69 | 10 | 70 | 2,114 | 38,016 |
+| -131 tb-lizard | 110,856 | 128 | 901,302 | 1,216 | 33 | 1 | 27 | 1,303 | 50,813 |
+| -132 tb-focus | 21,824 | 62 | 136,772 | 1,016 | 13 | 1 | 266 | 1,121 | 8,489 |
+| -132 tb-nearest | 16,091 | 52 | 91,307 | 33 | 6 | 0 | 1,489 | 1,036 | 6,734 |
+| -133 tb-focus | 29,145 | 64 | 187,927 | 66 | 17 | 3 | 266 | 1,124 | 11,063 |
+| -133 tb-nearest | 16,254 | 51 | 94,809 | 1,111 | 1,091 | 0 | 2,110 | 1,043 | 6,590 |
+| -134 tb-lizard | 88,670 | 179 | 500,397 | 1,322 | 67 | 5 | 87 | 1,991 | 39,141 |
+| -135 tb-nearest | 21,826 | 53 | 137,828 | 54 | 13 | 1 | 266 | 1,907 | 8,097 |
+| -136 tb-lizard | 82,357 | 160 | 451,376 | 1,959 | 47 | 2 | 457 | 1,528 | 37,348 |
+| all 36 record runs | 1,003,446 | 2,441 | 6,046,210 | 15,883 | 2,345 | 40 | 27 | 48,869 | 385,005 |
 
 All 109 runs: 3,146,005 sets computed and equal (7,566 of them changes, each equal to its `vis` record), none unequal; the
-remaining frames show that no record means no change. The group memory's `near` leaf is now the sim's (no longer counted
-among `memory computed`'s inputs; 1,218,083 computed).
+remaining frames show that no record means no change. 1,218,083 `near` leaves computed (checked, no longer inputs).
 
 Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, now 16 cases on `-111`/tb-nearest,
 each reported): the 14 above (a `vis` record missing a unit or removing one that wasn't there are now reported by the
@@ -300,14 +334,12 @@ overlap too) and a change with no record (a `vis` record deleted), a far unit ad
 - The awake units (`aa_awake`; `-95` and `-96` have none: the sim's own, with the units it can't establish settled by
   the `vis` records' observers), as everywhere.
 - Each unit's `Corpulence` (the `corp` reads) and the physics clock (`fixed_phase0` of the begin record, each tick's
-  `delta`, `fixed_delta_time`), the frames at the window's start (the colliders' positions at the window's first frame are
-  the prefix rows).
+  `delta`, `fixed_delta_time`); the colliders' positions at the window's first frame (the prefix rows).
 - Unit positions: the recording's rows without the driven agent, as before.
-- Observer requests (to remove the last inferences; none is needed for these captures to be valid): a `bounds` record at
-  the window's start and on change, one per collider (`SphereBoundsCollider.radius`, `transform.position`, `enabled`, the
-  creation order), and the number of fixed steps each frame ran (`Physics` has no counter: `MonoBehaviour.FixedUpdate`
-  count of a helper), so the clock is read, not computed; the corpulence of every unit with a collider (today only the
-  units the fights read).
+- Observer requests (to remove the inferences; none is needed for these captures to be valid): a `bounds` record at the
+  window's start and on change, one per collider (`SphereBoundsCollider.radius`, `transform.position`, `enabled`, the
+  creation order, the view's `lossyScale`), the number of fixed steps each frame ran, and the corpulence of every unit with
+  a collider, not only the units the fights read.
 
 ## Observer changes requested
 
@@ -367,7 +399,7 @@ Two small additions would remove the sim's remaining inferences about the caches
 - `CanBeInVisionRange` is the sim's, but its inputs aren't: the corpulences (read by the fights only), the physics clock
   and the awake units are the recording's; PhysX's result order is the colliders' creation order, which every recorded
   `near` leaf agrees with (385,005 of them) but PhysX's pruner is not ported (a scene with more colliders than 21 could
-  order differently). The capsule test is PhysX's `f32` distance, which agrees with the exact one on all 22.5 million
+  order differently). The capsule test is PhysX's `f32` distance, which agrees with the exact one on all 18.9 million
   pairs here.
 - The TransformPoint rounding of the blockers and the grid's bounds are derived, not compared (above).
 - Without the driven agent (`-95`, `-96`, `-109`, `-111`, `-112`) a unit's position is the recording's rows, and in the

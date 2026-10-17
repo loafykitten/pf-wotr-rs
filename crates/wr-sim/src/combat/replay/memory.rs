@@ -980,17 +980,10 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         // The sim's: the members' sets in the overlap's order, `ExtractNearUnits`' union.
         let members = self.w.combat.groups.get(g).units.clone();
         if let Some(sim) = self.d.vis_near_union(self.w, &members) {
-            self.d.out.mem_reads += 1;
-            if sim == us {
-                self.d.vis.counts.near_unions += 1;
-            } else {
-                self.w.coverage.unsupported(
-                    "driven replay: memory: the sim's near units (vision range sets, their order) differ from the recording's",
-                );
-            }
-            return Ok(us);
+            self.d.vis.counts.near_unions += usize::from(sim == us);
+            return Ok(self.leaf_checked("near", sim, us));
         }
-        Ok(self.input(us))
+        Ok(self.leaf_taken("near", us))
     }
 
     fn faction_peaceful(&mut self, u: EntityIdx) -> Result<bool, Desync> {
