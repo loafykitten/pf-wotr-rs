@@ -97,6 +97,9 @@ pub struct Part {
 pub trait RoamInputs {
     /// `RollNextPoint`'s start (WrathOracle's `roam_roll`), before its draws.
     fn roll(&mut self, w: &mut World, u: EntityIdx, settings: Option<Settings>) -> R<()>;
+    /// The roll's draws as the sim made them (`insideUnitCircle`, `Range(min, max)`), against
+    /// their records.
+    fn drew(&mut self, circle: [f32; 2], idle: f32, min: f32, max: f32) -> R<()>;
     /// `ObstacleAnalyzer.TraceAlongNavmesh(start, end)`.
     fn trace_along_navmesh(&mut self, w: &mut World, start: V3, end: V3) -> R<V3>;
     /// `UnitEntityData.IsSleeping`.
@@ -266,6 +269,7 @@ fn roll_next_point<I: RoamInputs>(w: &mut World, inp: &mut I, u: EntityIdx) -> R
     let end = cs::add(original, cs::mul([x, 0.0, y], radius));
     let end = inp.trace_along_navmesh(w, original, end)?;
     let idle_time = w.rng.range_float(SITE_ROLL_IDLE, min, max);
+    inp.drew([x, y], idle_time, min, max)?;
     // `settings?.IdleCutscenes.Random()`: no draw from an empty list.
     if settings.is_some_and(|s| s.idle_cutscenes > 0) {
         return Err(Desync("the settings' idle cutscenes (RollNextPoint: not modelled)".into()));

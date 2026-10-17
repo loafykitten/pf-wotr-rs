@@ -209,7 +209,7 @@ impl Driver<'_> {
                 continue;
             }
             self.out.roam.ticks += 1;
-            let mut io = Io { d: self };
+            let mut io = Io { d: self, draws: None };
             if let Err(Desync(e)) = roam::tick_on_unit(w, &mut io, u, game_time, delta) {
                 Self::roam_unsupported(w, format!("{id}: {e}"));
                 // (Its state isn't the game's from here: its records are taken.)
@@ -352,6 +352,8 @@ fn spawner_settings(w: &World, u: EntityIdx) -> Result<(Option<Settings>, Option
 /// The controller's inputs: the records it pulls.
 struct Io<'a, 't> {
     d: &'a mut Driver<'t>,
+    /// The roll's draw records, pulled with its `roam_roll`, checked once drawn.
+    draws: Option<[usize; 2]>,
 }
 
 impl RoamInputs for Io<'_, '_> {
@@ -371,10 +373,41 @@ impl RoamInputs for Io<'_, '_> {
         }
         // Its two draws follow (the circle, then the idle time), each the sim's from the tape.
         let trace = self.d.trace;
-        for site in [roam::SITE_ROLL_CIRCLE, roam::SITE_ROLL_IDLE] {
-            self.d.roam_take(&format!("RollNextPoint's draw at {}", site.0), |r| {
-                r["k"] == "draw" && trace.site_key(r).as_deref() == Some(site.0)
+        let mut at = [0; 2];
+        for (n, site) in [roam::SITE_ROLL_CIRCLE, roam::SITE_ROLL_IDLE].into_iter().enumerate() {
+            at[n] = self.d.roam_take(&format!("RollNextPoint's draw at {}", site.0), |r| {
+                r["k"] == "draw" && r["c"] == "sim" && trace.site_key(r).as_deref() == Some(site.0)
             })?;
+        }
+        self.draws = Some(at);
+        Ok(())
+    }
+
+    fn drew(&mut self, circle: [f32; 2], idle: f32, min: f32, max: f32) -> R<()> {
+        let Some([c, i]) = self.draws.take() else {
+            return Err(Desync("RollNextPoint's draws without their records".into()));
+        };
+        let recs = &self.d.trace.records;
+        let (rc, ri) = (&recs[c], &recs[i]);
+        let vec2 = |v: &Rv| -> Option<[u32; 2]> {
+            let a = v.as_array().filter(|a| a.len() == 2)?;
+            Some([f(&a[0])?.to_bits(), f(&a[1])?.to_bits()])
+        };
+        let args = |v: &Rv| -> Option<Vec<u32>> {
+            v.as_array()?.iter().map(|x| f(x).map(f32::to_bits)).collect()
+        };
+        let ok = rc["m"] == "insideUnitCircle"
+            && args(&rc["a"]).is_some_and(|a| a.is_empty())
+            && vec2(&rc["v"]) == Some(circle.map(f32::to_bits))
+            && ri["m"] == "Range_ff"
+            && args(&ri["a"]) == Some(vec![min.to_bits(), max.to_bits()])
+            && f(&ri["v"]).map(f32::to_bits) == Some(idle.to_bits());
+        if !ok {
+            return Err(Desync(format!(
+                "RollNextPoint's draws: the sim's insideUnitCircle {circle:?} and Range({min}, {max}) {idle}, the recording's {} and {}",
+                describe(rc),
+                describe(ri)
+            )));
         }
         self.d.out.roam.rolls += 1;
         Ok(())
@@ -418,12 +451,18 @@ impl RoamInputs for Io<'_, '_> {
             return Err(Desync(format!("the sleeping step of {id}: a record it can't read")));
         };
         let before = w.unit(u).map_or([0.0; 3], |x| x.position);
+        if r["u"].as_str() != Some(id.as_str()) {
+            return Err(Desync(format!(
+                "the sleeping step of {id}: the recording's is {}'s",
+                r["u"].as_str().unwrap_or("?")
+            )));
+        }
         // The recorded position carries on.
         let after = roam::stepped(before, v);
         if let Some(x) = w.unit_mut(u) {
             x.position = after;
         }
-        if r["u"].as_str() != Some(id.as_str()) || bits3(pos) != bits3(before) {
+        if bits3(pos) != bits3(before) {
             return Err(Desync(format!(
                 "the sleeping step of {id}: the sim's position {before:?}, the recording's {}",
                 describe(r)
@@ -491,11 +530,25 @@ impl RoamInputs for Io<'_, '_> {
             await_override: None,
             movement_delay: 0.0,
         };
+        // A fresh `UnitMoveTo` (`CommandType.Move`, `IgnoreCooldown()`: no time limit), not a
+        // subclass, nobody's yet, not started.
         let ok = m.is_some_and(|m| {
             m.class == class::MOVE_TO
+                && m.bases.is_empty()
                 && matches!(m.s.target, Target::Point(t) if bits3(t) == bits3(point))
                 && m.ap == Some(ap)
                 && m.mv == Some(mv)
+                && m.ua.is_none()
+                && m.aoo.is_none()
+                && m.s.ty == ty::MOVE
+                && m.ignore_cooldown
+                && m.ignore_before.is_none()
+                && !(m.ai || m.reaction || m.cutscene || m.dont_interrupt_tb || m.player)
+                && !(m.rider || m.mount)
+                && m.s.executor.is_none()
+                && !(m.s.started || m.s.acted || m.s.finished || m.s.did_run)
+                && m.s.result == 0
+                && m.s.time_since_start.to_bits() == 0
         });
         if !ok {
             return Err(Desync(format!(
@@ -509,7 +562,12 @@ impl RoamInputs for Io<'_, '_> {
             r["k"] == "obs" && r["ev"] == "uc_run" && r["nested"] == false && by_controller(r)
         })?;
         let r = &self.d.trace.records[run];
-        if r["u"].as_str() != Some(uid.as_str()) || id(&r["c"]) != c {
+        // `unit.Commands.Run(cmd)`: not from the queue, the queue cleared.
+        if r["u"].as_str() != Some(uid.as_str())
+            || id(&r["c"]) != c
+            || r["fq"] != false
+            || r["ncq"] != false
+        {
             return Err(Desync(format!(
                 "the roaming move of {uid}: the recording runs {}",
                 describe(r)

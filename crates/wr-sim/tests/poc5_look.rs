@@ -427,6 +427,23 @@ fn missing_or_wrong_roaming_records_are_reported() {
             let at = roll_draw(recs);
             recs[at]["v"][0] = json!(recs[at]["v"][0].as_f64().unwrap() * 0.5);
         }),
+        // A draw's record unlike the sim's draw: its value, its arguments, its kind.
+        ("RollNextPoint's draws: the sim's", false, |recs| {
+            let at = roam_roll(recs) + 2;
+            recs[at]["v"] = json!(recs[at]["v"].as_f64().unwrap() + 0.25);
+        }),
+        ("RollNextPoint's draws: the sim's", false, |recs| {
+            let at = roam_roll(recs) + 2;
+            recs[at]["a"] = json!([3.0, 8.0, 999.0]);
+        }),
+        ("RollNextPoint's draws: the sim's", false, |recs| {
+            let at = roam_roll(recs) + 1;
+            recs[at]["v"][1] = json!(recs[at]["v"][1].as_f64().unwrap() * 0.5);
+        }),
+        ("RollNextPoint's draw at", false, |recs| {
+            let at = roam_roll(recs) + 1;
+            recs[at]["c"] = json!("pres");
+        }),
         // A roll the sim's controller didn't make (another frame, or an extra one).
         ("which the sim's didn't make", false, |recs| {
             let at = roam_roll(recs);
@@ -449,7 +466,7 @@ fn missing_or_wrong_roaming_records_are_reported() {
             let at = roam_step(recs);
             recs[at]["pos"][2] = json!(recs[at]["pos"][2].as_f64().unwrap() + 0.25);
         }),
-        ("the sleeping step of 5052: the sim's position", false, |recs| {
+        ("the sleeping step of 5052: the recording's is 5198's", false, |recs| {
             let at = roam_step(recs);
             recs[at]["u"] = json!("5198");
         }),
@@ -486,6 +503,24 @@ fn missing_or_wrong_roaming_records_are_reported() {
         ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
             let at = roam_run(recs) - 1;
             recs[at]["ap"] = json!("2|1000000|10");
+        }),
+        // Not a fresh `UnitMoveTo` (a cooldown time limit, a player's), or not `Run(cmd)`'s
+        // flags.
+        ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
+            let at = roam_run(recs) - 1;
+            recs[at]["ign_before"] = json!(1000);
+        }),
+        ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
+            let at = roam_run(recs) - 1;
+            recs[at]["player"] = json!(true);
+        }),
+        ("the roaming move of 5052: the recording runs", false, |recs| {
+            let at = roam_run(recs);
+            recs[at]["ncq"] = json!(true);
+        }),
+        ("the roaming move of 5052: the recording runs", false, |recs| {
+            let at = roam_run(recs);
+            recs[at]["fq"] = json!(true);
         }),
         ("the roaming move's uc_new: the recording has", false, |recs| {
             let at = roam_run(recs);
