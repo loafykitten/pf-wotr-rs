@@ -1,5 +1,15 @@
 # POC-5: physics queries (movement step 4)
 
+Status (2026-10-17, stream boxes): **box colliders are computed too.** How Unity hands a `BoxCollider` to PhysX is
+read from the player and checked against every probe: the static actor's pose is `TransformPoint(center)` (Unity's
+own hierarchy walk, ported and checked against the player on a million calls) with the GameObject's rotation, which
+PhysX normalises, and the half extents `max(|lossyScale * size * 0.5|, FLT_EPSILON)` ("Boxes", below). Unity's
+raycast also drops every hit at a distance not above zero (its post-filter). With the boxes' rotation and lossy
+scale recorded (`ph_col`), all 176,106 probe hits on a box are computed exactly where the answer doesn't hang on the
+pruner (169,050 before the tolerance below, 175,224 after), none wrong; of the 393,802 recorded `ag_phys` queries of
+every current capture, 25 fail closed (presentation code's, on two floor tiles in one plane or the pruner's
+culling; 840 of the table's captures failed closed on a box before), none wrong.
+
 Status (2026-10-16, stream S): **triangle meshes are computed too.** PhysX 4.1's BVH34 mesh raycast is ported from
 the player's NEON build and equals its own function on 26 million generated rays (12 million hits); with each
 mesh's transform recorded (`phys_probe`'s `ph_col`), every recorded query of `poc5-tb-121`, `-128` and `-129` that
@@ -31,6 +41,10 @@ used. The mask is `Layers.WalkableMask`: layers 0 (Default), 8 (Ground), 11 (Opt
   `queriesHitTriggers`); then `PxScene::raycast` (a virtual call) for the closest blocking hit, whose distance and
   position it copies unchanged into the `RaycastHit`. The managed side normalises the direction twice
   (`PhysicsScene.Raycast`, `Ray`); `(0, -1, 0)` stays itself.
+- Unity's query filter (`0x6bbcd0`/`0x6bbdac`, the filter object's vtable at `0x1683860`; the query's filter flags
+  `0xf`, `ePREFILTER | ePOSTFILTER` included): the pre-filter is the layer mask and the trigger rule; the post-filter
+  keeps a hit only when its distance is above zero (`fcmp` then `b.le`: zero and NaN dropped), so a ray that starts
+  inside a box, or on a surface, doesn't see it (stream boxes; `Physics.Raycast`'s documented behaviour).
 - PhysX's scene query (`NpSceneQueries`' `MultiQueryCallback`) tests the shapes whose (inflated) bounds the ray
   crosses, each with the distance shrunk to the closest hit so far, and keeps a blocking hit only when its distance is
   `<=` that distance (at first `max`). With one shape hit, the answer doesn't depend on the order. The height field's
@@ -95,7 +109,7 @@ to the terrain's actor; the caves have none).
 - `hf`: `raycast_heightField` with `HeightFieldTraceUtil::traceSegment` (the DDA over cells, both triangles per
   cell with the tess flag's rotation, holes, `enlarge` 1e-4, the 1.01 bounds inflation and the 10 m ray-start
   offset) and `faceHit` (distance `max(0, (p - origin) · dir)` in shape space, the point through the pose).
-- `boxes`: `raycast_box`. Not used by the queries yet (below).
+- `boxes`: `raycast_box`, Unity's `TransformPoint` and the box's pose and geometry ("Boxes", below).
 - `bv4` (stream S): the triangle mesh, below.
 - `query::Scene`: `raycast_down(origin, max, mask)` and `heuristic_disc_cast_down(origin, radius, max, mask)`, as
   the game calls them.
@@ -154,9 +168,9 @@ the file) and reports a difference.
 the closest hit so far, keeping a hit when `distance <= shrunk`. `Scene::raycast_down` runs every order of the
 shapes that can hit: the height field (a shorter ray can turn its miss into a hit) and each recorded mesh that hits
 the whole ray (a mesh's raycast only loses hits as the ray shortens: node culling and the leaf's test only tighten).
-A shape the pruner may skip (the ray not surely across its bounds by a tolerance of 1e-5 of the coordinates involved,
-the operands PhysX's own bounds round from, and the scene's extent, at which its tree nodes round) is tried both
-tested and skipped. All outcomes must agree, distance, point and shape, or the query fails closed (`Unsupported`):
+A shape the pruner may skip (the ray not surely across its bounds by a tolerance of 2e-6 of the coordinates involved,
+the operands PhysX's own bounds round from, and the scene's extent, at which its tree nodes round; 1e-5 until stream
+boxes, below) is tried both tested and skipped. All outcomes must agree, distance, point and shape, or the query fails closed (`Unsupported`):
 two shapes hit at the same distance, for instance.
 
 **Found in the player** (no symbols; `objdump -d` of `UnityPlayer.dylib`): `Gu::getRaycastFuncTable` returns
@@ -212,12 +226,102 @@ the open item above) and are presentation code's (critters', `ctx: "other"`), wh
 recording without reporting. Of the probes that hit a mesh, those not failing closed on a nearby box or an
 ambiguous order (two shapes within the pruner's tolerance) are exact, 51,552.
 
+## Boxes (stream boxes) [C, M]
+
+**What Unity hands PhysX for a static `BoxCollider`**, read from the arm64 player (`objdump -d` of
+`UnityPlayer.dylib`; the functions found from the box warning string and the icall table) after the probes had
+established it:
+
+- **The pose** [C]: `0x6aac44` (which the centre's setter `0x6b5554` calls; `0x6b53cc` is `GetGlobalCenter`, the same
+  `TransformPoint` alone) gets the GameObject's Transform, computes `Transform::TransformPoint(m_Center)` (`0x6744c0`)
+  and `Transform.rotation` (`0x679474`), and passes them to the shape's actor's `setGlobalPose` (the shape's vtable
+  `+0x90`, the actor's `+0xa0`). So the box's world centre is Unity's hierarchy walk, not the GameObject's position
+  plus its rotated, lossy-scaled centre, and the shape's local pose is the identity [I: with any other the probes'
+  last bits would differ]. PhysX normalises the pose (`PxQuat::getNormalized`, `1 / sqrt(((x² + y²) + z²) + w²)` times
+  each component, as `NpRigidStatic::setGlobalPose` does) [M: below].
+- **The geometry** [C]: `BoxCollider::Create` (`0x6b5404`) and `set_size` (`0x6b4db0`) take the half extents from
+  `0x6b5280` with the lossy scale (`0x675afc`) and `(1, 1, 1)`: `((lossyScale * 1) * m_Size) * 0.5`, its absolute
+  value (a negative one logs "BoxColliders does not support negative scale or size"), `fmaxnm` with `FLT_EPSILON`
+  (`0x34000000`); then a `PxBoxGeometry` (type 3).
+- **`TransformPoint`** [C, M]: per level from the GameObject up, `v = p * s`, then
+  `t + ((v + c0 vx) + (c1 vy + c2 vz))` with `c0..c2` the rotation matrix less the identity, each entry a difference
+  of two products (`qy (-2 qy) - qz (2 qz)`, ...: constants `(-2, 2, -2)`, `(2, -2, -2)`, `(-2, -2, 2)` times one
+  component), no fused multiply-add; `boxes::transform_point`. `transform_point(chain, 0)` is `Transform.position`:
+  it reproduces all 31,518 objects of `check-1`'s hierarchy dump in the static and UI scenes bit for bit, 28,848 of
+  them under a rotated or scaled ancestor (only `BaseMechanics`' animated units differ, 1,419 of its 4,335).
+
+**How the probes decided it** [M]. `poc5-tb-129`'s record has 1,797 probe hits on a box (on layers 0 and 8: the
+crusade floor tiles, the tilted `tower_wood_trash_*` boards with z scales 0.07 to 0.36, the market's carts and tents,
+three colliders on one GameObject, the fog-of-war walls scaled 10 x 4 x 0.1). With the recorded rotation and lossy
+scale, distance and point exact:
+
+| Pose and geometry | Exact of 1,797 |
+|---|---:|
+| the GameObject's position plus the rotated, lossy-scaled centre (PhysX's pose composition, Unity's managed quaternion or the recorded `localToWorldMatrix`), rotation as recorded | 1,544 |
+| the same with the rotation normalised as PhysX does (dividing instead: 1,545) | 1,566 |
+| **`TransformPoint(center)`, the rotation normalised, half extents from the lossy scale** | **1,797** |
+| the same, half extents from the local scale | 1,784 |
+| the same, rotation not normalised / normalised twice | 1,766 / 1,766 |
+
+The misses were the boxes tilted about several axes: each one's probes all became exact with one coordinate of its
+centre moved by one ulp (seven boxes) or, for one board, its rotation normalised. Across every current capture the
+probes hit a box 176,106 times; every one the scene query answers (175,224; the rest hang on the pruner, below) is
+exact, distance, point and collider.
+
+**Checked against the player** (`native_check::transform_point_and_box_extents_match_the_player`): `0x6744c0` called
+with a `TransformHierarchy` laid out as it reads it (fence 0x0, locals 0x18 as 48-byte `t, q, s`, parents 0x20; the
+transform's hierarchy 0x38 and index 0x40) on a million generated hierarchies (1 to 5 levels, identity, one-axis and
+arbitrary rotations, uniform, non-uniform, negative, tiny and subnormal scales, zeros of both signs) and points, and
+`0x6b5280` on a million sizes and scales (negative, zero, tiny, subnormal): **bit-identical**. Changing the sum's
+association or dropping the `FLT_EPSILON` clamp is caught.
+
+**Established for** (`BoxRuntime::established`; others keep the conservative test): a static box (the importer
+refuses a mesh or box collider under a `Rigidbody`, whose shape is posed relative to the body; none in the caves), its
+ancestors only translating (rotation `(0, 0, 0, 1)`, scale exactly one: every recorded box's; the code takes the same
+path under any hierarchy [I], but no probe covers one), its hierarchy placing the GameObject where the recording has
+it, a positive lossy scale (a negative one takes the same code [C], but no recorded box has one). In the caves 61
+boxes are computed; `Loot/Loot_1/luxery_chest_02_Collider` (a rotated ancestor; layer 10, outside the walkable mask)
+keeps the conservative test, and 26 recorded inactive or disabled (loot, interactions, Terendelev's scales, all layer
+10) are left out.
+
+**The importer** (`wr-import phys-pack --colliders`): each box keeps its local transforms from the root down (the
+scene's, which Unity loads unchanged) and, from its `ph_col` record (matched by scene, path, sibling path, type,
+centre and size: a GameObject can have several), the recorded rotation, lossy scale, position and layer; its world
+centre is `transform_point(chain, center)`. The driven replay checks a recording's box `ph_col` against the file as it
+does the meshes' (`World::check_recorded_colliders`); every capture with `phys_probe` (`-112` onward, 98 runs) records
+the same boxes and meshes as `-129`'s record.
+
+**The scene query.** A box with its recorded transform joins the meshes: a candidate when it hits the whole ray
+(`raycast_box` only loses hits as the ray shortens: `max` is only compared with), tried under every sign of its
+recorded zeros, its bounds (the box's exact AABB under the `f32` pose) deciding whether the pruner surely tests it.
+Floor tiles lie a few millimetres above the terrain, so a terrain hit found first shrinks the ray to end just below a
+tile's top: with stream S's tolerance (1e-5 of the magnitudes involved, about 7 mm here) 85 `ag_phys` records and
+16,464 probes hung on the pruner. The tolerance is now 2e-6 of the same sum [I]: the pruner's rounding is a few `f32`
+ulps of the coordinates it works with (node centres and extents from bounds, the segment's centre and half-diagonal,
+leaf bounds from the pose and extents, which PhysX also inflates), and 2e-6 of the summed magnitudes is still over 16
+ulps of each; it leaves 9 and 10,290, and nothing wrong. What remains is genuine: two floor tiles whose tops lie in
+one plane (16 records "tie": the pruner's order picks the collider, the distance and point the same), shapes a few
+micrometres apart (two cave meshes, a mesh under a tile), or the pruner's culling within the tolerance.
+
+**Against the recordings** (`tests::every_recorded_query_is_computed_exactly`; "near a box": a query the file without
+the boxes' transforms answered `Unverified` for a box):
+
+| Captures | Runs | Queries (near a box) | Exact (box hits) | Wrong | Failed closed |
+|---|---:|---:|---:|---:|---:|
+| `-95`, `-96`, `-100` to `-105`, `-109`, `-111` to `-118`, `-120` to `-135` | 155 | 393,802 (4,752) | 393,777 (3,307) | 0 | 25 (16 ties, 9 the pruner; critters' and `other`) |
+| their probes (`-112` onward) | 98 | 658,854 (298,606) | 648,564 (175,224 of 176,106 box hits) | 0 | 10,290 (the pruner or order) |
+| the table's captures before (stream S, `-95` to `-129`) | 129 | 279,186 | 278,346 | 0 | 840 (a box) |
+| their probes before | 72 | 484,056 | 176,184 | 0 | 307,872 (301,968 a box) |
+
+The test now fails on any sim query that fails closed but presentation code's (critters', `other`), which the driven
+replay takes from the recording.
+
 ## Failing closed
 
 `Scene` answers only what is established; otherwise a `QueryError` the caller reports:
 
-- `Unverified { shape }`: the ray may touch a box, a mesh without a recorded transform or another collider within
-  `[0, max]`. The test is in `f64` on
+- `Unverified { shape }`: the ray may touch a box or a mesh without a recorded transform (or one the mapping isn't
+  established for), or another collider, within `[0, max]`. The test is in `f64` on
   the collider's geometry under its `localToWorldMatrix`, with a slack along the ray and around the edges of 1 mm plus
   a millionth of the coordinates' and distance's magnitude (`f32` rounding in PhysX: a box 1 cm beyond a 1,000 km ray
   rounds into it) and of the game's own `f32` placement of the shape (a millionth of the translation's and each scaled
@@ -232,14 +336,11 @@ ambiguous order (two shapes within the pruner's tolerance) are exact, 51,552.
   rays, grazing ones and rays ending at the hit included). Spheres, capsules and controllers count as the sphere of
   radius `(r + h/2)` times the largest scale, convex meshes as their grown bounds. The importer refuses a sheared
   transform (a rotated child of a non-uniformly scaled parent: its matrix-transformed shape needn't enclose what Unity
-  hands PhysX); none occurs here. PhysX's per-shape box raycast is ported and exact, but how Unity turns a
-  `BoxCollider` into a `PxBoxGeometry` and shape pose (centre, lossy scale, its tolerance for "unscaled") isn't
-  verified (`ph_probe`'s 1,797 box hits could settle it as they settled the meshes). A mesh with a recorded transform
-  is computed (above).
+  hands PhysX); none occurs here. A mesh or box with a recorded transform is computed (above).
 - `Unsupported`: a trigger collider in the mask (`queriesHitTriggers`), the `*_!Visual` layer ambiguity above (a
   recorded mesh has its run-time layer instead), more than one height field in the mask, an answer that depends on
-  the scene query's shape order, the pruner's culling or the sign of a recorded zero (above), more than 5 shapes that
-  can hit, a non-finite origin or negative distance.
+  the scene query's shape order, the pruner's culling or the sign of a recorded zero (above; "shapes tie" when only
+  the collider depends on it), more than 5 shapes that can hit, a non-finite origin or negative distance.
 
 ## The file
 
@@ -248,7 +349,9 @@ fixtures/captures/oracle/poc5-tb-129/fixtures/tb-lizard/record.trace.jsonl.gz` w
 (header as the nav file's: magic, version, length, FNV-1a; postcard payload; the height samples packed, materials
 stored once when uniform). Format 2 (stream S): every shape's sibling path (names repeat: three `cave_wall_01`s; the
 driven replay now matches a hit's collider by it exactly), each mesh's decoded BV4 mesh and recorded transform:
-9.1 MB. Without `--colliders` the meshes keep the conservative test. It isn't in `scripts/scene-cache.sh` yet (other
+9.1 MB. Format 3 (stream boxes): each box's local transforms from the root down and its recorded transform (world
+centre, rotation, lossy scale, position, layer). Without `--colliders` the meshes and boxes keep the conservative
+test. It isn't in `scripts/scene-cache.sh` yet (other
 areas may hit the refusals above, and need a recording with `phys_probe`).
 
 ## For the sim
@@ -258,8 +361,8 @@ areas may hit the refusals above, and need a recording with `phys_probe`).
 on the area's file (`Scene::owned` keeps it), every recorded `ag_phys` a check; a `QueryError` is reported and the
 recorded answer taken. Stream S's hooks (`combat/replay/nav.rs`): a hit's collider is the shape whose name and
 sibling path the record names (it was a name that had to be unique); a recording with `phys_probe` has its `ph_col`
-checked against the file's recorded transforms (`World::check_recorded_meshes`), reported as "the recorded colliders
-(ph_col) aren't the physics file's" (a damage case in `poc5_agent.rs`).
+checked against the file's recorded transforms (`World::check_recorded_colliders`, the boxes' too since stream
+boxes), reported as "the recorded colliders (ph_col) aren't the physics file's" (a damage case in `poc5_agent.rs`).
 
 On every run of `-121`, `-128` and `-129` no mesh is reported any more: `-129` is valid on all three, `-121` reports
 only its pre-`origin` `other` records, `-128` only the place-on-ground view's difference (a capture before
@@ -270,9 +373,10 @@ only its pre-`origin` `other` records, `-128` only the place-on-ground view's di
 
 - Colliders that aren't in the static scenes: units (layer 9, outside the mask), spawned objects, and map objects
   whose colliders change state; a runtime collider on a walkable layer would be missed. `ph_col` (below) lists them.
-- Boxes, meshes without a recorded transform (above), capsules, spheres, controllers, convex meshes, cooking (a
-  mesh without baked data), the BVH33 midphase, any-hit and multiple-hit mesh queries, Unity's world transform and
-  `lossyScale` (recorded instead), the pruner's tree and order (every order tried instead).
+- Meshes and boxes without a recorded transform (above), boxes under a rotated or scaled ancestor or with a negative
+  scale, colliders under a `Rigidbody`, capsules, spheres, controllers, convex meshes, cooking (a mesh without baked
+  data), the BVH33 midphase, any-hit and multiple-hit mesh queries, Unity's world rotation and `lossyScale` (recorded
+  instead; `TransformPoint` is ported), the pruner's tree and order (every order tried instead).
 - The terrain's pose other than the origin, holes, the geometry's double-sided flag (no effect on rays from above).
 - The `*_!Visual` layer move's rule.
 
@@ -302,7 +406,8 @@ cargo run --release -p wr-import -- phys-pack --area prologue_caves_1 --guid bad
   --colliders fixtures/captures/oracle/poc5-tb-129/fixtures/tb-lizard/record.trace.jsonl.gz
 WR_PHYS_CAPTURES=poc5-tb-100,poc5-tb-101,poc5-tb-102,poc5-tb-103,poc5-tb-104,poc5-tb-105,poc5-tb-121,poc5-tb-128,poc5-tb-129 \
   scripts/heavy.sh cargo test --release -p wr-phys -- --ignored --nocapture every_recorded
-# The native checks (a million rays each, 26 million on the meshes; the mutations; every f32 through frecpe):
+# The native checks (a million rays each, 26 million on the meshes; the mutations; every f32 through frecpe;
+# TransformPoint and the box extents, a million each):
 WR_PHYS_MUTATION_RAYS=100000 scripts/heavy.sh cargo test --release -p wr-phys -- --ignored --nocapture \
   --test-threads=1 native_check
 ```

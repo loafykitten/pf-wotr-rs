@@ -5,13 +5,15 @@
 //! Unity's native `Raycast` passes the ray to `PxScene::raycast` with hit flags
 //! `ePOSITION | eNORMAL | eUV` (`eMESH_BOTH_SIDES` only with `Physics.queriesHitBackfaces`,
 //! false by default) and a filter that keeps the shapes whose layer is in the mask (and
-//! triggers per `queriesHitTriggers`); a +inf distance becomes `FLT_MAX`. PhysX then tests the
+//! triggers per `queriesHitTriggers`), and a post-filter that drops every hit at a distance not
+//! above zero (`Physics.Raycast` doesn't see a collider the ray starts inside); a +inf distance
+//! becomes `FLT_MAX`. PhysX then tests the
 //! shapes whose bounds the ray crosses, in its pruner's order, each with the distance shrunk to
 //! the closest hit so far, keeping a hit when its distance is `<=` that distance. The pruner's
 //! order isn't modelled: the query is run in every order of the shapes that can hit (the height
-//! field, which a shorter ray can make hit, and each mesh that hits the whole ray: a mesh's
-//! raycast only loses hits as the ray shortens), and a query whose answer depends on the order
-//! fails closed, as does any query that may touch a collider kind not verified yet.
+//! field, which a shorter ray can make hit, and each mesh or box that hits the whole ray: their
+//! raycasts only lose hits as the ray shortens), and a query whose answer depends on the order
+//! fails closed, as does any query that may touch a collider not verified yet.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -74,6 +76,16 @@ enum Prepared {
         lo: [f64; 3],
         hi: [f64; 3],
     },
+    /// A box with its recorded transform: `raycast_box` on the pose and geometry Unity hands
+    /// PhysX, under every sign of the recorded zeros.
+    BoxExact {
+        poses: Vec<Transform>,
+        half: Vec3,
+        layer: u32,
+        lo: [f64; 3],
+        hi: [f64; 3],
+        operands: f64,
+    },
     /// A mesh with its recorded transform: the BV4 raycast as the player runs it, under every
     /// sign of the recorded zeros (the recording doesn't keep them).
     MeshExact {
@@ -108,11 +120,12 @@ fn shape_extent(s: &crate::Shape, p: &Prepared) -> f64 {
         (
             Prepared::HeightField { lo, hi, .. }
             | Prepared::MeshExact { lo, hi, .. }
+            | Prepared::BoxExact { lo, hi, .. }
             | Prepared::Mesh { lo, hi, .. }
             | Prepared::Other { lo, hi },
             _,
         ) => m3(lo).max(m3(hi)),
-        (Prepared::Box { .. }, ShapeKind::Box { local_to_world: m, center, size }) => {
+        (Prepared::Box { .. }, ShapeKind::Box { local_to_world: m, center, size, .. }) => {
             let local =
                 center.iter().zip(size).map(|(c, h)| f64::from(c.abs() + h.abs())).sum::<f64>();
             let basis = m[..12].iter().fold(0.0f64, |x, y| x.max(f64::from(y.abs())));
@@ -180,7 +193,28 @@ impl<'w> Scene<'w> {
                         * 3.0;
                     Prepared::HeightField { bounds, lo, hi, operands }
                 }
-                ShapeKind::Box { local_to_world, center, size } => {
+                ShapeKind::Box { center, size, chain, runtime: Some(r), .. }
+                    if r.established(chain, *center, *size).is_ok() =>
+                {
+                    // `TransformPoint(center)` and the rotation as PhysX normalises it.
+                    let poses: Vec<Transform> = zero_sign_variants(r.world_center, r.rotation)
+                        .into_iter()
+                        .map(|t| Transform {
+                            q: crate::boxes::px_normalized([t.q.x, t.q.y, t.q.z, t.q.w]),
+                            p: t.p,
+                        })
+                        .collect();
+                    let half = r.half_extents(*size);
+                    let h = f64x3(half.to_array());
+                    let corners = (0..8).map(|c| {
+                        let pick = |k: usize| if c >> k & 1 == 0 { -h[k] } else { h[k] };
+                        place(poses[0], [1.0; 3], [pick(0), pick(1), pick(2)])
+                    });
+                    let (lo, hi) = aabb(corners);
+                    let operands = 3.0 * abs_max(&half.to_array()) + 3.0 * abs_max(&r.world_center);
+                    Prepared::BoxExact { poses, half, layer: r.layer, lo, hi, operands }
+                }
+                ShapeKind::Box { local_to_world, center, size, .. } => {
                     let m = M4::from_f32(local_to_world);
                     let center = f64x3(*center);
                     let half = f64x3(*size).map(|x| x.abs() * 0.5);
@@ -296,7 +330,9 @@ impl<'w> Scene<'w> {
         // hit) and each mesh that hits the whole ray.
         let mut candidates: Vec<usize> = Vec::new();
         for (i, (s, p)) in self.world.shapes.iter().zip(&self.prepared).enumerate() {
-            let inside = if let Prepared::MeshExact { layer, .. } = p {
+            let inside = if let Prepared::MeshExact { layer, .. }
+            | Prepared::BoxExact { layer, .. } = p
+            {
                 // The recorded layer, after the load's move.
                 in_mask(*layer, mask)
             } else {
@@ -320,7 +356,7 @@ impl<'w> Scene<'w> {
             }
             match p {
                 Prepared::HeightField { .. } => candidates.push(i),
-                Prepared::MeshExact { .. } => {
+                Prepared::MeshExact { .. } | Prepared::BoxExact { .. } => {
                     if self.shape_hit(i, o, dir, max)?.is_some() {
                         candidates.push(i);
                     }
@@ -349,10 +385,18 @@ impl<'w> Scene<'w> {
             self.orders(&order, o, dir, max, None, &mut outcomes)?;
             more = next_permutation(&mut order);
         }
+        let place = |h: &Option<RaycastHit>| h.map(|h| key(Some((h.distance, h.point))));
         match outcomes.split_first() {
             None => Ok(None),
             Some((a, rest)) => match rest.iter().find(|b| !same_hit(*a, **b)) {
                 None => Ok(*a),
+                // The same distance and point from different shapes (two boxes' faces in one
+                // plane): the pruner's order decides only the collider.
+                Some(b) if outcomes.iter().all(|x| place(x) == place(a)) => {
+                    Err(QueryError::Unsupported(format!(
+                        "shapes tie (the scene query's shape order decides the collider: {a:?} or {b:?})"
+                    )))
+                }
                 Some(b) => Err(QueryError::Unsupported(format!(
                     "the scene query's shape order or pruning decides the hit ({a:?} or {b:?})"
                 ))),
@@ -381,7 +425,9 @@ impl<'w> Scene<'w> {
             return Ok(());
         };
         match self.shape_hit(i, o, dir, shrunk)? {
-            Some((distance, point)) if distance <= shrunk => {
+            // Unity's post-filter (the player's `0x6bbdac`) drops a hit whose distance isn't
+            // above zero (a ray from inside a box, or from on a surface).
+            Some((distance, point)) if distance <= shrunk && distance > 0.0 => {
                 let hit = Some(RaycastHit { distance, point, shape: i });
                 self.orders(rest, o, dir, distance, hit, out)?;
                 if !self.surely_tested(i, o, shrunk) {
@@ -402,7 +448,8 @@ impl<'w> Scene<'w> {
     fn surely_tested(&self, i: usize, o: Vec3, max: f32) -> bool {
         let (lo, hi, operands) = match &self.prepared[i] {
             Prepared::HeightField { lo, hi, operands, .. }
-            | Prepared::MeshExact { lo, hi, operands, .. } => (lo, hi, *operands),
+            | Prepared::MeshExact { lo, hi, operands, .. }
+            | Prepared::BoxExact { lo, hi, operands, .. } => (lo, hi, *operands),
             _ => return false,
         };
         let o = f64x3(o.to_array());
@@ -410,15 +457,15 @@ impl<'w> Scene<'w> {
         let size = lo.iter().chain(hi).chain(&o).fold(max, |a, x| a.max(x.abs()));
         // The pruner's tree nodes enclose other shapes: their rounding is at the scene's scale
         // (the static colliders of the area's scenes; others aren't modelled).
-        let tol = 1e-5 * (size + operands + self.extent) + 1e-5;
+        let tol = 2e-6 * (size + operands + self.extent) + 1e-5;
         (0..3).all(|k| k == 1 || (lo[k] + tol < o[k] && o[k] < hi[k] - tol))
             && o[1] - max + tol <= hi[1]
             && lo[1] <= o[1] - tol
     }
 
     /// Shape `i`'s raycast as `MultiQueryCallback` makes it, `max` the shrunk distance: the
-    /// height field's or the mesh's under every sign of its recorded zeros (all equal, or the
-    /// query fails closed).
+    /// height field's, or the mesh's or box's under every sign of its recorded zeros (all
+    /// equal, or the query fails closed).
     fn shape_hit(
         &self,
         i: usize,
@@ -434,27 +481,21 @@ impl<'w> Scene<'w> {
                     .map(|h| (h.distance, h.position.to_array())))
             }
             (ShapeKind::Mesh { mesh, .. }, Prepared::MeshExact { poses, scale, .. }) => {
-                let mut first: Option<Option<(f32, [f32; 3])>> = None;
-                for pose in poses {
-                    // Unity's hit flags: `ePOSITION | eNORMAL | eUV`; the geometry single-sided.
-                    let h = crate::bv4::raycast_triangle_mesh(
-                        mesh, scale, false, *pose, o, dir, max, HIT_FLAGS,
+                // Unity's hit flags: `ePOSITION | eNORMAL | eUV`; the geometry single-sided.
+                same_under_zero_signs(&s.name, poses, |pose| {
+                    crate::bv4::raycast_triangle_mesh(
+                        mesh, scale, false, pose, o, dir, max, HIT_FLAGS,
                     )
-                    .map(|h| (h.distance, h.position.to_array()));
-                    match first {
-                        None => first = Some(h),
-                        Some(f) if key(f) == key(h) => {}
-                        Some(_) => {
-                            return Err(QueryError::Unsupported(format!(
-                                "the sign of a zero in {}'s recorded transform decides the hit",
-                                s.name
-                            )));
-                        }
-                    }
-                }
-                Ok(first.flatten())
+                    .map(|h| (h.distance, h.position.to_array()))
+                })
             }
-            _ => unreachable!("only height fields and recorded meshes are computed"),
+            (ShapeKind::Box { .. }, Prepared::BoxExact { poses, half, .. }) => {
+                same_under_zero_signs(&s.name, poses, |pose| {
+                    crate::boxes::raycast_box(*half, pose, o, dir, max)
+                        .map(|h| (h.distance, h.position.to_array()))
+                })
+            }
+            _ => unreachable!("only height fields and recorded meshes and boxes are computed"),
         }
     }
 
@@ -531,6 +572,29 @@ fn aabb(points: impl Iterator<Item = [f64; 3]>) -> ([f64; 3], [f64; 3]) {
     (lo, hi)
 }
 
+/// A shape's raycast under each of its poses (the signs of its recorded zeros): all the same,
+/// bit for bit, or the query fails closed.
+fn same_under_zero_signs(
+    name: &str,
+    poses: &[Transform],
+    mut hit: impl FnMut(Transform) -> Option<(f32, [f32; 3])>,
+) -> Result<Option<(f32, [f32; 3])>, QueryError> {
+    let mut first: Option<Option<(f32, [f32; 3])>> = None;
+    for pose in poses {
+        let h = hit(*pose);
+        match first {
+            None => first = Some(h),
+            Some(f) if key(f) == key(h) => {}
+            Some(_) => {
+                return Err(QueryError::Unsupported(format!(
+                    "the sign of a zero in {name}'s recorded transform decides the hit"
+                )));
+            }
+        }
+    }
+    Ok(first.flatten())
+}
+
 /// A hit compared bit for bit (the shape too: the caller checks the collider).
 fn key(h: Option<(f32, [f32; 3])>) -> Option<(u32, [u32; 3])> {
     h.map(|(d, p)| (d.to_bits(), p.map(f32::to_bits)))
@@ -574,7 +638,9 @@ pub(crate) fn zero_sign_variants(position: [f32; 3], rotation: [f32; 4]) -> Vec<
 fn may_touch(p: &Prepared, o: [f64; 3], max: f64) -> bool {
     const DOWN: [f64; 3] = [0.0, -1.0, 0.0];
     match p {
-        Prepared::HeightField { .. } | Prepared::MeshExact { .. } => false,
+        Prepared::HeightField { .. } | Prepared::MeshExact { .. } | Prepared::BoxExact { .. } => {
+            false
+        }
         Prepared::Box { m, center, half } => {
             conservative::ray_hits_box(o, DOWN, max, m, *center, *half)
         }

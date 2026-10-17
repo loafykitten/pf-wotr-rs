@@ -3,9 +3,10 @@
 //!
 //! What is exact: the terrain (`TerrainCollider`, a PhysX height field), whose raycast is a port
 //! of `raycast_heightField` checked against the player's own function, and whose construction
-//! from the `TerrainData` is checked against every recorded query. Boxes, triangle meshes and
-//! the other collider kinds are kept with their geometry but not yet verified against the game
-//! (no recorded query reaches one): a query that may touch one fails closed with
+//! from the `TerrainData` is checked against every recorded query; triangle meshes (the BV4
+//! raycast) and boxes with the transforms a recording holds for them (`ph_col`). Other collider
+//! kinds, and meshes and boxes without a recorded transform, are kept with their geometry but
+//! not verified against the game: a query that may touch one fails closed with
 //! [`QueryError::Unverified`] instead of guessing. `docs/poc5/physics.md` has the details.
 //!
 //! An area's colliders reach the sim through the physics file ([`PhysFile`]), which
@@ -39,7 +40,7 @@ pub use query::{QueryError, RaycastHit};
 /// File magic: `WRPHYS`, then NULs and the format generation.
 pub const MAGIC: [u8; 8] = *b"WRPHYS\0\x01";
 /// Bumped whenever [`PhysFile`] or anything it holds changes incompatibly.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 const HEADER_LEN: usize = 32;
 
 /// An area's colliders.
@@ -80,8 +81,16 @@ pub struct Shape {
 pub enum ShapeKind {
     /// A `TerrainCollider`: the height field and the actor's pose.
     HeightField { pose: px::Transform, field: hf::HeightField },
-    /// A `BoxCollider` (`center`, `size`) under its GameObject's `localToWorldMatrix`.
-    Box { local_to_world: [f32; 16], center: [f32; 3], size: [f32; 3] },
+    /// A `BoxCollider` (`center`, `size`) under its GameObject's `localToWorldMatrix`, the
+    /// GameObject's local transforms from the root down (its own last), and with `runtime`
+    /// the transform the game was recorded holding, which the queries use.
+    Box {
+        local_to_world: [f32; 16],
+        center: [f32; 3],
+        size: [f32; 3],
+        chain: Vec<boxes::LocalTrs>,
+        runtime: Option<boxes::BoxRuntime>,
+    },
     /// A non-convex `MeshCollider`: the BVH34 mesh PhysX cooked (the mesh's
     /// `m_BakedTriangleCollisionMesh`) under the GameObject's transform: its
     /// `localToWorldMatrix`, and its world pose and lossy scale as the importer computes them;
@@ -117,11 +126,11 @@ pub struct MeshRuntime {
     pub source: String,
 }
 
-/// A mesh collider as a recording names it (observer `phys_probe`'s `ph_col`), to check a
-/// physics file's recorded transforms against another run's.
+/// A mesh or box collider as a recording names it (observer `phys_probe`'s `ph_col`), to
+/// check a physics file's recorded transforms against another run's.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordedMesh {
-    /// `scene:path (MeshCollider)`, as the importer names shapes.
+pub struct RecordedCollider {
+    /// `scene:path (MeshCollider)` or `(BoxCollider)`, as the importer names shapes.
     pub name: String,
     pub sibling_path: Vec<u32>,
     /// Active in the hierarchy and enabled.
@@ -131,64 +140,91 @@ pub struct RecordedMesh {
     pub rotation: [f32; 4],
     pub lossy_scale: [f32; 3],
     pub trigger: bool,
-    pub convex: bool,
-    /// `MeshCollider.cookingOptions`.
-    pub cooking: i64,
+    pub kind: RecordedKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordedKind {
+    /// `MeshCollider.convex` and `.cookingOptions`.
+    Mesh { convex: bool, cooking: i64 },
+    /// `BoxCollider.center` and `.size` (a GameObject can have several boxes).
+    Box { center: [f32; 3], size: [f32; 3] },
+}
+
+/// Bit-equal, zeros of either sign equal (the recording doesn't keep a zero's sign).
+fn same_bits(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits() || (*x == 0.0 && *y == 0.0))
+}
+
+impl Shape {
+    /// The recorded collider is this shape (name, sibling path, and a box's centre and size).
+    fn is_recorded(&self, c: &RecordedCollider) -> bool {
+        c.name == self.name
+            && c.sibling_path == self.sibling_path
+            && match (&self.kind, &c.kind) {
+                (ShapeKind::Mesh { .. }, RecordedKind::Mesh { .. }) => true,
+                (
+                    ShapeKind::Box { center, size, .. },
+                    RecordedKind::Box { center: rc, size: rs },
+                ) => same_bits(center, rc) && same_bits(size, rs),
+                _ => false,
+            }
+    }
 }
 
 impl World {
-    /// The recording's mesh colliders against the meshes' recorded transforms: each mesh with
-    /// one is recorded exactly once, present, on its layer, with its transform (zeros' signs
-    /// aside, which the recording doesn't keep), its trigger flag, non-convex and with the
-    /// baked mesh's cooking options; and every present mesh collider of the world's scenes is
-    /// one of its shapes (the units' colliders, in other scenes, aren't modelled).
-    pub fn check_recorded_meshes(&self, recorded: &[RecordedMesh]) -> Result<(), String> {
+    /// The recording's mesh and box colliders against the shapes' recorded transforms: each
+    /// shape with one is recorded exactly once, present, on its layer, with its transform
+    /// (zeros' signs aside, which the recording doesn't keep) and trigger flag (a mesh
+    /// non-convex with the baked mesh's cooking options); and every present mesh or box
+    /// collider of the world's scenes is one of its shapes (the units' colliders, in other
+    /// scenes, aren't modelled).
+    pub fn check_recorded_colliders(&self, recorded: &[RecordedCollider]) -> Result<(), String> {
         for s in &self.shapes {
-            if let ShapeKind::Mesh { runtime: Some(_), .. } = s.kind {
-                let n = recorded
-                    .iter()
-                    .filter(|c| c.name == s.name && c.sibling_path == s.sibling_path)
-                    .count();
+            if matches!(
+                s.kind,
+                ShapeKind::Mesh { runtime: Some(_), .. } | ShapeKind::Box { runtime: Some(_), .. }
+            ) {
+                let n = recorded.iter().filter(|c| s.is_recorded(c)).count();
                 if n != 1 {
                     return Err(format!("{} {:?}: recorded {n} times", s.name, s.sibling_path));
                 }
             }
         }
-        let same = |a: &[f32], b: &[f32]| {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b)
-                    .all(|(x, y)| x.to_bits() == y.to_bits() || (*x == 0.0 && *y == 0.0))
-        };
         let scene = |name: &str| name.split(':').next().unwrap_or("").to_owned();
         let scenes: std::collections::HashSet<String> =
             self.shapes.iter().map(|s| scene(&s.name)).collect();
         for c in recorded.iter().filter(|c| scenes.contains(&scene(&c.name))) {
-            let shape =
-                self.shapes.iter().find(|s| s.name == c.name && s.sibling_path == c.sibling_path);
-            match shape.map(|s| (s, &s.kind)) {
-                None if c.present => {
-                    return Err(format!(
-                        "{} {:?}: not in the physics file",
-                        c.name, c.sibling_path
-                    ));
-                }
-                Some((s, ShapeKind::Mesh { runtime: Some(r), .. }))
-                    if !c.present
+            let shape = self.shapes.iter().find(|s| s.is_recorded(c));
+            let differs = |layer: u32, position: &[f32], rotation: &[f32], lossy: &[f32]| {
+                !c.present
+                    || c.layer != layer
+                    || !same_bits(&c.position, position)
+                    || !same_bits(&c.rotation, rotation)
+                    || !same_bits(&c.lossy_scale, lossy)
+            };
+            let bad = match shape.map(|s| (s, &s.kind)) {
+                None => c.present.then(|| "not in the physics file".to_owned()),
+                Some((s, ShapeKind::Mesh { runtime: Some(r), .. })) => {
+                    (differs(r.layer, &r.position, &r.rotation, &r.lossy_scale)
                         || c.trigger != s.is_trigger
-                        || c.convex
-                        || c.cooking != 30
-                        || c.layer != r.layer
-                        || !same(&c.position, &r.position)
-                        || !same(&c.rotation, &r.rotation)
-                        || !same(&c.lossy_scale, &r.lossy_scale) =>
-                {
-                    return Err(format!(
-                        "{} {:?}: recorded {c:?}, the physics file's (from {}) {r:?}",
-                        c.name, c.sibling_path, r.source
-                    ));
+                        || c.kind != RecordedKind::Mesh { convex: false, cooking: 30 })
+                    .then(|| {
+                        format!("recorded {c:?}, the physics file's (from {}) {r:?}", r.source)
+                    })
                 }
-                _ => {}
+                Some((s, ShapeKind::Box { runtime: Some(r), .. })) => {
+                    (differs(r.layer, &r.position, &r.rotation, &r.lossy_scale)
+                        || c.trigger != s.is_trigger)
+                        .then(|| {
+                            format!("recorded {c:?}, the physics file's (from {}) {r:?}", r.source)
+                        })
+                }
+                _ => None,
+            };
+            if let Some(e) = bad {
+                return Err(format!("{} {:?}: {e}", c.name, c.sibling_path));
             }
         }
         Ok(())
@@ -319,7 +355,28 @@ impl World {
                         ensure!(r.layer < 32, "{}: recorded layer {}", s.name, r.layer);
                     }
                 }
-                ShapeKind::Box { .. } | ShapeKind::Other { .. } => {}
+                ShapeKind::Box { chain, runtime, .. } => {
+                    if let Some(r) = runtime {
+                        let all = r
+                            .world_center
+                            .iter()
+                            .chain(&r.rotation)
+                            .chain(&r.lossy_scale)
+                            .chain(&r.position);
+                        ensure!(
+                            all.clone().all(|x| x.is_finite()),
+                            "{}: a recorded transform that isn't finite",
+                            s.name
+                        );
+                        ensure!(
+                            !chain.is_empty(),
+                            "{}: a recorded box without its transforms",
+                            s.name
+                        );
+                        ensure!(r.layer < 32, "{}: recorded layer {}", s.name, r.layer);
+                    }
+                }
+                ShapeKind::Other { .. } => {}
             }
         }
         Ok(())

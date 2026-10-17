@@ -584,6 +584,24 @@ impl SceneData {
         out
     }
 
+    /// Whether `go` or one of its ancestors has a component of class `class`.
+    #[must_use]
+    pub fn in_parents(&self, go: i64, class: &str) -> bool {
+        let mut t = self.go_transform.get(&go).copied();
+        let mut visited = HashSet::new();
+        while let Some(tr) = t {
+            if !visited.insert(tr) {
+                break;
+            }
+            let Some((g, parent, _)) = self.transforms.get(&tr) else { break };
+            if self.components_of(*g).iter().any(|(c, _)| *c == class) {
+                return true;
+            }
+            t = *parent;
+        }
+        false
+    }
+
     /// Counts components by class name.
     #[must_use]
     pub fn class_counts(&self) -> BTreeMap<String, usize> {
