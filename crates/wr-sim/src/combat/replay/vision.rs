@@ -157,7 +157,15 @@ impl Driver<'_> {
     pub(super) fn vis_start(&mut self, w: &mut World, declared: &[&str]) {
         let trace = self.trace;
         let has_vis = trace.records.iter().any(|r| r["k"] == "obs" && r["ev"] == "vis");
-        if !declared.contains(&"engage") || !has_vis {
+        if !declared.contains(&"engage") {
+            return;
+        }
+        if !has_vis {
+            // (The memory observer needs the vision records; older captures have neither.)
+            if declared.contains(&"memory") {
+                w.coverage
+                    .unsupported("driven replay: vision: a recording without its vis records");
+            }
             return;
         }
         let g = match load_geometry(w) {

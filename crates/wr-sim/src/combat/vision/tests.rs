@@ -400,3 +400,19 @@ fn a_cache_tick_that_doesnt_clear_tells_the_radius_of_a_cache_from_before_the_wi
     assert_eq!(v.clear_if_needed(&wv, O), Some([0.0; 3]));
     assert!(v.caches[&O].known);
 }
+
+#[test]
+fn a_recorded_clear_is_refused_when_the_caches_sample_and_radius_say_it_doesnt_clear() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    // A tick on a cache nobody has read yet: undecided, a clear may be recorded.
+    assert_eq!(v.clear_if_needed(&wv, O), None);
+    assert_eq!(v.caches[&O].radius, Some(11.7));
+    v.pending.push_back(miss(&wv, O, T, [0.1, 0.0, 0.0], true));
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Value(true)));
+    // Sample and radius known, the owner within 0.5 m: the next tick decides it doesn't clear.
+    assert_eq!(v.clear_if_needed(&wv, O), None);
+    assert!(v.adopt_clear(&wv, O, [0.0; 3]).is_err());
+}

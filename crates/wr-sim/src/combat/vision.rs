@@ -85,6 +85,9 @@ pub struct SightCache {
     pub sample: Option<V3>,
     /// `m_LastVisionRadius`.
     pub radius: Option<f32>,
+    /// A cache not known yet: its owner's last controller tick could tell it didn't clear (the
+    /// sample and the radius were known then and neither moved), so a recorded clear is wrong.
+    pub decided: bool,
     pub entries: HashMap<EntityIdx, Entry>,
 }
 
@@ -220,7 +223,7 @@ impl Vision {
     /// Clears it and returns the position it clears at (the owner's, what WrathOracle's
     /// `los_clear` writes). A cache not known yet isn't decided here (the recording's clear is).
     pub fn clear_if_needed(&mut self, vw: &dyn VisionWorld, u: EntityIdx) -> Option<V3> {
-        let c = self.caches.get_mut(&u)?;
+        let c = self.caches.entry(u).or_default();
         let pos = vw.position(u);
         let radius = vw.radius(u);
         let moved = c.sample.is_some_and(|s| sqr_distance_2d(pos, s) >= MAX_POSITION_ERROR2);
@@ -229,6 +232,7 @@ impl Vision {
         // `m_LastVisionRadius` of a cache not cleared in the window is unknown until a controller
         // tick leaves it: it then equals the owner's radius.
         let radius_changed = c.radius.is_some_and(|r| r != radius);
+        c.decided = !c.known && c.sample.is_some() && c.radius.is_some();
         if moved || radius_changed {
             c.entries.clear();
             c.sample = Some(pos);
@@ -260,6 +264,11 @@ impl Vision {
         }
         let radius = vw.radius(u);
         let c = self.caches.entry(u).or_default();
+        if c.decided {
+            return Err(format!(
+                "a recorded clear of {u:?}, whose sample and radius say it doesn't clear"
+            ));
+        }
         c.entries.clear();
         c.sample = Some(at);
         c.radius = Some(radius);
