@@ -86,19 +86,25 @@ pub fn try_identify(w: &mut World, unit: EntityIdx, item: EntityIdx) {
     crate::combat::rules::trigger_any(w, &mut rule, |_| None);
 }
 
-/// `ItemEntity.TryIdentify()` (the player inventory's `OnItemAdded`): each party member tries
-/// (in capital mode the remote companions and the main character: reported); an item still not
-/// identified raises `IIdentifyHandler.OnFailedToIdentify`, whose handlers (the game log, the
-/// tutorials' triggers, two trickster features) the sim doesn't run: one subscribed is reported.
+/// `ItemEntity.TryIdentify()` (the player inventory's `OnItemAdded`, `CapitalCompanionLogic`):
+/// each party member tries (in capital mode the remote companions, then the main character);
+/// an item still not identified raises `IIdentifyHandler.OnFailedToIdentify`, whose handlers
+/// (the game log, the tutorials' triggers, two trickster features) the sim doesn't run: one
+/// subscribed is reported.
 pub fn try_identify_by_party(w: &mut World, item: EntityIdx) {
     if w.item(item).is_none_or(|i| i.is_identified) {
         return;
     }
-    if w.player.capital_party_mode {
-        w.coverage.unsupported("ItemEntity.TryIdentify: capital party mode");
-        return;
-    }
-    for u in crate::narrative::party::party(w) {
+    let units = if w.player.capital_party_mode() {
+        let mut l = crate::narrative::party::character_lists(w).remote_companions;
+        if let Some(mc) = w.main_character {
+            l.push(mc);
+        }
+        l
+    } else {
+        crate::narrative::party::party(w)
+    };
+    for u in units {
         try_identify(w, u, item);
     }
     if w.item(item).is_some_and(|i| !i.is_identified) && failed_handlers_unknown(w) {

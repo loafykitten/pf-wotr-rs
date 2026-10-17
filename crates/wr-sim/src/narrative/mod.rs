@@ -89,12 +89,24 @@ pub struct ScheduledDialog {
     pub is_scheduled: bool,
 }
 
-/// A unit spawner's saved state (`UnitSpawnerBase.MyData`): what `UnitFromSpawner` reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A unit spawner's saved state (`UnitSpawnerBase.MyData`, or `CompanionSpawner.MyData`):
+/// what `UnitFromSpawner` reads, and what the spawner activation at load and the companion
+/// spawners read and write ([`crate::companion_spawner`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Spawner {
     /// `m_SpawnedUnit` (a unit id; it may name a placeholder that hasn't become a unit).
     pub spawned_unit: Option<String>,
     pub has_spawned: bool,
+    /// The data is a `CompanionSpawner.MyData`.
+    pub companion: bool,
+    /// `CompanionSpawner.MyData.DidSpawnOnce` (saved).
+    pub did_spawn_once: bool,
+    /// `CompanionSpawner.MyData.m_NeedInitOnPlace` (not saved: false after a load).
+    pub need_init_on_place: bool,
+    /// `m_IsInGame` (saved; true when omitted).
+    pub in_game: bool,
+    /// The saved parts' CLR types (`Parts.m_Parts`), in order.
+    pub parts: Vec<String>,
 }
 
 /// `UnitPlaceholderEntityData`: a unit stored compressed, rebuilt from its blueprint by
@@ -159,14 +171,18 @@ pub struct Player {
     pub max_unique_id: u64,
     pub experience_rate_percent: i32,
     pub money: i64,
-    /// `CapitalPartyMode` (the loaded area's setting; false in the prologue).
-    pub capital_party_mode: bool,
+    /// `LoadedAreaState.Settings.CapitalPartyMode`: the `CountingGuard`'s count (not saved: 0
+    /// after a load; `CapitalCompanionLogic` sets it). [`Player::capital_party_mode`] reads it.
+    pub capital_party_guard: i32,
     pub area: Option<Guid>,
     pub area_part: Option<Guid>,
     /// `StartPreset` (its `Campaign` is `Player.Campaign`).
     pub start_preset: Option<Guid>,
     /// Unit spawners of the loaded area by `UniqueId`.
     pub spawners: HashMap<String, Spawner>,
+    /// The spawners' data ids in the order they joined `Game.State.Entities` (the loaded
+    /// states' `m_EntityData` order, main state first).
+    pub spawner_order: Vec<String>,
     /// Placeholders of the loaded area by unit id (`m_Id`).
     pub placeholders: HashMap<String, Placeholder>,
     /// `Player.GameTime` is on the clock; this is `Game.Instance.CurrentMode` as a name.
@@ -197,6 +213,12 @@ pub struct Player {
 }
 
 impl Player {
+    /// `Player.CapitalPartyMode`: `LoadedAreaState.Settings.CapitalPartyMode`'s value.
+    #[must_use]
+    pub fn capital_party_mode(&self) -> bool {
+        self.capital_party_guard > 0
+    }
+
     /// `Player.GetNewUniqueId()`: `m_MaxGameUniqueId++.ToString("X")`, skipping ids in
     /// use.
     pub fn new_unique_id(w: &mut World) -> String {
@@ -251,7 +273,7 @@ fn fact_id_in_use(w: &World, id: &str) -> bool {
 pub fn entity_event(w: &mut World, e: EntityIdx, iface: &str) -> bool {
     let method = w.bus.call.last().map_or("", |c| c.0);
     match (w.entity(e).clr, iface, method) {
-        ("EtudesSystem", "ICompanionChangeHandler", "HandleCapitalModeChanged")
+        ("EtudesSystem", "IPartyHandler", "HandleCapitalModeChanged")
         | ("EtudesSystem", "ISummonPoolHandler", "HandleUnitAdded" | "HandleUnitRemoved")
         | ("EtudesSystem", "IAreaHandler", "OnAreaDidLoad") => true,
         (

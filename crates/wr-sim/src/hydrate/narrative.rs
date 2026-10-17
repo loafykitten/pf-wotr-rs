@@ -227,13 +227,34 @@ impl Loader<'_> {
             Some(Value::F64(f)) => *f as f32,
             _ => 0.0,
         };
-        let companion = o
+        let companion_part = o
             .obj("Parts")
             .map(|p| p.objs("m_Parts"))
             .unwrap_or_default()
             .into_iter()
-            .find(|p| p.ty() == "UnitPartCompanion")
-            .map(|p| p.i32_or("State", 0));
+            .find(|p| p.ty() == "UnitPartCompanion");
+        let companion = companion_part.map(|p| p.i32_or("State", 0));
+        // `UnitPartCompanion.m_Spawner` (an `EntityRef`: the spawner data's id) and
+        // `IsIgnoreFixInGame`.
+        let companion_spawner = companion_part
+            .and_then(|p| p.str("m_Spawner"))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let ignore_fix_in_game =
+            companion_part.is_some_and(|p| p.bool_or("IsIgnoreFixInGame", false));
+        let spawn_pos = vec_of(o.get("SpawnPosition")).unwrap_or_default();
+        let parts = o.obj("Parts").map(|p| p.objs("m_Parts")).unwrap_or_default();
+        let pet_type = parts.iter().find(|p| p.ty() == "UnitPartPet").map(|p| p.i32_or("Type", 0));
+        let pet_refs: Vec<String> = parts
+            .iter()
+            .find(|p| p.ty() == "UnitPartPetMaster")
+            .map(|p| {
+                p.objs("m_Pets")
+                    .into_iter()
+                    .filter_map(|r| r.str("m_Ref").map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         // `UnitPartFollowUnit.m_LeaderRef`: `OnTurnOn` initializes the following from it.
         let leader_ref = o
             .obj("Parts")
@@ -338,6 +359,14 @@ impl Loader<'_> {
             if pos.len() == 3 {
                 u.position = [pos[0], pos[1], pos[2]];
             }
+            if spawn_pos.len() == 3 {
+                u.spawn_position = [spawn_pos[0], spawn_pos[1], spawn_pos[2]];
+            }
+            u.companion_spawner = companion_spawner;
+            u.pet_type = pet_type;
+            u.pet_refs = pet_refs;
+            u.ignore_fix_in_game = ignore_fix_in_game;
+            u.last_rest_time = d.and_then(|d| d.timespan("LastRestTime"));
             u.orientation = orientation;
             u.companion_state = companion;
             u.alignment = alignment;
@@ -359,13 +388,26 @@ impl Loader<'_> {
     /// The area's spawners and placeholders.
     pub(super) fn area_narrative(&mut self, main: O<'_>) {
         for o in main.objs("m_EntityData") {
-            if o.clr().contains("UnitSpawnerBase+MyData") {
+            let companion = o.clr().contains("CompanionSpawner+MyData");
+            if o.clr().contains("UnitSpawnerBase+MyData") || companion {
                 let id = o.str("UniqueId").unwrap_or_default().to_owned();
+                let parts = o
+                    .obj("Parts")
+                    .map(|p| p.objs("m_Parts"))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| p.clr().to_owned())
+                    .collect();
                 self.w.player.spawners.insert(
                     id,
                     Spawner {
                         spawned_unit: o.str("m_SpawnedUnit").map(str::to_owned),
                         has_spawned: o.bool_or("HasSpawned", false),
+                        companion,
+                        did_spawn_once: o.bool_or("DidSpawnOnce", false),
+                        need_init_on_place: false,
+                        in_game: o.bool_or("m_IsInGame", true),
+                        parts,
                     },
                 );
             } else if o.ty() == "UnitPlaceholderEntityData" {

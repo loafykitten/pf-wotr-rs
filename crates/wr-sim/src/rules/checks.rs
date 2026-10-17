@@ -528,7 +528,7 @@ impl RulePartyStatCheck {
 fn applicable_units(w: &mut World, allow_pets: bool, capital: bool) -> Vec<EntityIdx> {
     let lists = crate::narrative::party::character_lists(w);
     let mut v = if allow_pets { lists.party_and_pets } else { lists.party };
-    if capital && w.player.capital_party_mode {
+    if capital && w.player.capital_party_mode() {
         v.extend(
             lists
                 .remote_companions

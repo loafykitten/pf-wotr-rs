@@ -202,6 +202,19 @@ pub struct Unit {
     /// `UnitPartCompanion.State` (`CompanionState`: 0 None, 1 Remote, 2 InParty,
     /// 3 ExCompanion, 4 InPartyDetached), if the unit has the part.
     pub companion_state: Option<i32>,
+    /// `UnitPartCompanion.m_Spawner` (saved): the `UniqueId` of the companion's current
+    /// spawner's data (`GetCurrentSpawner` resolves it to a loaded `CompanionSpawner` view).
+    pub companion_spawner: Option<String>,
+    /// `UnitPartCompanion.IsIgnoreFixInGame` (saved).
+    pub ignore_fix_in_game: bool,
+    /// `UnitPartPet.Type` (`PetType`), if the unit has the part.
+    pub pet_type: Option<i32>,
+    /// `UnitPartPetMaster.m_Pets` (saved): the pets' unique ids, in order.
+    pub pet_refs: Vec<String>,
+    /// `SpawnPosition` (saved like `Position`).
+    pub spawn_position: [f32; 3],
+    /// `Descriptor.LastRestTime` (100 ns ticks), when set.
+    pub last_rest_time: Option<i64>,
     /// `Descriptor.Alignment`.
     pub alignment: Option<crate::narrative::alignment::UnitAlignment>,
     /// `GroupId`.

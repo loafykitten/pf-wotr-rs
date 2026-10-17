@@ -46,9 +46,11 @@ pub fn character_lists(w: &mut World) -> CharacterLists {
             w.coverage.unsupported("Player.AddCharacterToLists: unit in list but not in party");
         }
         let mut flag = in_party;
-        if w.player.capital_party_mode {
-            w.coverage.unsupported("Player.AddCharacterToLists: capital party mode");
-            flag = Some(master) == w.main_character;
+        // In capital mode only the main character (and its pets that no spawner controls)
+        // is in the party.
+        if w.player.capital_party_mode() {
+            flag = Some(master) == w.main_character
+                && (!is_pet || !crate::companion_spawner::is_controlled_by_spawner(w, u));
         }
         if !is_pet && flag {
             out.party.push(u);

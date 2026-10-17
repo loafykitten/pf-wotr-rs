@@ -885,8 +885,29 @@ pub fn after_area_load(w: &mut World, order: &[AreaEntry], spawned: &[EntityIdx]
     // know: it acts on nothing and is reported if it would (as in the controller's tick; the
     // extras of Manual_10's crowds sleep). Another unit in the game is taken as awake, as the
     // recordings have it (its fog of war isn't modelled).)
+    // The controller ticks `AwakeUnits` in `State.Units` order: the units spawned at load, and
+    // the loaded units the load woke (`Wake()` on a position change: a companion placed by its
+    // spawner), whose `AwakeTimer` keeps them awake at the first tick unless a check before it
+    // puts them to sleep (out of the game, a fake blueprint, suppressed, a companion while the
+    // party is hidden); other loaded units' toggles are as saved [C].
     let party = crate::narrative::party::character_lists(w).party_and_pets;
-    for &e in spawned {
+    let woken = std::mem::take(&mut w.woken_at_load);
+    let order: Vec<EntityIdx> = crate::scene::units_pool(w)
+        .into_iter()
+        .filter(|e| spawned.contains(e) || woken.contains(e))
+        .collect();
+    for e in order {
+        if !spawned.contains(&e) {
+            if awake_state_in(w, e, &party, true) == Awake::No
+                || (crate::scene::area_has_parts(w)
+                    && crate::area_parts::suppressed_at_load(w, e).is_err())
+            {
+                continue;
+            }
+            w.coverage.context = Some(w.entity(e).unique_id.clone());
+            activatable_abilities_unit_tick(w, e, false, TickMode::StartPass);
+            continue;
+        }
         let extra = w.unit(e).is_some_and(|x| x.is_extra);
         let mode = match awake_after_spawn(w, e, &party) {
             Awake::No => continue,

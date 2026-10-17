@@ -148,29 +148,127 @@ reported: suppression in later frames (`SuppressEntitiesController` re-evaluates
 or joined a state, at the start of the frame; the sim doesn't follow that), the entity pool's suppressed
 entities (`EntityPoolEnumerator`, in later frames), and `UpdateHasDummyView`'s later view swaps.
 
+## Companion spawners and the capital mode (stream drezen, 2026-10-17)
+
+`wr-sim hydrate Manual_10` against `state-manual10-after-load.json.gz` (the regression's compare) [M]:
+
+| | before (branch point, no Drezen scene cache) | scene cache only (old code) | after |
+|---|---|---|---|
+| match rate | 0.9989 | 0.9989 | 0.9989 |
+| facts on one side only | 0 | 0 | 0 |
+| `fact.id` equal | 21,884 / 21,900 | 21,884 / 21,900 | 21,884 / 21,900 (below) |
+| `facts.order` equal | 537 / 539 | 537 / 539 | **538 / 539** (Greybor) |
+| ids the load allocates (oracle: 18,518) | 18,501 | 18,501 | **18,514** |
+| unsupported kinds at load | 201 | 208 | 208 |
+
+**The ids** [M]: the sim now allocates the 15 `ActivatableAbility.ReapplyBuff` ids of the first tick
+in the oracle's order and with its owners: Lann (`420D`: 3), Woljif (`9960`: 2), Ember (`B909`),
+Ulbrig (`121C0`: 2), Sosiel (`21B5A`), Greybor (`7D739`: 3), Trever (`1C02EB`), then `5FA03` and
+`6241B`, the 13 restarted companion toggles first (`1E699D`..`1E69AB` in the sim, `1E69A0`..`1E69AE`
+in the oracle). Each is 3 lower than the oracle's: the three area-effect ids before them aren't
+allocated (What is left), so `fact.id` counts the same 16 differences. Before, the 13 companions'
+toggle buffs kept their saved ids and `5FA03`/`6241B` came 13 ids early.
+
+**What the load does** [C]:
+
+- `SceneLoader.LoadSceneEntities` attaches each `CompanionSpawner.MyData` to its view:
+  `UnitSpawnerBase.MyData.OnViewDidAttach` runs its `IUnitInitializer` parts' `OnInitialize` for the
+  spawned unit (`SpawnerInteractionPart`: the unit's `UnitPartInteractions`) and, when the unit
+  stands where it was spawned (`(SpawnPosition.To2D() - Position.To2D()).magnitude < 0.1f`), moves it
+  to the view's exact position. A saved position is rounded to hundredths, so the position changes
+  (`Vector3 !=`) and `UnitEntityData.Position`'s setter wakes the unit (`AwakeTimer = 0`).
+- The views subscribe to the event bus as their scenes load (`EntityViewBase.OnEnable`), after the
+  player's state turned on and before the area's states are post-loaded.
+- `ProcessSpawnerActivationCoroutine`, after the states are on: every spawner data of
+  `Game.State.Entities` (the pool's enumerator skips data out of the game; `m_Suppressed` is false,
+  `SuppressEntitiesController` hasn't ticked) whose `ShouldProcessActivation(false)` holds (always for
+  a companion spawner; for a unit spawner, `SpawnOnSceneInit && !HasSpawned`), sorted by its
+  blueprint's `Prefab.AssetId` (`List.Sort` with an ordinal comparison: Mono's introsort, ties
+  included, capacity from `ToList`), gets `HandleAreaSpawnerInit`. A companion spawner that controls
+  its companion places it (`PlaceCompanion`): capital mode is off (`RuntimeAreaSettings.CapitalPartyMode`
+  isn't saved), the seven `DefaultPosition` spawners show their companion only in capital mode, and
+  a `Remote` companion isn't controllable in the party, so each leaves the game:
+  `OnIsInGameChanged` deactivates its buffs and toggles (`Stop`: the toggles' buffs removed).
+- `Game.AfterSceneLoaderFinishedArea` → `UpdateEtudes` → the etude `CapitalCompanionLogic`'s bracket
+  enters (`OnEnter`, `m_RestAllRemoteCompanions` set): `PlaceAllCompanions` turns capital mode on
+  (`SetCapitalMode`: the `CountingGuard` changes, `IPartyHandler.HandleCapitalModeChanged`), and each
+  spawner that can control its companion (`CanControlCompanion`) places it at its position, back in
+  the game: its buffs and toggles activate, the toggles on but not started. The remote companions
+  without a spawner would leave the game (none here); every inventory item tries to be identified by
+  the remote companions and the main character; the rest of remote companions isn't due (they rested
+  18 seconds before the save); `ISafeZoneHandler.OnEnterSafeZone` is raised.
+- The first tick's `UnitActivatableAbilitiesController` ticks the awake units in `State.Units` order:
+  the companions are awake through the wake above (`ShouldBeSleeping` reads `AwakeTimer >= 0` before
+  the fog of war; a cross-scene unit is never suppressed), so their toggles start (`TryStart` →
+  `ReapplyBuff`: new buffs), before the units spawned at load.
+
+**The data**: Drezen's scene cache (`scripts/scene-cache.sh DrezenCapital
+2570015799edf594daf2f076f2f975d8`; the cache now keeps a `CompanionSpawner` view's components: its
+settings and the `SpawnerInteraction*`, `SpawnerAdditionalActions`, `SpawnerCustomCutscene`
+components), the spawner data (`DidSpawnOnce`, `m_IsInGame`, the saved parts) and the companions'
+`UnitPartCompanion.m_Spawner`, `IsIgnoreFixInGame`, `SpawnPosition`, `Descriptor.LastRestTime` and
+the pets' `UnitPartPet.Type` and masters' `UnitPartPetMaster.m_Pets`.
+
+**Ported** (`crates/wr-sim/src/companion_spawner.rs`): `CompanionSpawner` (`ShouldShowUnit`,
+`CanControlCompanion`, `IsControllingCompanion`, `GetMyCompanion` with pets, `BeginControllingCompanion`,
+`PlaceCompanion`, `MyData.OnPlaceCompanion`/`OnSpawned`/`Clear`, `HandleAreaSpawnerInit`, `Spawn`, and its
+`IPartyHandler`/`ICompanionChangeHandler` handlers), `UnitSpawnerBase.MyData.OnViewDidAttach` for
+companion spawners, `ProcessSpawnerActivationCoroutine`, `SetCapitalMode`, `CapitalCompanionLogic`
+(`OnEnter`, `OnResume`, `OnExit`), `Player.AddCharacterToLists` in capital mode (only the main
+character, and its pets no spawner controls, are in the party), `ItemEntity.TryIdentify()` in capital
+mode, `UnitPartCompanion.HandleObjectInGameChanged`, and the empty `HandleCapitalModeChanged` of
+`EtudesSystem` (it was matched under the wrong interface, which would have marked the etudes'
+conditions dirty), `DisableMountRiding`, `AddFeatureToPet` and `HideAllPets`;
+`EtudeBracketSetCompanionPosition.HandleCapitalModeChanged` enters in capital mode. The first tick's
+start pass (`spawn::after_area_load`) now runs over `State.Units` order on the units spawned at load
+and the loaded units the load woke.
+
+**Inferred** [I]: Unity's enable order within a scene (the order the capital mode reaches the
+spawners) is taken to be the scene cache's object order; on Manual_10 the seven spawners placed
+their companions in that order (WrathOracle's `in_game` events) [M]. The order matters only when two
+spawners can take the same companion.
+
+**Still reported**: a unit spawner that would spawn at load (none in the slice's saves), a pet's
+`UnitPartPet.ShouldBeHidden` (`HideAllPets` isn't ported; on Manual_10 the main character's dragon
+spawners ask: `CompanionSpawner.ShouldShowUnit: a pet`, and one of their show conditions,
+`UnitIsInAreaPart`), placing a companion's pets, a spawn's ground placement
+(`UnitPlaceOnGroundController.ForcedTick`), custom cutscenes at spawn, settings components without a
+port, the respawn of a dead companion, `HandleCompanionRemoved` (its `stayInGame` argument isn't in
+the sim's event call), `HandleUnrecruit` when it would act, `AttachPartyMember` for a detached
+companion, and the remote companions' rest. `UnitSpawnerBase.MyData.OnViewDidAttach` of *unit*
+spawners (their units' interactions and position) is still not modelled, as before. Each
+companion's two changes of `IsInGame` add to the existing `UnitEntityData.OnIsInGameChanged: group
+membership` reports (58 -> 72: `m_Group` isn't saved, and whether something read it before is
+unknown). Every unit's `IsInGame` after the load equals the oracle's dump [M].
+
+**The other reports that changed** [M]: the companions' buffs deactivate and activate again, so
+their unported components' hooks (`ActivationDisable`, `BuffOnHealthTickingTrigger`,
+`SuppressBuffs`, `UnitHealthGuard`, a `ContextRankConfig`) and the event-bus handlers that see the
+buffs go and come (`EnduringSpells: IUnitBuffHandler`, `RecalculateOnFactsChange`) report more; 21
+fewer `EntityPoolEnumerator` reports (the seven companions are out of the game when the three zones'
+`OnAreaDidLoad` enumerate the units); `CapitalCompanionLogic.OnEnter` and `area scene entity not
+hydrated: MyData` (72) are gone. Building the scene cache alone (the old code) changes the reports
+too: `SceneLoader: no scene cache`, `ScriptZone.OnAreaDidLoad: scene settings unavailable` and
+`action Spawn (no scene cache…)` go, and the scene's map objects' parts that aren't ported
+(`EntityDataBase.OnViewDidAttach: … removed`, `DestructionComponent`, a loot table) and the
+suppression enumerator are reported instead.
+
 ## What is left
 
-- **16 ids allocated after the load** [M, `manual10-ids-2`]: WrathOracle's `IdTrace` now records,
-  with the ids and their callers, each `ActivatableAbility.Stop` of a started toggle and each change
-  of a unit's `IsInGame`. It establishes why 13 of them restart. The seven remote companions (Lann,
-  Woljif, Ember, Ulbrig, Sosiel, Greybor, Trever: `CompanionState.Remote`, in game when saved) are taken
-  out of the game during the load by their scene's `CompanionSpawner`
-  (`SceneLoader.ProcessSpawnerActivationCoroutine` → `HandleAreaSpawnerInit` → `PlaceCompanion`:
-  `ShouldShowUnit` is false while capital mode is still off), which deactivates their toggles
-  (`OnIsInGameChanged` → `ActivatableAbilities.SetActive(false)` → `OnDeactivate` → `Stop`, the buffs
-  removed). Then the etude bracket `CapitalCompanionLogic.OnEnter` (`UpdateEtudes`) turns capital mode
-  on (`PlaceAllCompanions` → `SetCapitalMode` → `HandleCapitalModeChanged`), and the same spawners put
-  them back in the game (`BeginControllingCompanion` → `PlaceCompanion`). Their toggles are active,
-  on and no longer started, so the controller's first tick starts them (`TryStart` → `ReapplyBuff`: new
-  buff ids). The two others (`5FA03`, `6241B`) start in both, only later in the oracle's sequence.
-  Computing this needs
-  Drezen's scene (its `CompanionSpawner`s, their flags and `ShowCondition`s; the area has no scene cache)
-  and `CapitalCompanionLogic`; both are reported (`SceneLoader: no scene cache for the area`,
-  `CapitalCompanionLogic.OnEnter`). The other three ids come from area effects:
-  `AddAreaEffect.OnAreaActivated`, and twice the view's `HandleCharacterParticleSnapMapUpdated`
-  (presentation-timed). The main character's `LifeBondingFriendshipEffectBuff` is reapplied by an area
-  effect's unit-enter actions. Those are reported too (`AddAreaEffect.OnActivate`,
-  `AddAreaEffect: IAreaActivationHandler`, `AddAreaEffect: IAreaHandler`).
+- **4 ids allocated after the load** [M, `manual10-ids-2`]: the three `AddAreaEffect` area effects
+  (`AreaEffectsController.SpawnAttachedToTarget`: twice from the view's
+  `HandleCharacterParticleSnapMapUpdated`, between the last placeholder's unit and the spawner
+  activation, and once from `OnAreaActivated`, before the first tick) and the main character's
+  `LifeBondingFriendshipEffectBuff`, applied by an area effect's unit-enter actions
+  (`AbilityAreaEffectRunAction.OnUnitEnter` in `AreaEffectsController.Tick`). Whether `AddAreaEffect`
+  spawns depends on the owner's view (`IsOwnerAvatarValid`: the view's `ParticlesSnapMap`, built
+  by the character avatar on its own schedule), which is presentation the sim can't know; and the
+  area effects themselves (`AreaEffectEntityData`, its ticks and unit enter/exit) aren't modelled.
+  They stay reported (`AddAreaEffect.OnActivate`, `AddAreaEffect: IAreaActivationHandler`,
+  `AddAreaEffect: IAreaHandler`). Computing them needs, from the oracle, which units' views had a
+  snap map when (an `IdTrace` field naming the `AddAreaEffect` buff and owner of each spawn would
+  pin the three ids), and a port of the area effect entity. Until then every id after the first of
+  them is 3 lower in the sim (the 15 restarted toggles' buffs, below).
 - **In `crates/wr-sim/src/combat/` (another stream's, so not changed here)**: `AddAdditionalLimb`
   fills a limb slot directly, without `ItemSlot.InsertItem`'s `HandleEquipmentSlotUpdated`, so a
   limb added while `ShiftersFuryPart` is on or a `BuffEnchantAnyWeapon` buff is active isn't seen

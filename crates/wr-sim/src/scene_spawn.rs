@@ -233,7 +233,7 @@ fn set_spawner(w: &mut World, id: &str, unit: Option<EntityIdx>, has_spawned: bo
         .player
         .spawners
         .entry(id.to_owned())
-        .or_insert(crate::narrative::Spawner { spawned_unit: None, has_spawned: false });
+        .or_insert(crate::narrative::Spawner { in_game: true, ..Default::default() });
     if uid.is_some() {
         s.spawned_unit = uid;
     }

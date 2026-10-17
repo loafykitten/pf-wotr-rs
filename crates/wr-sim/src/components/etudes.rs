@@ -432,6 +432,13 @@ fn run_phase(w: &mut World, c: CompRef, name: &'static str, p: Phase) -> R {
             rt.remove("$Leader");
             rt.remove("$Followers");
         }
+        // `CapitalCompanionLogic`: the capital mode and the companions' placement
+        // (`crate::companion_spawner`).
+        ("CapitalCompanionLogic", Enter) => {
+            crate::companion_spawner::capital_on_enter(w, v.bool("m_RestAllRemoteCompanions"));
+        }
+        ("CapitalCompanionLogic", Resume) => crate::companion_spawner::place_all_companions(w),
+        ("CapitalCompanionLogic", Exit) => crate::companion_spawner::capital_on_exit(w),
         // Presentation: Wwise events and objects, sound banks, music, weather.
         (
             "EtudeBracketAudioEvents"
@@ -682,7 +689,7 @@ fn set_companion_position(w: &mut World, v: View<'_>) {
     // `m_IgnoreWhenEx` defaults to true.
     let ignore_ex = if v.has("m_IgnoreWhenEx") { v.bool("m_IgnoreWhenEx") } else { true };
     let acts =
-        (state != Some(2) || w.player.capital_party_mode) && (state != Some(3) || !ignore_ex);
+        (state != Some(2) || w.player.capital_party_mode()) && (state != Some(3) || !ignore_ex);
     if acts {
         w.coverage.unsupported("EtudeBracketSetCompanionPosition: locator placement");
     }
@@ -816,6 +823,12 @@ fn set_companion_position_event(w: &mut World, c: CompRef, iface: &str) {
             }
         }
         ("IPartyHandler", Some(("HandleCompanionRemoved", _))) => {}
+        // `HandleCapitalModeChanged`: `OnEnter()` when the capital mode is on.
+        ("IPartyHandler", Some(("HandleCapitalModeChanged", _))) => {
+            if w.player.capital_party_mode() {
+                phase(w, c, Phase::Enter);
+            }
+        }
         _ => w.coverage.unsupported(format!("EtudeBracketSetCompanionPosition: {iface}")),
     }
 }
@@ -858,7 +871,13 @@ fn disable_mount_riding_event(w: &mut World, _c: CompRef, iface: &str) {
                 add_condition(w, u, DISABLE_MOUNT_RIDING, None);
             }
         }
-        ("IPartyHandler", Some(("HandleCompanionActivated" | "HandleCompanionRemoved", _))) => {}
+        (
+            "IPartyHandler",
+            Some((
+                "HandleCompanionActivated" | "HandleCompanionRemoved" | "HandleCapitalModeChanged",
+                _,
+            )),
+        ) => {}
         _ => w.coverage.unsupported(format!("DisableMountRiding: {iface} (method unknown)")),
     }
 }
