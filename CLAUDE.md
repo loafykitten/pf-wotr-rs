@@ -31,7 +31,7 @@ survey and notes on other rewrites.
     terrain, boxes and triangle meshes exact against the player), paths, the AI's simulation steps, place-on-ground and
     facing (`docs/poc5/orientation.md`); memory (`docs/poc5/memory.md`), spells, the combat log with its tooltips and
     initiative ties are computed too. PLAN's "Where things stand" lists the twenty-second and twenty-third sessions' streams (line of sight, roaming, loot and prone, the view pin), the
-    captures (`poc5-tb-111` to `-135`) and what's open (the camera-view pin for `-134`).
+    captures (`poc5-tb-111` to `-138`) and what's open (new observers awaiting a capture, a replay window's one-frame start offset).
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in
     parallel (recordings, POC-6 render comparisons, Metal captures of the original), never timing. Setup, sync and
