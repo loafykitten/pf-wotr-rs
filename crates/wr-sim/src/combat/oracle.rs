@@ -160,6 +160,18 @@ impl Trace {
                     DrawKind::RangeFloat { min: f32_of(a.first()), max: f32_of(a.get(1)) }
                 }
                 (Some("value"), _) => DrawKind::Value,
+                // `insideUnitCircle` (roaming's `RollNextPoint`): its `x`, `y`.
+                (Some("insideUnitCircle"), _)
+                    if r["v"].as_array().is_some_and(|a| a.len() == 2) =>
+                {
+                    let a = r["v"].as_array().expect("an array");
+                    per.entry(key).or_default().push_back(TapeDraw {
+                        kind: Some(DrawKind::InsideUnitCircle),
+                        value: DrawValue::Vec2([f32_of(a.first()), f32_of(a.get(1))]),
+                        in_rule: r["rule"].as_i64().unwrap_or(0) != 0,
+                    });
+                    continue;
+                }
                 _ => {
                     // Vector draws (`insideUnitCircle`…) aren't modelled: kept as opaque.
                     per.entry(key).or_default().push_back(TapeDraw {
@@ -284,6 +296,18 @@ impl Rng for SiteTape {
         match self.next(site, DrawKind::Value) {
             Some(DrawValue::Float(v)) => v,
             _ => 0.0,
+        }
+    }
+
+    fn inside_unit_circle(&mut self, site: CallSite) -> [f32; 2] {
+        match self.next(site, DrawKind::InsideUnitCircle) {
+            Some(DrawValue::Vec2(v)) if crate::rng::in_unit_disc(v) => v,
+            Some(_) => {
+                let seq = self.log.len() as u64;
+                self.failures.push(RngFailure::ValueOutOfRange { seq, site: site.0.into() });
+                [0.0; 2]
+            }
+            None => [0.0; 2],
         }
     }
 

@@ -820,6 +820,11 @@ impl Driver<'_> {
     }
 
     /// An entry from outside the lifecycle (`uc_run`, `uc_queue`, `uc_x`), placed by its caller.
+    /// A `uc_run` entry (the roaming controller's `Run`, which pulls it).
+    pub(super) fn uc_run_entry(&mut self, w: &mut World, i: usize) -> usize {
+        self.uc_entry(w, i, Entry::Run)
+    }
+
     fn uc_entry(&mut self, w: &mut World, i: usize, kind: Entry) -> usize {
         let trace = self.trace;
         let r = &trace.records[i];

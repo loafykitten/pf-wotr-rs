@@ -187,6 +187,8 @@ pub struct Outcome {
     pub nav: nav::NavCounts,
     /// Units' orientation writes and `DesiredOrientation` reads (`replay/look.rs`).
     pub look: look::LookCounts,
+    /// The roaming controller (`replay/roaming.rs`).
+    pub roam: roaming::RoamCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
     /// messages against the recording's ([`crate::game_log::check`]).
     pub clog: Option<crate::game_log::check::Summary>,
@@ -516,7 +518,7 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 15] = [
+const WORK: [Phase; 16] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
@@ -524,6 +526,7 @@ const WORK: [Phase; 15] = [
     Phase::Sleeping,
     Phase::Cooldowns,
     Phase::Buffs,
+    Phase::Roaming,
     Phase::Abilities,
     Phase::Life,
     Phase::Leave,
@@ -1459,6 +1462,7 @@ impl<'t> Driver<'t> {
             d.nav_start(w);
         }
         d.look_start(w);
+        d.roam_start(w, &declared);
         // The paths' records need the driven agent (`agent_sync` and its chain).
         // Observer `paths`' records without its declaration (a damaged begin record).
         let paths_records = recs.iter().any(|r| {
@@ -1992,6 +1996,7 @@ impl Driver<'_> {
                     }
                 }
                 Phase::Buffs => super::life::buffs_tick(w),
+                Phase::Roaming => self.roam_tick(w),
                 Phase::Abilities => {
                     if super::spells::tick(w) > 0 {
                         w.combat.spells.ran_at = Some(self.tick);
@@ -3039,6 +3044,10 @@ impl Driver<'_> {
                 && matches!(r["ev"].as_str(), Some("ag_init" | "ag_sync" | "ag_pathdef")))
         {
             self.ag_block_close(w);
+        }
+        // The roaming controller's records: its phase pulls them.
+        if let Some(next) = self.roam_record(w, i) {
+            return next;
         }
         match r["k"].as_str() {
             // A frame starts at the `tick` record (`GameMode.Tick`'s prefix): the previous
@@ -4658,6 +4667,7 @@ mod impatience;
 mod look;
 mod memory;
 mod nav;
+mod roaming;
 mod spells;
 mod targets;
 

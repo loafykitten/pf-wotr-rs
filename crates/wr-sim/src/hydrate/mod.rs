@@ -664,6 +664,9 @@ impl Loader<'_> {
             if graph::roaming_next_idle_cutscene(r) {
                 self.w.coverage.unsupported(crate::spawn::ROAMING_NEXT_IDLE_CUTSCENE);
             }
+            if let Some(u) = self.w.unit_mut(e) {
+                u.combat.roaming = Some(Box::new(graph::roaming_part(r)));
+            }
         }
         // Items first (modifiers and facts point at them), then facts, then stats.
         let inv = d.obj("m_Inventory");

@@ -247,6 +247,56 @@ pub fn str_of(v: &Value) -> Option<&str> {
     }
 }
 
+/// A saved `UnitPartRoaming` (a unit's part, a placeholder's `m_Roaming`) as `OnPostLoad` (or
+/// `RestoreFrom`) leaves it: the next point from `m_PersistentNextPointId` (a scene waypoint) or
+/// `m_PersistentNextPoint` (a `RoamingPoint`; another type is kept by name, unmodelled), and the
+/// saved members. `Settings` isn't saved (the spawner's `OnInitialize` sets it and the origin).
+#[must_use]
+pub fn roaming_part(r: O<'_>) -> crate::combat::roaming::Part {
+    use crate::combat::roaming::{Part, Point};
+    let v3 = |v: Option<&Value>| -> [f32; 3] {
+        let v = super::narrative::vec_of(v).unwrap_or_default();
+        [0, 1, 2].map(|i| v.get(i).copied().unwrap_or(0.0))
+    };
+    let f = |v: Option<&Value>| -> f32 {
+        match v {
+            Some(Value::F32(x)) => *x,
+            #[allow(clippy::cast_possible_truncation)]
+            Some(Value::F64(x)) => *x as f32,
+            _ => 0.0,
+        }
+    };
+    let set = |v: Option<&Value>| {
+        v.is_some_and(|v| !matches!(v, Value::Null | Value::NullText | Value::GuidEmpty))
+    };
+    let mut unknown_next = None;
+    let next = match r.str("m_PersistentNextPointId").filter(|s| !s.is_empty()) {
+        Some(id) => Some(Point::Waypoint(id.to_owned())),
+        None => match r.obj("m_PersistentNextPoint") {
+            None => None,
+            Some(p) if p.ty() == "RoamingPoint" => Some(Point::Own {
+                position: v3(p.get("Position")),
+                idle_time: f(p.get("IdleTime")),
+                idle_cutscene: set(p.get("IdleCutscene")),
+            }),
+            Some(p) => {
+                unknown_next = Some(p.ty().to_owned());
+                None
+            }
+        },
+    };
+    Part {
+        next,
+        disabled: r.bool_or("m_Disabled", false),
+        original: v3(r.get("OriginalPoint")),
+        reverse: r.bool_or("ReverseDirection", false),
+        idle_cutscene: r.obj("IdleCutscene").is_some(),
+        idle_end: crate::csharp::TimeSpan(r.timespan("IdleEndTime").unwrap_or(0)),
+        settings: None,
+        unknown_next,
+    }
+}
+
 /// A saved `UnitPartRoaming` (a unit's part, a placeholder's `m_Roaming`) whose next point is a
 /// `RoamingPoint` of its own with an idle cutscene (a blueprint reference, not null).
 #[must_use]

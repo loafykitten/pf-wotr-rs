@@ -67,6 +67,8 @@ pub struct PlaceholderData {
     /// The saved roaming state's next point is a `RoamingPoint` of its own (`RollNextPoint`'s)
     /// with an idle cutscene.
     pub roaming_next_idle_cutscene: bool,
+    /// The saved roaming state (`RestoreFrom` copies it).
+    pub roaming_part: Option<crate::combat::roaming::Part>,
     /// `m_VendorTable` (`UnitPartVendor.SharedInventory`).
     pub vendor_table: Option<Guid>,
     /// `m_PrefabId` is set (`UnitSpawningData.PrefabGuid`): `EntityCreator.SpawnUnit` then
@@ -230,6 +232,9 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
             w.entity_mut(e).parts.push(crate::world::Part { clr: "UnitPartRoaming" });
         }
         w.coverage.stub("UnitPartRoaming.RestoreFrom (roaming movement along waypoints: T1)");
+        if let Some(u) = w.unit_mut(e) {
+            u.combat.roaming = p.roaming_part.clone().map(Box::new);
+        }
         if p.roaming_idle_cutscene {
             w.coverage.unsupported("UnitPartRoaming.RestoreFrom: an idle cutscene playing");
         }

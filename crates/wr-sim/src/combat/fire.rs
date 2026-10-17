@@ -74,6 +74,12 @@ impl<R: Rng> Rng for Recording<R> {
         v
     }
 
+    fn inside_unit_circle(&mut self, site: CallSite) -> [f32; 2] {
+        let v = self.inner.inside_unit_circle(site);
+        self.note(site, json!(v.map(|x| format!("{x:?}"))));
+        v
+    }
+
     fn log(&self) -> &[Draw] {
         self.inner.log()
     }

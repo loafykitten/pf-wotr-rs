@@ -116,12 +116,16 @@ pub enum DrawKind {
     RangeFloat { min: f32, max: f32 },
     /// `Random.value`: `[0, 1]`.
     Value,
+    /// `Random.insideUnitCircle`: a point in the unit disc.
+    InsideUnitCircle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum DrawValue {
     Int(i32),
     Float(f32),
+    /// A vector draw's components (`insideUnitCircle`'s `x`, `y`).
+    Vec2([f32; 2]),
 }
 
 /// One recorded draw.
@@ -153,12 +157,21 @@ pub trait Rng {
     fn range_int(&mut self, site: CallSite, min: i32, max: i32) -> i32;
     fn range_float(&mut self, site: CallSite, min: f32, max: f32) -> f32;
     fn value(&mut self, site: CallSite) -> f32;
+    /// `Random.insideUnitCircle`.
+    fn inside_unit_circle(&mut self, site: CallSite) -> [f32; 2];
     /// Every draw made so far, in order (a play run's log replays as a tape).
     fn log(&self) -> &[Draw];
     /// Failures so far (always empty for [`PlayRng`]).
     fn failures(&self) -> &[RngFailure];
     /// Ends the run: a tape with draws left over records [`RngFailure::MissingDraws`].
     fn finish(&mut self);
+}
+
+/// A point of the closed unit disc (`insideUnitCircle`'s range), finite.
+#[must_use]
+pub fn in_unit_disc(v: [f32; 2]) -> bool {
+    let [x, y] = v.map(f64::from);
+    x.is_finite() && y.is_finite() && x * x + y * y <= 1.0
 }
 
 /// Replays a recorded tape.
@@ -209,6 +222,7 @@ impl Tape {
             }
             (DrawKind::RangeFloat { min, max }, DrawValue::Float(v)) => (min..=max).contains(&v),
             (DrawKind::Value, DrawValue::Float(v)) => (0.0..=1.0).contains(&v),
+            (DrawKind::InsideUnitCircle, DrawValue::Vec2(v)) => in_unit_disc(v),
             _ => false,
         };
         if !ok {
@@ -241,6 +255,13 @@ impl Rng for Tape {
         match self.next(site, DrawKind::Value) {
             Some(DrawValue::Float(v)) => v,
             _ => 0.0,
+        }
+    }
+
+    fn inside_unit_circle(&mut self, site: CallSite) -> [f32; 2] {
+        match self.next(site, DrawKind::InsideUnitCircle) {
+            Some(DrawValue::Vec2(v)) => v,
+            _ => [0.0; 2],
         }
     }
 
@@ -344,6 +365,18 @@ impl Rng for PlayRng {
         v
     }
 
+    fn inside_unit_circle(&mut self, site: CallSite) -> [f32; 2] {
+        // Rejection from the square (not Unity's algorithm: play needn't reproduce it).
+        let v = loop {
+            let v = [self.unit() * 2.0 - 1.0, self.unit() * 2.0 - 1.0];
+            if in_unit_disc(v) {
+                break v;
+            }
+        };
+        self.record(site, DrawKind::InsideUnitCircle, DrawValue::Vec2(v));
+        v
+    }
+
     fn log(&self) -> &[Draw] {
         &self.log
     }
@@ -401,6 +434,12 @@ impl Rng for Counted {
 
     fn value(&mut self, site: CallSite) -> f32 {
         let v = self.inner.value(site);
+        self.sync();
+        v
+    }
+
+    fn inside_unit_circle(&mut self, site: CallSite) -> [f32; 2] {
+        let v = self.inner.inside_unit_circle(site);
         self.sync();
         v
     }
@@ -466,6 +505,31 @@ mod tests {
         let mut t = Tape::new(vec![d(0, 9, 7)]);
         let _ = dice(&mut t, 1, 6);
         assert!(matches!(t.failures()[0], RngFailure::ValueOutOfRange { .. }));
+    }
+
+    #[test]
+    fn inside_unit_circle_replays_and_checks_its_range() {
+        const SITE: CallSite = CallSite("roll");
+        let mut p = PlayRng::new(7);
+        let v: Vec<[f32; 2]> = (0..20).map(|_| p.inside_unit_circle(SITE)).collect();
+        assert!(v.iter().all(|x| in_unit_disc(*x)));
+        let mut t = Tape::new(p.log().to_vec());
+        let w: Vec<[f32; 2]> = (0..20).map(|_| t.inside_unit_circle(SITE)).collect();
+        t.finish();
+        assert_eq!(v, w);
+        assert!(t.failures().is_empty());
+        let out = Draw {
+            seq: 0,
+            site: SITE.0.into(),
+            kind: DrawKind::InsideUnitCircle,
+            value: DrawValue::Vec2([0.8, 0.8]),
+        };
+        let mut t = Tape::new(vec![out]);
+        let _ = t.inside_unit_circle(SITE);
+        assert!(matches!(t.failures()[0], RngFailure::ValueOutOfRange { .. }));
+        let mut t = Tape::new(vec![d(0, 3, 7)]);
+        let _ = t.inside_unit_circle(sites::DICE_D);
+        assert!(matches!(t.failures()[0], RngFailure::KindMismatch { .. }));
     }
 
     #[test]
