@@ -368,7 +368,13 @@ internal static class Fidelity
         if (CommandObs.LookOn) Observers.Add("look");
         if (CommandObs.MemOn) Observers.Add("memory");
         // The entity-bounds colliders at the window's first tick (bounds_init, bounds_init_end; CommandObsBounds.cs).
-        if (CommandObs.MemOn) Observers.Add("bounds_init");
+        if (CommandObs.MemOn && CommandObs.BoundsOn) Observers.Add("bounds_init");
+        // Each EntityBoundsController.TickEntity: the colliders' radii and positions as set (bounds_tick).
+        if (CommandObs.BoundsOn) Observers.Add("bounds_tick");
+        // The collider writes outside TickEntity: enabled, position, destroy, relink (bounds_set).
+        if (CommandObs.BoundsOn) Observers.Add("bounds_set");
+        // EntityBoundsController's scene made anew (bounds_scene).
+        if (CommandObs.BoundsOn) Observers.Add("bounds_scene");
         // Each awake unit's CanBeInVisionRange in enumeration order when it changes (vis_order; Observe.cs).
         Observers.Add("vis_order");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
