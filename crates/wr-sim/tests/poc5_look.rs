@@ -444,6 +444,11 @@ fn missing_or_wrong_roaming_records_are_reported() {
             let at = roam_roll(recs) + 1;
             recs[at]["c"] = json!("pres");
         }),
+        // An idle time outside `Range`'s bounds, on the tape too.
+        ("RollNextPoint's draws: the sim's", true, |recs| {
+            let at = roam_roll(recs) + 2;
+            recs[at]["v"] = json!(1000.0);
+        }),
         // A roll the sim's controller didn't make (another frame, or an extra one).
         ("which the sim's didn't make", false, |recs| {
             let at = roam_roll(recs);

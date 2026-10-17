@@ -396,7 +396,11 @@ impl RoamInputs for Io<'_, '_> {
         let args = |v: &Rv| -> Option<Vec<u32>> {
             v.as_array()?.iter().map(|x| f(x).map(f32::to_bits)).collect()
         };
-        let ok = rc["m"] == "insideUnitCircle"
+        // (`Random.Range(float, float)` returns within its inclusive bounds; the tape doesn't
+        // check them.)
+        let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+        let ok = (lo..=hi).contains(&idle)
+            && rc["m"] == "insideUnitCircle"
             && args(&rc["a"]).is_some_and(|a| a.is_empty())
             && vec2(&rc["v"]) == Some(circle.map(f32::to_bits))
             && ri["m"] == "Range_ff"
@@ -441,6 +445,21 @@ impl RoamInputs for Io<'_, '_> {
 
     fn step(&mut self, w: &mut World, u: EntityIdx, value: Result<V3, String>) -> R<()> {
         let id = w.entity(u).unique_id.clone();
+        // The setter keeps a position its value equals (`m_Position != value`): no write, and
+        // WrathOracle writes no `ag_pos`.
+        let before = w.unit(u).map_or([0.0; 3], |x| x.position);
+        if let Ok(x) = value
+            && crate::combat::orientation::vec3_eq(before, x)
+        {
+            let r = self.d.trace.records.get(self.d.i);
+            if r.is_some_and(|r| r["k"] == "obs" && r["ev"] == "ag_pos" && by_controller(r)) {
+                return Err(Desync(format!(
+                    "the sleeping step of {id}: a position written where the setter keeps it"
+                )));
+            }
+            self.d.out.roam.steps += 1;
+            return Ok(());
+        }
         let at = self.d.roam_take("the sleeping step's ag_pos", |r| {
             r["k"] == "obs" && r["ev"] == "ag_pos" && by_controller(r)
         })?;
@@ -450,7 +469,6 @@ impl RoamInputs for Io<'_, '_> {
         else {
             return Err(Desync(format!("the sleeping step of {id}: a record it can't read")));
         };
-        let before = w.unit(u).map_or([0.0; 3], |x| x.position);
         if r["u"].as_str() != Some(id.as_str()) {
             return Err(Desync(format!(
                 "the sleeping step of {id}: the recording's is {}'s",
