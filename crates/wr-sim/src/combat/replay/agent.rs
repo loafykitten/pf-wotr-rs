@@ -1453,7 +1453,7 @@ impl Driver<'_> {
                 // fall now, before the stop reads the view's posture.
                 let enter = by == "Kingmaker.View.UnitEntityView.EnterProneState";
                 if enter {
-                    self.prone_early(w, u)?;
+                    self.prone_stop(w, u)?;
                 }
                 ag::stop(w, u, self)?;
                 if enter {

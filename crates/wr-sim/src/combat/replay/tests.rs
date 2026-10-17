@@ -108,14 +108,14 @@ fn phases_follow_the_registration_order() {
     );
     assert_eq!(
         f.to(Post),
-        Ok(vec![Leave, Conscious, Prone, Helpless, Inspect, Creation, GameLog, Post])
+        Ok(vec![Leave, Conscious, Prone, ProneEnd, Helpless, Inspect, Creation, GameLog, Post])
     );
     assert_eq!(f.to(Post), Ok(vec![]), "once");
     assert_eq!(f.start(mode::DEFAULT), vec![]);
     // A frame without events: everything at its end.
     let all = vec![
         Groups, Turn, TurnChoose, Move, Sleeping, Cooldowns, Buffs, Roaming, Abilities, Life,
-        Leave, Conscious, Prone, Helpless, Inspect, Creation, GameLog, Post,
+        Leave, Conscious, Prone, ProneEnd, Helpless, Inspect, Creation, GameLog, Post,
     ];
     assert_eq!(f.start(mode::DEFAULT), all);
     assert_eq!(f.finish(), all);
@@ -143,15 +143,15 @@ fn phases_follow_the_game_modes_registrations() {
         f.finish(),
         vec![
             Groups, Turn, TurnChoose, Move, Sleeping, Roaming, Abilities, Life, Conscious, Prone,
-            Helpless, Inspect, Creation, GameLog, Post
+            ProneEnd, Helpless, Inspect, Creation, GameLog, Post
         ]
     );
     f.start(mode::DIALOG);
     assert_eq!(
         f.finish(),
         vec![
-            Groups, Move, Sleeping, Buffs, Roaming, Abilities, Life, Conscious, Prone, Helpless,
-            Inspect, Creation, GameLog, Post
+            Groups, Move, Sleeping, Buffs, Roaming, Abilities, Life, Conscious, Prone, ProneEnd,
+            Helpless, Inspect, Creation, GameLog, Post
         ]
     );
     f.start(2);

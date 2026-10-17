@@ -506,8 +506,11 @@ pub enum Phase {
     Leave,
     /// `UnitReturnToConsciousController`: out of combat, each unit's group memory's `Enemies`.
     Conscious,
-    /// `UnitProneController`.
+    /// `UnitProneController`: the place of its recorded calls (the stop of `EnterProneState`, the
+    /// commands' `InterruptAll`), each of which ticks its unit; it runs nothing of its own.
     Prone,
+    /// The rest of `UnitProneController`'s units, and the check of its falls against the calls.
+    ProneEnd,
     /// `UnitHelplessController`.
     Helpless,
     /// `InspectUnitsController`: dead units' knowledge checks.
@@ -523,7 +526,7 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 18] = [
+const WORK: [Phase; 19] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
@@ -537,6 +540,7 @@ const WORK: [Phase; 18] = [
     Phase::Leave,
     Phase::Conscious,
     Phase::Prone,
+    Phase::ProneEnd,
     Phase::Helpless,
     Phase::Inspect,
     Phase::Creation,
@@ -571,7 +575,9 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         Phase::TurnPrefix | Phase::Turn | Phase::TurnChoose => m == DEFAULT || m == CUTSCENE,
         Phase::Buffs => m == DEFAULT || m == DIALOG,
         Phase::Follow | Phase::Impatience | Phase::Ai | Phase::Engagement => m == DEFAULT,
-        Phase::Roaming | Phase::Prone => m == DEFAULT || m == DIALOG || m == CUTSCENE,
+        Phase::Roaming | Phase::Prone | Phase::ProneEnd => {
+            m == DEFAULT || m == DIALOG || m == CUTSCENE
+        }
     })
 }
 
@@ -2024,7 +2030,7 @@ impl Driver<'_> {
                     }
                 }
                 Phase::Life => super::life::life_tick(w),
-                Phase::Prone => self.prone_tick(w),
+                Phase::ProneEnd => self.prone_end(w),
                 Phase::Helpless => super::life::helpless_tick(w),
                 Phase::Inspect => super::inspect::tick(w),
                 Phase::Creation => crate::spawn::entity_creator_tick(w),

@@ -106,18 +106,21 @@ one) and the turn controller (`MoveAction += 3`, `TryCancelCommands`). `HandleUn
 
 `Unit` has `prone_active`, `prone_should_be_active` and `prone_duration` (ticks), hydrated from the save (a saved
 posture is still reported at hydration: the controller runs only in the driven combat replay). `tick_unit` is the
-controller's code for one unit but for `InterruptAll`. In the driven replay (on with the commands model):
-- `Phase::Prone` ticks the awake units (the recording's awake sets complete the list);
-- the recorded `ag_call Stop` from `UnitEntityView.EnterProneState` ticks its unit early (it must make it fall), so the
-  state the stop's `ConnectToGroups` reads is the sim's: **the agent's `IsProne` read is checked against the sim's
-  posture** instead of being an input;
-- a fall needs the recording's `uc_x` `InterruptAll` by `UnitProneController.Tick` for that unit in that frame (run by
-  the commands model where recorded), a recorded call without a fall is reported, as is one left at the frame's end;
+controller's code for one unit but for `InterruptAll`. In the driven replay (on with the commands model) the controller runs unit by unit as the game's
+`BaseUnitController.Tick` does, and a unit's whole sequence (its stop, its `InterruptAll`) is processed before the next unit's:
+- the first recorded record of a unit's fall (the `ag_call Stop` from `UnitEntityView.EnterProneState`, or the `uc_x`
+  `InterruptAll` by `UnitProneController.Tick`) ticks that unit then, in `Phase::Prone` (which runs nothing of its own); the
+  unit must fall, so **the agent's `IsProne` read is checked against the sim's posture** instead of being an input;
+- `Phase::ProneEnd` (before the next controller's first record, or at the frame's end) ticks the other awake units; each
+  fall needs the recording's `InterruptAll` for that unit in that frame (run by the commands model where recorded), and a
+  recorded call needs a fall (a fall of a unit without an agent has no stop record);
 - a unit whose awake state the sleeping controller couldn't settle (only the window's last frame: no next awake set) is
   taken from the frame's own recorded set [I: its own sleeping controller's change is what that leaves out; counted as
   "last-frame units taken as asleep"], or, without a set, ticked on a copy and reported if that changes its posture;
 - the end state's posture of every unit (`Active`, `ShouldBeActive`, `Duration`) is compared with the recording's
   (`compare::compare_prone`: a unit or posture missing on either side is a difference).
+[I] No capture has two units falling in one frame: the per-unit design handles it by construction (round 2 of the
+review found the first design, which ticked every unit at the phase's first record, would not), unverified by a fight.
 
 Presentation: `EnterProneState`/`LeaveProneState`'s animation and `Wake` (the awake sets are recorded). Reported where
 reached: a posture that should end in turn-based combat (the keeps-down branch needs `IsDirectlyControllable`), a

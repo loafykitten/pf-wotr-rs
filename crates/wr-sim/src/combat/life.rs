@@ -404,9 +404,8 @@ pub fn make_unit_conscious(w: &mut World, u: EntityIdx) {
     if petrifying {
         w.coverage.unsupported("UnitReturnToConsciousController: a petrifying buff");
     }
-    if has_condition(w, u, cond::PETRIFIED) {
-        crate::unit_state::remove_condition(w, u, cond::PETRIFIED, true);
-    }
+    // (Unconditional: it clears the raw count, which an immunity masks.)
+    crate::unit_state::remove_condition(w, u, cond::PETRIFIED, true);
     set_life_state(w, u, state::CONSCIOUS);
 }
 

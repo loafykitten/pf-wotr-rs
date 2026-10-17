@@ -530,9 +530,15 @@ pub fn compare_prone(ours: &J, oracle: &J) -> (u64, Vec<FlagDiff>) {
     let mut n = 0;
     let mut diffs = Vec::new();
     let posture = |u: &J, path: &[&str]| -> J { path.iter().fold(u.clone(), |v, k| v[*k].clone()) };
+    // An older dump has no postures at all; one that has them has one for every unit.
+    let supported = b.values().any(|o| !posture(o, &["state", "Prone"]).is_null());
     for (id, o) in &b {
         let y = posture(o, &["state", "Prone"]);
         if y.is_null() {
+            if supported {
+                let x = a.get(id).map_or(J::Null, |u| posture(u, &["prone"]));
+                diffs.push((id.clone(), "missing".to_owned(), x, y));
+            }
             continue;
         }
         let x = a.get(id).map_or(J::Null, |u| posture(u, &["prone"]));
@@ -548,7 +554,7 @@ pub fn compare_prone(ours: &J, oracle: &J) -> (u64, Vec<FlagDiff>) {
         }
     }
     // A unit only the sim has.
-    if n > 0 || !diffs.is_empty() {
+    if supported {
         for (id, u) in &a {
             if !b.contains_key(id) && !u["prone"].is_null() {
                 diffs.push((id.clone(), "missing".to_owned(), u["prone"].clone(), J::Null));
@@ -588,6 +594,14 @@ mod flag_tests {
         let extra = json!({"units": [{"id": "u", "state": {"Prone": post(true, 170000)}}]});
         let (_, d) = compare_prone(&ours, &extra);
         assert_eq!((d.len(), d[0].1.as_str()), (1, "missing"));
+        // The oracle's unit without a posture while the others have one.
+        let hole = json!({"units": [{"id": "u", "state": {"Prone": post(true, 170000)}},
+                                    {"id": "v", "state": {}}]});
+        let (_, d) = compare_prone(&ours, &hole);
+        assert_eq!((d.len(), d[0].1.as_str()), (1, "missing"));
+        // An older dump (no posture anywhere) compares nothing.
+        let old = json!({"units": [{"id": "u", "state": {}}, {"id": "v", "state": {}}]});
+        assert_eq!(compare_prone(&json!({"units": []}), &old), (0, vec![]));
     }
 
     /// A unit that is dead in one dump and not in the other, or out of the game, shows.
