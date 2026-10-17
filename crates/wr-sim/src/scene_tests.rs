@@ -851,7 +851,7 @@ fn map_object_world(
 }
 
 fn comp(class: &str, fields: serde_json::Value) -> crate::scene::CompInfo {
-    crate::scene::CompInfo { class: class.into(), fields }
+    crate::scene::CompInfo { class: class.into(), fields, enabled: None }
 }
 
 /// `AreaTransitionPart.UpdateVisibility`: the object is in game while the visibility flag is

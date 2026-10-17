@@ -71,6 +71,9 @@ pub struct ZoneInfo {
 pub struct CompInfo {
     pub class: String,
     pub fields: Value,
+    /// `Behaviour.enabled` (`None`: not recorded, a cache built before it was kept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// An entity view of the scene, by unique id.
@@ -140,7 +143,7 @@ impl SceneCache {
         };
         let flag = |v: &Value| v.as_i64().map_or_else(|| v.as_bool().unwrap_or(false), |i| i != 0);
         // Components by owner unique id.
-        let mut comps_of: std::collections::HashMap<String, Vec<(String, Value)>> =
+        let mut comps_of: std::collections::HashMap<String, Vec<(String, Value, Option<bool>)>> =
             std::collections::HashMap::new();
         for o in d["objects"].as_array().context("inventory without objects")? {
             let cs = o["components"].as_array().cloned().unwrap_or_default();
@@ -153,6 +156,7 @@ impl SceneCache {
                 list.push((
                     c["class"].as_str().unwrap_or_default().to_owned(),
                     c["fields"].clone(),
+                    c["enabled"].as_bool(),
                 ));
             }
         }
@@ -161,8 +165,8 @@ impl SceneCache {
             let Some(uid) = z["unique_id"].as_str() else { continue };
             let fields = comps_of
                 .get(uid)
-                .and_then(|cs| cs.iter().find(|(c, _)| c.ends_with("SriptZones.ScriptZone")))
-                .map_or(Value::Null, |(_, f)| f.clone());
+                .and_then(|cs| cs.iter().find(|(c, _, _)| c.ends_with("SriptZones.ScriptZone")))
+                .map_or(Value::Null, |(_, f, _)| f.clone());
             let calls = |n: &str| {
                 fields[n]["m_PersistentCalls"]["m_Calls"].as_array().map_or(0, std::vec::Vec::len)
             };
@@ -256,7 +260,11 @@ impl SceneCache {
                         .get(&uid)
                         .into_iter()
                         .flatten()
-                        .map(|(c, f)| CompInfo { class: c.clone(), fields: f.clone() })
+                        .map(|(c, f, e)| CompInfo {
+                            class: c.clone(),
+                            fields: f.clone(),
+                            enabled: *e,
+                        })
                         .collect()
                 } else {
                     Vec::new()

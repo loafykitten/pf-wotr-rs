@@ -205,7 +205,7 @@ toggle buffs kept their saved ids and `5FA03`/`6241B` came 13 ids early.
 **The data**: Drezen's scene cache (`scripts/scene-cache.sh DrezenCapital
 2570015799edf594daf2f076f2f975d8`; the cache now keeps a `CompanionSpawner` view's components: its
 settings and the `SpawnerInteraction*`, `SpawnerAdditionalActions`, `SpawnerCustomCutscene`
-components), the spawner data (`DidSpawnOnce`, `m_IsInGame`, the saved parts) and the companions'
+components, and each component's `enabled`: a disabled spawner component never subscribes), the spawner data (`DidSpawnOnce`, `m_IsInGame`, the saved parts) and the companions'
 `UnitPartCompanion.m_Spawner`, `IsIgnoreFixInGame`, `SpawnPosition`, `Descriptor.LastRestTime` and
 the pets' `UnitPartPet.Type` and masters' `UnitPartPetMaster.m_Pets`.
 

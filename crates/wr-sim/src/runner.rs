@@ -1750,6 +1750,7 @@ mod tests {
             components: vec![CompInfo {
                 class: "Kingmaker.View.Roaming.RoamingWaypointView".into(),
                 fields: json!({ "IdleCutscenes": idle, "NextWaypoints": [{}, {}] }),
+                enabled: None,
             }],
             position: [0.0; 3],
             rotation: [0.0, 0.0, 0.0, 1.0],

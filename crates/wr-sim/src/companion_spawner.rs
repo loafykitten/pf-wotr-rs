@@ -766,8 +766,8 @@ impl ExternalHandler for SpawnerView {
     fn rule(&self, _w: &mut World, _rule: &mut dyn RuleEvent, _step: RuleStep) {}
 }
 
-/// `EntityViewBase.OnEnable` → `EventBus.Subscribe(this)` for every active companion spawner view
-/// of the loaded scenes, as their scenes load (before the area's states are post-loaded), in
+/// `EntityViewBase.OnEnable` → `EventBus.Subscribe(this)` for every active, enabled companion
+/// spawner view of the loaded scenes, as their scenes load (before the area's states are post-loaded), in
 /// the scene cache's view order. [I] Unity's enable order within a scene is taken to be the
 /// cache's object order: on Manual_10 the order the capital mode reached seven spawners
 /// (WrathOracle's `in_game` events) is that order [M].
@@ -780,6 +780,14 @@ pub fn subscribe_views(w: &mut World) {
             || !w.scene.loaded_scenes.contains(&v.scene)
         {
             continue;
+        }
+        // `OnEnable` runs only for an enabled component.
+        match v.components.iter().find(|c| c.class.ends_with(".CompanionSpawner")).and_then(|c| c.enabled) {
+            Some(true) => {}
+            Some(false) => continue,
+            None => w.coverage.unsupported(
+                "CompanionSpawner: the component's enabled flag isn't in the scene cache (rebuild it)",
+            ),
         }
         let key = VIEW_HANDLER_BASE + n;
         n += 1;
@@ -1097,7 +1105,7 @@ mod tests {
             active_in_hierarchy: true,
             is_in_game: true,
             components: vec![
-                CompInfo { class: "Transform".into(), fields: json!({}) },
+                CompInfo { class: "Transform".into(), fields: json!({}), enabled: None },
                 CompInfo {
                     class: "Kingmaker.View.Spawners.CompanionSpawner".into(),
                     fields: json!({
@@ -1107,10 +1115,12 @@ mod tests {
                         "m_SpawnWhenInCapital": i32::from(capital), "m_SpawnWhenEx": 0,
                         "ShowCondition": { "guid": "" },
                     }),
+                    enabled: Some(true),
                 },
                 CompInfo {
                     class: "Kingmaker.UnitLogic.Interaction.SpawnerInteractionDialog".into(),
                     fields: json!({ "m_Dialog": { "guid": "" } }),
+                    enabled: Some(true),
                 },
             ],
             position,
@@ -1260,6 +1270,7 @@ mod tests {
         v.components = vec![CompInfo {
             class: "Kingmaker.View.Spawners.UnitSpawner".into(),
             fields: json!({ "m_Blueprint": { "guid": Guid(0xC1).to_string() }, "m_SpawnOnSceneInit": 1, "m_spawnConditions": { "guid": "" } }),
+            enabled: Some(true),
         }];
         cache.views.push(v);
         w.scene.cache = Some(Rc::new(cache));
@@ -1305,5 +1316,19 @@ mod tests {
         );
         assert_eq!(w.unit(u).expect("unit").companion_spawner.as_deref(), Some("sp"));
         assert_eq!(w.unit(u).expect("unit").position, [-13.467, 40.136, 60.642]);
+    }
+
+    /// A disabled spawner component never runs `OnEnable`: it doesn't hear the capital mode.
+    #[test]
+    fn a_disabled_spawner_is_not_subscribed() {
+        let (mut w, u) = setup();
+        let mut cache = (**w.scene.cache.as_ref().expect("cache")).clone();
+        cache.views[0].components[1].enabled = Some(false);
+        w.scene.cache = Some(Rc::new(cache));
+        subscribe_views(&mut w);
+        assert!(w.scene.companion_views.is_empty());
+        crate::entity::set_is_in_game(&mut w, u, false);
+        set_capital_mode(&mut w, true);
+        assert!(!w.entity(u).is_in_game);
     }
 }
