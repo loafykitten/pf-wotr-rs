@@ -11,6 +11,10 @@ This runs in the driven replay with the agent. Since stream T, `DesiredOrientati
 - with WrathOracle's observer `look`, every `UpdateSlowRotation` read is the sim's and checked ("The writers",
   below).
 
+Since stream roaming (2026-10-17), the roaming controller runs in the driven replay: its `LookAt`s, the last
+writes whose point was an input, are computed and checked on every capture that records them ("Roaming",
+below).
+
 Tags as elsewhere: [M] measured, [I] inferred, [C] from the decompiled code.
 
 ## The code [C]
@@ -114,9 +118,8 @@ checks fail.
 - `wr_nav::cs::approx_eq` (`Vector3 ==`) compares the unrounded double sum, while the decompiled operator stores
   it in a `float` local first (`orientation::vec3_eq` rounds). The two differ only when the sum rounds across
   `9.9999994E-11f`; worth aligning (and checking) when the agent's position equality is next touched.
-- The roaming controller's `LookAt` of a sleeping unit (toward its next roaming point) and its `ag_pos` step stay
-  inputs: roaming isn't modelled in combat replays (the dialogue runner models it). Porting it would compute the 1
-  to 4 outside writes left per fight.
+- The roaming controller's `LookAt` of a sleeping unit and its `ag_pos` step: computed since stream roaming
+  ("Roaming", below).
 
 ## The writers (2026-10-16, stream T)
 
@@ -241,6 +244,8 @@ Per run, the same for the record run and both replays:
 | `-132/tb-focus` | 15,051 (0) | 577, 565, 1 | roaming `LookAt` 1 | 0 | yes |
 | `-131/tb-lizard` | 81,918 (0) | 2,465, 2,475, 1 | roaming `LookAt` 4 | 103 | no |
 
+(Since stream roaming, these roaming `LookAt`s are the sim's, computed and checked: "Roaming", below.)
+
 - **`-131`'s other reports belong to other ports:** the walls' meshes and the crates' boxes (`Unverified`
   raycasts), the dropped loot, its combat log, and a prone rider's turn. None is the agent's, the commands' or
   orientation's.
@@ -272,8 +277,8 @@ Per run, the same for the record run and both replays:
 ### What stays an input, and what's left
 
 - **Inputs, by cause:**
-  - the point of a writer the sim doesn't run (the roaming controller's next point for a sleeping unit: 1 to 4
-    writes per fight; the angle itself is the sim's);
+  - the point of a writer the sim doesn't run (none left in these fights: the roaming controller's are computed
+    since stream roaming);
   - whether the attack of opportunity's animation handle was made (presentation: the gate of its `LookAt`);
   - the desired orientation at the window's start (`ag_init`) and where real time ends (`ag_sync`);
   - writes in real time, which isn't ported;
@@ -281,7 +286,7 @@ Per run, the same for the record run and both replays:
 - **Reported where reached, not modelled:** riders' and mounts' writes (`LookAt`/`ForceLookAt` of a rider, the
   rider's copy in `TickUnit`), `TurnToTarget` overrides other than `UnitMoveTo`'s, the paused `ForceLookAt`s.
 - **Left:**
-  - port the roaming controller in combat replays, so its writes' points are computed too;
+  - ~~port the roaming controller in combat replays~~: done ("Roaming", below);
   - `-131`'s other reports, which belong to other streams: box and mesh raycasts, the dropped loot, its combat log,
     a prone rider's turn;
   - WrathOracle's `ReferenceEquals` hardening in `LookPre` (after review, on this branch) is in no build yet. It
@@ -299,3 +304,142 @@ Reviews (gpt-6.1-sol, high):
   - the optional write in older captures;
   - the validity test's T0 check.
 - Then one pass on the final state.
+
+## Roaming (2026-10-17, stream roaming)
+
+The last `DesiredOrientation` writes whose point was an input were the roaming controller's: a sleeping unit's
+`LookAt` toward its next roaming point, after a position step (`ag_pos`). The controller now runs in the driven
+replay, and both are computed.
+
+### The code [C]
+
+- **`UnitRoamingController`** (`TickSleeping`: every unit of `State.Units`; registered in Default, Dialog,
+  Cutscene and Rest, after `UnitBuffsController`).
+  - `ShouldTickOnUnit`: conscious, `Commands.Empty`, not among the dialogue's `InvolvedUnits`, not in combat, with
+    `UnitPartRoaming`.
+  - `TickOnUnit`:
+    - `Disable`, a cutscene controlling the unit or a disabled part (`m_Disabled`, or a `UnitPartFollowUnit`):
+      interrupt a roaming move, return;
+    - no `NextPoint`: `RollNextPoint`;
+    - `IsPlayingIdle`: `IdleEndTime > GameTime`, or an idle cutscene playing; else both are cleared;
+    - `num = SqrDistance2D(next, Position)`;
+    - asleep (`IsSleeping`): `Position += (next - Position).normalized * Math.Min(Math.Sqrt(num), CurrentSpeedMps
+      [* 0.5 for a Slow or Stealth movement type] * DeltaTime)`, then `LookAt(next)`;
+    - `num > 1`: awake, `Run(new UnitMoveTo(next, 1f, distanceXZ: true) { MovementType, Orientation =
+      next.Orientation, Roaming = true })`; return;
+    - else (arrived): `IdleEndTime = GameTime + next.SelectIdleTime()`, play `next.SelectCutscene()`,
+      `AdvancePoint` (the next or previous waypoint by `ReverseDirection`; none: turn round once).
+  - `RollNextPoint`: `OriginalPoint + Random.insideUnitCircle.To3D() * Radius`, through
+    `ObstacleAnalyzer.TraceAlongNavmesh(OriginalPoint, end)`; `IdleTime = Random.Range(MinIdleTime, MaxIdleTime)`;
+    `IdleCutscene = Settings?.IdleCutscenes.Random()` (`LinqExtensions.Random`: no draw from an empty list).
+- **`RoamingPoint`** (the unit's own): no next or previous point, its `IdleTime.Seconds()` (`TimeSpan.FromSeconds`,
+  whole milliseconds), its `IdleCutscene`, no orientation.
+- **`UnitPartRoaming`**: saved `m_PersistentNextPoint` (a `RoamingPoint`) or `m_PersistentNextPointId` (a scene
+  waypoint), `m_Disabled`, `OriginalPoint`, `ReverseDirection`, `IdleCutscene`, `IdleEndTime`; not `Settings`.
+  A placeholder's `m_Roaming` is restored by `BecomeUnit` (`RestoreFrom`) at the load.
+- **`SpawnerRoamingSettings.Part.OnInitialize`**, when the spawner's view attaches (at the load too):
+  `Settings` (a new one: `Radius` 1, no idle times or cutscenes), its `MovementType`, `Radius` mode's radius and
+  idle times, `Cutscene` mode's cutscenes and idle times; `OriginalPoint = transform.position`.
+- **`CurrentSpeedMps`** of a unit without commands: `Math.Max(MinUnitSpeedMps, ModifiedSpeedMps)`, with
+  `ModifiedSpeedMps = Math.Max(MinUnitSpeedMps, BaseSpeedMps * CalculateSpeedModifier())`, `BaseSpeedMps =
+  Stats.Speed.Mps` (`ModifiedValue` feet `* 0.3048f / 3f`) for a non-player unit, the modifier halved per
+  Staggered, Slowed, Entangled and DifficultTerrain (and stealth, mobility, the weather's slowdown).
+
+### The sim
+
+- **`crates/wr-sim/src/combat/roaming.rs`**: `Part`, `Point`, `Settings`; `should_tick_on_unit`, `tick_on_unit`
+  (with `RollNextPoint`, `IsPlayingIdle`, the sleeping step, `AdvancePoint` of an own point), `current_speed_mps`,
+  each through `RoamInputs` where the game reads or writes outside the part.
+- **Hydration** (`hydrate::graph::roaming_part`): the saved part, a unit's or a placeholder's.
+- **`rng`**: `insideUnitCircle` draws (`DrawKind::InsideUnitCircle`, its `x` and `y`) on the tape.
+- **The driven replay (`replay/roaming.rs`)**, on with the driven agent and the roaming producers' records
+  (`cutscene_progress`: `roam_roll`):
+  - `Phase::Roaming` runs the controller over the units pool every frame (real time too: the positions there are
+    the recording's, as for every other controller).
+  - What it makes pulls its records, in the game's order, each checked:
+    - a roll: `roam_roll` (unit, settings, their idle cutscenes), then its two draws, the sim's from the tape;
+    - a sleeping step: `ag_pos` (the position before; after, the sim's step);
+    - its `LookAt`: `ag_look` through `look_write` (site `UnitRoamingController.TickOnUnit`);
+    - a move: `uc_new` (the point, `ApproachRadius` 1, `MaxApproachRadius` 1000000, XZ, `Roaming`, no orientation,
+      no delay), then its `uc_run` entry, which the commands model runs.
+  - A roaming record (by its caller chain, or a roll's draw) the record loop reaches places the frame's roaming
+    phase, which pulls it. One the controller didn't pull, or reached after the phase, is reported and taken.
+  - The start: the settings and origin from the unit's spawner in the scene cache; the saved state is the window's
+    start only when the unit runs a roaming `UnitMoveTo` to its saved next point (the controller issued it after
+    the load and hasn't arrived since: arriving would have rolled another point) [I]. Otherwise, and after a
+    report, the unit's state is unknown, and the controller reaching it is reported.
+  - `TraceAlongNavmesh`: the sim's grid when the paths are computed, else the area's nav file (the navmesh graph
+    isn't updated by ported code).
+- **Not modelled, reported where reached:** scene waypoints (`Patrol` mode), idle cutscenes (the settings', a
+  point's, one playing), a rider's or mount's speed, a player-faction unit out of combat, the weather's slowdown
+  (`WeatherSettings.UseSlowdown` is false in the root blueprint), the mobility condition, a dialogue's involved
+  units, a roaming unit whose commands or awake state the sim doesn't know.
+- **Not modelled, and why that can't pass silently:** cutscene control of a unit, `Disable`, stealth
+  (`RuleEnterStealth`; saved false in the fixtures), the speed's per-frame memo. Each changes what the controller
+  makes (a roll, a step, a move), and each of those is a record the sim pulls and checks; waiting at a point
+  changes nothing either way.
+- **The `Position` setter's** `Wake()` and `IEntityPositionChangedHandler` aren't run (as before, when the step
+  was an input): the awake states are the recording's.
+
+### Result [M]
+
+Per run (the same on the record run and both replays, but where noted), with the final build: the controller's
+ticks; rolls, sleeping steps, `LookAt`s and moves made; of the `LookAt`s, those computed and checked against
+`ag_look` in turn-based combat (the others are in real time, taken, or in a capture without `look`, the sim's
+unchecked). Every roll's point and idle time, every step (its speed included) and every move's description equal
+the recording's; every unit's state at the window's start was established (one roaming unit, `5052`);
+no write is left an outside input (`writes by code the sim doesn't run {}`).
+
+| Capture / fight | Ticks | Rolls | Steps | `LookAt`s (checked by `look`) | Moves | Valid |
+|---|---:|---:|---:|---:|---:|---|
+| `-113/tb-focus` (no `look`) | 1,687 | 2 | 1 | 1 (–) | 2 | yes |
+| `-113/tb-nearest` (no `look`) | 1,806 | 2 | 1 | 1 (–) | 1 | yes |
+| `-129/tb-lizard` (no `look`) | 7,554 | 8 | 7 | 7 (–) | 16 | yes |
+| `-131/tb-lizard` | 7,173 | 8 | 7 | 7 (4) | 6 | no (other ports: boxes, loot, log) |
+| `-132/tb-nearest` | 2,195 | 2 | 1 | 1 (1) | 1 | yes |
+| `-132/tb-focus` | 2,679 | 2 | 1 | 1 (1) | 1 | yes |
+| `-133/tb-nearest` | 1,983 | 2 | 1 | 1 (1) | 1 | yes |
+| `-133/tb-focus` | 3,064 | 2 | 1 | 1 (1) | 3 | yes |
+| `-134/tb-lizard` | 9,104 | 9 | 8 | 8 (5) | 10 | record and replay-1 no (the dropped loot and its log, another port's); replay-2 yes |
+| `-135/tb-nearest` (record, replay-1) | 2,072 | 2 | 1 | 1 (1) | 3 | yes |
+
+- **The roll's point** is the spawner's position (the scene cache's) plus the circle times `Radius` 3, unchanged by
+  `TraceAlongNavmesh` here, bit for bit; the idle times `Range(3, 8)`; the saved point's idle time 7.51869631 s.
+- **The step** is `CurrentSpeedMps` 3.048 (30 ft), halved for the spawner's `Slow` movement type, times the frame's
+  `DeltaTime` (0.05 at `-132/tb-focus`'s step), bit for bit: the speed port is checked by every step.
+- POC-4's dialogue suite (9 tests) passes: the hydration change only stores the saved part.
+
+**The tests** (`crates/wr-sim/tests/poc5_look.rs`):
+- `missing_or_wrong_roaming_records_are_reported` damages `-132/tb-focus`'s roaming records, each reported:
+  - a roll: missing, of another unit, with other settings or idle cutscenes, an extra field; a draw missing,
+    swapped, of the presentation class; a draw's value or arguments unlike the sim's draw; an idle time outside
+    `Range`'s bounds (on the tape too); the first roll's circle halved on the tape (the step then differs);
+  - a roll a frame later the controller didn't make;
+  - the sleeping step: missing, to or from another position, of another unit, unreadable, a frame early (the
+    idle isn't over), duplicated;
+  - the move: to another point, not roaming, another approach radius, a cooldown time limit, a player's, run
+    from the queue or without clearing it, its `uc_new` missing, another command run;
+  - the window's start: the running roaming move not to the saved next point.
+- `missing_or_wrong_look_records_are_reported`'s roaming cases now name the sim's `LookAt` (its state before,
+  result, point, missing, a rider's, another unit's).
+
+Reviews (gpt-6.1-sol, high), four rounds:
+- round 1: the roll's draw records checked against the sim's draws (kind, arguments, value); the move's
+  description a fresh `UnitMoveTo` (`IgnoreCooldown()`'s defaults, nobody's, not started); `Run(cmd)`'s
+  `fromQueue` and `doNotClearQueue` false; the step's unit checked before its position is applied;
+- round 2: no `ag_pos` where the `Position` setter keeps the position (WrathOracle writes none); the idle time
+  within `Range`'s bounds (the tape doesn't check them);
+- round 3: that missing `ag_pos` check only for this unit in this frame (another unit's step may follow);
+- round 4: no findings.
+
+### What's left
+
+- **Record at the window's start** (WrathOracle, `roam_init`): each `UnitPartRoaming` as the window opens (next
+  point: kind, position, idle time and cutscene, waypoint id; `IdleEndTime`, `IdleCutscene`, `ReverseDirection`,
+  `OriginalPoint`, `m_Disabled`, the settings). The save's state stands in today, confirmed only by the running
+  roaming move (every capture here has one); a unit idle at the window's start would be reported.
+- **Scene waypoints** (`Patrol` mode: `SelectNextPoint`'s `WeightedRandom`, `SelectPrevPoint`, `SelectIdleTime`'s
+  draw, with `roam_point` as their producer) and idle cutscenes: reported; no combat capture reaches them (the
+  dialogue runner's Horgus fixture has waypoints).
+- `MovementType` isn't in `uc_new`'s description: the move's type is unchecked (its speed is the agent's
+  `speedmps` leaf, an input).
