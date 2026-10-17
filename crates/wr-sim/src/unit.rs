@@ -239,6 +239,9 @@ pub struct Unit {
     pub in_stealth: bool,
     /// `UnitStealth.m_SpottedBy` (saved): the unique ids of the units that spotted it, in order.
     pub stealth_spotted_by: Vec<String>,
+    /// `UnitStealth` flags the stealth controller acts on (`WantEnterStealth`, `InAmbush`,
+    /// `ForceEnterStealth`, `ShouldExitStealth`), any set in the save.
+    pub stealth_pending: bool,
     /// The unit has a `UnitPartBlindsense` (saved; its range isn't hydrated).
     pub has_blindsense: bool,
     /// `State.MarkedForDeath`, `State.ForceKill` (saved).

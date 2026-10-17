@@ -351,20 +351,12 @@ impl Loader<'_> {
             );
         }
         let group = o.str("GroupId").map(str::to_owned);
-        // `UnitState.IsInStealth` and `UnitStealth.m_SpottedBy` (`InStealthFor`), and the blindsense
-        // part (`UnitPartBlindsense`, which `UnitMemoryController` asks `Reach`).
-        let in_stealth = state.is_some_and(|s| s.bool_or("IsInStealth", false));
-        let mut stealth_spotted_by = Vec::new();
-        if let Some(Value::Seq(items)) = o.obj("m_Stealth").and_then(|s| s.get("m_SpottedBy")) {
-            for v in items {
-                match super::graph::str_of(v) {
-                    Some(id) => stealth_spotted_by.push(id.to_owned()),
-                    None => self
-                        .w
-                        .coverage
-                        .unsupported("UnitStealth.m_SpottedBy: an entry that isn't a unit id"),
-                }
-            }
+        // `UnitState.IsInStealth`, `UnitEntityData.Stealth` (`InStealthFor`, the stealth controller's
+        // entry flags) and the blindsense part (`UnitPartBlindsense`, which `UnitMemoryController`
+        // asks `Reach`).
+        let stealth = saved_stealth(o);
+        if stealth.bad_spotters > 0 {
+            self.w.coverage.unsupported("UnitStealth.m_SpottedBy: an entry that isn't a unit id");
         }
         let has_blindsense = parts.iter().any(|p| p.ty() == "UnitPartBlindsense");
         let marked_for_death = state.is_some_and(|s| s.bool_or("MarkedForDeath", false));
@@ -392,9 +384,10 @@ impl Loader<'_> {
             u.alignment = alignment;
             u.life_state = life;
             u.finally_dead = finally_dead;
-            u.in_stealth = in_stealth;
-            u.stealth_spotted_by = stealth_spotted_by;
+            u.in_stealth = stealth.in_stealth;
+            u.stealth_spotted_by = stealth.spotted_by;
             u.has_blindsense = has_blindsense;
+            u.stealth_pending = stealth.pending;
             u.marked_for_death = marked_for_death;
             u.force_kill = force_kill;
             u.no_xp_on_death = no_xp_on_death;
@@ -473,6 +466,43 @@ impl Loader<'_> {
             }
         }
     }
+}
+
+/// A unit's saved stealth state (`UnitState.IsInStealth` under `Descriptor.State`, and the unit's
+/// `Stealth` property: `UnitEntityData.Stealth`, not a placeholder's `m_Stealth`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct SavedStealth {
+    pub in_stealth: bool,
+    /// `UnitStealth.m_SpottedBy`: the spotters' unique ids, in order.
+    pub spotted_by: Vec<String>,
+    /// Entries of the list that aren't ids.
+    pub bad_spotters: usize,
+    /// `WantEnterStealth`, `InAmbush`, `ForceEnterStealth` or `ShouldExitStealth` is set.
+    pub pending: bool,
+}
+
+/// The stealth state of a saved `UnitEntityData`.
+pub(super) fn saved_stealth(o: O<'_>) -> SavedStealth {
+    let mut out = SavedStealth {
+        in_stealth: o
+            .obj("Descriptor")
+            .and_then(|d| d.obj("State"))
+            .is_some_and(|s| s.bool_or("IsInStealth", false)),
+        ..SavedStealth::default()
+    };
+    let Some(stealth) = o.obj("Stealth") else { return out };
+    if let Some(Value::Seq(items)) = stealth.get("m_SpottedBy") {
+        for v in items {
+            match super::graph::str_of(v) {
+                Some(id) => out.spotted_by.push(id.to_owned()),
+                None => out.bad_spotters += 1,
+            }
+        }
+    }
+    out.pending = ["WantEnterStealth", "InAmbush", "ForceEnterStealth", "ShouldExitStealth"]
+        .iter()
+        .any(|k| stealth.bool_or(k, false));
+    out
 }
 
 /// `settings.game.tutorial.*` from the save's settings list.

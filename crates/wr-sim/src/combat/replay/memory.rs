@@ -879,6 +879,9 @@ impl<'t> MemWorld<'_, 't> {
         recorded: T,
     ) -> T {
         *self.d.out.mem_leaf_checked.entry(f).or_default() += 1;
+        if sim != recorded {
+            *self.d.out.mem_leaf_differs.entry(f).or_default() += 1;
+        }
         self.checked(f, sim, &recorded);
         recorded
     }
@@ -916,9 +919,9 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| Desync("a ready group the sim doesn't have".into()))?;
         // `SleepingUnitsController`: every group of `UnitGroups`, in order, once, that has a member
-        // the test lists. The sim decides a group whose member is in combat or of the party (never
-        // in fog of war); a group that rests on another member's fog of war is taken as recorded.
-        let party = crate::narrative::party::character_lists(self.w).party_and_pets;
+        // the test lists. The sim decides a group whose member is in combat or directly
+        // controllable (never in fog of war); a group that rests on another member's fog of war is
+        // taken as recorded.
         let order = self.w.combat.groups.list.clone();
         let mut wrong = None;
         let mut last: Option<usize> = None;
@@ -934,13 +937,14 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         }
         for &g in &order {
             let listed = groups.contains(&g);
-            match senses::ready_for_combat(self.w, g, &party) {
+            match senses::ready_for_combat(self.w, g) {
                 Tri::Unknown => {
                     *self.d.out.mem_leaf_taken.entry("ready").or_default() += 1;
                 }
                 t => {
                     *self.d.out.mem_leaf_checked.entry("ready").or_default() += 1;
                     if (t == Tri::Yes) != listed {
+                        *self.d.out.mem_leaf_differs.entry("ready").or_default() += 1;
                         wrong = Some(format!(
                             "group {} is {} ready, the recording {} it",
                             group_key(self.w, g),
@@ -985,8 +989,10 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         let r = self.leaf("pass", &["u", "v"])?;
         Self::about(r, "u", &self.uid(u))?;
         let v = Self::bool_of(r, "v")?;
-        let sim = senses::passive(self.w, u);
-        Ok(self.leaf_checked("pass", sim, v))
+        Ok(match senses::passive(self.w, u) {
+            Some(sim) => self.leaf_checked("pass", sim, v),
+            None => self.leaf_taken("pass", v),
+        })
     }
 
     fn group_of(&mut self, u: EntityIdx) -> Result<GroupIdx, Desync> {
@@ -1021,8 +1027,10 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         Self::about(r, "u", &self.uid(u))?;
         Self::about(r, "g", &group_key(self.w, g))?;
         let v = Self::bool_of(r, "v")?;
-        let sim = senses::in_stealth_for(self.w, u, g);
-        Ok(self.leaf_checked("stl", sim, v))
+        Ok(match senses::in_stealth_for(self.w, u) {
+            Some(sim) => self.leaf_checked("stl", sim, v),
+            None => self.leaf_taken("stl", v),
+        })
     }
 
     fn is_enemy(&mut self, g: GroupIdx, u: EntityIdx) -> Result<bool, Desync> {

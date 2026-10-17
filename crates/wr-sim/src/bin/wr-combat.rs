@@ -297,8 +297,8 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.mem_checked
     );
     println!(
-        "memory leaves: computed and equal to the recording's {:?}; taken from it {:?}",
-        out.mem_leaf_checked, out.mem_leaf_taken
+        "memory leaves: decided by the sim and compared with the recording's {:?}, of which differing {:?}; taken from the recording {:?}",
+        out.mem_leaf_checked, out.mem_leaf_differs, out.mem_leaf_taken
     );
     match (&out.vision, &out.vision_off) {
         (Some(v), _) => println!(
