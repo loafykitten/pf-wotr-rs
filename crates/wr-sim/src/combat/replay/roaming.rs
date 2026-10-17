@@ -452,7 +452,14 @@ impl RoamInputs for Io<'_, '_> {
             && crate::combat::orientation::vec3_eq(before, x)
         {
             let r = self.d.trace.records.get(self.d.i);
-            if r.is_some_and(|r| r["k"] == "obs" && r["ev"] == "ag_pos" && by_controller(r)) {
+            // (Another unit's step may come next: only this unit's, in this frame, is wrong.)
+            if r.is_some_and(|r| {
+                r["k"] == "obs"
+                    && r["ev"] == "ag_pos"
+                    && by_controller(r)
+                    && r["u"].as_str() == Some(id.as_str())
+                    && r["t"].as_i64() == Some(self.d.tick)
+            }) {
                 return Err(Desync(format!(
                     "the sleeping step of {id}: a position written where the setter keeps it"
                 )));
