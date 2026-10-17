@@ -445,7 +445,10 @@ Reviews (gpt-6.1-sol, high), four rounds:
 
 ### What's left
 
-- **Record at the window's start** (WrathOracle, `roam_init`): each `UnitPartRoaming` as the window opens (next
+- **Record at the window's start** (WrathOracle, `roam_init`; **added 2026-10-17 in the main session**, `CommandObsRoam.cs`,
+  declared as observer `roam_init` with the agent: one `roam_init` per unit with a part, then `roam_init_end` with the
+  count; parts read from `EntityPartsManager.m_Parts`, not `Get<T>`, which fills its cache. Not yet recorded, and the sim
+  doesn't read it yet; gpt-6.1-sol: two rounds, no findings left): each `UnitPartRoaming` as the window opens (next
   point: kind, position, idle time and cutscene, waypoint id; `IdleEndTime`, `IdleCutscene`, `ReverseDirection`,
   `OriginalPoint`, `m_Disabled`, the settings). The save's state stands in today, confirmed only by the running
   roaming move (every capture here has one); a unit idle at the window's start would be reported.

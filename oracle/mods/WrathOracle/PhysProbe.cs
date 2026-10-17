@@ -13,7 +13,7 @@ namespace WrathOracle;
 //  - ph_col: every Collider in the loaded scenes, inactive ones included: identity (scene, hierarchy
 //    path, sibling path, type, instance id), the GameObject's layer and activity, enabled, isTrigger,
 //    bounds, the transform's position, rotation, lossyScale and localToWorldMatrix, and per type:
-//    box center and size; mesh sharedMesh name, convex, cookingOptions; terrain data name, size and
+//    box center, size and world centre (wcenter: transform.TransformPoint(center)); mesh sharedMesh name, convex, cookingOptions; terrain data name, size and
 //    heightmap resolution; capsule/sphere/controller center, radius, height, direction;
 //  - ph_probe: rays straight down (100 m, mask Layers.WalkableMask) over a 9 x 9 grid on the xz bounds
 //    of each enabled, active box and mesh collider on a walkable layer, from 2 m above the bounds' top:
@@ -52,7 +52,8 @@ internal static class PhysProbe
                     j.Prop("l2w", t.localToWorldMatrix);
                     switch (c)
                     {
-                        case BoxCollider bc: j.Prop("center", bc.center); j.Prop("size", bc.size); break;
+                        case BoxCollider bc:
+                            j.Prop("center", bc.center); j.Prop("size", bc.size); j.Prop("wcenter", t.TransformPoint(bc.center)); break;
                         case MeshCollider mc:
                             j.Prop("mesh", mc.sharedMesh != null ? mc.sharedMesh.name : null);
                             j.Prop("convex", mc.convex); j.Prop("cooking", (int)mc.cookingOptions); break;
@@ -93,7 +94,7 @@ internal static class PhysProbe
                 }
             }
         }
-        catch (Exception e) { Health.Failed("phys probe", e); }
+        catch (Exception e) { Trace.HookFailed("phys probe", e); }
     }
 
     // The collider's identity: scene, hierarchy path, sibling path, type, instance id.

@@ -314,7 +314,7 @@ internal static partial class CommandObs
             if (EngOn) EngInit();
             if (TgtOn) TgtInit();
             if (ImpOn) ImpInit();
-            if (AgOn) AgInit();
+            if (AgOn) { AgInit(); RoamInit(); }
             if (MemOn) MemInit();
         }
         catch (Exception e) { Trace.HookFailed("observe uc_snap", e); }

@@ -419,6 +419,8 @@ Unbuilt, for the main session to build and record (`oracle/mods/WrathOracle/`):
 3. **`ph_col` `wcenter`** (stream boxes, `PhysProbe.cs`): for a `BoxCollider`, `transform.TransformPoint(center)`
    (round-trip floats), so the importer can take the box's world centre as recorded (and check it against its
    `TransformPoint` port) instead of computing it from the scene's local transforms.
+   **Added (2026-10-17, main session; gpt-6.1-sol: two rounds, no findings left), not yet recorded:** `ph_col`'s
+   `wcenter` for every `BoxCollider`. The importer doesn't read it yet; the next capture with `phys_probe` carries it.
 
 ## Reproduce
 

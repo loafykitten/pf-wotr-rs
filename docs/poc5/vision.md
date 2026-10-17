@@ -171,6 +171,11 @@ against the game. Two things stay open for the blockers themselves, and one reco
    192 transformed cube vertices round differently when summed in double; the native routine's order isn't established);
 2. the grid's bounds and the registration (the importer derives them; nothing has been compared).
 
+**Added 2026-10-17 in the main session** (`LosProbe.cs`, observer `los_geom`, written right after the begin record
+next to `phys_probe`; gpt-6.1-sol: two rounds, no findings left; not yet recorded): `los_geom` and `los_probe` as
+specified below, 40 probes per distinct segment (`System.Random`, seed 20261017; Unity's RNG untouched). Left for the
+sim: when `los_geom` is declared, require both records (today it checks whichever arrive).
+
 WrathOracle's next recording should, once at the window's start (the geometry is initialised by then; both reads are
 pure and take the geometry's read lock only):
 

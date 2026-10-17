@@ -68,7 +68,8 @@ namespace WrathOracle;
 //  - ag_v isdone: each Path.IsDone() the agent evaluates (PathTo, FindPath, IsReallyMoving, PathFailed), with the path;
 //  - ag_sim / ag_sim_end: each SimulateTickMovementForTurnBased step (ScorePath's movement simulation, the path
 //    visualizer's), the simulator before (with its path's points) and after, the step's result; its reads in between
-//    are ag_v leaves with ctx "sim": maxspeed, fly, near (GetNearest's AllyBlocked), los (HasObstacle).
+//    are ag_v leaves with ctx "sim": maxspeed, fly, near (GetNearest's AllyBlocked), los (HasObstacle);
+//  - roam_init / roam_init_end: each roaming part at the window's first tick, after ag_init (CommandObsRoam.cs).
 // Gated like the other observers: inside a turn-based window, on the main thread.
 internal static partial class CommandObs
 {

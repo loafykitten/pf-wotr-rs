@@ -133,6 +133,8 @@ internal static class Fixture
         // The colliders and a probe of them (observer phys_probe; reads only), where the window records
         // observations (Sched.On: turn-based windows), so no unrecorded query runs elsewhere.
         if (Fidelity.Observers.Contains("phys_probe") && Sched.On) PhysProbe.Run();
+        // The line-of-sight geometry and the game's answers across it (observer los_geom; reads only).
+        if (Fidelity.Observers.Contains("los_geom") && Sched.On) LosProbe.Run();
         CamPin.WindowOpen(); // the camera's view of extra and dead units at the window's open (reads only)
         Main.Note($"fixture {Mode} {name} -> {PathNow}");
         PrePathSync.Flush(Time.frameCount);
@@ -360,10 +362,13 @@ internal static class Fidelity
         if (CommandObs.AgSyncOn) Observers.Add("agent_sync");
         // The place-on-ground step's view position, reads and rays (ag_ground vafter/fly/prone/torso, ag_phys ctx ground).
         if (CommandObs.AgOn) Observers.Add("ground_view");
+        // Each roaming part at the window's first tick (roam_init, roam_init_end; CommandObsRoam.cs).
+        if (CommandObs.AgOn) Observers.Add("roam_init");
         // Every write of a unit's DesiredOrientation and m_Orientation outside TickUnit's own (ag_look; CommandObsLook.cs).
         if (CommandObs.LookOn) Observers.Add("look");
         if (CommandObs.MemOn) Observers.Add("memory");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
+        if (LosProbe.Installed) Observers.Add("los_geom");
         if (CommandObs.PathsOn) Observers.Add("paths");
         // Projectile arrival pinned (proj_launch, proj_hit; ProjPin.cs), critters' path requests keyed apart
         // (path_critter; PathSync.cs).
