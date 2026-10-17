@@ -367,6 +367,10 @@ internal static class Fidelity
         // Every write of a unit's DesiredOrientation and m_Orientation outside TickUnit's own (ag_look; CommandObsLook.cs).
         if (CommandObs.LookOn) Observers.Add("look");
         if (CommandObs.MemOn) Observers.Add("memory");
+        // The entity-bounds colliders at the window's first tick (bounds_init, bounds_init_end; CommandObsBounds.cs).
+        if (CommandObs.MemOn) Observers.Add("bounds_init");
+        // Each awake unit's CanBeInVisionRange in enumeration order when it changes (vis_order; Observe.cs).
+        Observers.Add("vis_order");
         if (PhysProbe.Installed) Observers.Add("phys_probe");
         if (LosProbe.Installed) Observers.Add("los_geom");
         if (CommandObs.PathsOn) Observers.Add("paths");
