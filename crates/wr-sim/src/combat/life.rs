@@ -32,12 +32,16 @@ const MYTHIC_HARD_TO_KILL: i64 = 69;
 const IMMORTALITY: i64 = 44;
 const ALLOW_DYING_CONDITION: i64 = 45;
 
-/// `Game.Instance.State.Units` in order (the entity pool): every unit entity.
+/// Every unit entity, in `Game.Instance.State.Units` order: the pool's
+/// ([`crate::scene::units_pool`]: the order units joined their states), then any other unit entity
+/// (fake, disposed or held by no state) in the sim's entity order, so the set is every unit's.
 pub(crate) fn all_units(w: &World) -> Vec<EntityIdx> {
-    (0..w.entities.len())
-        .filter_map(|i| u32::try_from(i).ok().map(EntityIdx))
-        .filter(|e| w.unit(*e).is_some() && w.entity(*e).clr == "UnitEntityData")
-        .collect()
+    let mut out = crate::scene::units_pool(w);
+    let pooled: std::collections::HashSet<EntityIdx> = out.iter().copied().collect();
+    out.extend((0..w.entities.len()).filter_map(|i| u32::try_from(i).ok().map(EntityIdx)).filter(
+        |e| !pooled.contains(e) && w.unit(*e).is_some() && w.entity(*e).clr == "UnitEntityData",
+    ));
+    out
 }
 
 /// `SleepingUnitsController.ShouldBeSleeping` for what the sim can establish.
