@@ -6,7 +6,7 @@
 //! the recording's set is the one the run goes on with.
 //!
 //! The collider's inputs the sim doesn't have are the recording's: each unit's `Corpulence` (its
-//! `corp` reads: the last at or before the frame, else the first after it) and the physics clock
+//! `corp` reads before the record the phase is placed at; none yet: unknown) and the physics clock
 //! (`fixed_phase0` of the begin record and each tick's scaled delta: which frames run a physics
 //! step, the frame a collider's transform reaches PhysX in).
 
@@ -14,11 +14,17 @@ use std::collections::{HashMap, HashSet};
 
 use crate::combat::oracle::{Rv, Trace};
 use crate::combat::vision::V3;
-use crate::combat::vision::range::{self, BoundsUnit, Hit, Radius};
+use crate::combat::vision::range::{self, BoundsUnit, Enabled, Hit};
 use crate::world::{EntityIdx, World};
 
 use super::vision::vision_radius;
 use super::{Driver, Phase};
+
+/// The view's `lossyScale` (larger horizontal component) a collider is made with: the sim doesn't
+/// have it (the unit prefab's root scale times the size scale), and 1 is assumed. The
+/// recordings agree with the assumption: pairs within 5 cm of the capsule's surface, the ones another
+/// scale could decide, are counted (`range_within_5cm`) and every one of them equals the recording's.
+const ASSUMED_VIEW_SCALE: f32 = 1.0;
 
 /// The vision controller's side: the sets the sim computes, checked against the `vis` records.
 #[derive(Debug, Default)]
@@ -26,8 +32,8 @@ pub(super) struct RangeDriver {
     /// The sets are the sim's, checked against the records; else they stay the records'.
     on: bool,
     /// The recording's reads of each unit's `Corpulence` (`uc_v`/`ag_v` `corp`), by unit id: the
-    /// frame and the value, in order.
-    corp: HashMap<String, Vec<(i64, f32)>>,
+    /// record's index and the value, in order.
+    corp: HashMap<String, Vec<(usize, f32)>>,
     /// The (frame, observer) pairs the recording has a `vis` record for.
     recs: HashSet<(i64, String)>,
     /// WrathOracle's `VisionLast`: each unit's set as of its last `vis` record (a record is the
@@ -54,13 +60,11 @@ impl RangeDriver {
             #[allow(clippy::cast_possible_truncation)]
             _ => v.as_f64().map(|x| x as f32),
         };
-        for r in &trace.records {
+        for (i, r) in trace.records.iter().enumerate() {
             match (r["k"].as_str(), r["ev"].as_str()) {
                 (Some("obs"), Some("uc_v" | "ag_v")) if r["f"] == "corp" => {
-                    if let (Some(u), Some(t), Some(c)) =
-                        (r["u"].as_str(), r["t"].as_i64(), value(&r["v"]))
-                    {
-                        self.corp.entry(u.to_owned()).or_default().push((t, c));
+                    if let (Some(u), Some(c)) = (r["u"].as_str(), value(&r["v"])) {
+                        self.corp.entry(u.to_owned()).or_default().push((i, c));
                     }
                 }
                 (Some("obs"), Some("vis")) => {
@@ -138,19 +142,19 @@ impl Driver<'_> {
         );
     }
 
-    /// A unit's collider radius at this frame: its `Corpulence` as the recording shows it.
-    fn vis_radius(&mut self, w: &World, u: EntityIdx) -> Radius {
-        let Some(series) = self.vis.range.corp.get(&w.entity(u).unique_id) else {
-            return Radius::Unknown;
-        };
-        let i = series.partition_point(|(t, _)| *t <= self.tick);
-        if i > 0 {
-            return Radius::of_corpulence(Some(series[i - 1].1));
+    /// A unit's `Corpulence` as the recording shows it before the record the phase is placed at
+    /// (the record being processed: a read in the frame's later phases comes after it); `None`
+    /// until the unit's first read (counted).
+    fn vis_corpulence(&mut self, w: &World, u: EntityIdx) -> Option<f32> {
+        let at = w.combat.nav.at;
+        let read = self.vis.range.corp.get(&w.entity(u).unique_id).and_then(|series| {
+            let i = series.partition_point(|(i, _)| *i < at);
+            (i > 0).then(|| series[i - 1].1)
+        });
+        if read.is_none() {
+            self.vis.counts.range_corp_unknown += 1;
         }
-        // A unit read only after this frame: its first read (a corpulence changes only by a size
-        // effect).
-        self.vis.counts.range_corp_later += 1;
-        Radius::of_corpulence(series.first().map(|x| x.1))
+        read
     }
 
     /// A unit's position at the frame's start, from the observation rows (the previous frame's
@@ -202,18 +206,45 @@ impl Driver<'_> {
         }
         let first = !self.vis.range.started;
         self.vis.range.started = true;
-        let pool = crate::scene::units_pool(w);
+        let pool = crate::scene::units_with_bounds(w);
         let mut list = Vec::with_capacity(pool.len());
         for &u in &pool {
             let pos = self.vis_pos(w, u, true);
             let prefix = if first { self.vis_prefix_pos(w, u) } else { pos };
-            // (`m_Suppressed` only exists in an area with parts, which the vision run refuses.)
+            // `ShouldBeEnumeratedByEntityPoolEnumerator` is `IsInGame && !Suppressed`; `m_Suppressed`
+            // only exists in an area with parts, which the vision run refuses.
             let in_game = w.entity(u).is_in_game;
-            let radius = self.vis_radius(w, u);
-            list.push(BoundsUnit { unit: u, pos, prefix, in_game, enabled: in_game, radius });
+            if in_game {
+                w.combat.vision.fade_hidden.remove(&u);
+            }
+            // A view that fade-hides keeps its collider's `enabled` until the fade ends.
+            let enabled = match (in_game, w.combat.vision.fade_hidden.contains(&u)) {
+                (true, _) => Enabled::Yes,
+                (false, true) => Enabled::Unknown,
+                (false, false) => Enabled::No,
+            };
+            self.vis.counts.range_fade_unit_frames += usize::from(enabled == Enabled::Unknown);
+            let corpulence = self.vis_corpulence(w, u);
+            list.push(BoundsUnit {
+                unit: u,
+                pos,
+                prefix,
+                in_game,
+                enabled,
+                corpulence,
+                view_scale: ASSUMED_VIEW_SCALE,
+            });
         }
         let step = self.vis_steps();
-        w.combat.vision.bounds.tick(&list, step);
+        for gone in w.combat.vision.bounds.tick(&list, step).removed {
+            let id = w.entity(gone).unique_id.clone();
+            Self::vis_report(
+                w,
+                &format!(
+                    "the entity {id} left the entities with bounds: when its view and sphere collider are destroyed isn't modelled"
+                ),
+            );
+        }
         self.vis.range.expect.clear();
         if m == super::mode::PAUSE {
             return;
@@ -281,6 +312,7 @@ impl Driver<'_> {
             c.range_pairs += 1;
             c.range_rounding += usize::from(h.rounding);
             let a = margin.abs();
+            c.range_within_5cm += usize::from(a < 0.05);
             c.range_within_1cm += usize::from(a < 0.01);
             c.range_within_1mm += usize::from(a < 0.001);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

@@ -8,6 +8,12 @@
 //! `pos + up * 2r` with radius `r = VisionRangeMeters`, and keeps their units.
 //!
 //! What the model holds, and what the recordings fixed (docs/poc5/vision.md):
+//! - **Population.** `State.EntitiesWithBounds` in the order its entities joined their states; the
+//!   first tick (`m_UpdateAll`) walks it through `EntityPoolEnumerator`, which skips entities that are
+//!   not `ShouldBeEnumeratedByEntityPoolEnumerator` (in the game and not suppressed): a unit hidden
+//!   at that tick gets its collider only when it later comes into the game, in the order of
+//!   the update list's insertions (taken to be the pool's order), after the others. A collider is
+//!   destroyed with its view, which the sim doesn't know the time of: [`Tick::removed`].
 //! - **Position.** The bounds controller sets a collider's transform to the entity's `Position` in
 //!   its tick, but `Physics.autoSyncTransforms` is off: PhysX takes the transforms at a physics
 //!   step (a fixed update, before the frame's controllers). Most frames run a step, so a query
@@ -15,14 +21,20 @@
 //!   before. The capsule is at the querying unit's position of this frame ([`Bounds::tick`] takes
 //!   whether the frame ran a step). A collider made in a tick is at the origin until the next
 //!   step.
-//! - **Radius.** The collider's radius is `Max(0.05, Corpulence)`. A unit whose corpulence the
-//!   recording never shows has an *unknown* radius, at least [`MIN_CORPULENCE`]: a pair that range
+//! - **Radius.** A collider is made with `Max(0.05, Corpulence * view scale)` and, in the same
+//!   tick, set to `Max(0.05, Corpulence)` (its own transform has unit scale) if that is more than
+//!   0.05 away; later ticks of the entity (position, game state or size changed) do the same
+//!   against the radius it has. The sim has the corpulence from the recording and the view's scale
+//!   only as an assumption (1: [`BoundsUnit::view_scale`]). A unit whose corpulence the recording
+//!   doesn't show yet has an *unknown* radius, at least [`MIN_CORPULENCE`]: a pair that range
 //!   decides is the sim's, any other pair is [`Tri::Maybe`] (the recording answers).
 //! - **Enabled.** `ShouldBeEnumeratedByEntityPoolEnumerator` (in the game and not suppressed), set
-//!   by `UpdateViewActive` the moment either changes.
-//! - **Order.** The results come in the colliders' order, the order they were made in (the pool's
-//!   for the units of a loaded area, a later unit after them): the sets are refilled in that order
-//!   each tick, so it is also the order `UnitGroup.ExtractNearUnits` unions them in.
+//!   by `UpdateViewActive` the moment either changes, except while the view fade-hides
+//!   (`m_IsFadeHide`): the collider then keeps its state until the fade ends, which the sim
+//!   doesn't know ([`Enabled::Unknown`]: a pair in reach is [`Tri::Maybe`]).
+//! - **Order.** The results come in the colliders' order, the order they were made in, so it is
+//!   also the order `UnitGroup.ExtractNearUnits` unions the sets in (they are refilled in it each
+//!   tick).
 //!
 //! The overlap itself is PhysX's sphere against capsule: the squared distance from the sphere's
 //! centre to the capsule's segment against the squared sum of the radii, in `f32`
@@ -44,22 +56,46 @@ pub const MAX_CORPULENCE: f32 = 4.0;
 /// A collider's radius as far as the sim knows it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Radius {
-    /// `Max(0.05, Corpulence)` with the corpulence the recording gives.
+    /// The radius the game's rules give, from the corpulence the recording shows.
     Known(f32),
-    /// A corpulence the recording never shows.
+    /// A corpulence the recording doesn't show.
     Unknown,
 }
 
-impl Radius {
-    /// The collider radius for a unit's `Corpulence` (`EntityBoundsController.ScaleRadius` with
-    /// the collider's unit scale).
-    #[must_use]
-    pub fn of_corpulence(c: Option<f32>) -> Self {
-        c.map_or(Self::Unknown, |c| Self::Known(c.max(0.05)))
-    }
+/// `ScaleRadius(radius, lossyScale)` with the scale's larger horizontal component `s`.
+fn scale_radius(radius: f32, s: f32) -> f32 {
+    (radius * s).max(0.05)
 }
 
-/// What the sim knows of a pair: it overlaps, it doesn't, or the radius left unknown decides.
+/// What a tick of `EntityBoundsController` does to a unit's collider radius: `radius` is what it
+/// has (`None`: not made yet), `corpulence` the unit's now and `view_scale` the view's
+/// `lossyScale` (larger horizontal component).
+fn next_radius(radius: Option<Radius>, corpulence: Option<f32>, view_scale: f32) -> Radius {
+    let Some(c) = corpulence else { return Radius::Unknown };
+    // The collider's own transform has unit scale.
+    let target = scale_radius(c, 1.0);
+    let have = match radius {
+        Some(Radius::Known(r)) => r,
+        // Made now: from the view's scale.
+        None => scale_radius(c, view_scale),
+        // The earlier radius is lost with the corpulence: the rule's target.
+        Some(Radius::Unknown) => return Radius::Known(target),
+    };
+    Radius::Known(if (have - target).abs() > 0.05 { target } else { have })
+}
+
+/// Whether a collider is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Enabled {
+    Yes,
+    No,
+    /// The view is fade-hiding: `UpdateViewActive` returns early, the collider keeps its state
+    /// until the fade ends (when isn't known).
+    Unknown,
+}
+
+/// What the sim knows of a pair: it overlaps, it doesn't, or the radius left unknown (or the
+/// collider's enabled state) decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tri {
     In,
@@ -76,11 +112,16 @@ pub struct BoundsUnit {
     /// `Position` at the frame's start: where the first tick of a window finds the collider (the
     /// previous frame's tick put it there).
     pub prefix: V3,
-    /// `IsInGame` (the entity is added to the update list only while it is).
+    /// `IsInGame` (the entity is added to the update list only while it is, and the first tick
+    /// walks only the entities that are).
     pub in_game: bool,
-    /// `ShouldBeEnumeratedByEntityPoolEnumerator`: the collider's `enabled`.
-    pub enabled: bool,
-    pub radius: Radius,
+    /// What `ShouldBeEnumeratedByEntityPoolEnumerator` and the fade make of the collider's `enabled`.
+    pub enabled: Enabled,
+    /// `Corpulence` now, when the recording shows it.
+    pub corpulence: Option<f32>,
+    /// The view's `lossyScale` (larger horizontal component) a collider is made with: not known to
+    /// the sim, assumed 1.
+    pub view_scale: f32,
 }
 
 /// One `SphereCollider`.
@@ -93,7 +134,10 @@ struct Collider {
     /// next step).
     transform: V3,
     radius: Radius,
-    enabled: bool,
+    enabled: Enabled,
+    /// The unit's state at the collider's last tick: what the update list reacts to.
+    seen_in_game: bool,
+    seen_corpulence: Option<f32>,
 }
 
 /// One pair of a query.
@@ -106,6 +150,14 @@ pub struct Hit {
     pub margin: Option<f64>,
     /// The `f32` decision differs from the exact one (only for a known radius).
     pub rounding: bool,
+}
+
+/// What a tick found beyond updating the colliders.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Tick {
+    /// Units with a collider that are not among the entities any more: their views' destruction
+    /// (the time of which the sim doesn't know) is taken to destroy the collider now.
+    pub removed: Vec<EntityIdx>,
 }
 
 /// The entity-bounds scene.
@@ -169,11 +221,13 @@ pub fn capsule_sphere(pos: V3, r: f32, centre: V3, rs: f32) -> (bool, f64, bool)
 impl Bounds {
     /// `EntityBoundsController.Tick` (in the game's order: before the vision controller): when the
     /// frame ran a physics step (`step`, before its controllers), the transforms the previous ticks
-    /// set reach PhysX; then the units whose position changed (all of them on the first tick of a
-    /// run, and those without a collider) move their collider's transform; `units` are the pool's,
-    /// in order. The first tick of a window finds the colliders where the unit stood at the
+    /// set reach PhysX; then the entities in the update list move their collider's transform and
+    /// update its radius: on the first tick of a run all of them that are in the game (a collider
+    /// is made for those without one), later those whose position, game state or corpulence
+    /// changed (a collider is made for an entity that is in the game). `units` are the pool's, in
+    /// order. The first tick of a window finds the colliders where the unit stood at the
     /// frame's start.
-    pub fn tick(&mut self, units: &[BoundsUnit], step: bool) {
+    pub fn tick(&mut self, units: &[BoundsUnit], step: bool) -> Tick {
         if step {
             for c in &mut self.colliders {
                 c.phys = c.transform;
@@ -181,48 +235,64 @@ impl Bounds {
         }
         let first = !self.started;
         self.started = true;
+        let present: HashSet<EntityIdx> = units.iter().map(|u| u.unit).collect();
+        let mut out = Tick::default();
+        self.colliders.retain(|c| {
+            let keep = present.contains(&c.unit);
+            if !keep {
+                out.removed.push(c.unit);
+            }
+            keep
+        });
         for u in units {
             match self.colliders.iter_mut().find(|c| c.unit == u.unit) {
                 Some(c) => {
                     c.enabled = u.enabled;
-                    if first || u.in_game {
+                    let listed = u.in_game
+                        && (first
+                            || c.transform != u.pos
+                            || !c.seen_in_game
+                            || c.seen_corpulence.map(f32::to_bits)
+                                != u.corpulence.map(f32::to_bits));
+                    if listed {
                         c.transform = u.pos;
-                        c.radius = u.radius;
+                        c.radius = next_radius(Some(c.radius), u.corpulence, u.view_scale);
+                        c.seen_corpulence = u.corpulence;
                     }
+                    c.seen_in_game = u.in_game;
                 }
-                None if first => {
-                    self.colliders.push(Collider {
-                        unit: u.unit,
-                        phys: u.prefix,
-                        transform: u.pos,
-                        radius: u.radius,
-                        enabled: u.enabled,
-                    });
-                }
+                // (`EntityPoolEnumerator` skips what isn't `ShouldBeEnumerated` at the first tick;
+                // the entity gets its collider when it comes into the game.)
                 None if u.in_game => {
-                    // (`AddComponent<SphereCollider>` makes the shape where the new object is,
-                    // the origin; the position set after it waits for a step.)
-                    self.made_later += 1;
+                    if !first {
+                        self.made_later += 1;
+                    }
                     self.colliders.push(Collider {
                         unit: u.unit,
-                        phys: [0.0; 3],
+                        // At the first tick the collider exists since before; later
+                        // `AddComponent<SphereCollider>` makes the shape where the new object is,
+                        // the origin, and the position set after it waits for a step.
+                        phys: if first { u.prefix } else { [0.0; 3] },
                         transform: u.pos,
-                        radius: u.radius,
+                        radius: next_radius(None, u.corpulence, u.view_scale),
                         enabled: u.enabled,
+                        seen_in_game: true,
+                        seen_corpulence: u.corpulence,
                     });
                 }
                 None => {}
             }
         }
+        out
     }
 
-    /// `OverlapCapsule` for a unit at `pos` with vision radius `r`: every enabled collider, in
-    /// the order they were made.
+    /// `OverlapCapsule` for a unit at `pos` with vision radius `r`: every collider that is or may
+    /// be enabled, in the order they were made.
     #[must_use]
     pub fn overlap(&self, pos: V3, r: f32) -> Vec<Hit> {
         let mut out = Vec::new();
-        for c in self.colliders.iter().filter(|c| c.enabled) {
-            out.push(match c.radius {
+        for c in self.colliders.iter().filter(|c| c.enabled != Enabled::No) {
+            let mut hit = match c.radius {
                 Radius::Known(rs) => {
                     let (hit, margin, rounding) = capsule_sphere(pos, r, c.phys, rs);
                     Hit {
@@ -242,7 +312,11 @@ impl Bounds {
                     };
                     Hit { unit: c.unit, tri, margin: None, rounding: false }
                 }
-            });
+            };
+            if c.enabled == Enabled::Unknown && hit.tri != Tri::Out {
+                hit.tri = Tri::Maybe;
+            }
+            out.push(hit);
         }
         out
     }
@@ -293,8 +367,27 @@ mod tests {
     const B: EntityIdx = EntityIdx(2);
     const C: EntityIdx = EntityIdx(3);
 
-    fn unit(u: EntityIdx, pos: V3, radius: Radius) -> BoundsUnit {
-        BoundsUnit { unit: u, pos, prefix: pos, in_game: true, enabled: true, radius }
+    /// A unit in the game with a corpulence (`None`: unknown), its view's scale 1.
+    fn unit(u: EntityIdx, pos: V3, corpulence: Option<f32>) -> BoundsUnit {
+        BoundsUnit {
+            unit: u,
+            pos,
+            prefix: pos,
+            in_game: true,
+            enabled: Enabled::Yes,
+            corpulence,
+            view_scale: 1.0,
+        }
+    }
+
+    fn k(u: EntityIdx, pos: V3) -> BoundsUnit {
+        unit(u, pos, Some(0.5))
+    }
+
+    fn hidden(mut u: BoundsUnit) -> BoundsUnit {
+        u.in_game = false;
+        u.enabled = Enabled::No;
+        u
     }
 
     fn tris(b: &Bounds, pos: V3, r: f32) -> Vec<(EntityIdx, Tri)> {
@@ -323,58 +416,121 @@ mod tests {
     #[test]
     fn a_collider_lags_the_unit_by_one_step() {
         let mut b = Bounds::default();
-        let k = Radius::Known(0.5);
         // The window's first tick: the unit stood at 0 and is at 5 now; PhysX has 0.
-        let mut a = unit(A, [5.0, 0.0, 0.0], k);
+        let mut a = k(A, [5.0, 0.0, 0.0]);
         a.prefix = [0.0; 3];
-        b.tick(&[a, unit(B, [0.0; 3], k)], true);
+        b.tick(&[a, k(B, [0.0; 3])], true);
         let at = |b: &Bounds| tris(b, [0.0; 3], 1.0);
         assert_eq!(at(&b), vec![(A, Tri::In), (B, Tri::In)]);
         // Next tick it is at 9: PhysX now has 5, out of reach of a capsule of radius 1 (+0.5).
-        b.tick(&[unit(A, [9.0, 0.0, 0.0], k), unit(B, [0.0; 3], k)], true);
+        b.tick(&[k(A, [9.0, 0.0, 0.0]), k(B, [0.0; 3])], true);
         assert_eq!(at(&b), vec![(A, Tri::Out), (B, Tri::In)]);
         // A frame without a step: the next one still sees 5 (two ticks old).
-        b.tick(&[unit(A, [1.0, 0.0, 0.0], k), unit(B, [0.0; 3], k)], false);
+        b.tick(&[k(A, [1.0, 0.0, 0.0]), k(B, [0.0; 3])], false);
         assert_eq!(at(&b), vec![(A, Tri::Out), (B, Tri::In)]);
         // A unit appearing later sits at the origin until a step.
-        let both = [unit(A, [1.0, 0.0, 0.0], k), unit(B, [0.0; 3], k)];
-        b.tick(&[both[0], both[1], unit(C, [40.0, 0.0, 0.0], k)], true);
+        let both = [k(A, [1.0, 0.0, 0.0]), k(B, [0.0; 3])];
+        b.tick(&[both[0], both[1], k(C, [40.0, 0.0, 0.0])], true);
         assert_eq!(at(&b), vec![(A, Tri::In), (B, Tri::In), (C, Tri::In)]);
-        b.tick(&[both[0], both[1], unit(C, [40.0, 0.0, 0.0], k)], true);
+        assert_eq!(b.made_later, 1);
+        b.tick(&[both[0], both[1], k(C, [40.0, 0.0, 0.0])], true);
         assert_eq!(at(&b)[2], (C, Tri::Out));
     }
 
     #[test]
-    fn disabled_and_not_in_game_colliders() {
+    fn the_first_tick_makes_colliders_only_for_what_is_in_the_game() {
         let mut b = Bounds::default();
-        let k = Radius::Known(0.5);
-        let mut a = unit(A, [0.0; 3], k);
-        let mut c = unit(C, [0.0; 3], k);
-        c.in_game = false;
-        c.enabled = false;
-        b.tick(&[a, c], true);
-        // At the first tick every unit gets a collider, a disabled one isn't asked.
-        assert!(b.has(C));
-        assert_eq!(b.overlap([0.0; 3], 1.0).len(), 1);
-        // A later unit that isn't in the game gets none.
-        let mut d = unit(B, [0.0; 3], k);
-        d.in_game = false;
-        d.enabled = false;
-        b.tick(&[a, c, d], true);
+        // B is hidden since the load: it gets no collider, so C's is made before the one B gets
+        // when it comes into the game.
+        b.tick(&[k(A, [0.0; 3]), hidden(k(B, [0.0; 3])), k(C, [0.5, 0.0, 0.0])], true);
         assert!(!b.has(B));
-        // Disabling a collider at once removes it from the query.
-        a.enabled = false;
+        assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::In), (C, Tri::In)]);
+        // A hidden unit stays without one, and comes into the game later.
+        b.tick(&[k(A, [0.0; 3]), hidden(k(B, [0.0; 3])), k(C, [0.5, 0.0, 0.0])], true);
+        assert!(!b.has(B));
+        b.tick(&[k(A, [0.0; 3]), k(B, [0.1, 0.0, 0.0]), k(C, [0.5, 0.0, 0.0])], true);
+        assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::In), (C, Tri::In), (B, Tri::In)]);
+        // (At the origin until a step: the unit stands at the origin here too, so make it far.)
+        let far = k(B, [40.0, 0.0, 0.0]);
+        let mut b = Bounds::default();
+        b.tick(&[k(A, [0.0; 3]), hidden(far)], true);
+        b.tick(&[k(A, [0.0; 3]), far], false);
+        assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::In), (B, Tri::In)]);
+        b.tick(&[k(A, [0.0; 3]), far], true);
+        assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::In), (B, Tri::Out)]);
+    }
+
+    #[test]
+    fn disabled_colliders_and_those_that_left() {
+        let mut b = Bounds::default();
+        let mut a = k(A, [0.0; 3]);
+        // Out of the game after having a collider: it stays, disabled at once.
+        b.tick(&[a, k(C, [0.0; 3])], true);
+        let mut c = k(C, [0.0; 3]);
+        c.in_game = false;
+        c.enabled = Enabled::No;
+        b.tick(&[a, c], true);
+        assert!(b.has(C));
+        assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::In)]);
+        a.enabled = Enabled::No;
         b.tick(&[a, c], true);
         assert!(b.overlap([0.0; 3], 1.0).is_empty());
+        // An entity gone from the pool takes its collider with it, and is reported.
+        let t = b.tick(&[a], true);
+        assert_eq!(t.removed, vec![C]);
+        assert!(!b.has(C));
+    }
+
+    #[test]
+    fn a_collider_of_a_fade_hidden_view_is_unknown_when_in_reach() {
+        let mut b = Bounds::default();
+        let mut a = k(A, [0.0; 3]);
+        b.tick(&[a, k(B, [30.0, 0.0, 0.0])], true);
+        a.in_game = false;
+        a.enabled = Enabled::Unknown;
+        b.tick(&[a, k(B, [30.0, 0.0, 0.0])], true);
+        // In reach: the recording decides; out of reach: out whatever the fade does.
+        assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::Maybe), (B, Tri::Out)]);
+        assert_eq!(tris(&b, [5.0, 0.0, 0.0], 1.0), vec![(A, Tri::Out), (B, Tri::Out)]);
+    }
+
+    #[test]
+    fn the_radius_keeps_the_view_scale_within_a_twentieth_and_follows_later_changes() {
+        let at = |c: f32, scale: f32| next_radius(None, Some(c), scale);
+        // Made from the corpulence times the view's scale, corrected only when more than 0.05 off.
+        assert_eq!(at(0.5, 1.0), Radius::Known(0.5));
+        assert_eq!(at(0.5, 1.05), Radius::Known(0.525));
+        assert_eq!(at(0.5, 1.2), Radius::Known(0.5));
+        assert_eq!(at(0.5, 0.92), Radius::Known(0.5 * 0.92));
+        // The minimum is 0.05.
+        assert_eq!(at(0.01, 1.0), Radius::Known(0.05));
+        // Later ticks compare with the radius it has.
+        assert_eq!(next_radius(Some(Radius::Known(0.525)), Some(0.5), 1.0), Radius::Known(0.525));
+        assert_eq!(next_radius(Some(Radius::Known(0.525)), Some(0.9), 1.0), Radius::Known(0.9));
+        assert_eq!(next_radius(Some(Radius::Known(0.525)), None, 1.0), Radius::Unknown);
+        assert_eq!(next_radius(Some(Radius::Unknown), Some(0.7), 1.2), Radius::Known(0.7));
+        // In a bounds tick: made at 1.05, kept while the position changes, corrected by a size change.
+        let mut b = Bounds::default();
+        let mut a = k(A, [10.52, 0.0, 0.0]);
+        a.view_scale = 1.05;
+        b.tick(&[a], true);
+        // Sphere radius 0.525: the margin at 10 + 0.525 = 10.525 is exactly the sphere's reach.
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::In)]);
+        a.pos = [10.53, 0.0, 0.0];
+        b.tick(&[a], true);
+        b.tick(&[a], true);
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::Out)]);
+        a.corpulence = Some(0.9);
+        b.tick(&[a], true);
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::In)]);
     }
 
     #[test]
     fn results_come_in_the_order_the_colliders_were_made() {
         let mut b = Bounds::default();
-        let k = Radius::Known(0.5);
-        let ca = [unit(C, [1.0, 0.0, 0.0], k), unit(A, [2.0, 0.0, 0.0], k)];
+        let ca = [k(C, [1.0, 0.0, 0.0]), k(A, [2.0, 0.0, 0.0])];
         b.tick(&ca, true);
-        let cab = [ca[0], ca[1], unit(B, [3.0, 0.0, 0.0], k)];
+        let cab = [ca[0], ca[1], k(B, [3.0, 0.0, 0.0])];
         b.tick(&cab, true);
         b.tick(&cab, true);
         let order: Vec<EntityIdx> = tris(&b, [0.0; 3], 5.0).into_iter().map(|x| x.0).collect();
@@ -386,9 +542,9 @@ mod tests {
         let mut b = Bounds::default();
         b.tick(
             &[
-                unit(A, [10.2, 0.0, 0.0], Radius::Unknown),
-                unit(B, [10.8, 0.0, 0.0], Radius::Unknown),
-                unit(C, [30.0, 0.0, 0.0], Radius::Unknown),
+                unit(A, [10.2, 0.0, 0.0], None),
+                unit(B, [10.8, 0.0, 0.0], None),
+                unit(C, [30.0, 0.0, 0.0], None),
             ],
             true,
         );

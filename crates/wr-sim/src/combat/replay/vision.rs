@@ -98,8 +98,13 @@ pub struct VisCounts {
     pub range_within_1mm: usize,
     pub range_closest_um: u64,
     pub range_rounding: usize,
-    /// Collider radii taken from a read after the frame (the unit's first read is later).
-    pub range_corp_later: usize,
+    /// Unit-frames whose corpulence the recording hasn't shown yet (the radius is unknown, the
+    /// pairs it leaves open the recording's).
+    pub range_corp_unknown: usize,
+    /// Unit-frames of a fade-hidden view whose collider's `enabled` isn't known.
+    pub range_fade_unit_frames: usize,
+    /// Pairs within 5 cm of the capsule's surface: those another view scale could decide.
+    pub range_within_5cm: usize,
     /// Colliders made after the window's first frame (units that joined later).
     pub range_made_later: usize,
     /// The group memory's near units (`ExtractNearUnits`, the members' sets in the overlap's

@@ -140,6 +140,10 @@ pub struct Vision {
     pub near_order: HashMap<EntityIdx, Vec<EntityIdx>>,
     /// `EntityBoundsController`'s sphere colliders (the overlap behind `near`).
     pub bounds: range::Bounds,
+    /// Units a `HideUnit` with `Fade` hid: while the fade runs (`EntityViewBase.m_IsFadeHide`)
+    /// `UpdateViewActive` returns early and their collider keeps its `enabled`; when the fade
+    /// ends isn't modelled.
+    pub fade_hidden: HashSet<EntityIdx>,
     /// Each awake unit's vision radius at the frame's cache phase (a miss adopted later in the
     /// frame may have been made before a unit joined combat).
     pub frame_radius: HashMap<EntityIdx, f32>,

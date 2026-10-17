@@ -787,6 +787,18 @@ pub fn area_has_parts(w: &World) -> bool {
 /// a unit that joins one later is appended); a unit removed from its state (disposed) leaves it.
 #[must_use]
 pub fn units_pool(w: &World) -> Vec<EntityIdx> {
+    pool_units(w, false)
+}
+
+/// The unit entities of `State.EntitiesWithBounds` (every entity with `RequiresSphereBoundsCollider`,
+/// in the order they joined their states): [`units_pool`]'s order and units, with the fake ones.
+/// (The pool's map objects and cutscene anchors are left out: their colliders are on another layer.)
+#[must_use]
+pub fn units_with_bounds(w: &World) -> Vec<EntityIdx> {
+    pool_units(w, true)
+}
+
+fn pool_units(w: &World, with_fakes: bool) -> Vec<EntityIdx> {
     let mut out: Vec<EntityIdx> = Vec::new();
     let held =
         |u: &EntityIdx| w.player.cross_scene_units.contains(u) || w.player.area_units.contains(u);
@@ -801,7 +813,7 @@ pub fn units_pool(w: &World) -> Vec<EntityIdx> {
         let Some(x) = w.unit(u) else { continue };
         let fake =
             x.blueprint.and_then(|g| w.content.get(g)).is_some_and(|b| b.view().bool("IsFake"));
-        if fake || w.entity(u).is_disposed || out.contains(&u) {
+        if (fake && !with_fakes) || w.entity(u).is_disposed || out.contains(&u) {
             continue;
         }
         out.push(u);

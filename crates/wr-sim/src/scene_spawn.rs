@@ -312,6 +312,8 @@ pub fn hide_unit(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()
     if a.bool("Fade") {
         // `value.Commands.InterruptAll(); view.FadeHide();` (commands and fading are T1).
         w.coverage.stub("HideUnit: interrupt commands, fade out (T1)");
+        // (The view's `m_IsFadeHide` keeps its sphere collider as it was until the fade ends.)
+        w.combat.vision.fade_hidden.insert(u);
     }
     crate::entity::set_is_in_game(w, u, false);
     if a.bool("SetHideInSaves") && w.entity(u).parts.iter().any(|p| p.clr == "UnitPartCompanion") {
