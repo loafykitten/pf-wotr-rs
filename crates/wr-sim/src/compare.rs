@@ -519,10 +519,50 @@ pub fn compare_flags(ours: &J, oracle: &J) -> (BTreeMap<String, (u64, u64)>, Vec
     (counts, diffs)
 }
 
+/// The units' `ProneState` (`Active`, `ShouldBeActive`, `Duration`) in the sim's dump against the
+/// oracle's (`state.Prone`): the differences as (unit, field, ours, oracle). A unit or dump
+/// without the posture isn't counted.
+#[must_use]
+pub fn compare_prone(ours: &J, oracle: &J) -> (u64, Vec<FlagDiff>) {
+    let (a, b) = (by(&ours["units"], "id"), by(&oracle["units"], "id"));
+    let mut n = 0;
+    let mut diffs = Vec::new();
+    for (id, u) in &a {
+        let Some(o) = b.get(id) else { continue };
+        let (x, y) = (&u["prone"], &o["state"]["Prone"]);
+        if x.is_null() || y.is_null() {
+            continue;
+        }
+        n += 1;
+        for f in ["Active", "ShouldBeActive", "Duration"] {
+            if x[f] != y[f] {
+                diffs.push((id.clone(), f.to_owned(), x[f].clone(), y[f].clone()));
+            }
+        }
+    }
+    (n, diffs)
+}
+
 #[cfg(test)]
 mod flag_tests {
-    use super::compare_flags;
+    use super::{compare_flags, compare_prone};
     use serde_json::json;
+
+    /// A posture that differs in any field shows; units without one aren't counted.
+    #[test]
+    fn prone_differences_show() {
+        let ours = json!({"units": [{"id": "u", "prone": {"Active": true, "ShouldBeActive": false, "Duration": 170000}},
+                                    {"id": "v"}]});
+        let theirs = |d: i64| {
+            json!({"units": [{"id": "u", "state": {"Prone": {"Active": true, "ShouldBeActive": false, "Duration": d}}},
+                                                {"id": "v", "state": {"Prone": {"Active": false, "ShouldBeActive": false, "Duration": 0}}}]})
+        };
+        let (n, d) = compare_prone(&ours, &theirs(170000));
+        assert_eq!((n, d.len()), (1, 0));
+        let (_, d) = compare_prone(&ours, &theirs(180000));
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].1, "Duration");
+    }
 
     /// A unit that is dead in one dump and not in the other, or out of the game, shows.
     #[test]

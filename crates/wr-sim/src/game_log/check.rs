@@ -366,6 +366,7 @@ pub fn raised_by_sim(ty: &str) -> bool {
                 | "GameLogEventPartyCombatState"
                 | "GameLogEventPartyGainExperience"
                 | "GameLogEventKnowledge"
+                | "GameLogEventItemsCollection"
         )
 }
 
@@ -389,6 +390,14 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
         Payload::PartyExperience { experience } => serde_json::json!({"Experience": experience}),
         // `InspectUnitsManager`'s `UnitInfo` (an object the observer names by type).
         Payload::Knowledge => serde_json::json!({"UnitInfo": {"$type": "UnitInfo"}}),
+        // `Event` is the enum (`Added`, `Removed`); the collection and item as the observer names
+        // them (an object by type, an entity with its class).
+        Payload::ItemsCollection { removed, item, count, .. } => serde_json::json!({
+            "Event": i32::from(*removed),
+            "Collection": {"$type": "ItemsCollection"},
+            "Item": {"$entity": w.entity(*item).unique_id, "class": w.entity(*item).clr},
+            "Count": count,
+        }),
         _ => return None,
     })
 }
@@ -400,6 +409,10 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
 ///   decrement (`cd_write` from its setter) or, without one, the observer's `eng_aoo` of it;
 /// - a party's experience (`Player.GainPartyExperience`) right after its last member's experience
 ///   (`mut` xp);
+/// - a removal from a collection (`ItemsCollection.Remove`) right after the dropped loot's
+///   rotation draw (`UnitEntityData.DropLootToGround`: the dismember branch's skinning items
+///   leave the inventory after `Quaternion.Euler(0, Random.Range(0, 360), 0)`), the only removal
+///   the sim makes in these fights;
 /// - `GameLogEventPartyCombatState` right after `GameLogEventCombatStateChanged` of the same
 ///   state (the next subscriber of the same raise), which comes after the turn controller's
 ///   handler of that raise (its `tb` `combat_start`/`combat_end`, the last of the frame).
@@ -429,6 +442,14 @@ fn raise_point_ok(recs: &[Rv], i: usize) -> bool {
         }
         Some("GameLogEventPartyGainExperience") => {
             prev_other.is_some_and(|p| p["k"] == "mut" && p["what"] == "xp")
+        }
+        Some("GameLogEventItemsCollection") => {
+            f["Event"] != 1
+                || prev_other.is_some_and(|p| {
+                    p["k"] == "draw"
+                        && p["m"] == "Range_ff"
+                        && p["a"] == serde_json::json!([0.0, 360.0])
+                })
         }
         Some("GameLogEventPartyCombatState") => prev.is_some_and(|p| {
             p["ev"] == "clog_q" && p["e"] == "GameLogEventCombatStateChanged" && p["f"] == *f
@@ -651,6 +672,12 @@ pub fn compare(
                 Some("GameLogEventProjectileHit") => {
                     Some(("HandleProjectileHit", "Projectile.OnHit"))
                 }
+                // The raise is `ItemsCollection.OnItemAdded` / `OnItemsRemoved`, whichever its
+                // callers (`Add`, `Remove`, ...).
+                Some("GameLogEventItemsCollection") => Some(match r["f"]["Event"].as_i64() {
+                    Some(0) => ("HandleItemsAdded", "ItemsCollection.OnItemAdded"),
+                    _ => ("HandleItemsRemoved", "ItemsCollection.OnItemsRemoved"),
+                }),
                 Some("GameLogEventBark") => Some(("HandleOnShowBark", "")),
                 _ => None,
             };

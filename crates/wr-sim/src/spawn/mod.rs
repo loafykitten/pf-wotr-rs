@@ -733,8 +733,10 @@ pub fn change_unit_blueprint(
     Some(e)
 }
 
-/// `EntityCreationController.Tick()`: the queued units join their states, then
-/// `IUnitHandler`/`IUnitSpawnHandler.HandleUnitSpawned` (not for a placeholder's unit).
+/// `EntityCreationController.Tick()`: the queued entities join their states (`AddEntityData`);
+/// a unit raises `IUnitHandler`/`IUnitSpawnHandler.HandleUnitSpawned` (not for a placeholder's),
+/// a map object (a dropped loot bag) `IMapObjectHandler.HandleMapObjectSpawned`, whose
+/// subscribers are the overtip managers (the UI).
 pub fn entity_creator_tick(w: &mut World) {
     // `for (i = 0; i < m_ToCreate.Count; i++)` then `m_ToCreate.Clear()` (`:366–408`): entries
     // a spawn handler appends are created in this same tick.
@@ -742,6 +744,16 @@ pub fn entity_creator_tick(w: &mut World) {
     while i < w.player.creation_queue.len() {
         let (e, cross) = w.player.creation_queue[i];
         i += 1;
+        if matches!(w.entity(e).kind, crate::world::EntityKind::DroppedLoot(_)) {
+            w.player.created_entities.push((e, cross));
+            crate::rulebook::bus::raise_global_call(
+                w,
+                "IMapObjectHandler",
+                "HandleMapObjectSpawned",
+                None,
+            );
+            continue;
+        }
         if cross {
             w.player.cross_scene_units.push(e);
         } else {

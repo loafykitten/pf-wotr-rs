@@ -260,6 +260,11 @@ pub struct Unit {
     pub view_prefab: Option<String>,
     /// `UnitState.Prone.Active` (saved).
     pub prone_active: bool,
+    /// `UnitState.Prone.ShouldBeActive` (saved): a knockdown's request, consumed by the next
+    /// `UnitProneController` tick.
+    pub prone_should_be_active: bool,
+    /// `UnitState.Prone.Duration` (saved), in 100 ns ticks.
+    pub prone_duration: i64,
     /// `UnitPartSpellResistance` (`m_NextId` and `m_SpellImmunities`; not saved, so empty
     /// after a load). `None`: the unit has no such part (a fresh part restarts at id 0).
     pub spell_resistance: Option<SpellResistancePart>,

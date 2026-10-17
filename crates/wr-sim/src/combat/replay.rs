@@ -189,6 +189,8 @@ pub struct Outcome {
     pub look: look::LookCounts,
     /// The roaming controller (`replay/roaming.rs`).
     pub roam: roaming::RoamCounts,
+    /// The prone controller (`replay/prone.rs`).
+    pub prone: prone::ProneCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
     /// messages against the recording's ([`crate::game_log::check`]).
     pub clog: Option<crate::game_log::check::Summary>,
@@ -510,6 +512,9 @@ pub enum Phase {
     Helpless,
     /// `InspectUnitsController`: dead units' knowledge checks.
     Inspect,
+    /// `EntityCreationController`: the entities queued for creation join their state
+    /// (a dropped loot bag, a spawned unit).
+    Creation,
     /// `GameLogController`, the frame's last controller: the combat log's queued events to their
     /// threads.
     GameLog,
@@ -518,7 +523,7 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 16] = [
+const WORK: [Phase; 18] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
@@ -531,8 +536,10 @@ const WORK: [Phase; 16] = [
     Phase::Life,
     Phase::Leave,
     Phase::Conscious,
+    Phase::Prone,
     Phase::Helpless,
     Phase::Inspect,
+    Phase::Creation,
     Phase::GameLog,
     Phase::Post,
 ];
@@ -553,6 +560,7 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         | Phase::Projectiles
         | Phase::Fx
         | Phase::Abilities
+        | Phase::Creation
         | Phase::Life => m != PAUSE,
         Phase::Join | Phase::Prepare | Phase::LeavePrefix | Phase::Leave => m == DEFAULT,
         Phase::Memory => m == DEFAULT,
@@ -987,6 +995,10 @@ struct Driver<'t> {
     clog: bool,
     clog_inputs: BTreeMap<String, usize>,
     clog_rule_q: HashMap<i64, usize>,
+    /// The prone controller is the sim's (the commands are): the frame's recorded
+    /// `InterruptAll`s by it, by unit.
+    prone_on: bool,
+    prone_calls: Vec<EntityIdx>,
     out: Outcome,
 }
 
@@ -1230,6 +1242,8 @@ impl<'t> Driver<'t> {
             clog: false,
             clog_inputs: BTreeMap::new(),
             clog_rule_q: HashMap::new(),
+            prone_on: false,
+            prone_calls: Vec::new(),
             out,
         };
         let mut d = d;
@@ -1270,6 +1284,7 @@ impl<'t> Driver<'t> {
             .iter()
             .any(|r| r["k"] == "obs" && r["ev"].as_str().is_some_and(|e| e.starts_with("uc_")));
         d.uc = d.tt && uc_family;
+        d.prone_on = d.uc;
         if uc_family && !d.tt {
             w.coverage.unsupported(
                 "driven replay: the command records without the turn controller's tick records",
@@ -2003,8 +2018,10 @@ impl Driver<'_> {
                     }
                 }
                 Phase::Life => super::life::life_tick(w),
+                Phase::Prone => self.prone_tick(w),
                 Phase::Helpless => super::life::helpless_tick(w),
                 Phase::Inspect => super::inspect::tick(w),
+                Phase::Creation => crate::spawn::entity_creator_tick(w),
                 Phase::GameLog => crate::game_log::tick(w),
                 // A recording with `loot_timer` records fires each timer at its record.
                 Phase::Post => {
@@ -4667,6 +4684,7 @@ mod impatience;
 mod look;
 mod memory;
 mod nav;
+mod prone;
 mod roaming;
 mod spells;
 mod targets;

@@ -133,7 +133,7 @@ fn has_standard_action(w: &World, u: EntityIdx) -> bool {
 }
 
 /// `UnitEntityData.HasMoveAction()`.
-fn has_move_action(w: &World, u: EntityIdx) -> bool {
+pub(crate) fn has_move_action(w: &World, u: EntityIdx) -> bool {
     if used_standard_action(w, u) {
         !used_one_move_action(w, u)
     } else {

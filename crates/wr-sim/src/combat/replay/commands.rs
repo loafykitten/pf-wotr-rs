@@ -836,6 +836,10 @@ impl Driver<'_> {
             self.imp_death_window(w, r);
         }
         let click = self.tgt_entry(w, i);
+        if matches!(kind, Entry::Mutator) && super::prone::is_prone_call(r) {
+            let unit = r["u"].as_str().and_then(|u| w.by_id.get(u).copied());
+            self.prone_call(w, unit);
+        }
         let running_before = r["u"].as_str().and_then(|u| w.combat.commands.is_running(u));
         match phase_of(origin) {
             Some(p) => self.place(w, p, "a command call"),

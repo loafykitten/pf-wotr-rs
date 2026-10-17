@@ -303,7 +303,20 @@ fn set_life_state(w: &mut World, u: EntityIdx, new: i32) {
             on_unit_death(w, u, prev == state::DEAD);
         }
     } else {
-        w.coverage.unsupported("UnitLifeController: return to consciousness");
+        // `newLifeState == Conscious`: a player-faction unit at death's door barks (the
+        // notification is UI, but it is a bark event the log would queue), then
+        // `ReturnToStartingPositionIfNeeded` (a move command, T1, as in `LeaveCombat`) and
+        // `RemoveBuffsOnResurrect`.
+        if w.unit(u).is_some_and(|x| x.is_player_faction) && has_condition(w, u, cond::DEATH_DOOR) {
+            w.coverage
+                .unsupported("UnitLifeController: the crippled notification's bark (death's door)");
+        }
+        if w.unit(u).is_some_and(|x| !x.is_player_faction) {
+            w.coverage.unsupported(
+                "UnitLifeController: ReturnToStartingPositionIfNeeded of a unit outside the player's faction",
+            );
+        }
+        remove_buffs_on_resurrect(w, u);
     }
     let conscious = w.unit(u).is_some_and(|x| x.life_state == state::CONSCIOUS);
     if !conscious {
@@ -314,6 +327,87 @@ fn set_life_state(w: &mut World, u: EntityIdx, new: i32) {
         // The game log's `GameEventsHandler` (`GameLogEventUnitLifeStateChanged`).
         crate::game_log::life_state_changed(w, u, prev);
     }
+}
+
+/// `UnitDescriptor.RemoveBuffsOnResurrect`: the buffs whose blueprint has `RemoveOnResurrect`.
+fn remove_buffs_on_resurrect(w: &mut World, u: EntityIdx) {
+    let doomed: Vec<_> = w
+        .entity(u)
+        .facts
+        .list
+        .iter()
+        .copied()
+        .filter(|f| {
+            w.fact(*f).kind == crate::world::FactKind::Buff
+                && w.fact(*f).bp.as_ref().is_some_and(|b| {
+                    crate::unit_facts::buff_flag(b, crate::unit_facts::BUFF_REMOVE_ON_RESURRECT)
+                })
+        })
+        .collect();
+    for f in doomed {
+        crate::unit_facts::remove(w, u, f);
+    }
+}
+
+/// `UnitReturnToConsciousController.MakeUnitConscious`: damage down to the hit points less the
+/// character level and the non-lethal damage (not below 0), attribute damage and drain that left
+/// an attribute under 1 healed, negative levels removed while they equal the level, petrification
+/// ended, then `UnitLifeController.ForceUnitConscious`. The Kineticist's burn, an attribute under
+/// 1, negative levels and petrifying buffs are reported where the unit has them (nothing here does).
+pub fn make_unit_conscious(w: &mut World, u: EntityIdx) {
+    let hp = w.stats(u).v(StatType::HitPoints).modified_value;
+    let level = crate::unit::character_level(w, u).max(1);
+    let non_lethal = w.stats(u).v(StatType::DamageNonLethal).modified_value;
+    let mut num = arith::sub(arith::sub(hp, level), non_lethal);
+    if num < 0 {
+        if has_part(w, u, "UnitPartKineticist") {
+            w.coverage.unsupported("UnitReturnToConsciousController: the Kineticist's burn");
+        }
+        num = 0;
+    }
+    let old = w.unit(u).map_or(0, |x| x.damage);
+    super::set_damage(w, u, num);
+    let now = w.unit(u).map_or(0, |x| x.damage);
+    if now != old {
+        // The setter's mutation, outside any rule.
+        let id = w.entity(u).unique_id.clone();
+        w.events.mutation("damage", serde_json::json!({ "unit": id, "old": old, "new": now }));
+    }
+    for ty in [
+        StatType::Strength,
+        StatType::Dexterity,
+        StatType::Constitution,
+        StatType::Intelligence,
+        StatType::Wisdom,
+        StatType::Charisma,
+    ] {
+        if w.stats(u).v(ty).modified_value_raw < 1 {
+            w.coverage.unsupported(
+                "UnitReturnToConsciousController: an attribute under 1 (damage and drain healed)",
+            );
+        }
+    }
+    if has_part(w, u, "UnitPartNegativeLevels") {
+        w.coverage.unsupported("UnitReturnToConsciousController: UnitPartNegativeLevels");
+    }
+    let petrifying = w.entity(u).facts.list.iter().any(|f| {
+        w.fact(*f).kind == crate::world::FactKind::Buff
+            && w.fact(*f).bp.as_ref().is_some_and(|b| {
+                b.components_array().iter().any(|o| {
+                    matches!(
+                        wr_content::schema::ty(o.ty).short,
+                        "AddCondition" | "BuffStatusCondition"
+                    ) && crate::content::View(o).int("Condition") == i64::from(cond::PETRIFIED)
+                })
+            })
+    });
+    if petrifying {
+        w.coverage.unsupported("UnitReturnToConsciousController: a petrifying buff");
+    }
+    if has_condition(w, u, cond::PETRIFIED) {
+        crate::unit_state::remove_condition(w, u, cond::PETRIFIED, true);
+    }
+    set_life_state(w, u, state::CONSCIOUS);
 }
 
 /// The controllers subscribed to `IUnitHandler.HandleUnitDeath` (the facts' handlers are raised
@@ -573,7 +667,7 @@ pub fn buffs_tick(w: &mut World) {
 /// (`CombatController.Rider`/`Mount`). The mount isn't tracked: a mounted or saddled unit
 /// reports it. `None` when it can't be established: the rider of a turn that has ended may
 /// already have been cleared ([`super::CombatWorld::current_unit_maybe_cleared`]).
-fn is_current_unit(w: &mut World, u: EntityIdx) -> Option<bool> {
+pub(crate) fn is_current_unit(w: &mut World, u: EntityIdx) -> Option<bool> {
     let mounted = |w: &World, x: EntityIdx| {
         has_part(w, x, "UnitPartRider") || has_part(w, x, "UnitPartSaddled")
     };

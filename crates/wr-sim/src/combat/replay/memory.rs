@@ -378,20 +378,42 @@ impl Driver<'_> {
 
     /// `UnitReturnToConsciousController.Tick` (after the leave controller): out of combat, every
     /// unit of `State.Units` not in combat reads its group's `Memory.Enemies` (`HasAlive`; filled
-    /// if invalid). Its own effect (`MakeUnitConscious`) isn't the memory's.
+    /// if invalid, the memory model's reads), and one that is unconscious, not finally dead and
+    /// without a living enemy in the memory is made conscious (`life::make_unit_conscious`).
+    /// Without the memory model a unit that would be reported.
     pub(super) fn mem_return_to_conscious(&mut self, w: &mut World) {
-        if !self.mem.on || w.combat.combat_active {
+        if w.combat.combat_active {
             return;
         }
         for u in crate::scene::units_pool(w) {
             if !crate::scene::enumerated_by_pool(w, u) || crate::combat::is_in_combat(w, u) {
                 continue;
             }
-            if sim::enemies(w, u).is_none() {
+            if !self.mem.on {
+                if w.unit(u).is_some_and(|x| {
+                    x.life_state != crate::combat::life::state::CONSCIOUS && !x.finally_dead
+                }) {
+                    w.coverage.unsupported(
+                        "driven replay: UnitReturnToConsciousController without the group memory model",
+                    );
+                }
+                continue;
+            }
+            let Some(enemies) = sim::enemies(w, u) else {
                 w.coverage.unsupported(
                     "driven replay: memory: UnitReturnToConsciousController reads a memory the sim doesn't have",
                 );
                 return;
+            };
+            // `HasAlive`: a unit that resolves and isn't dead.
+            let alive = enemies.iter().any(|e| {
+                w.unit(*e).is_some_and(|x| x.life_state != crate::combat::life::state::DEAD)
+            });
+            let wakes = w.unit(u).is_some_and(|x| {
+                x.life_state != crate::combat::life::state::CONSCIOUS && !x.finally_dead
+            });
+            if !alive && wakes {
+                crate::combat::life::make_unit_conscious(w, u);
             }
         }
     }

@@ -102,25 +102,7 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
         if is_set(w, v, "m_NonIdentifiedNameText")? {
             return loc(w, v, "m_NonIdentifiedNameText");
         }
-        // `DefaultNonIdentifiedName`: a weapon's or armour's is its type's `DefaultName`, a
-        // shield's its armour component's type's.
-        if v.is("BlueprintItemWeapon") || v.is("BlueprintItemArmor") {
-            let ty = bp(
-                w,
-                v.guid("m_Type").ok_or_else(|| {
-                    TextError::Unsupported("weapon or armour without type".into())
-                })?,
-            )?;
-            return loc(w, ty.view(), "m_DefaultNameText");
-        }
-        if v.is("BlueprintItemShield") {
-            return armor_component_type_name(w, v);
-        }
-        return Err(TextError::Unsupported(format!(
-            "an unidentified item's default name (UnidentifiedItemNames; item {}{})",
-            w.entity(item).unique_id,
-            if it.runtime_created { ", created in the run" } else { "" }
-        )));
+        return default_non_identified_name(w, v, item);
     }
     let base = loc(w, v, "m_DisplayNameText")?;
     if !base.is_empty() {
@@ -186,6 +168,69 @@ pub fn item_name(w: &World, item: EntityIdx) -> Result<String, TextError> {
     Err(TextError::Unsupported("a weapon without a name, default name or type name".into()))
 }
 
+/// `BlueprintItem.DefaultNonIdentifiedName`: a weapon's or armour's is its type's `DefaultName`, a
+/// shield's its armour component's type's (else the generic one), a usable item's
+/// `UsableItemTypeNames[Type]`, any other's `UnidentifiedItemNames[ItemType]`.
+fn default_non_identified_name(
+    w: &World,
+    v: View<'_>,
+    item: EntityIdx,
+) -> Result<String, TextError> {
+    if v.is("BlueprintItemWeapon") || v.is("BlueprintItemArmor") {
+        let ty = bp(
+            w,
+            v.guid("m_Type")
+                .ok_or_else(|| TextError::Unsupported("weapon or armour without type".into()))?,
+        )?;
+        return loc(w, ty.view(), "m_DefaultNameText");
+    }
+    if v.is("BlueprintItemShield") {
+        // `ArmorComponent?.Type.DefaultName`; without a component the generic name.
+        if v.guid("m_ArmorComponent").is_some() {
+            return armor_component_type_name(w, v);
+        }
+    }
+    if v.is("BlueprintItemEquipmentUsable") {
+        // `UsableItemTypeNames.GetText(Type)`.
+        return super::tips::enum_text(w, "UsableItemTypeNames", v.int("Type"));
+    }
+    let Some(ty) = item_type(v) else {
+        return Err(TextError::Unsupported(format!(
+            "an unidentified item's default name (UnidentifiedItemNames; item {}: an equipment class without an item type)",
+            w.entity(item).unique_id,
+        )));
+    };
+    // `UnidentifiedItemNames.GetText(ItemType)`.
+    super::tips::enum_text(w, "UnidentifiedItemNames", ty)
+}
+
+/// `BlueprintItem.ItemType` (`ItemsFilter.ItemType`): the base class's `NonUsable`, each
+/// subclass's own. `None` for an equipment class that has none of the listed.
+fn item_type(v: View<'_>) -> Option<i64> {
+    const TYPES: [(&str, i64); 15] = [
+        ("BlueprintItemWeapon", 0),
+        ("BlueprintItemShield", 1),
+        ("BlueprintItemArmor", 2),
+        ("BlueprintItemEquipmentRing", 3),
+        ("BlueprintItemEquipmentBelt", 4),
+        ("BlueprintItemEquipmentFeet", 5),
+        ("BlueprintItemEquipmentGloves", 6),
+        ("BlueprintItemEquipmentHead", 7),
+        ("BlueprintItemEquipmentNeck", 8),
+        ("BlueprintItemEquipmentShoulders", 9),
+        ("BlueprintItemEquipmentWrist", 10),
+        ("BlueprintItemEquipmentUsable", 11),
+        ("BlueprintItemEquipmentHandSimple", 13),
+        ("BlueprintItemEquipmentGlasses", 14),
+        ("BlueprintItemEquipmentShirt", 15),
+    ];
+    if let Some((_, n)) = TYPES.iter().find(|(c, _)| v.is(c)) {
+        return Some(*n);
+    }
+    // `BlueprintItemEquipment.ItemType` is abstract: every concrete equipment class is above.
+    (!v.is("BlueprintItemEquipment")).then_some(12)
+}
+
 /// A shield's `ArmorComponent.Type.DefaultName`.
 fn armor_component_type_name(w: &World, shield: View<'_>) -> Result<String, TextError> {
     let a = bp(
@@ -201,4 +246,45 @@ fn armor_component_type_name(w: &World, shield: View<'_>) -> Result<String, Text
             .ok_or_else(|| TextError::Unsupported("armour without type".into()))?,
     )?;
     loc(w, ty.view(), "m_DefaultNameText")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::tests::obj;
+
+    fn item_type_of(class: &str) -> Option<i64> {
+        let o = obj(class, &[]);
+        item_type(View(&o))
+    }
+
+    /// `BlueprintItem.ItemType` (`ItemsFilter.ItemType`): each class's own, `NonUsable` for the
+    /// base class; the abstract equipment class has none.
+    #[test]
+    fn the_item_type_of_each_blueprint_class() {
+        for (class, ty) in [
+            ("Items.Weapons.BlueprintItemWeapon", 0),
+            ("Items.Shields.BlueprintItemShield", 1),
+            ("Items.Armors.BlueprintItemArmor", 2),
+            ("Items.Equipment.BlueprintItemEquipmentRing", 3),
+            ("Items.Equipment.BlueprintItemEquipmentBelt", 4),
+            ("Items.Equipment.BlueprintItemEquipmentFeet", 5),
+            ("Items.Equipment.BlueprintItemEquipmentGloves", 6),
+            ("Items.Equipment.BlueprintItemEquipmentHead", 7),
+            ("Items.Equipment.BlueprintItemEquipmentNeck", 8),
+            ("Items.Equipment.BlueprintItemEquipmentShoulders", 9),
+            ("Items.Equipment.BlueprintItemEquipmentWrist", 10),
+            ("Items.Equipment.BlueprintItemEquipmentUsable", 11),
+            ("Items.BlueprintItem", 12),
+            ("Items.Equipment.BlueprintItemEquipmentHandSimple", 13),
+            ("Items.Equipment.BlueprintItemEquipmentGlasses", 14),
+            ("Items.Equipment.BlueprintItemEquipmentShirt", 15),
+        ] {
+            assert_eq!(item_type_of(&format!("Kingmaker.Blueprints.{class}")), Some(ty), "{class}");
+        }
+        assert_eq!(
+            item_type_of("Kingmaker.Blueprints.Items.Equipment.BlueprintItemEquipment"),
+            None
+        );
+    }
 }

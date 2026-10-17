@@ -327,24 +327,28 @@ impl Loader<'_> {
         if unknown_effect {
             self.w.coverage.unsupported("UnitState.m_StatusEffects: unknown condition key");
         }
-        // A saved status effect's own state (its buff, modifiers, lifecycle) isn't
-        // hydrated; nor is a saved posture's (`ShouldBeActive`, `Duration`, the prone
-        // controller).
+        // A saved status effect's own state (its buff, modifiers, lifecycle) isn't hydrated.
         for c in &status_effects {
             self.w
                 .coverage
                 .unsupported(format!("UnitState: saved status effect ({c}) not hydrated"));
         }
-        let prone = state.and_then(|s| s.obj("Prone")).is_some_and(|p| p.bool_or("Active", false));
-        let prone_saved = state.and_then(|s| s.obj("Prone")).is_some_and(|p| {
+        // `ProneState` (`Active`, `ShouldBeActive`, `Duration`: the defaults are not written).
+        let prone_state = state.and_then(|s| s.obj("Prone"));
+        let prone = prone_state.is_some_and(|p| p.bool_or("Active", false));
+        let prone_should_be_active =
+            prone_state.is_some_and(|p| p.bool_or("ShouldBeActive", false));
+        let prone_duration = prone_state.and_then(|p| p.timespan("Duration")).unwrap_or(0);
+        // The controller runs only in the driven combat replay, so a saved posture is still
+        // reported for any other run.
+        if prone_state.is_some_and(|p| {
             p.bool_or("Active", false)
                 || p.bool_or("ShouldBeActive", false)
                 || p.get("Duration").is_some()
-        });
-        if prone_saved {
-            self.w
-                .coverage
-                .unsupported("UnitState.Prone: saved posture (prone controller not ported)");
+        }) {
+            self.w.coverage.unsupported(
+                "UnitState.Prone: saved posture (the prone controller runs only in the driven combat replay)",
+            );
         }
         let group = o.str("GroupId").map(str::to_owned);
         let marked_for_death = state.is_some_and(|s| s.bool_or("MarkedForDeath", false));
@@ -381,6 +385,8 @@ impl Loader<'_> {
                 u.state.status_effects.insert(c, crate::unit_state::StatusEffect::Saved);
             }
             u.prone_active = prone;
+            u.prone_should_be_active = prone_should_be_active;
+            u.prone_duration = prone_duration;
             u.group_id = group;
         }
     }
