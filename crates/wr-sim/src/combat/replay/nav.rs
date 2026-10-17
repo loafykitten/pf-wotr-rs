@@ -874,6 +874,9 @@ impl Driver<'_> {
         }
         let answers = parse_los(&r["los"])?;
         let world = &nav.world;
+        // The recorded answers are the game's `HasObstacle`: checked against the sim's geometry
+        // when it has one (docs/poc5/vision.md).
+        let geometry = w.combat.vision.geometry.clone();
         let compute = |req: &TurnBasedRequest| {
             let mut at = 0;
             let mut mismatch: Option<String> = None;
@@ -885,6 +888,17 @@ impl Driver<'_> {
                     && a.fudge.to_bits() == q.fudge.to_bits())
                 {
                     mismatch.get_or_insert(format!("line of sight {q:?}, the game asked {a:?}"));
+                }
+                if let Some(g) = &geometry {
+                    match g.has_obstacle(a.from, a.to, a.fudge) {
+                        Ok(v) if v == a.blocked => {}
+                        other => {
+                            mismatch.get_or_insert(format!(
+                                "HasObstacle({:?}, {:?}, {}): the sim computes {other:?}, the game answered {}",
+                                a.from, a.to, a.fudge, a.blocked
+                            ));
+                        }
+                    }
                 }
                 Some(a.blocked)
             };
@@ -898,6 +912,9 @@ impl Driver<'_> {
         let (got, mismatch, asked) = compute(&p.req);
         if let Some(m) = mismatch {
             return Err(m);
+        }
+        if geometry.is_some() {
+            w.combat.vision.counts.obstacle_reads += asked;
         }
         if let Some(q) = got.search.los_unknown {
             return Err(format!("line of sight asked past the recorded answers ({q:?})"));
@@ -1975,8 +1992,16 @@ impl SimInputs for SimIn<'_, '_> {
                 describe(&r)
             )));
         }
+        let recorded = boolean(&r, "v", "los")?;
+        if w.combat.vision.on() {
+            // The sim's geometry answers; the recording's answer is checked against it.
+            match w.combat.vision.obstacle(from, to, fudge, recorded) {
+                Ok(v) => return Ok(v),
+                Err(e) => w.coverage.unsupported(format!("driven replay: vision: {e}")),
+            }
+        }
         self.d.ag_input("the simulation's line of sight");
-        boolean(&r, "v", "los")
+        Ok(recorded)
     }
 }
 

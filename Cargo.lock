@@ -4827,10 +4827,22 @@ dependencies = [
  "serde_json",
  "texture2ddecoder",
  "wr-assets",
+ "wr-los",
  "wr-nav",
  "wr-paths",
  "wr-phys",
  "zip",
+]
+
+[[package]]
+name = "wr-los"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "postcard",
+ "serde",
+ "wr-nav",
+ "wr-paths",
 ]
 
 [[package]]
@@ -4910,6 +4922,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wr-content",
+ "wr-los",
  "wr-nav",
  "wr-paths",
  "wr-phys",

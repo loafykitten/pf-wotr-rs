@@ -1,0 +1,18 @@
+[package]
+name = "wr-los"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Line of sight exact to the game: Owlcat's LineOfSightGeometry over an area's FogOfWarBlockers, and the area line-of-sight file."
+
+[dependencies]
+wr-paths.workspace = true
+wr-nav.workspace = true
+anyhow.workspace = true
+postcard.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

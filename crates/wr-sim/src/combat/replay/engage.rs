@@ -271,7 +271,14 @@ impl EngInputs for Driver<'_> {
         to: Option<&str>,
     ) -> R<bool> {
         let at = match f {
-            "los" => self.eng_leaf(w, f, &["u", "to", "v"], &[("u", u), ("to", to)])?,
+            "los" => {
+                let at = self.eng_leaf(w, f, &["u", "to", "v"], &[("u", u), ("to", to)])?;
+                // `unit.HasLOS(enemy)`: the sim's when it computes line of sight.
+                return match (self.trace.records[at]["v"].as_bool(), u, to) {
+                    (Some(rec), Some(a), Some(b)) => Ok(self.vis_engage(w, a, b, rec, at)),
+                    _ => self.uc_reject(at, "a leaf los it can't read"),
+                };
+            }
             "memc" => self.eng_leaf(w, f, &["of", "v"], &[("of", to)])?,
             "motion" | "prevent" | "fmove" | "canatk" => {
                 self.eng_leaf(w, f, &["u", "v"], &[("u", u)])?
