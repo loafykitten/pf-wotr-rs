@@ -998,13 +998,39 @@ pub fn update_slot_index(w: &mut World, item: EntityIdx, force: bool) -> Option<
     Some(index)
 }
 
+/// What a raise's other subscribers may have made: the event log's and the combat log's lengths.
+fn raise_marks(w: &World) -> (usize, usize) {
+    (w.events.records.len(), w.game_log.events.len())
+}
+
+/// The combat log's event for a raise whose other subscribers have run. The game queues it in
+/// subscription order (the log controller's handler among the facts'); the sim queues it last, which
+/// is the game's only if no other subscriber made anything the order shows (a record, a log event):
+/// reported otherwise.
+fn log_after_subscribers(
+    w: &mut World,
+    before: (usize, usize),
+    removed: bool,
+    col: usize,
+    item: EntityIdx,
+    count: i32,
+) {
+    if w.game_log.on && raise_marks(w) != before {
+        w.coverage.unsupported(
+            "ItemsCollection.OnItemAdded/OnItemsRemoved: a subscriber of the raise made records, so the combat log's event place among them isn't established",
+        );
+    }
+    crate::game_log::items_collection(w, removed, col, item, count);
+}
+
 fn on_items_removed(w: &mut World, col: usize, item: EntityIdx, count: i32, suppress: bool) {
     if !suppress {
         w.bus.item.push((col, item));
+        let before = raise_marks(w);
         bus::raise_global_call(w, "IItemsCollectionHandler", "HandleItemsRemoved", None);
         // `GameLogEventItemsCollection.EventsHandler.HandleItemsRemoved`: a global subscriber of
         // the same raise.
-        crate::game_log::items_collection(w, true, col, item, count);
+        log_after_subscribers(w, before, true, col, item, count);
         w.bus.item.pop();
     }
 }
@@ -1012,8 +1038,9 @@ fn on_items_removed(w: &mut World, col: usize, item: EntityIdx, count: i32, supp
 fn on_item_added(w: &mut World, col: usize, item: EntityIdx, count: i32, suppress: bool) {
     if !suppress {
         w.bus.item.push((col, item));
+        let before = raise_marks(w);
         bus::raise_global_call(w, "IItemsCollectionHandler", "HandleItemsAdded", None);
-        crate::game_log::items_collection(w, false, col, item, count);
+        log_after_subscribers(w, before, false, col, item, count);
         w.bus.item.pop();
     }
     if is_player_inventory(w, col) {

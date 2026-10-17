@@ -51,6 +51,27 @@ impl Driver<'_> {
     /// end); returns whether it fell.
     fn prone_unit(&mut self, w: &mut World, u: EntityIdx) -> R<bool> {
         self.place(w, Phase::Prone, "the prone controller");
+        if !self.prone_done.contains(&u) {
+            // `BaseUnitController.Tick` visits `AwakeUnits` in order: the named unit must be awake
+            // (the window's last frame: in its prefix's set) and not before one already named.
+            match w.combat.awake.iter().position(|x| *x == u) {
+                Some(i) if i < self.prone_cursor => {
+                    return Err(Desync(
+                        "a prone controller record out of the awake list's order".into(),
+                    ));
+                }
+                Some(i) => self.prone_cursor = i,
+                None => {
+                    let id = &w.entity(u).unique_id;
+                    let listed = self.awake_sets.get(&self.tick).is_some_and(|s| s.contains(id));
+                    if !(listed && !self.awake_sets.contains_key(&(self.tick + 1))) {
+                        return Err(Desync(
+                            "a prone controller record of a unit that isn't awake".into(),
+                        ));
+                    }
+                }
+            }
+        }
         self.prone_tick_unit(w, u)
     }
 
@@ -162,5 +183,6 @@ impl Driver<'_> {
             );
         }
         self.prone_done.clear();
+        self.prone_cursor = 0;
     }
 }
