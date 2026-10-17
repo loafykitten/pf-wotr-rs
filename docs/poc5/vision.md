@@ -85,44 +85,44 @@ replays have the same counts), 96 runs in all:
 
 | capture / fight (record run; its two replays equal) | engagement reads | memory group reads (on pre-window entries) | misses computed | misses by readers the sim doesn't run | clears (adopted) | `HasObstacle` answers |
 |---|---|---|---|---|---|---|
-| -95 tb-focus | 10,334 | 0 (0) | 8 | 296 | 122 (6) | 0 |
-| -95 tb-nearest | 10,546 | 0 (0) | 6 | 296 | 118 (6) | 0 |
-| -96 tb-hold | 6,404 | 0 (0) | 11 | 298 | 108 (7) | 0 |
-| -109 tb-focus | 5,406 | 0 (0) | 8 | 338 | 104 (7) | 0 |
-| -109 tb-nearest | 2,176 | 0 (0) | 4 | 342 | 104 (7) | 0 |
-| -111 tb-focus | 7,840 | 14,067 (115) | 349 | 0 | 126 (6) | 0 |
-| -111 tb-nearest | 9,054 | 16,258 (117) | 363 | 0 | 125 (6) | 0 |
-| -112 tb-focus | 13,082 | 18,960 (115) | 359 | 0 | 128 (6) | 0 |
-| -112 tb-nearest | 4,066 | 13,871 (116) | 235 | 0 | 102 (6) | 0 |
-| -113 tb-focus | 1,538 | 11,348 (115) | 300 | 0 | 92 (5) | 0 |
-| -113 tb-nearest | 1,532 | 8,737 (117) | 334 | 0 | 99 (6) | 2 |
-| -114 tb-focus | 8,582 | 16,349 (115) | 369 | 0 | 121 (6) | 24 |
-| -114 tb-nearest | 7,000 | 12,760 (115) | 412 | 0 | 127 (6) | 17 |
-| -115 tb-focus | 3,144 | 14,362 (116) | 308 | 0 | 108 (7) | 18 |
-| -115 tb-nearest | 6,244 | 12,505 (114) | 381 | 0 | 123 (6) | 18 |
-| -116 tb-hold | 6,906 | 13,048 (116) | 364 | 0 | 125 (7) | 21 |
-| -117 tb-solo | 4,758 | 15,130 (117) | 325 | 0 | 104 (6) | 17 |
-| -120 tb-cast | 4,875 | 12,728 (113) | 284 | 0 | 95 (6) | 25 |
-| -122 tb-focus | 6,624 | 11,941 (114) | 349 | 0 | 123 (6) | 18 |
-| -123 tb-chain | 10,120 | 20,389 (113) | 610 | 0 | 313 (7) | 35 |
-| -124 tb-chain | 10,886 | 22,004 (115) | 740 | 0 | 325 (8) | 37 |
-| -125 tb-focus | 11,102 | 17,680 (116) | 420 | 0 | 132 (7) | 30 |
-| -125 tb-nearest | 1,662 | 9,414 (115) | 351 | 0 | 104 (6) | 17 |
-| -126 tb-focus | 4,414 | 12,058 (115) | 282 | 0 | 101 (6) | 15 |
-| -126 tb-nearest | 10,498 | 14,975 (116) | 323 | 0 | 124 (6) | 18 |
-| -127 tb-tie | 11,542 | 16,503 (117) | 326 | 0 | 120 (6) | 19 |
-| -129 tb-lizard | 29,140 | 66,157 (114) | 1462 | 0 | 716 (10) | 75 |
-| -132 tb-focus | 12,574 | 17,522 (115) | 359 | 0 | 127 (6) | 20 |
-| -132 tb-nearest | 3,664 | 12,802 (116) | 295 | 0 | 100 (6) | 16 |
-| -133 tb-focus | 22,620 | 26,794 (116) | 379 | 0 | 132 (6) | 32 |
-| -133 tb-nearest | 8,312 | 15,089 (115) | 309 | 0 | 106 (7) | 19 |
-| -136 tb-lizard | 20,432 | 53,819 (114) | 1240 | 0 | 739 (9) | 60 |
+| -95 tb-focus | 10,334 | 0 (0) | 8 | 296 | 123 (5) | 0 |
+| -95 tb-nearest | 10,546 | 0 (0) | 6 | 296 | 119 (5) | 0 |
+| -96 tb-hold | 6,404 | 0 (0) | 11 | 298 | 109 (6) | 0 |
+| -109 tb-focus | 5,406 | 0 (0) | 8 | 338 | 105 (6) | 0 |
+| -109 tb-nearest | 2,176 | 0 (0) | 4 | 342 | 105 (6) | 0 |
+| -111 tb-focus | 7,840 | 14,067 (115) | 349 | 0 | 127 (5) | 0 |
+| -111 tb-nearest | 9,054 | 16,258 (117) | 363 | 0 | 126 (5) | 0 |
+| -112 tb-focus | 13,082 | 18,960 (115) | 359 | 0 | 129 (5) | 0 |
+| -112 tb-nearest | 4,066 | 13,871 (116) | 235 | 0 | 103 (5) | 0 |
+| -113 tb-focus | 1,538 | 11,348 (115) | 300 | 0 | 93 (4) | 0 |
+| -113 tb-nearest | 1,532 | 8,737 (117) | 334 | 0 | 100 (5) | 2 |
+| -114 tb-focus | 8,582 | 16,349 (115) | 369 | 0 | 122 (5) | 24 |
+| -114 tb-nearest | 7,000 | 12,760 (115) | 412 | 0 | 128 (5) | 17 |
+| -115 tb-focus | 3,144 | 14,362 (116) | 308 | 0 | 109 (6) | 18 |
+| -115 tb-nearest | 6,244 | 12,505 (114) | 381 | 0 | 124 (5) | 18 |
+| -116 tb-hold | 6,906 | 13,048 (116) | 364 | 0 | 126 (6) | 21 |
+| -117 tb-solo | 4,758 | 15,130 (117) | 325 | 0 | 105 (5) | 17 |
+| -120 tb-cast | 4,875 | 12,728 (113) | 284 | 0 | 96 (5) | 25 |
+| -122 tb-focus | 6,624 | 11,941 (114) | 349 | 0 | 124 (5) | 18 |
+| -123 tb-chain | 10,120 | 20,389 (113) | 610 | 0 | 315 (5) | 35 |
+| -124 tb-chain | 10,886 | 22,004 (115) | 740 | 0 | 327 (6) | 37 |
+| -125 tb-focus | 11,102 | 17,680 (116) | 420 | 0 | 133 (6) | 30 |
+| -125 tb-nearest | 1,662 | 9,414 (115) | 351 | 0 | 105 (5) | 17 |
+| -126 tb-focus | 4,414 | 12,058 (115) | 282 | 0 | 102 (5) | 15 |
+| -126 tb-nearest | 10,498 | 14,975 (116) | 323 | 0 | 125 (5) | 18 |
+| -127 tb-tie | 11,542 | 16,503 (117) | 326 | 0 | 121 (5) | 19 |
+| -129 tb-lizard | 29,140 | 66,157 (114) | 1462 | 0 | 719 (7) | 75 |
+| -132 tb-focus | 12,574 | 17,522 (115) | 359 | 0 | 128 (5) | 20 |
+| -132 tb-nearest | 3,664 | 12,802 (116) | 295 | 0 | 101 (5) | 16 |
+| -133 tb-focus | 22,620 | 26,794 (116) | 379 | 0 | 133 (5) | 32 |
+| -133 tb-nearest | 8,312 | 15,089 (115) | 309 | 0 | 107 (6) | 19 |
+| -136 tb-lizard | 20,432 | 53,819 (114) | 1240 | 0 | 742 (6) | 60 |
 
 Over the 96 runs: 831,231 engagement reads and 1,492,226 group reads computed and equal; 35,595 cache misses computed
 (each equal to its record: target eye point, sample, result) and 4,710 misses of readers the sim doesn't run verified and
 adopted (`-95`, `-96`, `-109` only: they have no `memory` observer, so the memory controller's reads aren't the sim's;
 each is checked against `CheckLOS` of its recorded sample, its target is the unit standing at the eye point and its entry
-is kept); 15,879 clears equal (624 of caches whose first clear in the window it was: adopted); 1,659 `HasObstacle`
+is kept); 15,993 clears equal (510 of caches whose first clear in the window it was: adopted); 1,659 `HasObstacle`
 answers (the movement simulation's and the path search's) equal to the sim's geometry; 418,209 reads of a unit outside
 `CanBeInVisionRange` (false without asking a cache). The AI's `InLos` isn't read in any of these fights (0 reads: wired
 and unit-tested only).
