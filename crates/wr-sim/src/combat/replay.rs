@@ -1020,8 +1020,8 @@ struct Driver<'t> {
     prone_falls: Vec<EntityIdx>,
     /// The awake list's index of the last unit a record named (the controller's order).
     prone_cursor: Option<usize>,
-    /// The cursor's unit has stopped (`EnterProneState`) and its `InterruptAll` hasn't come.
-    prone_open: bool,
+    /// Each unit's visit this frame: 1 stopped (`EnterProneState`), 2 its `InterruptAll` came.
+    prone_visit: HashMap<EntityIdx, u8>,
     out: Outcome,
 }
 
@@ -1271,7 +1271,7 @@ impl<'t> Driver<'t> {
             prone_done: HashSet::new(),
             prone_falls: Vec::new(),
             prone_cursor: None,
-            prone_open: false,
+            prone_visit: HashMap::new(),
             out,
         };
         let mut d = d;

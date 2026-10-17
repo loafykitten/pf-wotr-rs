@@ -64,7 +64,7 @@ impl Driver<'_> {
                     "a prone controller record out of the awake list's order".into(),
                 ));
             }
-            Some(c) if at > c && self.prone_open => {
+            Some(c) if at > c && self.prone_visit_open(w) => {
                 return Err(Desync(
                     "a prone controller record of the next unit before the last one's calls came"
                         .into(),
@@ -76,14 +76,23 @@ impl Driver<'_> {
         self.prone_tick_unit(w, u)
     }
 
+    /// The cursor's unit has stopped (`EnterProneState`) and its `InterruptAll` hasn't come.
+    fn prone_visit_open(&self, w: &World) -> bool {
+        let order = self.prone_order(w);
+        self.prone_cursor
+            .and_then(|c| order.get(c))
+            .is_some_and(|u| self.prone_visit.get(u) == Some(&1))
+    }
+
     /// The units the controller visits, in order: the awake list, and in the window's last frame
     /// (no recorded next awake set) the units of the frame's prefix set the sim couldn't place.
     fn prone_order(&self, w: &World) -> Vec<EntityIdx> {
-        let mut units = w.combat.awake.clone();
+        let mut eligible: std::collections::HashSet<EntityIdx> =
+            w.combat.awake.iter().copied().collect();
         if !self.awake_sets.contains_key(&(self.tick + 1))
             && let Some(set) = self.awake_sets.get(&self.tick)
         {
-            units.extend(
+            eligible.extend(
                 w.combat
                     .awake_unknown
                     .iter()
@@ -91,7 +100,8 @@ impl Driver<'_> {
                     .filter(|u| set.contains(&w.entity(*u).unique_id)),
             );
         }
-        units
+        // (`State.Units.All` order, which the awake list keeps.)
+        crate::combat::life::all_units(w).into_iter().filter(|u| eligible.contains(u)).collect()
     }
 
     /// [`Self::prone_unit`] in the phase (no placing: the phase's end runs inside the frame's).
@@ -121,8 +131,11 @@ impl Driver<'_> {
         if !self.prone_on {
             return Ok(());
         }
+        if self.prone_visit.contains_key(&u) {
+            return Err(Desync("a second stop of EnterProneState, or one after the call".into()));
+        }
         if self.prone_unit(w, u)? {
-            self.prone_open = true;
+            self.prone_visit.insert(u, 1);
             Ok(())
         } else {
             Err(Desync(
@@ -146,7 +159,7 @@ impl Driver<'_> {
         match self.prone_unit(w, u) {
             Ok(true) => {
                 self.prone_calls.push(u);
-                self.prone_open = false;
+                self.prone_visit.insert(u, 2);
             }
             Ok(false) => w.coverage.unsupported(
                 "driven replay: the recording has an InterruptAll by the prone controller for a unit the sim's controller doesn't make fall (or not awake)",
@@ -207,6 +220,6 @@ impl Driver<'_> {
         }
         self.prone_done.clear();
         self.prone_cursor = None;
-        self.prone_open = false;
+        self.prone_visit.clear();
     }
 }
