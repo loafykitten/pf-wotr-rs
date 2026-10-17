@@ -489,7 +489,9 @@ fn missing_or_wrong_agent_records_are_reported() {
             recs.remove(at);
             renumber(recs);
         }),
-        ("the position before differs", |recs| {
+        // (The window's one outside position write is the roaming controller's sleeping step, the
+        // sim's since its port: `replay/roaming.rs`.)
+        ("the sleeping step of 5052: the sim's position", |recs| {
             let at = pos(recs, |r| ev(r, "ag_pos"));
             recs[at]["pos"][0] = json!(1.0);
         }),
