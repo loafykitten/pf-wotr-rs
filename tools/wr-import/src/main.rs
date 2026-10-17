@@ -69,6 +69,16 @@ enum Cmd {
         #[arg(long)]
         colliders: Option<PathBuf>,
     },
+    /// Writes the area's line-of-sight file for the sim, `cache/sim/los/<guid>.wrlos`: the
+    /// scenes' `FogOfWarBlocker`s in wr-los's format.
+    LosPack {
+        /// The area's bundle name, lower case (e.g. `prologue_caves_1`).
+        #[arg(long)]
+        area: String,
+        /// The area blueprint's guid.
+        #[arg(long)]
+        guid: String,
+    },
     /// Runs a path query on an area's graph cache.
     Path {
         #[arg(long, default_value = "prologue_caves_1")]
@@ -224,6 +234,41 @@ fn main() -> Result<()> {
                     m.cooked_triangles,
                     m.render_triangles
                 );
+            }
+            Ok(())
+        }
+        Cmd::LosPack { area, guid } => {
+            let t = Instant::now();
+            let a = wr_import::oracle_diff::load_area_scenes(&area)?;
+            // The player's own files have no type trees (a blocker's `MeshFilter` may point at the
+            // built-in cube): borrow the Mesh tree from the scenes (same Unity version).
+            let donors: Vec<&_> = a.scenes.iter().map(|s| s.file).collect();
+            let paths = wr_paths::GamePaths::from_env();
+            a.universe.add_loose_file_with_donors(
+                &paths.app.join("Contents/Resources/unity default resources"),
+                &donors,
+            )?;
+            let (file, rep) = wr_import::los::build(&a.universe, &a.scenes, &guid)?;
+            let path = wr_los::path_for(&guid);
+            file.write(&path)?;
+            let back = wr_los::LosFile::read(&path)?;
+            anyhow::ensure!(back == file, "{} does not read back as written", path.display());
+            eprintln!(
+                "wrote {} ({} blockers: {} polygons, {} meshes; {} inactive left out, {} updatable; {} fog of war areas; {} extended vision spawners; {} transformed points whose f32 and double sums differ; {} bytes) in {:?}",
+                path.display(),
+                rep.blockers,
+                rep.polygons,
+                rep.meshes,
+                rep.skipped_inactive,
+                rep.updatable,
+                rep.areas,
+                file.extended_vision_spawners,
+                rep.ambiguous_points,
+                std::fs::metadata(&path)?.len(),
+                t.elapsed()
+            );
+            for l in &rep.list {
+                eprintln!("  {l}");
             }
             Ok(())
         }

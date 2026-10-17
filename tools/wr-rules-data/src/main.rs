@@ -26,7 +26,9 @@ use wr_content::node::Node;
 use wr_import::unity::bundle::Bundle;
 use wr_import::unity::serialized::{SerializedFile, class_id};
 use wr_import::unity::value::Value;
-use wr_sim::area_parts::{AREA_BOUNDS_SCHEMA, AreaBoundsTable, AreaPartBoundsAsset, Bounds};
+use wr_sim::area_parts::{
+    AREA_BOUNDS_SCHEMA, AreaBoundsTable, AreaPartBoundsAsset, Bounds, FogOfWarBoundsAsset,
+};
 use wr_sim::difficulty::{
     DifficultyPreset, DifficultyPresetAsset, DifficultyPresetsList, RULES_DATA_SCHEMA, RulesData,
     StatsAdjustmentPreset,
@@ -588,6 +590,10 @@ fn area_bounds(
                 override_local_map_bounds: boolf(&v, "m_OverrideLocalMapBounds")
                     .with_context(ctx)?,
                 local_map_bounds: bounds(&v, "m_LocalMapBounds").with_context(ctx)?,
+                fog_of_war: Some(FogOfWarBoundsAsset {
+                    override_bounds: boolf(&v, "m_OverrideFogOfWarBounds").with_context(ctx)?,
+                    bounds: bounds(&v, "m_FogOfWarBounds").with_context(ctx)?,
+                }),
             },
         );
     }

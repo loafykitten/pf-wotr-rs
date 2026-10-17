@@ -90,6 +90,18 @@ pub struct AreaPartBoundsAsset {
     pub mechanic_bounds: Bounds,
     pub override_local_map_bounds: bool,
     pub local_map_bounds: Bounds,
+    /// `m_OverrideFogOfWarBounds` and `m_FogOfWarBounds` (`None`: a table extracted before these
+    /// were read: rebuild it with `wr-rules-data`).
+    #[serde(default)]
+    pub fog_of_war: Option<FogOfWarBoundsAsset>,
+}
+
+/// An `AreaPartBounds`' fog-of-war bounds (`SceneLoader.SetFogOfWarParameters` gives them to the
+/// area's `FogOfWarArea`, whose bounds `LineOfSightGeometry.Init` takes).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FogOfWarBoundsAsset {
+    pub override_bounds: bool,
+    pub bounds: Bounds,
 }
 
 impl AreaPartBoundsAsset {
@@ -103,6 +115,13 @@ impl AreaPartBoundsAsset {
     #[must_use]
     pub fn local_map(&self) -> Bounds {
         if self.override_local_map_bounds { self.local_map_bounds } else { self.default_bounds }
+    }
+
+    /// `FogOfWarBounds`: the override, else `m_DefaultBounds` (`None`: not extracted).
+    #[must_use]
+    pub fn fog_of_war_bounds(&self) -> Option<Bounds> {
+        let f = self.fog_of_war?;
+        Some(if f.override_bounds { f.bounds } else { self.default_bounds })
     }
 }
 

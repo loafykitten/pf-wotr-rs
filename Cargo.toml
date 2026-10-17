@@ -29,6 +29,7 @@ zstd = { version = "0.13", default-features = false }
 wr-save = { path = "crates/wr-save" }
 wr-assets = { path = "crates/wr-assets" }
 wr-nav = { path = "crates/wr-nav" }
+wr-los = { path = "crates/wr-los" }
 wr-phys = { path = "crates/wr-phys" }
 wr-text = { path = "crates/wr-text" }
 

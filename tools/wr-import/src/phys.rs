@@ -403,7 +403,7 @@ pub fn apply_recorded_colliders(
     Ok(rep)
 }
 
-fn positions(m: &crate::pack::mesh::DecodedMesh) -> Vec<[f32; 3]> {
+pub(crate) fn positions(m: &crate::pack::mesh::DecodedMesh) -> Vec<[f32; 3]> {
     let Some(ch) = m.channels.first().copied().flatten() else { return Vec::new() };
     if ch.format != 0 || ch.dimension < 3 {
         return Vec::new();

@@ -10,7 +10,9 @@
 # (cache/sim/unit-prefabs.json: each unit prefab's IsInGameBySettings, which every unit built
 # from a view starts with) is built once per install with `wr-import unit-prefabs`, here too
 # when it is missing. The area's nav file (cache/sim/nav/<guid>.wrnav: its navigation graphs in
-# wr-nav's format) is written alongside.
+# wr-nav's format) is written alongside, and its line-of-sight file (cache/sim/los/<guid>.wrlos: the
+# scenes' FogOfWarBlockers, `wr-import los-pack`). Line of sight in the driven replay also needs the
+# area bounds table's fog of war bounds (`cargo run -p wr-rules-data`, once per install).
 set -euo pipefail
 name=${1:?area name, e.g. Prologue_Neathholm}
 guid=${2:?area guid}
@@ -21,6 +23,7 @@ lower=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
 # The dependency list names the bundles in lower case (`prologue_neathholm_*.scenes`).
 cargo run --release -q -p wr-import -- import --area "$lower" --no-census
 cargo run --release -q -p wr-import -- nav-pack --area "$lower" --guid "$guid"
+cargo run --release -q -p wr-import -- los-pack --area "$lower" --guid "$guid"
 [ -f "$WR_CACHE/sim/unit-prefabs.json" ] || cargo run --release -q -p wr-import -- unit-prefabs
 cargo run --release -q -p wr-sim --bin wr-sim -- scene-import \
   "$WR_CACHE/import/$lower/inventory.json" --area "$guid"
