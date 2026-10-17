@@ -7,9 +7,14 @@
 //! `SphereBoundsUnit`, only enabled ones) overlap the vertical capsule from `pos - up * 2r` to
 //! `pos + up * 2r` with radius `r = VisionRangeMeters`, and keeps their units.
 //!
-//! What the model holds, and what the recordings fixed (docs/poc5/vision.md). **An assumption never
-//! makes a pair definite**: wherever something the sim doesn't know could change a pair's answer,
-//! the pair is [`Tri::Maybe`] (the recording answers, and it is counted by [`Cause`]).
+//! What the model holds, and what the recordings fixed (docs/poc5/vision.md). A pair the sim's
+//! unknowns (the view's scale, a corpulence not read yet, a physics step that may not have run, a
+//! fade) could change is left to the recording ([`Tri::Maybe`], counted by [`Cause`]). What the
+//! sim *hypothesizes* about the state of the colliders at the window's start (the creation order
+//! of the colliders made before it, no fade in progress, the positions PhysX has at the first
+//! frame) is not an unknown in that sense: a wrong hypothesis shows as a reported difference, never as
+//! a masked one, and everything decided rests on them (docs/poc5/vision.md, "Hypotheses about the
+//! window's start").
 //! - **Population.** `State.EntitiesWithBounds` in the order its entities joined their states; the
 //!   first tick (`m_UpdateAll`) walks it through `EntityPoolEnumerator`, which skips entities that are
 //!   not `ShouldBeEnumeratedByEntityPoolEnumerator` (in the game and not suppressed): a unit hidden
@@ -272,7 +277,8 @@ pub fn capsule_sphere(pos: V3, r: f32, centre: V3, rs: f32) -> (bool, f64, bool)
     let cy = f64::from(centre[1]).clamp(y0 - h, y0 + h);
     let dy = f64::from(centre[1]) - cy;
     let dist = (dx * dx + dz * dz + dy * dy).sqrt();
-    let margin = dist - f64::from(sum);
+    // (The sum in `f64` from the two `f32`s: `sum` is the rounded one.)
+    let margin = dist - (f64::from(r) + f64::from(rs));
     (hit, margin, hit != (margin <= 0.0))
 }
 
@@ -541,6 +547,16 @@ mod tests {
         let (_, m, rounding) = capsule_sphere(pos, 10.0, [10.0, 0.0, 0.0], 0.5);
         assert!((m + 0.5).abs() < 1e-9, "{m}");
         assert!(!rounding);
+    }
+
+    #[test]
+    fn the_exact_margin_sums_the_radii_in_f64() {
+        // Sol's reproducer: the f32 sum 12.4 rounds, the exact one is 11.7f32 + 0.7f32.
+        let (hit, margin, rounding) =
+            capsule_sphere([0.0; 3], 11.7, [11.468_463, 0.0, 4.715_331_6], 0.7);
+        assert!(margin < 0.0 && margin > -1e-7, "{margin:e}");
+        assert!((margin + 4.062e-8).abs() < 1e-9, "{margin:e}");
+        assert_eq!(rounding, hit != (margin <= 0.0));
     }
 
     #[test]

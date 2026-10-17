@@ -302,7 +302,7 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
     );
     match (&out.vision, &out.vision_off) {
         (Some(v), _) => println!(
-            "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal; vision range: sets computed {} and equal to the recording's (changes {}, differences {}); with a pair left to the recording: sets {}, changes {}; pairs decided by the sim and equal {}, left to the recording by cause: corpulence {}, position {}, enabled {}, view-scale band {} (the answer at scale 1 equal {}, differing {}); {} pairs at scale 1 of known one position (within 5 cm {}, within 1 cm {}, within 1 mm {}, closest {} um, f32 against exact differing {}); unit-frames of unknown corpulence {}, of a fade-hidden collider {}; colliders made after the first frame {}; the memory's near-unit unions (the sets' order) equal {}",
+            "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal; vision range: sets compared {} (changes {}, differences {}); everything below is decided given the window's start hypotheses (docs/poc5/vision.md) and the physics clock; with a pair left to the recording: sets {}, changes {}; pairs decided given the hypotheses and equal to the recording's {}, left to the recording by cause: corpulence {}, position {}, enabled {}, view-scale band {} (the answer at scale 1 equal {}, differing {}); {} pairs at scale 1 of known one position (within 5 cm {}, within 1 cm {}, within 1 mm {}, closest {} um, f32 against exact differing {}); unit-frames of unknown corpulence {} (stale reads {}), of a fade-hidden collider {}; colliders made after the first frame {}; the memory's near-unit unions equal given the creation-order hypothesis {}",
             v.engage,
             v.engage_pre,
             v.memory,
@@ -321,12 +321,12 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
             v.vis_records,
             v.geometry_segments,
             v.probes,
-            v.range_sets,
+            v.range_sets_compared,
             v.range_changes,
             v.range_differences,
             v.range_sets_open,
             v.range_changes_open,
-            v.range_decided,
+            v.range_decided_given_start,
             v.range_open[0],
             v.range_open[1],
             v.range_open[2],
@@ -340,9 +340,10 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
             v.range_closest_um,
             v.range_rounding,
             v.range_corp_unknown,
+            v.range_corp_stale,
             v.range_fade_unit_frames,
             v.range_made_later,
-            v.near_unions
+            v.near_unions_given_order
         ),
         (None, Some(why)) => {
             println!("vision: not computed ({why}); line of sight stays the recording's")

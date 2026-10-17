@@ -980,7 +980,7 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         // The sim's: the members' sets in the overlap's order, `ExtractNearUnits`' union.
         let members = self.w.combat.groups.get(g).units.clone();
         if let Some(sim) = self.d.vis_near_union(self.w, &members) {
-            self.d.vis.counts.near_unions += usize::from(sim == us);
+            self.d.vis.counts.near_unions_given_order += usize::from(sim == us);
             return Ok(self.leaf_checked("near", sim, us));
         }
         Ok(self.leaf_taken("near", us))

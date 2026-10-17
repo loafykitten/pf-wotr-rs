@@ -20,6 +20,10 @@ use crate::world::{EntityIdx, World};
 use super::vision::vision_radius;
 use super::{Driver, Phase};
 
+/// A unit's size and original size, and whether a producer of its corpulence the sim can't follow
+/// is on it.
+type SizeWatch = (Option<(Option<i32>, Option<i32>)>, bool);
+
 /// The vision controller's side: the sets the sim computes, checked against the `vis` records.
 #[derive(Debug, Default)]
 pub(super) struct RangeDriver {
@@ -37,6 +41,10 @@ pub(super) struct RangeDriver {
     pub expect: HashMap<EntityIdx, Vec<Hit>>,
     /// The bounds controller has ticked in this run.
     started: bool,
+    /// What sets each unit's corpulence as of the last phase (sizes, a producer the sim can't
+    /// follow) and the record from which a read counts, after a change.
+    size_watch: HashMap<EntityIdx, SizeWatch>,
+    size_epoch: HashMap<EntityIdx, usize>,
     /// The physics clock after the last frame it was advanced to: `Time.time - Time.fixedTime`,
     /// the frame, and the fixed step; `None` without the begin record's `fixed_phase0` (every
     /// frame is then assumed to run a step).
@@ -118,7 +126,7 @@ impl Driver<'_> {
             w.combat.vision.near_inexact.insert(u);
         }
         let c = &mut self.vis.counts;
-        c.range_sets += 1;
+        c.range_sets_compared += 1;
         c.range_changes += usize::from(rec);
         let open: usize = d.open.iter().sum();
         c.range_sets_open += usize::from(open > 0);
@@ -126,7 +134,7 @@ impl Driver<'_> {
         for (k, n) in d.open.iter().enumerate() {
             c.range_open[k] += n;
         }
-        c.range_decided += d.decided;
+        c.range_decided_given_start += d.decided;
         c.range_guess_agree += d.guess_agree;
         c.range_guess_differ += d.guess_differ;
         if diffs.is_empty() {
@@ -151,17 +159,42 @@ impl Driver<'_> {
         );
     }
 
-    /// A unit's `Corpulence` as the recording shows it before the record the phase is placed at
-    /// (the record being processed: a read in the frame's later phases comes after it); `None`
-    /// until the unit's first read (counted).
+    /// A unit's `Corpulence` as the recording shows it: the last `corp` read before the record the
+    /// phase is placed at (a read in the frame's later phases comes after it) and not before
+    /// the last change the sim saw in what sets it. `None` until the unit's first valid read
+    /// (counted).
+    ///
+    /// What sets it (`View.Corpulence` = the prefab's `m_Corpulence` times `GetSizeScale()`): the
+    /// unit's size against its original size (`HandleUnitSizeChanged`), the progression's scale
+    /// percent (`AddUnitScale`), a polymorph (`DisableSizeScaling`), and a mount's size for its
+    /// rider. The sim sees the sizes; for a unit with one of the other producers it can't tell
+    /// when the corpulence changes, so from the first frame it has one the unit's reads count for
+    /// nothing, and neither do the ones before the last frame it had one.
     fn vis_corpulence(&mut self, w: &World, u: EntityIdx) -> Option<f32> {
         let at = w.combat.nav.at;
-        let read = self.vis.range.corp.get(&w.entity(u).unique_id).and_then(|series| {
-            let i = series.partition_point(|(i, _)| *i < at);
-            (i > 0).then(|| series[i - 1].1)
+        let r = &mut self.vis.range;
+        let key = w.unit(u).map(|x| {
+            (x.state_size.or(x.original_size).map(|s| s as i32), x.original_size.map(|s| s as i32))
         });
+        let producer = ["AddUnitScale", "Polymorph"].iter().any(|c| super::has_component(w, u, c))
+            || w.entity(u).parts.iter().any(|p| p.clr == "UnitPartRider");
+        let was = r.size_watch.insert(u, (key, producer));
+        let changed = was.is_some_and(|(k, p)| k != key || p || producer);
+        if changed {
+            r.size_epoch.insert(u, at);
+        }
+        let from = r.size_epoch.get(&u).copied().unwrap_or(0);
+        let series = r.corp.get(&w.entity(u).unique_id);
+        let latest = series.and_then(|series| {
+            let i = series.partition_point(|(i, _)| *i < at);
+            (i > 0).then(|| series[i - 1])
+        });
+        let read = latest.filter(|(i, _)| *i >= from && !producer).map(|(_, c)| c);
         if read.is_none() {
             self.vis.counts.range_corp_unknown += 1;
+            if latest.is_some() {
+                self.vis.counts.range_corp_stale += 1;
+            }
         }
         read
     }
@@ -180,27 +213,28 @@ impl Driver<'_> {
 
     /// Whether a physics step ran since the last tick (a fixed update before this frame's
     /// controllers): the clock `Time.time - Time.fixedTime` gains the frame's scaled delta in each
-    /// frame and loses a fixed step for each fixed update. Without the clock, or when the frame
-    /// can't be followed from the last, whether it did isn't known.
+    /// frame and loses a fixed step for each fixed update. When the clock or a frame's delta is
+    /// missing, or a frame is skipped, the phase isn't known any more, for good (nothing in the
+    /// recording re-establishes it): every later step is unknown.
     fn vis_steps(&mut self) -> Step {
-        let Some(&(frame, dt)) = self.vis.range.frames.get(&self.tick) else {
-            return Step::Unknown;
-        };
-        let Some((mut phase, mut at, step)) = self.vis.range.clock else { return Step::Unknown };
-        if frame <= at || frame - at > 100_000 {
-            return Step::Unknown;
-        }
-        let mut ran = false;
-        while at < frame {
-            at += 1;
-            phase += dt;
-            while phase >= step {
-                phase -= step;
-                ran = true;
+        let r = &mut self.vis.range;
+        let Some((mut phase, at, step)) = r.clock else { return Step::Unknown };
+        match r.frames.get(&self.tick) {
+            Some(&(frame, dt)) if frame == at + 1 => {
+                phase += dt;
+                let mut ran = false;
+                while phase >= step {
+                    phase -= step;
+                    ran = true;
+                }
+                r.clock = Some((phase, frame, step));
+                if ran { Step::Ran } else { Step::NotRan }
+            }
+            _ => {
+                r.clock = None;
+                Step::Unknown
             }
         }
-        self.vis.range.clock = Some((phase, at, step));
-        if ran { Step::Ran } else { Step::NotRan }
     }
 
     /// `EntityBoundsController.Tick` and `UnitVisionRangeController.Tick` (the vision controller
@@ -211,6 +245,8 @@ impl Driver<'_> {
         if !self.vis.on || !self.vis.range.on {
             return;
         }
+        // (The clock follows every frame the phase is reached in.)
+        let step = self.vis_steps();
         let Some(m) = self.draining.or(self.frame.mode) else { return };
         if super::registered(m, Phase::Visibility) != Some(true) {
             return;
@@ -238,7 +274,6 @@ impl Driver<'_> {
             let corpulence = self.vis_corpulence(w, u);
             list.push(BoundsUnit { unit: u, pos, prefix, in_game, enabled, corpulence });
         }
-        let step = self.vis_steps();
         for gone in w.combat.vision.bounds.tick(&list, step).removed {
             let id = w.entity(gone).unique_id.clone();
             Self::vis_report(

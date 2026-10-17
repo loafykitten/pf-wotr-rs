@@ -196,9 +196,12 @@ test can take an earlier unmodelled miss on the same pair for a later member's r
 
 ### What the sim does
 
-**An assumption never makes a pair definite.** A pair (an awake unit's capsule and a collider) is answered by the sim
-only when everything the sim doesn't know cannot change the answer; otherwise it is left to the recording (`Tri::Maybe`),
-counted by cause, and the recording's answer is the run's. `Bounds::tick` keeps each collider's transform, PhysX's copy
+A pair (an awake unit's capsule and a collider) is answered by the sim only when the things the sim doesn't know (the
+view's scale, a corpulence not read, a physics step that may not have run, a fade it saw begin) cannot change the answer;
+otherwise it is left to the recording (`Tri::Maybe`), counted by cause, and the recording's answer is the run's. What the
+sim *hypothesizes* about the colliders' state at the window's start is a different kind of thing, listed in "Hypotheses
+about the window's start" below: every decided pair rests on those hypotheses, and a wrong one shows as a reported
+difference, not as a masked one. `Bounds::tick` keeps each collider's transform, PhysX's copy
 (taken from the transform when the frame ran a step; both candidates when that isn't known), the radius as an interval
 and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
 - **Population.** `scene::units_with_bounds`: the units of `State.Units`' order, fake ones too (map objects and anchors have
@@ -271,30 +274,71 @@ The hypotheses and their results (the first by a script on the party's 5,010 obs
    entity.
 5. **The margin** (item 3 of the task): the closest approach of any pair, over all runs, to the capsule's surface is
    **27 um** (`-131`, at scale 1); 7,108 pair-frames of the 18.9 million with a known corpulence are within 1 cm and 123 within
-   1 mm, in sets that agree. `f32` against exact arithmetic: **0** of them decide differently, so PhysX's rounding doesn't
-   matter for these captures (the sim decides in `f32` as PhysX does; the exact margin is only logged).
+   1 mm, in sets that agree (margins at scale 1). PhysX's `f32` test against the same test with the radii summed in `f64`
+   (the margin is that distance less the `f64` sum): **0** of them decide differently, so the `f32` rounding doesn't matter
+   for these captures (the sim decides in `f32`; the other is only logged).
 6. **The order.** The recorded `near` leaves' first member's prefix gives that member's set order exactly: over five
    captures (`-111`, `-120`, `-123`, `-129`, `-136`) there is one static total order, never a conflict: the party first,
    then the other units of the area by id, that is the pool order [`State.Units.All`: the units of the cross-scene state,
    then the area's]. The sim's overlap in the colliders' order (made in pool order, a later collider appended) reproduces
    **every** recorded `near` leaf: 385,005 of 385,005 in the record runs of `-111` and later (1,218,083 in all 109 runs;
-   `-95`, `-96` and `-109` have no `memory` observer), so the order is no longer an input either. (Why PhysX returns the
-   colliders in creation order for this scene isn't established; it holds for every capture here, which have at most
-   21 colliders.)
+   `-95`, `-96` and `-109` have no `memory` observer), so the order is no longer an input, given the hypotheses
+   below. (Why PhysX returns the colliders in creation order for this scene isn't established; it holds for every capture
+   here, which have at most 21 colliders.)
 
-### Assumptions that remain, and what each leaves to the recording
+### Hypotheses about the window's start, checked against the recording
 
-Every item is a pair left to the recording (counted in the run's line), not an assumption made definite. In the 36 record
-runs the sim decided 6,398,043 pairs (each equal to the recording's) and left 13,246,833 to the recording:
-- **Corpulence unknown** (no read before the phase's record): 13,230,950 pairs. Every set has some (the units nobody reads
-  are in every observer's query), so **no set is wholly computed**: the 1,003,446 sets each equal the recording's on the
-  pairs the sim decided. The computed part is where the flips are: the pairs of units whose corpulence is read.
+The recording opens mid-session. The sim hypothesizes the colliders' state at the first tick of the window, and everything
+it decides rests on these; a wrong one is reported as a difference (a pair the sim decides differently from the recording),
+never absorbed:
+- **The creation order of the colliders made before the window is the pool's** (`State.Units`' order, fakes included). A
+  unit hidden when its collider was first made and revealed before the window would have been created later than the pool
+  says. Checked by the memory's `near` leaves: 385,005 equal in the record runs (1,218,083 in all 109 runs).
+- **No fade is in progress at the first tick** (`HideUnit` with `Fade` before the window leaves a view with
+  `m_IsFadeHide` and a collider that keeps its `enabled`): the sim only knows the fades it saw begin. A fade in
+  progress would show as a unit in the recorded sets (or not) against its `IsInGame`; no run shows one.
+- **The positions PhysX has at the window's first frame** are the observation rows at the frame's prefix, when the
+  frame ran a step (the previous tick's transform); a first frame without a known step leaves the colliders' pairs to
+  the recording.
+- **The radii at the first tick** are within 0.05 of the corpulence the recording shows (the first `TickEntity` of the
+  window runs `m_UpdateAll`); the unit's view scale is unknown and kept as the band.
+- **The physics clock** `Time.time - Time.fixedTime` is `fixed_phase0` of the begin record advanced by each tick's scaled
+  `delta` (the begin record's phase is measured after the begin frame's steps): an inference checked by the decided pairs
+  (109 runs equal; a step in every frame, or the fixed frame time instead, don't), not recorded.
+- **Units hidden at the first tick** may already own a disabled collider: handled as unknown (position, order), not
+  hypothesized. **Pool order for colliders made later** (the update list's insertion order): 0 such colliders.
+
+What WrathOracle will record to replace them (poc `0fe4003`, in no capture yet) and what the sim would read:
+- `bounds_init`, one per root `GameObject` of the entity-bounds scene (`GetRootGameObjects`) at the window's first tick:
+  `i` the root's index, `id` its instance id, `layer`, `e` the entity's `UniqueId` (null for a root that isn't an
+  entity's), `kind`, `r` the collider's radius, `on` its `enabled`, `pos` the transform's position (Unity's, **not**
+  PhysX's synced copy, which can't be read passively), `fade` the view's `m_IsFadeHide` (or null); then
+  `bounds_init_end {n, valid}`. Observer `bounds_init` (declared with `memory`). The sim would take: `r` as the first
+  radius (an exact radius at the first tick instead of the band, until a size change), `on` and the presence of the root as
+  whether a hidden unit owns a collider (ending the unknown history), `fade` as the initial `fade_hidden`, `pos` as the
+  transform (the PhysX copy stays the hypothesis above: the prefix row if the last step synced it), and `i` as the
+  creation order. The root order is evidence for the creation history, not a guarantee of it (the scene's root list
+  order); it replaces the pool-order hypothesis only where the two agree, and a disagreement is reported. A record
+  whose `valid` is false is refused.
+- `vis_order {u, v}`, whenever a unit's `CanBeInVisionRange` enumeration order differs from its last (observer `vis_order`):
+  the ids in the set's order, which is the overlap's filtered result order (Mono's `HashSet` enumerates in insertion order
+  after `Clear`). The sim would check its own order per unit (`near_order`) against it, not only the union the memory's
+  `near` leaf shows, and the unknown-order case of the hidden units would be settled by it.
+No reader is implemented yet.
+
+### What the sim leaves to the recording, by cause
+
+Every item is a pair left to the recording (counted in the run's line). In the 36 record runs the sim decided 6,398,041
+pairs (given the hypotheses; each equal to the recording's) and left 13,246,835 to the recording:
+- **Corpulence unknown** (no read before the phase's record, or a read made stale by a size change the sim saw, or a unit with
+  a producer it can't follow: `AddUnitScale`, a polymorph, a rider): 13,230,952 pairs. Every set has some (the units nobody
+  reads are in every observer's query), so **no set is wholly decided by the sim**: the 1,003,446 sets each equal the
+  recording's on the pairs the sim decided. The decided part is where the flips are: the pairs of units whose corpulence is
+  read. A read stays valid until the sim sees the unit's size (or its original size) change, or a producer appear or
+  disappear; the read before is then not used (1 unit-frame in the record runs, 3 in all).
 - **View scale** (the band +-0.05): 15,883 pairs, all equal to the scale-1 answer.
-- **Position, enabled, history of hidden units, destruction**: 0 pairs (no run has the case).
-- **The physics clock** is computed from `fixed_phase0` and the tick deltas (an inference that makes 109 runs equal on the
-  decided pairs; the oracle doesn't record the steps); a frame whose step can't be followed is left to the recording.
-- **The order of the colliders made before the window** is the pool's (verified by every `near` leaf: 385,005); the update
-  list's order for colliders made later (pool order assumed): 0 such colliders.
+- **Position, enabled, history of hidden units, destruction**: 0 pairs (no run has the case). A missing or discontinuous
+  physics clock makes every later step unknown, for good.
 
 ### Results [M]
 
@@ -302,55 +346,55 @@ runs the sim decided 6,398,043 pairs (each equal to the recording's) and left 13
 replays have the counts of their own length). **Every run of all 24 captures** (`-95`, `-96`, `-109`, `-111` to `-117`,
 `-120`, `-122` to `-127`, `-129`, `-131` to `-136`: 109 runs, on the result of merging `poc` at 88bba63) is as valid as
 before (only `-122`/tb-nearest's initiative tie is not), with 0 differences between the sim's sets and the recording's.
-Which part the sim decided and which the recording: each set has pairs left to the recording (the unread units), so the
-columns say what was decided:
+Which part the sim decided (given the hypotheses above) and which the recording: each set has pairs left to the
+recording (the unread units), so the columns say what was decided:
 
-| capture / fight (record run) | sets | changes | sets with a pair left to the recording | pairs decided by the sim | left: corpulence | left: scale band | scale-1 answer equal / differing | near-unit unions equal |
-|---|---|---|---|---|---|---|---|---|
-| -95 tb-focus | 20,641 | 53 | 20,641 | 137,423 | 291,488 | 34 | 34 / 0 | 0 |
-| -95 tb-nearest | 20,817 | 56 | 20,817 | 137,320 | 293,941 | 1039 | 1039 / 0 | 0 |
-| -96 tb-hold | 17,394 | 55 | 17,394 | 112,505 | 246,170 | 29 | 29 / 0 | 0 |
-| -109 tb-focus | 15,050 | 56 | 15,050 | 93,293 | 213,800 | 33 | 33 / 0 | 0 |
-| -109 tb-nearest | 13,755 | 52 | 13,755 | 82,510 | 195,722 | 32 | 32 / 0 | 0 |
-| -111 tb-focus | 18,612 | 61 | 18,612 | 119,887 | 263,771 | 64 | 64 / 0 | 7,400 |
-| -111 tb-nearest | 20,805 | 59 | 20,805 | 135,606 | 296,207 | 55 | 55 / 0 | 8,087 |
-| -112 tb-focus | 22,918 | 62 | 22,918 | 150,314 | 323,506 | 1017 | 1017 / 0 | 8,969 |
-| -112 tb-nearest | 15,109 | 55 | 15,109 | 97,739 | 214,639 | 33 | 33 / 0 | 5,924 |
-| -113 tb-focus | 14,532 | 50 | 14,532 | 90,349 | 206,328 | 37 | 37 / 0 | 6,047 |
-| -113 tb-nearest | 13,019 | 52 | 13,019 | 77,089 | 185,673 | 36 | 36 / 0 | 5,567 |
-| -114 tb-focus | 21,320 | 46 | 21,320 | 135,109 | 300,677 | 36 | 36 / 0 | 8,649 |
-| -114 tb-nearest | 18,574 | 56 | 18,574 | 108,443 | 264,599 | 52 | 52 / 0 | 7,916 |
-| -115 tb-focus | 15,663 | 48 | 15,663 | 99,189 | 221,970 | 25 | 25 / 0 | 6,365 |
-| -115 tb-nearest | 18,677 | 52 | 18,677 | 113,329 | 263,866 | 47 | 47 / 0 | 7,766 |
-| -116 tb-hold | 19,214 | 52 | 19,214 | 119,288 | 271,257 | 43 | 43 / 0 | 7,802 |
-| -117 tb-solo | 18,734 | 52 | 18,734 | 116,814 | 267,522 | 35 | 35 / 0 | 7,412 |
-| -120 tb-cast | 18,693 | 46 | 18,693 | 115,706 | 263,979 | 29 | 29 / 0 | 7,598 |
-| -122 tb-focus | 18,260 | 53 | 18,260 | 110,832 | 260,268 | 55 | 55 / 0 | 6,592 |
-| -122 tb-nearest | 19,336 | 47 | 19,336 | 122,985 | 272,655 | 190 | 190 / 0 | 7,635 |
-| -123 tb-chain | 36,097 | 90 | 36,097 | 203,487 | 489,678 | 122 | 122 / 0 | 15,676 |
-| -124 tb-chain | 37,531 | 84 | 37,531 | 209,352 | 510,481 | 351 | 351 / 0 | 15,676 |
-| -125 tb-focus | 24,357 | 47 | 24,357 | 152,911 | 347,394 | 45 | 45 / 0 | 9,884 |
-| -125 tb-nearest | 14,390 | 54 | 14,390 | 86,130 | 203,996 | 586 | 586 / 0 | 5,801 |
-| -126 tb-focus | 15,918 | 57 | 15,918 | 97,884 | 225,329 | 28 | 28 / 0 | 6,380 |
-| -126 tb-nearest | 19,581 | 57 | 19,581 | 128,993 | 277,281 | 772 | 772 / 0 | 7,619 |
-| -127 tb-tie | 20,422 | 55 | 20,422 | 134,914 | 288,851 | 43 | 43 / 0 | 7,949 |
-| -129 tb-lizard | 87,004 | 185 | 87,004 | 503,189 | 1,030,812 | 4238 | 4238 / 0 | 38,016 |
-| -131 tb-lizard | 110,856 | 128 | 110,856 | 924,425 | 1,213,662 | 1216 | 1216 / 0 | 50,813 |
-| -132 tb-focus | 21,824 | 62 | 21,824 | 144,234 | 308,383 | 1016 | 1016 / 0 | 8,489 |
-| -132 tb-nearest | 16,091 | 52 | 16,091 | 98,590 | 228,291 | 33 | 33 / 0 | 6,734 |
-| -133 tb-focus | 29,145 | 64 | 29,145 | 197,676 | 409,556 | 66 | 66 / 0 | 11,063 |
-| -133 tb-nearest | 16,254 | 51 | 16,254 | 101,158 | 230,475 | 1111 | 1111 / 0 | 6,590 |
-| -134 tb-lizard | 88,670 | 179 | 88,670 | 519,808 | 1,073,676 | 1322 | 1322 / 0 | 39,141 |
-| -135 tb-nearest | 21,826 | 53 | 21,826 | 147,818 | 310,109 | 54 | 54 / 0 | 8,097 |
-| -136 tb-lizard | 82,357 | 160 | 82,357 | 471,744 | 964,938 | 1959 | 1959 / 0 | 37,348 |
-| all 36 record runs | 1,003,446 | 2,441 | 1,003,446 | 6,398,043 | 13,230,950 | 15,883 | 15,883 / 0 | 385,005 |
+| capture / fight (record run) | sets compared | changes | pairs decided given the hypotheses, equal | left: unknown corpulence | left: scale band (scale-1 answer equal / differing) | near-unit unions equal |
+|---|---|---|---|---|---|---|
+| -95 tb-focus | 20,641 | 53 | 137,423 | 291,488 | 34 (34 / 0) | 0 |
+| -95 tb-nearest | 20,817 | 56 | 137,320 | 293,941 | 1039 (1039 / 0) | 0 |
+| -96 tb-hold | 17,394 | 55 | 112,505 | 246,170 | 29 (29 / 0) | 0 |
+| -109 tb-focus | 15,050 | 56 | 93,293 | 213,800 | 33 (33 / 0) | 0 |
+| -109 tb-nearest | 13,755 | 52 | 82,510 | 195,722 | 32 (32 / 0) | 0 |
+| -111 tb-focus | 18,612 | 61 | 119,887 | 263,771 | 64 (64 / 0) | 7,400 |
+| -111 tb-nearest | 20,805 | 59 | 135,606 | 296,207 | 55 (55 / 0) | 8,087 |
+| -112 tb-focus | 22,918 | 62 | 150,314 | 323,506 | 1017 (1017 / 0) | 8,969 |
+| -112 tb-nearest | 15,109 | 55 | 97,739 | 214,639 | 33 (33 / 0) | 5,924 |
+| -113 tb-focus | 14,532 | 50 | 90,349 | 206,328 | 37 (37 / 0) | 6,047 |
+| -113 tb-nearest | 13,019 | 52 | 77,089 | 185,673 | 36 (36 / 0) | 5,567 |
+| -114 tb-focus | 21,320 | 46 | 135,109 | 300,677 | 36 (36 / 0) | 8,649 |
+| -114 tb-nearest | 18,574 | 56 | 108,443 | 264,599 | 52 (52 / 0) | 7,916 |
+| -115 tb-focus | 15,663 | 48 | 99,189 | 221,970 | 25 (25 / 0) | 6,365 |
+| -115 tb-nearest | 18,677 | 52 | 113,329 | 263,866 | 47 (47 / 0) | 7,766 |
+| -116 tb-hold | 19,214 | 52 | 119,288 | 271,257 | 43 (43 / 0) | 7,802 |
+| -117 tb-solo | 18,734 | 52 | 116,814 | 267,522 | 35 (35 / 0) | 7,412 |
+| -120 tb-cast | 18,693 | 46 | 115,704 | 263,981 | 29 (29 / 0) | 7,598 |
+| -122 tb-focus | 18,260 | 53 | 110,832 | 260,268 | 55 (55 / 0) | 6,592 |
+| -122 tb-nearest | 19,336 | 47 | 122,985 | 272,655 | 190 (190 / 0) | 7,635 |
+| -123 tb-chain | 36,097 | 90 | 203,487 | 489,678 | 122 (122 / 0) | 15,676 |
+| -124 tb-chain | 37,531 | 84 | 209,352 | 510,481 | 351 (351 / 0) | 15,676 |
+| -125 tb-focus | 24,357 | 47 | 152,911 | 347,394 | 45 (45 / 0) | 9,884 |
+| -125 tb-nearest | 14,390 | 54 | 86,130 | 203,996 | 586 (586 / 0) | 5,801 |
+| -126 tb-focus | 15,918 | 57 | 97,884 | 225,329 | 28 (28 / 0) | 6,380 |
+| -126 tb-nearest | 19,581 | 57 | 128,993 | 277,281 | 772 (772 / 0) | 7,619 |
+| -127 tb-tie | 20,422 | 55 | 134,914 | 288,851 | 43 (43 / 0) | 7,949 |
+| -129 tb-lizard | 87,004 | 185 | 503,189 | 1,030,812 | 4238 (4238 / 0) | 38,016 |
+| -131 tb-lizard | 110,856 | 128 | 924,425 | 1,213,662 | 1216 (1216 / 0) | 50,813 |
+| -132 tb-focus | 21,824 | 62 | 144,234 | 308,383 | 1016 (1016 / 0) | 8,489 |
+| -132 tb-nearest | 16,091 | 52 | 98,590 | 228,291 | 33 (33 / 0) | 6,734 |
+| -133 tb-focus | 29,145 | 64 | 197,676 | 409,556 | 66 (66 / 0) | 11,063 |
+| -133 tb-nearest | 16,254 | 51 | 101,158 | 230,475 | 1111 (1111 / 0) | 6,590 |
+| -134 tb-lizard | 88,670 | 179 | 519,808 | 1,073,676 | 1322 (1322 / 0) | 39,141 |
+| -135 tb-nearest | 21,826 | 53 | 147,818 | 310,109 | 54 (54 / 0) | 8,097 |
+| -136 tb-lizard | 82,357 | 160 | 471,744 | 964,938 | 1959 (1959 / 0) | 37,348 |
+| all 36 record runs | 1,003,446 | 2,441 | 6,398,041 | 13,230,952 | 15,883 (15,883 / 0) | 385,005 |
 
 All 109 runs: 3,146,005 sets compared, 7,566 of them changes (each equal to its `vis` record on the pairs the sim decided),
-19,946,983 pairs decided and equal, 41,241,942 left to the recording for an unknown corpulence, 50,455 for the view-scale
+19,946,977 pairs decided and equal, 41,241,948 left to the recording for an unknown corpulence, 50,455 for the view-scale
 band (all equal to the scale-1 answer), none for a position, `enabled` or history. The no-record frames show no
-change on the decided pairs. 1,218,083 `near` leaves checked equal (the sets' orders are the sim's). Before this revision
-the sim treated those unknown corpulences as 0.5 to 4.0 and the scale as exactly 1: 18.9 million pairs decided, 147,756 left
-to the recording.
+change on the decided pairs. 1,218,083 `near` leaves equal given the creation-order hypothesis (the sets' orders are the sim's). An earlier version treated
+the unknown corpulences as 0.5 to 4.0 and the scale as exactly 1: it decided 18.9 million pairs and left 147,756 to the
+recording.
 
 Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, now 16 cases on `-111`/tb-nearest,
 each reported): the 14 above (a `vis` record missing a unit or removing one that wasn't there are now reported by the
@@ -423,10 +467,11 @@ Two small additions would remove the sim's remaining inferences about the caches
 - `vis_group` takes a miss pending for a later member and the same target as that member's read (an earlier unmodelled
   miss on the same pair could be mistaken for it: only in a capture with unmodelled readers and then a false report).
 - The clears are matched by owner, not in `AwakeUnits` order (independent caches).
-- `CanBeInVisionRange` is the sim's, but its inputs aren't: the corpulences (read by the fights only), the physics clock
-  and the awake units are the recording's; PhysX's result order is the colliders' creation order, which every recorded
-  `near` leaf agrees with (385,005 of them) but PhysX's pruner is not ported (a scene with more colliders than 21 could
-  order differently). The capsule test is PhysX's `f32` distance, which agrees with the exact one on all 18.9 million
+- `CanBeInVisionRange` is the sim's on the pairs it can decide, but its inputs aren't: the corpulences (read by the fights
+  only), the physics clock and the awake units are the recording's, and the colliders' state at the window's start is
+  hypothesized (above). PhysX's result order is taken to be the colliders' creation order, which every recorded `near` leaf
+  agrees with (385,005 of them) but PhysX's pruner is not ported (a scene with more colliders than 21 could order
+  differently). The capsule test is PhysX's `f32` distance, which agrees with the same test in `f64` on all 18.9 million
   pairs here.
 - The TransformPoint rounding of the blockers and the grid's bounds are derived, not compared (above).
 - Without the driven agent (`-95`, `-96`, `-109`, `-111`, `-112`) a unit's position is the recording's rows, and in the

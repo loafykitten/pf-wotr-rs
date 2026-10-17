@@ -85,7 +85,7 @@ pub struct VisCounts {
     /// The vision controller's sets the sim computed (an awake unit in a frame) and compared with
     /// the recording's, of which the frames with a `vis` record (a change), the sets that had a
     /// pair left to the recording, and the differences found (reported).
-    pub range_sets: usize,
+    pub range_sets_compared: usize,
     pub range_changes: usize,
     pub range_sets_open: usize,
     pub range_changes_open: usize,
@@ -94,7 +94,7 @@ pub struct VisCounts {
     /// corpulence, an unknown position, an unknown `enabled`, the view-scale band.
     pub range_open: [usize; 4],
     /// Pairs the sim decided, each equal to the recording's.
-    pub range_decided: usize,
+    pub range_decided_given_start: usize,
     /// Of the pairs left open only by the view-scale band, those where the answer with scale 1
     /// and the corpulence as radius equals / differs from the recording's.
     pub range_guess_agree: usize,
@@ -110,6 +110,8 @@ pub struct VisCounts {
     /// Unit-frames whose corpulence the recording hasn't shown yet (the radius is unknown, the
     /// pairs it leaves open the recording's).
     pub range_corp_unknown: usize,
+    /// Of those, unit-frames with a read the sim's view of size changes made stale.
+    pub range_corp_stale: usize,
     /// Unit-frames of a fade-hidden view whose collider's `enabled` isn't known.
     pub range_fade_unit_frames: usize,
     /// Pairs within 5 cm of the capsule's surface: those another view scale could decide.
@@ -118,7 +120,7 @@ pub struct VisCounts {
     pub range_made_later: usize,
     /// The group memory's near units (`ExtractNearUnits`, the members' sets in the overlap's
     /// order) the sim computed and found equal to the recording's.
-    pub near_unions: usize,
+    pub near_unions_given_order: usize,
     /// The game's own segments (`los_geom`) and `HasObstacle` probes (`los_probe`) the sim's
     /// geometry equals.
     pub geometry_segments: usize,
