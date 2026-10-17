@@ -7,7 +7,7 @@
 #   - target: its own build directory beside the main one (an APFS clone of it, so dependencies
 #     don't rebuild), linked as target/;
 #   - cache: its own directory beside the main one whose entries link to the main cache's (reads
-#     see the main cache; new top-level entries stay private), linked as cache/.
+#     see the main cache; new top-level entries stay private), sim/ a private copy, linked as cache/.
 # Prints the environment to use (CARGO_TARGET_DIR and WR_CACHE point at the links' targets;
 # CARGO_BUILD_JOBS keeps a stream's builds to 4 jobs, so parallel streams don't exhaust memory).
 # Memory-heavy runs (capture replays and sweeps, ignored capture suites) go through
@@ -32,6 +32,9 @@ if [ ! -e "$target" ]; then
   cp -cR "$main_target" "$target" 2>/dev/null || mkdir -p "$target"
 fi
 mkdir -p "$cache"
+# sim/ (the area files the sim reads: physics, nav, scenes, prefabs, strings) is copied, not linked: a stream
+# that changes a file's format would otherwise write it into the main cache, which the main build can't read.
+[ -e "$cache/sim" ] || cp -R "$main_cache/sim" "$cache/sim"
 for e in "$main_cache"/*; do
   [ -e "$cache/$(basename "$e")" ] || ln -s "$e" "$cache/$(basename "$e")"
 done
