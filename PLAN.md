@@ -486,9 +486,8 @@ decision with measured evidence. Nothing past it is committed.
   engine writes its own saves elsewhere until save compatibility is proven.
 - Ask before anything outward-facing.
 - **Model routing** (Ember's global CLAUDE.md, 2026-10-10; subagent model changed by Ember
-  2026-10-11): Claude implements, in the main session or through **Sonnet subagents** for
-  large or parallel work, escalating to Opus 5.5 (high) only when Sonnet's work is bad or it
-  can't solve the task.
+  2026-10-11, 2026-10-15 and 2026-10-17): Claude implements, in the main session or through **Sonnet 5.5
+  (high) subagents** for large or parallel work, stepping up to Opus 5.5 (medium) when they have problems.
   **gpt-6.1-sol (high) reviews every implementation** (`codex-review` skill;
   `codex exec -m gpt-6.1-sol -c model_reasoning_effort="high"`, Codex Fast mode
   `service_tier = "priority"`); **GPT 6 Astra (high)** (`-m gpt-6-astra`) instead when Sol misses

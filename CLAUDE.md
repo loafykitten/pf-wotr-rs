@@ -41,8 +41,8 @@ survey and notes on other rewrites.
 
   **The oracle lives in this repo** (`oracle/`, see `oracle/README.md`) and runs on
   `builds/arm64-oracle` (gitignored APFS clone; no ToyBox or BuffIt2TheLimit). Ember wants both
-  mods recreated in our version later (PLAN, After the POC, item 4). Implementation subagents run on **Opus 5.5 at high
-  effort** (Ember, 2026-10-15; was Sonnet), at most 3 at once (Ember, 2026-10-15: briefly 5, back to 3), and every brief says "don't
+  mods recreated in our version later (PLAN, After the POC, item 4). Implementation subagents run on **Sonnet 5.5 at high
+  effort**, stepping up to Opus 5.5 at medium effort if they have problems (Ember, 2026-10-17; Opus 5.5 (high) from 2026-10-15), at most 3 at once (Ember, 2026-10-15: briefly 5, back to 3), and every brief says "don't
   spawn sub-agents". Parallel streams work in git worktrees prepared by `scripts/worktree-setup.sh NAME` (linked inputs,
   their own target and cache dirs); only the main session builds and installs WrathOracle and records.
   **Memory (2026-10-15: the Mac, 32 GB, froze out of memory with three streams, a sweep and the suites at once):**
@@ -70,8 +70,8 @@ survey and notes on other rewrites.
   (`loafykitten/pf-wotr-rs`) is public (since 2026-10-14) with a fresh history (the old one is on the
   local, never-pushed branch `archive/private-history`): keep tracked files free of machine-specific paths
   (scripts find the repo from their own location) and of personal details.
-- **Model routing:** Claude implements (here, or through **Opus 5.5 (high)** subagents; Ember, 2026-10-15, replacing
-  the Sonnet-first rule of 2026-10-11). **gpt-6.1-sol (high)** reviews every implementation (`codex-review` skill, Codex Fast mode); **GPT 6 Astra (high)** instead when Sol misses things or the work is particularly complex or touchy (Ember, 2026-10-12: Astra is slow even in Fast mode). Use
+- **Model routing:** Claude implements (here, or through **Sonnet 5.5 (high)** subagents, stepping up to Opus 5.5
+  (medium) when they have problems; Ember, 2026-10-17, replacing the Opus 5.5 (high) rule of 2026-10-15). **gpt-6.1-sol (high)** reviews every implementation (`codex-review` skill, Codex Fast mode); **GPT 6 Astra (high)** instead when Sol misses things or the work is particularly complex or touchy (Ember, 2026-10-12: Astra is slow even in Fast mode). Use
   **gpt-6.1-sol**, not gpt-5.6-sol, for Codex bulk investigation and computer use
   (`codex exec -m gpt-6.1-sol`); Ember said 2026-10-10 that it supersedes 5.6, and it
   overrides the global CLAUDE.md and any skill that names 5.6.
