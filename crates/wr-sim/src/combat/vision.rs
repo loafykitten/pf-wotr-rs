@@ -130,6 +130,9 @@ pub struct Vision {
     pub caches: HashMap<EntityIdx, SightCache>,
     /// `UnitEntityData.CanBeInVisionRange`, per unit (`UnitVisionRangeController`'s sets).
     pub near: HashMap<EntityIdx, HashSet<EntityIdx>>,
+    /// Each awake unit's vision radius at the frame's cache phase (a miss adopted later in the
+    /// frame may have been made before a unit joined combat).
+    pub frame_radius: HashMap<EntityIdx, f32>,
     /// The recorded misses not yet explained by a read, in order.
     pub pending: VecDeque<Miss>,
     /// The clears the sim predicted in this frame's cache phase and the recording hasn't shown.
@@ -173,7 +176,8 @@ pub fn check_los(
 /// A hit on an entry made before the window, with the target at `there`: the cached position is
 /// within 0.5 m of every position the target has had at a hit, so two 1 m apart can't both be.
 fn note_hit(e: &mut Entry, there: V3) -> Result<(), VisError> {
-    if let Some(far) = e.hits.iter().find(|h| sqr_distance_2d(**h, there) >= 1.0) {
+    // (The game's squared distances are rounded `float`s: the bound has a margin of 0.001.)
+    if let Some(far) = e.hits.iter().find(|h| sqr_distance_2d(**h, there) >= 1.001) {
         return Err(format!(
             "hits on one cache entry with the target at {far:?} and at {there:?}: the cache would have missed"
         ));
@@ -333,7 +337,14 @@ impl Vision {
             }
             _ => {}
         }
-        // A miss: `m_LastSamplePosition`, then `CheckLOS`.
+        // A miss: `m_LastSamplePosition`, then `CheckLOS`. An entry made before the window that a
+        // hit with the target exactly here answered can't have missed here.
+        if let Some(e) = self.caches.get(&owner).and_then(|c| c.entries.get(&other))
+            && e.pos.is_none()
+            && e.hits.iter().any(|h| bits(*h) == bits(there))
+        {
+            return Err(format!("{owner:?} missed on {other:?} at a position its cache hit at"));
+        }
         let rec = self.pending.front().copied().filter(|_| front);
         let c = self.caches.entry(owner).or_default();
         if !c.known && rec.is_none() {
@@ -459,21 +470,34 @@ impl Vision {
     pub fn adopt_miss(&mut self, vw: &dyn VisionWorld, m: Miss) -> Result<(), VisError> {
         let units = vw.units();
         let geometry = self.geometry()?;
+        // The radius at the miss: now, or at the frame's start (a unit that joined combat since
+        // changed it; the miss was made before the frame's end).
         let radius = vw.radius(m.owner);
-        let (has_los, _) = check_los(&geometry, radius, m.sample, m.point)?;
+        let mut has_los = check_los(&geometry, radius, m.sample, m.point)?.0;
+        if has_los != m.result
+            && let Some(r0) = self.frame_radius.get(&m.owner).copied().filter(|r0| *r0 != radius)
+        {
+            has_los = check_los(&geometry, r0, m.sample, m.point)?.0;
+        }
         if has_los != m.result {
             return Err(format!(
                 "an unexplained miss of {:?}: the sim computes {has_los}",
                 m.owner
             ));
         }
-        // (A reader asks the cache only about units in vision range.)
-        let targets: Vec<EntityIdx> = units
+        // The target is the unit standing at the eye point; of several, those in vision range
+        // (`HasLOS` asks the cache only about those; `GetLOS` called directly doesn't).
+        let at_point: Vec<EntityIdx> = units
             .iter()
             .copied()
             .filter(|t| bits(add(vw.position(*t), EYE)) == bits(m.point))
+            .collect();
+        let in_range: Vec<EntityIdx> = at_point
+            .iter()
+            .copied()
             .filter(|t| vw.is_fake(m.owner) || self.in_vision_range(m.owner, *t))
             .collect();
+        let targets = if in_range.is_empty() { at_point } else { in_range };
         let [target] = targets[..] else {
             return Err(format!(
                 "an unexplained miss of {:?} at {:?}: {} units stand there",
@@ -483,13 +507,18 @@ impl Vision {
             ));
         };
         let c = self.caches.entry(m.owner).or_default();
-        if let Some(Entry { pos: Some(p), .. }) = c.entries.get(&target)
-            && sqr_distance_2d(*p, vw.position(target)) < MAX_POSITION_ERROR2
-        {
-            return Err(format!(
-                "an unexplained miss of {:?} on {target:?}, which its cache answers",
-                m.owner
-            ));
+        if let Some(e) = c.entries.get(&target) {
+            let there = vw.position(target);
+            let answered = match e.pos {
+                Some(p) => sqr_distance_2d(p, there) < MAX_POSITION_ERROR2,
+                None => e.hits.iter().any(|h| bits(*h) == bits(there)),
+            };
+            if answered {
+                return Err(format!(
+                    "an unexplained miss of {:?} on {target:?}, which its cache answers",
+                    m.owner
+                ));
+            }
         }
         match c.sample {
             Some(s) if bits(s) != bits(m.sample) => {

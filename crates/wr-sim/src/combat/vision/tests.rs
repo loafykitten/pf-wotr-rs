@@ -321,8 +321,8 @@ fn hits_on_an_entry_from_before_the_window_cant_span_a_metre() {
     assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
     wv.put(T, [5.9, 0.0, 0.0]);
     assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
-    // 1.0 m from the first hit: the cached position can't be within 0.5 m of both.
-    wv.put(T, [6.0, 0.0, 0.0]);
+    // More than 1 m from the first hit: the cached position can't be within 0.5 m of both.
+    wv.put(T, [6.1, 0.0, 0.0]);
     assert!(v.has_los(&wv, O, T).is_err());
 }
 
@@ -337,4 +337,51 @@ fn an_entry_from_before_the_window_resolved_false_stays_false() {
     // True later without a miss or a clear: refused.
     assert_eq!(v.has_los(&wv, O, T), Ok(Los::Value(false)));
     assert!(v.resolve_pre(&wv, O, T, true).is_err());
+}
+
+#[test]
+fn an_adopted_miss_may_have_been_made_at_the_frames_start_radius() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(U, [0.0, 0.0, 30.0]);
+    wv.put(T, [8.8, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    known(&mut v, &wv);
+    // 8.8 m: out of an 8.5 m radius (false), in an 11.7 m one. The unit joined combat since.
+    v.frame_radius.insert(O, 8.5);
+    let m = miss(&wv, O, T, [0.0; 3], false);
+    v.adopt_miss(&wv, m).unwrap();
+    // Without the frame's radius the same record is refused (11.7 m sees 8.8 m).
+    let mut v = vision(&[]);
+    known(&mut v, &wv);
+    assert!(v.adopt_miss(&wv, miss(&wv, O, T, [0.0; 3], false)).is_err());
+}
+
+#[test]
+fn an_adopted_misss_target_is_the_unit_in_range_when_several_stand_there() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    wv.put(U, [5.0, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    known(&mut v, &wv);
+    v.near.get_mut(&O).unwrap().remove(&U);
+    v.adopt_miss(&wv, miss(&wv, O, T, [0.0; 3], true)).unwrap();
+    assert!(v.caches[&O].entries.contains_key(&T) && !v.caches[&O].entries.contains_key(&U));
+    // Neither in range: ambiguous again.
+    let mut v = vision(&[]);
+    known(&mut v, &wv);
+    v.near.get_mut(&O).unwrap().clear();
+    assert!(v.adopt_miss(&wv, miss(&wv, O, T, [0.0; 3], true)).is_err());
+}
+
+#[test]
+fn a_miss_at_the_position_a_pre_window_entry_hit_at_is_refused() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
+    v.pending.push_back(miss(&wv, O, T, [0.0; 3], true));
+    assert!(v.has_los(&wv, O, T).unwrap_err().contains("missed on"));
 }

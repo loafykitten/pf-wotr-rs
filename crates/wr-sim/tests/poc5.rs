@@ -6404,7 +6404,10 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
             let Some(v) = &out.vision else {
                 panic!("{name}: line of sight not computed: {:?}", out.vision_off);
             };
-            assert!(v.engage > 1000 && v.misses > 100 && v.clears > 20, "{name}: {v:?}");
+            assert!(
+                v.engage > 1000 && v.misses + v.unmodelled_fills > 100 && v.clears > 20,
+                "{name}: {v:?}"
+            );
         }
     }
     let Some(dir) = fixture_in("poc5-tb-111", "tb-nearest") else { return };

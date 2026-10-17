@@ -47,6 +47,8 @@ pub(super) struct VisDriver {
     /// at a frame's prefix; after `UnitMoveController` it is the next prefix's).
     rows: HashMap<String, Vec<(i64, V3)>>,
     last_tick: i64,
+    /// The owners whose `vis` record the frame has had.
+    vis_seen: (i64, Vec<EntityIdx>),
     ag: bool,
     /// The frame whose cache phase ran.
     phase_frame: Option<i64>,
@@ -82,6 +84,9 @@ pub struct VisCounts {
     /// geometry equals.
     pub geometry_segments: usize,
     pub probes: usize,
+    /// Reads and fills in the recording's last frame without the driven agent (positions as of
+    /// the last prefix, see [`Driver::note_last_frame`]).
+    pub last_frame_reads: usize,
 }
 
 /// The model's view of the world during one read.
@@ -219,9 +224,13 @@ impl Driver<'_> {
     }
 
     /// Without the driven agent, a position after the movement of the recording's last frame isn't
-    /// established (there is no next prefix to read it from).
-    fn positions_unestablished(&self, after_move: bool) -> bool {
-        !self.vis.ag && after_move && self.tick >= self.vis.last_tick
+    /// established (there is no next prefix to read it from): the last prefix's is used and the
+    /// read counted. The answers are checked against the recording as any other, so a unit that
+    /// moved in that frame shows as a difference.
+    fn note_last_frame(&mut self, after_move: bool) {
+        if !self.vis.ag && after_move && self.tick >= self.vis.last_tick {
+            self.vis.counts.last_frame_reads += 1;
+        }
     }
 
     /// A `vis`, `los`, `los_clear` or `los_geometry` record.
@@ -323,6 +332,8 @@ impl Driver<'_> {
 
     /// `vis`: the changes of a unit's `CanBeInVisionRange`.
     fn vis_set(&mut self, w: &mut World, r: &Rv) {
+        // `UnitVisionRangeController` follows the movement and precedes the fog of war.
+        self.place(w, Phase::Visibility, "the vision range controller");
         let (true, Some(u), Some(add), Some(rem)) = (
             has_fields(r, &["u", "add", "rem"]),
             r["u"].as_str().and_then(|u| w.by_id.get(u).copied()),
@@ -340,6 +351,19 @@ impl Driver<'_> {
             return;
         };
         self.vis.counts.vis_records += 1;
+        // Once per awake owner and frame, an empty delta never (after the first record).
+        if self.vis.vis_seen.0 != self.tick {
+            self.vis.vis_seen = (self.tick, Vec::new());
+        }
+        let first = !w.combat.vision.near.contains_key(&u);
+        if self.vis.vis_seen.1.contains(&u)
+            || !w.combat.awake.contains(&u)
+            || (!first && add.is_empty() && rem.is_empty())
+        {
+            Self::vis_report(w, "a vis record the controller wouldn't write");
+            return;
+        }
+        self.vis.vis_seen.1.push(u);
         // The delta of two sets: unique, disjoint, removals present, additions absent.
         let set = w.combat.vision.near.entry(u).or_default();
         let unique =
@@ -420,7 +444,9 @@ impl Driver<'_> {
         let awake = w.combat.awake.clone();
         let clears = self.with_vision(w, false, |v, vw| {
             let mut out = Vec::new();
+            v.frame_radius.clear();
             for u in awake {
+                v.frame_radius.insert(u, vw.radius(u));
                 if let Some(at) = v.clear_if_needed(vw, u) {
                     out.push((u, at));
                 }
@@ -444,13 +470,7 @@ impl Driver<'_> {
         if pending.is_empty() {
             return;
         }
-        if self.positions_unestablished(true) {
-            Self::vis_report(
-                w,
-                "misses in the last frame (the units' positions then aren't established)",
-            );
-            return;
-        }
+        self.note_last_frame(true);
         for m in pending {
             let res = self.with_vision(w, true, |v, vw| v.adopt_miss(vw, m));
             if let Err(e) = res {
@@ -491,13 +511,7 @@ impl Driver<'_> {
         if !self.vis.on {
             return recorded;
         }
-        if self.positions_unestablished(self.after_move()) {
-            Self::vis_report(
-                w,
-                "a read in the last frame (the units' positions then aren't established)",
-            );
-            return recorded;
-        }
+        self.note_last_frame(self.after_move());
         let (Some(ua), Some(ub)) = (w.by_id.get(a).copied(), w.by_id.get(b).copied()) else {
             Self::vis_report(w, "an engagement read of a unit the sim doesn't have");
             return recorded;
@@ -546,13 +560,7 @@ impl Driver<'_> {
         if !self.vis.on {
             return recorded;
         }
-        if self.positions_unestablished(self.after_move()) {
-            Self::vis_report(
-                w,
-                "a read in the last frame (the units' positions then aren't established)",
-            );
-            return recorded;
-        }
+        self.note_last_frame(self.after_move());
         let (from, to) = {
             let vw = self.vis_world(w, self.after_move());
             let p = vw.pos(me);
@@ -582,13 +590,7 @@ impl Driver<'_> {
         if !self.vis.on {
             return recorded;
         }
-        if self.positions_unestablished(self.after_move()) {
-            Self::vis_report(
-                w,
-                "a read in the last frame (the units' positions then aren't established)",
-            );
-            return recorded;
-        }
+        self.note_last_frame(self.after_move());
         let am = self.after_move();
         let mut pre = false;
         let mut pre_members = Vec::new();
@@ -651,6 +653,16 @@ impl Driver<'_> {
                     let fresh =
                         self.with_vision(w, am, |v, vw| v.fresh(vw, m, target)).unwrap_or(false);
                     w.combat.vision.note_fresh(fresh);
+                    // The only member left to answer true: its entry's value is true.
+                    let k = members.iter().position(|x| *x == m).unwrap_or(0);
+                    let mut later = false;
+                    for o in &members[k + 1..] {
+                        later |=
+                            w.entity(*o).is_in_game && !crate::combat::units::is_helpless(w, *o);
+                    }
+                    if !later {
+                        let _ = self.with_vision(w, am, |v, vw| v.resolve_pre(vw, m, target, true));
+                    }
                 } else if let Err(e) =
                     self.with_vision(w, am, |v, vw| v.resolve_pre(vw, m, target, false))
                 {

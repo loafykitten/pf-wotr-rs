@@ -145,100 +145,105 @@ pub fn build(
                     extended += 1;
                 }
             }
-            let Some((_, v)) = comps.iter().find(|(c, _)| *c == BLOCKER) else { continue };
-            let name = format!("{}:{}", s.scene, g.path);
-            if !g.active_in_hierarchy || v.get("m_Enabled").and_then(Value::as_bool) == Some(false)
-            {
-                rep.skipped_inactive += 1;
-                continue;
-            }
-            let m = g.world.matrix;
-            let two_sided = v.get("TwoSided").and_then(Value::as_bool).unwrap_or(false);
-            let updatable = comps.iter().any(|(c, _)| *c == UPDATER);
-            let (points, closed, height_y, source) = if let Some(poly) = class_of(s, &g, POLYGON) {
-                let raw = poly
-                    .get("m_Points")
-                    .and_then(Value::as_array)
-                    .with_context(|| format!("{name}: m_Points"))?;
-                let local: Vec<[f32; 3]> = raw
-                    .iter()
-                    .map(|p| p.vec3().with_context(|| format!("{name}: a point")))
-                    .collect::<Result<_>>()?;
-                let world: Vec<[f32; 3]> = local
-                    .iter()
-                    .map(|p| transform_point(&m, *p, &mut rep.ambiguous_points))
-                    .collect();
-                let mut lo = [f32::MAX; 3];
-                let mut hi = [f32::MIN; 3];
-                for p in &world {
-                    for k in 0..3 {
-                        lo[k] = lo[k].min(p[k]);
-                        hi[k] = hi[k].max(p[k]);
+            // (Each enabled component registers on its own.)
+            for (_, v) in comps.iter().filter(|(c, _)| *c == BLOCKER) {
+                let name = format!("{}:{}", s.scene, g.path);
+                if !g.active_in_hierarchy
+                    || v.get("m_Enabled").and_then(Value::as_bool) == Some(false)
+                {
+                    rep.skipped_inactive += 1;
+                    continue;
+                }
+                let m = g.world.matrix;
+                let two_sided = v.get("TwoSided").and_then(Value::as_bool).unwrap_or(false);
+                let updatable = comps.iter().any(|(c, _)| *c == UPDATER);
+                let (points, closed, height_y, source) = if let Some(poly) =
+                    class_of(s, &g, POLYGON)
+                {
+                    let raw = poly
+                        .get("m_Points")
+                        .and_then(Value::as_array)
+                        .with_context(|| format!("{name}: m_Points"))?;
+                    let local: Vec<[f32; 3]> = raw
+                        .iter()
+                        .map(|p| p.vec3().with_context(|| format!("{name}: a point")))
+                        .collect::<Result<_>>()?;
+                    let world: Vec<[f32; 3]> = local
+                        .iter()
+                        .map(|p| transform_point(&m, *p, &mut rep.ambiguous_points))
+                        .collect();
+                    let mut lo = [f32::MAX; 3];
+                    let mut hi = [f32::MIN; 3];
+                    for p in &world {
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(p[k]);
+                            hi[k] = hi[k].max(p[k]);
+                        }
                     }
-                }
-                let height = poly.get("Height").and_then(Value::as_f32).unwrap_or(0.0);
-                let n = if two_sided { world.len() * 2 - 1 } else { world.len() };
-                let mut pts = vec![[0.0f32; 2]; n];
-                for (j, p) in world.iter().enumerate() {
-                    pts[j] = [p[0], p[2]];
-                    if two_sided && j > 0 {
-                        let at = pts.len() - j;
-                        pts[at] = [p[0], p[2]];
+                    let height = poly.get("Height").and_then(Value::as_f32).unwrap_or(0.0);
+                    let n = if two_sided { world.len() * 2 - 1 } else { world.len() };
+                    let mut pts = vec![[0.0f32; 2]; n];
+                    for (j, p) in world.iter().enumerate() {
+                        pts[j] = [p[0], p[2]];
+                        if two_sided && j > 0 {
+                            let at = pts.len() - j;
+                            pts[at] = [p[0], p[2]];
+                        }
                     }
-                }
-                let closed =
-                    poly.get("m_Closed").and_then(Value::as_bool).unwrap_or(false) || two_sided;
-                rep.polygons += 1;
-                (pts, closed, hi[1] + height, "polygon")
-            } else if let Some(filter) = class_of(s, &g, "MeshFilter") {
-                let p = filter
-                    .get("m_Mesh")
-                    .and_then(Value::as_pptr)
-                    .with_context(|| format!("{name}: m_Mesh"))?;
-                let o = universe
-                    .resolve(s.file, p)?
-                    .with_context(|| format!("{name}: the mesh isn't found"))?;
-                let mv = o.read()?;
-                let decoded = crate::pack::mesh::decode(universe, &mv)
-                    .with_context(|| format!("{name}: the mesh"))?;
-                let local = crate::phys::positions(&decoded);
-                ensure!(!local.is_empty(), "{name}: a mesh without readable positions");
-                let world: Vec<[f32; 3]> = local
-                    .iter()
-                    .map(|p| transform_point(&m, *p, &mut rep.ambiguous_points))
-                    .collect();
-                let mut hi_y = f32::MIN;
-                for p in &world {
-                    hi_y = hi_y.max(p[1]);
-                }
-                let hull = convex_hull_xz(&world)?;
-                rep.meshes += 1;
-                (hull.iter().map(|p| [p[0], p[2]]).collect(), true, hi_y, "mesh")
-            } else {
-                bail!(
-                    "{name}: a blocker with neither a polygon nor a mesh (its registration throws)"
+                    let closed =
+                        poly.get("m_Closed").and_then(Value::as_bool).unwrap_or(false) || two_sided;
+                    rep.polygons += 1;
+                    (pts, closed, hi[1] + height, "polygon")
+                } else if let Some(filter) = class_of(s, &g, "MeshFilter") {
+                    let p = filter
+                        .get("m_Mesh")
+                        .and_then(Value::as_pptr)
+                        .with_context(|| format!("{name}: m_Mesh"))?;
+                    let o = universe
+                        .resolve(s.file, p)?
+                        .with_context(|| format!("{name}: the mesh isn't found"))?;
+                    let mv = o.read()?;
+                    let decoded = crate::pack::mesh::decode(universe, &mv)
+                        .with_context(|| format!("{name}: the mesh"))?;
+                    let local = crate::phys::positions(&decoded);
+                    ensure!(!local.is_empty(), "{name}: a mesh without readable positions");
+                    let world: Vec<[f32; 3]> = local
+                        .iter()
+                        .map(|p| transform_point(&m, *p, &mut rep.ambiguous_points))
+                        .collect();
+                    let mut hi_y = f32::MIN;
+                    for p in &world {
+                        hi_y = hi_y.max(p[1]);
+                    }
+                    let hull = convex_hull_xz(&world)?;
+                    rep.meshes += 1;
+                    (hull.iter().map(|p| [p[0], p[2]]).collect(), true, hi_y, "mesh")
+                } else {
+                    bail!(
+                        "{name}: a blocker with neither a polygon nor a mesh (its registration throws)"
+                    );
+                };
+                ensure!(
+                    points.iter().flatten().all(|x| x.is_finite()) && height_y.is_finite(),
+                    "{name}: a point or height that isn't finite"
                 );
-            };
-            ensure!(
-                points.iter().flatten().all(|x| x.is_finite()) && height_y.is_finite(),
-                "{name}: a point or height that isn't finite"
-            );
-            rep.list.push(format!(
-                "{name} [{source}] {} points {points:?}, closed {closed}, height {height_y}{}",
-                points.len(),
-                if updatable { ", updatable" } else { "" }
-            ));
-            rep.updatable += usize::from(updatable);
-            blockers.push(Blocker {
-                scene: s.scene.clone(),
-                path: g.path.clone(),
-                sibling_path: g.sibling_path.clone(),
-                points,
-                closed,
-                height_y,
-                source: source.to_owned(),
-                updatable,
-            });
+                rep.list.push(format!(
+                    "{name} [{source}] {} points {points:?}, closed {closed}, height {height_y}{}",
+                    points.len(),
+                    if updatable { ", updatable" } else { "" }
+                ));
+                rep.updatable += usize::from(updatable);
+                blockers.push(Blocker {
+                    scene: s.scene.clone(),
+                    path: g.path.clone(),
+                    sibling_path: g.sibling_path.clone(),
+                    points,
+                    closed,
+                    height_y,
+                    source: source.to_owned(),
+                    updatable,
+                });
+            }
         }
     }
     rep.blockers = blockers.len();
