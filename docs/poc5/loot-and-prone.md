@@ -14,7 +14,10 @@ falls prone, the turn controller waits for her to get up at her next turn, and s
 
 | | Result |
 |---|---|
-| (filled in below with the sweep's results) | |
+| `poc5-tb-131/tb-lizard` | record, replay-1, replay-2 **valid** [M] (before: all three invalid, 20 kinds); T0 stream equal (2448 records), combat log 620/620 events, 157 ticks, 101 messages equal (78 tooltips), end state match rate 1.0000, flags equal, every unit's posture equal (21) |
+| `poc5-tb-134/tb-lizard` | record, replay-1, replay-2 **valid** [M] (before: record and replay-1 invalid); log 631/631 events, 103 messages; postures equal |
+| Other captures | every capture valid before stays valid [M]: `-95`, `-96`, `-109`, `-111`..`-117`, `-120`, `-122/tb-focus`, `-123`..`-127`, `-129`, `-132`, `-133`, `-136` (105 runs replayed, 102 valid; the three invalid are `-122/tb-nearest`, invalid before: a tie recorded before `init_ties`) |
+| Merged `poc` (stream vision) | `-131` valid on the merged tree too: its 20 `HasLOS` differences (the memory's group, sim false, recording true) are gone [I: they followed from the leader's unrevived state after combat; the vision code is untouched] |
 
 ## The dropped loot [C]
 
@@ -170,3 +173,27 @@ player's faction).
 - `ItemsCollectionLogThread`'s messages for the player's inventory (looting, buying) and `InteractionLootPart`'s handler
   (a loot interaction).
 - `created_entities` has no consumer (the save writer's, later).
+
+## Results and tests [M]
+
+- Replays: `target/release/wr-combat replay fixtures/captures/oracle/poc5-tb-131/fixtures/tb-lizard --run record` prints the
+  `prone:` line (unit ticks, falls, get-ups, last-frame units taken as asleep) and `end-state postures (prone)`. `-131`:
+  8 falls (the leader and seven creatures), `-134`: 7 (6 in its second replay's shorter fight), none gets up.
+- `crates/wr-sim/tests/poc5_loot.rs` (ignored, local captures): `the_leaders_fall_and_the_lizards_loot_are_the_sims` (every run
+  valid, log equal, exact fall counts, postures equal for every unit, the bag joined its state),
+  `missing_or_wrong_loot_and_prone_records_are_reported` damages `-131`'s record 14 ways (the collection event dropped, its
+  count, kind, item, duplicated, its caller, before the rotation draw, disabled; the prone controller's `InterruptAll` dropped,
+  repeated, for another unit, retyped; `tt_prep`'s posture flipped both ways) and `a_damaged_end_posture_is_found`.
+  Unit tests: the prone controller's cases (`combat/prone.rs`), the item type of every blueprint class, the collection event
+  and its thread, `compare_prone`, the dropped bag's creation, the phase order.
+
+## Reviews (gpt-6.1-sol, high)
+
+- Round 1, eight findings, fixed: the last frame's unknown-awake units (now taken from the frame's prefix set or reported), the
+  view's `IsProne` unchecked (now the agent's read is compared with the sim's posture), the loot claim too broad (narrowed
+  above), a missing posture passing the comparison, the test's fall counts, `AddFallProneTrigger` too broad, the collection
+  event's rotation-draw check global (only for the drop's own removals), `HasAlive` not resolving the reference.
+- Round 2, three: ticking every unit at the first recorded call broke two falls in one frame (now per unit, `Phase::ProneEnd`),
+  `RemoveConditionAll(Petrified)` made unconditional, an oracle unit without a posture still passing.
+- Round 3, two: recorded falls now follow the awake list's eligibility and order; a subscriber of an items raise that made
+  records is reported (the log's event is queued last, the game's order is subscription order).
