@@ -64,6 +64,11 @@ pub struct UnitStateData {
     pub immunities: [i8; CONDITION_COUNT],
     /// `m_StatusEffects` (a `Dictionary<UnitCondition, UnitStatusEffect>`, Mono order).
     pub status_effects: CsDict<i32, StatusEffect>,
+    /// `State.IsPanicked` may be true: saved true, or the unit was (or was about to be) frightened
+    /// since the load. `UnitFearController` (not run by the sim) sets it only while `Frightened`
+    /// holds and clears it on its own tick, after the memory controller's, so a condition that
+    /// ended can leave it true for a frame; once possible it stays so.
+    pub panic_possible: bool,
 }
 
 impl Default for UnitStateData {
@@ -72,6 +77,7 @@ impl Default for UnitStateData {
             conditions: [0; CONDITION_COUNT],
             immunities: [0; CONDITION_COUNT],
             status_effects: CsDict::new(),
+            panic_possible: false,
         }
     }
 }
@@ -112,6 +118,9 @@ pub fn add_condition(
     source_buff: Option<crate::world::FactIdx>,
 ) {
     let had = has_condition(w, u, c);
+    if c == cond::FRIGHTENED {
+        st_mut(w, u).panic_possible = true;
+    }
     st_mut(w, u).conditions[idx(c)] = st(w, u).conditions[idx(c)].wrapping_add(1);
     update_status_effect(w, u, c, source_buff);
     let success = has_condition(w, u, c);
@@ -326,6 +335,9 @@ pub fn hydrate(w: &mut World, u: EntityIdx, conditions: &[i64], immunities: &[i6
     let s = st_mut(w, u);
     for (i, v) in conditions.iter().enumerate().take(CONDITION_COUNT) {
         s.conditions[i] = i8::try_from(*v).unwrap_or(0);
+    }
+    if s.conditions[idx(cond::FRIGHTENED)] > 0 {
+        s.panic_possible = true;
     }
     for (i, v) in immunities.iter().enumerate().take(CONDITION_COUNT) {
         s.immunities[i] = i8::try_from(*v).unwrap_or(0);

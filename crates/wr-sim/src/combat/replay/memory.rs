@@ -54,6 +54,9 @@ pub(super) struct MemDriver {
     started: bool,
     /// The frame of the last tick.
     tick_frame: Option<i64>,
+    /// Whether a unit's spawner has an initializer the sim doesn't port
+    /// ([`senses::spawner_initializers_unported`]), remembered per unit.
+    spawner_unported: std::cell::RefCell<HashMap<EntityIdx, bool>>,
 }
 
 /// The memory's changes as its records give them: (group id, change).
@@ -928,6 +931,8 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         for g in &groups {
             let at = order.iter().position(|x| x == g);
             if at.is_none() || last.is_some_and(|l| at <= Some(l)) {
+                *self.d.out.mem_leaf_checked.entry("ready").or_default() += 1;
+                *self.d.out.mem_leaf_differs.entry("ready").or_default() += 1;
                 wrong = Some(format!(
                     "ready group {} out of the sim's group order (or twice)",
                     group_key(self.w, *g)
@@ -989,7 +994,15 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         let r = self.leaf("pass", &["u", "v"])?;
         Self::about(r, "u", &self.uid(u))?;
         let v = Self::bool_of(r, "v")?;
-        Ok(match senses::passive(self.w, u) {
+        let w = &*self.w;
+        let memo = &self.d.mem.spawner_unported;
+        let sim = senses::passive(w, u, &|x| {
+            *memo
+                .borrow_mut()
+                .entry(x)
+                .or_insert_with(|| senses::spawner_initializers_unported(w, x))
+        });
+        Ok(match sim {
             Some(sim) => self.leaf_checked("pass", sim, v),
             None => self.leaf_taken("pass", v),
         })

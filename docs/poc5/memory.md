@@ -465,9 +465,14 @@ compared with the recording's {...}, of which differing {...}; taken from the re
   (a spawner view part, run when the unit is spawned), the cutscene commands `CommandMarkPassiveSpan` and
   `CommandIgnoreCombat`, and `UnitPartPet`'s synchronizer (a pet's flag follows its master's, and a change of the pet's own is
   reverted). Decided from the counter and the pet rule. A unit (or master) whose facts or blueprint carry a `MarkPassive`
-  component is unknown (taken). The spawner part and the two commands are fail-closed elsewhere (`scene_spawn` refuses a
-  spawner component it has no port for, the cutscene player any command it has none for), so a run that reaches them is
-  invalid before the leaf is read.
+  component is unknown (taken). A unit whose spawner has an initializer the sim doesn't port is unknown too: a loaded
+  area re-runs every `IUnitInitializer` part of the spawner that spawned each unit when the spawner's view attaches
+  (`UnitSpawnerBase.MyData.OnViewDidAttach`), so `SpawnerMakePassivePart` retains `Passive` on a unit loaded already
+  spawned (`senses::spawner_initializers_unported`: the saved part, a settings component of the spawner's scene view that
+  isn't on the list read in the decompiled code as leaving `Passive` alone (`SpawnerMakePassive` is the one that doesn't), or a
+  view the scene cache doesn't hold; the spawners of these fights have only listed components). The two cutscene commands are fail-closed
+  elsewhere (the cutscene player refuses any command it has no port for), so a run that reaches them is invalid before the
+  leaf is read.
 - **`stl`** [C]: `InStealthFor(group)` is `State.IsInStealth && !Stealth.IsSpottedBy(group)`; `IsSpottedBy` is a spotter in
   `Stealth.m_SpottedBy` that resolves, is conscious and whose `Group` is the group. The state is hydrated from the save
   (`UnitEntityData.Stealth`, a placeholder's is `m_Stealth`; `Unit::in_stealth`, `stealth_spotted_by`, `stealth_pending`;
@@ -484,7 +489,10 @@ compared with the recording's {...}, of which differing {...}; taken from the re
   IsForceRevealerOnFogOfWar`. Being a party member isn't that (a dead one isn't revealed by being in `PartyAndPets`), so the
   getter `IsDirectlyControllable` is ported (`senses::directly_controllable`): in the game, no `PreventDirectControl`, a
   directly controllable faction, not finally dead, not panicked, a companion that is neither remote nor ex-companion, not
-  detached; the capital party mode, tactical combat, a summoned monster and a frightened unit (`IsPanicked`) are unknown.
+  detached; the capital party mode, tactical combat and a summoned monster are unknown, and so is a unit whose `IsPanicked` may
+  be true. `IsPanicked` is its own saved flag, set only by `UnitFearController` (while `Frightened` holds, and cleared on its
+  own tick after the memory controller's), so it can outlive the condition by a frame: `UnitState::panic_possible` is set when
+  the save has `IsPanicked` or `Frightened`, and whenever the sim adds `Frightened`, and never cleared.
   (The forced revealer flag isn't modelled; it can only add certainty.) A group with no such member and no member asleep or
   peaceful is unknown. A group whose members are all asleep or of peaceful factions is not listed. Both answers and the order
   are checked against the recorded list. **What stays recorded:** a group whose only candidates are awake, non-peaceful

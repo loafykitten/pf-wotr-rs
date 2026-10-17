@@ -11,6 +11,10 @@ use crate::stats::value::Stats;
 use crate::unit::Unit;
 use crate::world::{Entity, EntityKind, FactsManager};
 
+fn no(_: EntityIdx) -> bool {
+    false
+}
+
 fn world() -> World {
     let mut w = World::new(Rc::new(Content::empty()), Rc::new(Registry::default()));
     w.combat.groups.on = true;
@@ -75,42 +79,42 @@ fn blueprint_with(w: &mut World, u: EntityIdx, guid: u128, components: &[&str]) 
 fn passive_is_the_units_flag_and_a_pets_is_its_masters() {
     let mut w = world();
     let (m, p, other) = (add_unit(&mut w, "m"), add_unit(&mut w, "p"), add_unit(&mut w, "o"));
-    assert_eq!(passive(&w, m), Some(false));
+    assert_eq!(passive(&w, m, &no), Some(false));
     w.player.counters.insert("unit:m.Passive".into(), 1);
-    assert_eq!(passive(&w, m), Some(true));
-    assert_eq!(passive(&w, other), Some(false), "another unit's flag is its own");
+    assert_eq!(passive(&w, m, &no), Some(true));
+    assert_eq!(passive(&w, other, &no), Some(false), "another unit's flag is its own");
     // A pet without the part, or without its master, keeps its own flag.
-    assert_eq!(passive(&w, p), Some(false));
+    assert_eq!(passive(&w, p, &no), Some(false));
     w.player.counters.insert("unit:p.Passive".into(), 1);
-    assert_eq!(passive(&w, p), Some(true));
+    assert_eq!(passive(&w, p, &no), Some(true));
     // With the part and its master, it mirrors the master (its own sources are reverted).
     {
         let x = w.unit_mut(p).expect("unit");
         x.pet_type = Some(0);
         x.master = Some(m);
     }
-    assert_eq!(passive(&w, p), Some(true));
+    assert_eq!(passive(&w, p, &no), Some(true));
     w.player.counters.insert("unit:m.Passive".into(), 0);
-    assert_eq!(passive(&w, p), Some(false), "the master's release releases the pet's");
+    assert_eq!(passive(&w, p, &no), Some(false), "the master's release releases the pet's");
 }
 
 #[test]
 fn a_mark_passive_component_leaves_passive_to_the_recording() {
     let mut w = world();
     let (m, p) = (add_unit(&mut w, "m"), add_unit(&mut w, "p"));
-    assert_eq!(passive(&w, m), Some(false));
+    assert_eq!(passive(&w, m, &no), Some(false));
     blueprint_with(&mut w, m, 700, &["Kingmaker.UnitLogic.FactLogic.MarkPassive"]);
-    assert_eq!(passive(&w, m), None, "a producer the sim doesn't run");
+    assert_eq!(passive(&w, m, &no), None, "a producer the sim doesn't run");
     // A pet follows its master's answer.
     {
         let x = w.unit_mut(p).expect("unit");
         x.pet_type = Some(0);
         x.master = Some(m);
     }
-    assert_eq!(passive(&w, p), None);
+    assert_eq!(passive(&w, p, &no), None);
     // Another blueprint without it: decided.
     blueprint_with(&mut w, m, 701, &["Kingmaker.UnitLogic.FactLogic.AddFacts"]);
-    assert_eq!(passive(&w, m), Some(false));
+    assert_eq!(passive(&w, m, &no), Some(false));
 }
 
 #[test]
@@ -267,4 +271,83 @@ fn a_group_is_ready_when_a_member_is_awake_unpeaceful_and_out_of_fog_or_in_comba
     // A faction the sim doesn't know is unknown, not peaceful.
     w.unit_mut(b).expect("unit").faction = None;
     assert_eq!(ready_for_combat(&w, g), Tri::Unknown);
+}
+
+#[test]
+fn a_spawners_unported_initializer_leaves_passive_to_the_recording() {
+    let mut w = world();
+    let (u, other) = (add_unit(&mut w, "u"), add_unit(&mut w, "o"));
+    assert!(!spawner_initializers_unported(&w, u), "no spawner names it");
+    let mut spawner =
+        crate::narrative::Spawner { spawned_unit: Some("u".into()), ..Default::default() };
+    w.player.spawners.insert("s1".into(), spawner.clone());
+    assert!(spawner_initializers_unported(&w, u), "its view isn't in the scene cache: unknown");
+    assert!(!spawner_initializers_unported(&w, other));
+    spawner.parts = vec!["Kingmaker.View.Spawners.SpawnerMakePassivePart".into()];
+    w.player.spawners.insert("s1".into(), spawner);
+    assert!(spawner_initializers_unported(&w, u), "the saved part retains Passive on attach");
+    // With the view in the scene cache: a known settings component leaves `Passive` alone,
+    // `SpawnerMakePassive` (whose part retains it on attach) or an unknown one doesn't.
+    w.player.spawners.get_mut("s1").expect("spawner").parts.clear();
+    let view = |classes: &[&str]| crate::scene::ViewInfo {
+        unique_id: "s1".into(),
+        class: "Kingmaker.View.Spawners.UnitSpawner".into(),
+        scene: String::new(),
+        active_in_hierarchy: true,
+        is_in_game: true,
+        components: classes
+            .iter()
+            .map(|c| crate::scene::CompInfo {
+                class: (*c).into(),
+                fields: serde_json::Value::Null,
+                enabled: None,
+            })
+            .collect(),
+        position: [0.0; 3],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        group: None,
+    };
+    let cache = |classes: &[&str]| {
+        Some(Rc::new(crate::scene::SceneCache {
+            schema: String::new(),
+            area: String::new(),
+            name: String::new(),
+            source: String::new(),
+            zones: Vec::new(),
+            views: vec![view(classes)],
+        }))
+    };
+    w.scene.cache = cache(&["Transform", "Kingmaker.View.Spawners.UnitSpawner"]);
+    assert!(!spawner_initializers_unported(&w, u));
+    w.scene.cache = cache(&["Transform", "Kingmaker.View.Spawners.SpawnerSummonPoolSettings"]);
+    assert!(!spawner_initializers_unported(&w, u), "summon pools register on spawn only");
+    w.scene.cache = cache(&["Transform", "Kingmaker.View.Spawners.SpawnerMakePassive"]);
+    assert!(spawner_initializers_unported(&w, u));
+    w.scene.cache = cache(&["Kingmaker.View.Spawners.SomethingNew"]);
+    assert!(spawner_initializers_unported(&w, u), "a component nobody read");
+    w.scene.cache = None;
+    let mut spawner = w.player.spawners["s1"].clone();
+    spawner.parts = vec!["Kingmaker.View.Spawners.SpawnerMakePassivePart".into()];
+    w.player.spawners.insert("s1".into(), spawner);
+    // The caller's answer decides `passive`; a pet follows its master's.
+    assert_eq!(passive(&w, u, &|x| spawner_initializers_unported(&w, x)), None);
+    assert_eq!(passive(&w, other, &|x| spawner_initializers_unported(&w, x)), Some(false));
+}
+
+#[test]
+fn panic_that_may_be_true_keeps_direct_control_unknown() {
+    let mut w = world();
+    let u = add_unit(&mut w, "u");
+    controllable(&mut w, u);
+    assert_eq!(directly_controllable(&w, u), Tri::Yes);
+    // Frightened once (even if the condition has ended since), or saved panicked: the fear
+    // controller's flag may still be true.
+    w.unit_mut(u).expect("unit").state.panic_possible = true;
+    assert_eq!(directly_controllable(&w, u), Tri::Unknown);
+    // A save with the condition counted marks it too.
+    let v = add_unit(&mut w, "v");
+    let mut all = vec![0_i64; usize::try_from(FRIGHTENED).unwrap() + 1];
+    all[usize::try_from(FRIGHTENED).unwrap()] = 1;
+    crate::unit_state::hydrate(&mut w, v, &all, &[]);
+    assert!(w.unit(v).expect("unit").state.panic_possible);
 }

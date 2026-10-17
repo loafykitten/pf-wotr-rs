@@ -384,6 +384,7 @@ impl Loader<'_> {
             u.alignment = alignment;
             u.life_state = life;
             u.finally_dead = finally_dead;
+            u.state.panic_possible |= state.is_some_and(|s| s.bool_or("IsPanicked", false));
             u.in_stealth = stealth.in_stealth;
             u.stealth_spotted_by = stealth.spotted_by;
             u.has_blindsense = has_blindsense;

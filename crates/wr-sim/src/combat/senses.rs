@@ -60,21 +60,79 @@ fn carries_component(w: &World, u: EntityIdx, ty: &str) -> bool {
         })
 }
 
+/// The spawner settings components (`Kingmaker.View.Spawners`, `.Roaming`, `.Components`) whose
+/// part's `OnInitialize` (run on the spawned unit when the spawner's view attaches) is empty or
+/// doesn't touch `Passive` (read in the decompiled code: they ensure parts, set flags, unpause a
+/// cutscene or add interactions). `SpawnerMakePassive`, whose part retains `Passive`, is not one,
+/// nor is a component this list doesn't know.
+const PASSIVE_FREE_INITIALIZERS: &[&str] = &[
+    "Transform",
+    "UnitSpawner",
+    "SpawnerInteractionDialog",
+    "SpawnerAdditionalActions",
+    "SpawnerSummonPoolSettings",
+    "SpawnerSelectBrain",
+    "SpawnerAmbushSettings",
+    "SpawnerLootSettings",
+    "SpawnerDebugUntargetable",
+    "SpawnerGuardSettings",
+    "SpawnerOptimizedUnit",
+    "SpawnerPreventReturn",
+    "SpawnerPetSettings",
+    "SpawnerCustomCutscene",
+    "SpawnerCorpseInteraction",
+    "SpawnerRoamingSettings",
+    "SpawnerMimicSettings",
+];
+
+/// Whether the spawner that spawned the unit may retain `Passive` on it: a loaded area re-runs
+/// every `IUnitInitializer` part of the spawner when its view attaches
+/// (`UnitSpawnerBase.MyData.OnViewDidAttach`), so `SpawnerMakePassivePart` retains `Passive` on a
+/// unit loaded already spawned. True for a saved `SpawnerMakePassivePart`, a settings component of
+/// the spawner's scene view that isn't known to leave `Passive` alone, or a spawner whose view the
+/// scene cache doesn't hold. A unit no spawner names has none.
+#[must_use]
+pub fn spawner_initializers_unported(w: &World, u: EntityIdx) -> bool {
+    let id = w.entity(u).unique_id.as_str();
+    let Some((sid, spawner)) =
+        w.player.spawners.iter().find(|(_, s)| s.spawned_unit.as_deref() == Some(id))
+    else {
+        return false;
+    };
+    if spawner.parts.iter().any(|p| p.ends_with("SpawnerMakePassivePart")) {
+        return true;
+    }
+    match w.scene.cache.as_ref().and_then(|c| c.view(sid)) {
+        None => true,
+        Some(v) => v.components.iter().any(|c| {
+            let n = c.class.rsplit('.').next().unwrap_or(&c.class);
+            !PASSIVE_FREE_INITIALIZERS.contains(&n)
+        }),
+    }
+}
+
 /// `(bool)unit.Passive`. A pet (`UnitPartPet` with its master) mirrors its master's flag: the
 /// synchronizer retains or releases until the counts are equal and reverts any change the pet's
-/// own sources make. `None` when the unit (or its master) carries a `MarkPassive` component,
-/// whose runtime the sim doesn't port.
+/// own sources make. `None` when the unit carries a `MarkPassive` component, whose runtime the sim
+/// doesn't port, or when `spawner_unported` says its spawner has an initializer part the sim
+/// doesn't run ([`spawner_initializers_unported`], asked by the caller, who may remember the
+/// answer).
 #[must_use]
-pub fn passive(w: &World, u: EntityIdx) -> Option<bool> {
-    if carries_component(w, u, "MarkPassive") {
+pub fn passive(
+    w: &World,
+    u: EntityIdx,
+    spawner_unported: &dyn Fn(EntityIdx) -> bool,
+) -> Option<bool> {
+    if let Some(x) = w.unit(u)
+        && x.pet_type.is_some()
+        && let Some(m) = x.master.filter(|m| *m != u)
+    {
+        return passive(w, m, spawner_unported);
+    }
+    if carries_component(w, u, "MarkPassive") || spawner_unported(u) {
         return None;
     }
-    match w.unit(u) {
-        Some(x) if x.pet_type.is_some() && x.master.is_some_and(|m| m != u) => {
-            x.master.and_then(|m| passive(w, m))
-        }
-        _ => Some(flag(w, &format!("unit:{}.Passive", w.entity(u).unique_id))),
-    }
+    Some(flag(w, &format!("unit:{}.Passive", w.entity(u).unique_id)))
 }
 
 /// `UnitDescriptor.IsSeeInvisibility`: `SeeInvisibility` or `TrueSeeing`.
@@ -148,8 +206,9 @@ pub fn directly_controllable(w: &World, u: EntityIdx) -> Tri {
     if !faction.view().bool("IsDirectlyControllable") || x.finally_dead {
         return Tri::No;
     }
-    // `State.IsPanicked` is `Frightened && …` (`UnitFearController`): not frightened, not panicked.
-    if has_condition(w, u, FRIGHTENED) {
+    // `State.IsPanicked` is its own saved flag, set by `UnitFearController` (after this tick's
+    // controllers) while `Frightened` holds: possibly true once saved true or frightened since.
+    if x.state.panic_possible || has_condition(w, u, FRIGHTENED) {
         return Tri::Unknown;
     }
     if w.entity(u).parts.iter().any(|p| p.clr == "UnitPartSummonedMonster") {

@@ -6369,6 +6369,29 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
             ));
         }
     }
+    // A mismatch of the ready list of any kind (a group dropped, two out of order) is counted as
+    // a difference, never as an equal read.
+    for change in [
+        (|recs: &mut Vec<V>| {
+            let at =
+                pos(recs, |r| leaf(r, "ready") && r["v"].as_array().is_some_and(|a| a.len() > 2));
+            recs[at]["v"].as_array_mut().unwrap().swap(0, 1);
+        }) as Change,
+        |recs| {
+            let at =
+                pos(recs, |r| leaf(r, "ready") && r["v"].as_array().is_some_and(|a| a.len() > 2));
+            recs[at]["v"].as_array_mut().unwrap().remove(0);
+        },
+    ] {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let changed = trace.edited(change);
+        let out = replay::run_with_tape(&mut w, &changed, &trace);
+        assert!(
+            out.mem_leaf_differs.get("ready").copied().unwrap_or(0) > 0,
+            "{:?}",
+            out.mem_leaf_differs
+        );
+    }
     // A replay's hashes against the record run's tape: valid as recorded; a taped value that
     // isn't the record run's, or one said not to be the tape's, is reported.
     let (_, record) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
