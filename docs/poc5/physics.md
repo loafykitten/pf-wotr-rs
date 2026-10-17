@@ -382,6 +382,11 @@ only its pre-`origin` `other` records, `-128` only the place-on-ground view's di
 `ground_view`). Every run of the valid captures (`-95`, `-96`, `-109`, `-111` to `-117`, `-120`, `-122/tb-focus`,
 `-123` to `-127`) stays valid.
 
+With the boxes (stream boxes): the critters' and `other` rays near the floor tiles are computed and checked like the
+rest (25 left failing closed, taken from the recording), and the recorded boxes' `ph_col` is checked against the
+file. Every run of the valid captures (`-95`, `-96`, `-109`, `-111` to `-117`, `-120`, `-122/tb-focus`, `-123` to
+`-127`, `-129`, `-132`, `-133`: 93 runs) stays valid and T0-equal; the POC-5 suites pass (34 of 34).
+
 ## Not modelled
 
 - Colliders that aren't in the static scenes: units (layer 9, outside the mask), spawned objects, and map objects
