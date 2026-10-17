@@ -1071,6 +1071,7 @@ fn draw_value(v: DrawValue) -> Value {
     match v {
         DrawValue::Int(i) => json!(i),
         DrawValue::Float(f) => json!(f),
+        DrawValue::Vec2(v) => json!(v),
     }
 }
 

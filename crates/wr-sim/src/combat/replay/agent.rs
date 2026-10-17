@@ -414,6 +414,8 @@ pub(super) struct AgDriver {
     pub nav: super::nav::NavDriver,
     /// Units' orientation writes (`replay/look.rs`).
     pub look: super::look::LookDriver,
+    /// The roaming controller (`replay/roaming.rs`).
+    pub roam: super::roaming::RoamDriver,
 }
 
 impl Default for AgDriver {
@@ -454,6 +456,7 @@ impl Default for AgDriver {
             ending: false,
             nav: super::nav::NavDriver::default(),
             look: super::look::LookDriver::default(),
+            roam: super::roaming::RoamDriver::default(),
         }
     }
 }
@@ -928,6 +931,7 @@ impl Driver<'_> {
             Self::ag_unsupported(w, "a position written inside the agent's controllers");
             return;
         }
+        // (With the roaming controller the sim's, one it didn't make was reported: taken.)
         self.ag_input(format!("a position written by {}", caller(origin, 1)));
         let Some(unit) = w.unit_mut(u) else { return };
         if bits3(unit.position) != bits3(pos) {

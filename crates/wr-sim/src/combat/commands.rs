@@ -681,6 +681,8 @@ pub enum LookSite {
     AooRun,
     /// `UnitMoveTo.OnAction`'s `DesiredOrientation = Orientation.Value`.
     MoveToAction,
+    /// `UnitRoamingController.TickOnUnit`'s `LookAt(nextPoint.Position)` of a sleeping unit.
+    Roaming,
 }
 
 impl LookSite {
@@ -691,6 +693,7 @@ impl LookSite {
             Self::TickApproaching => "TickApproaching's TurnToTarget",
             Self::AooRun => "UnitAttackOfOpportunity.OnRun",
             Self::MoveToAction => "UnitMoveTo.OnAction",
+            Self::Roaming => "UnitRoamingController.TickOnUnit",
         }
     }
 
@@ -707,6 +710,10 @@ impl LookSite {
             }
             Self::AooRun => &["Kingmaker.UnitLogic.Commands.UnitAttackOfOpportunity.OnRun"],
             Self::MoveToAction => &["Kingmaker.UnitLogic.Commands.UnitMoveTo.OnAction"],
+            Self::Roaming => &[
+                "Kingmaker.Controllers.Units.UnitRoamingController.TickOnUnit",
+                "Kingmaker.Controllers.Units.BaseUnitController.TickUnit",
+            ],
         }
     }
 }

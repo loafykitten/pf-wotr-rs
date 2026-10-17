@@ -34,6 +34,7 @@ pub mod orientation;
 pub mod paths;
 pub mod project;
 pub mod replay;
+pub mod roaming;
 pub mod rules;
 pub mod spells;
 pub mod targets;
@@ -78,6 +79,8 @@ pub struct UnitCombat {
     pub agent: agent::Agent,
     /// `UnitEntityData.PreviousPosition` (`UnitMoveController.TickUnit` sets it).
     pub prev_position: [f32; 3],
+    /// `UnitPartRoaming` (from the save; its settings and origin from the spawner).
+    pub roaming: Option<Box<roaming::Part>>,
     /// `UnitEntityData.DesiredOrientation` (`m_Orientation` is the unit's `orientation`).
     pub desired_orientation: f32,
 }

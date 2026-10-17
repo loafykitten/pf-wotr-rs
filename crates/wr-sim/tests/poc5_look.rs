@@ -180,34 +180,39 @@ fn missing_or_wrong_look_records_are_reported() {
             let at = by(recs, "UnitAttackOfOpportunity.OnRun");
             bump(&mut recs[at], "d");
         }),
-        // A write by code the sim doesn't run (roaming): its state before, its result, its unit,
-        // missing (the next read differs), or a rider's.
-        (
-            "LookAt by UnitRoamingController.TickOnUnit: the unit's position or orientation before",
-            |recs| {
-                let at = roaming(recs);
-                bump(&mut recs[at], "d0");
-            },
-        ),
-        ("LookAt by UnitRoamingController.TickOnUnit: the result differs", |recs| {
+        // The roaming controller's `LookAt` (the sim's since its port): its state before, its
+        // result, its point, missing, a rider's, of another unit.
+        ("(UnitRoamingController.TickOnUnit): the sim's position", |recs| {
+            let at = roaming(recs);
+            bump(&mut recs[at], "d0");
+        }),
+        ("(UnitRoamingController.TickOnUnit): the sim's position", |recs| {
             let at = roaming(recs);
             bump(&mut recs[at], "d");
         }),
-        ("LookAt by UnitRoamingController.TickOnUnit: the result differs", |recs| {
+        ("(UnitRoamingController.TickOnUnit): the sim's argument", |recs| {
             let at = roaming(recs);
             recs[at]["p"][0] = json!(recs[at]["p"][0].as_f64().unwrap() + 3.0);
         }),
-        ("UpdateSlowRotation's DesiredOrientation", |recs| {
+        ("LookAt: the recording has", |recs| {
             let at = roaming(recs);
             recs.remove(at);
         }),
-        ("LookAt of a rider", |recs| {
+        ("(UnitRoamingController.TickOnUnit): a rider's", |recs| {
             let at = roaming(recs);
             recs[at]["rider"] = json!(true);
         }),
-        ("a write of a unit the sim doesn't have", |recs| {
+        ("(UnitRoamingController.TickOnUnit): the recording has", |recs| {
             let at = roaming(recs);
             recs[at]["u"] = json!("no-such-unit");
+        }),
+        // A write by code the sim doesn't run, of a unit it doesn't have.
+        ("a write of a unit the sim doesn't have", |recs| {
+            let at = roaming(recs);
+            let mut w = recs[at].clone();
+            w["u"] = json!("no-such-unit");
+            w["origin"] = json!("Ns.X.Y < Ns.Z.W");
+            recs.insert(at + 1, w);
         }),
         ("an ag_look it can't read", |recs| {
             let at = roaming(recs);
@@ -232,6 +237,7 @@ fn missing_or_wrong_look_records_are_reported() {
             let s = pos(recs, |r| ev(r, "ag_sync"));
             let mut w = recs[roaming(recs)].clone();
             w["t"] = recs[s]["t"].clone();
+            w["origin"] = json!("Ns.X.Y < Ns.Z.W");
             recs.insert(s, w);
         }),
         // A setter of code the sim doesn't run, its result not the value set.
@@ -335,4 +341,243 @@ fn every_desired_orientation_read_is_the_sims() {
         }
     }
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The roaming controller's record at or after `t` (`roam_roll`, or by its caller chain).
+fn roam_at(recs: &[V], t: i64, e: &str) -> usize {
+    pos(recs, |r| {
+        r["t"].as_i64().is_some_and(|x| x >= t)
+            && ev(r, e)
+            && (e == "roam_roll"
+                || r["origin"].as_str().is_some_and(|o| {
+                    o.split(" < ")
+                        .find(|f| {
+                            !f.starts_with("Kingmaker.UnitLogic.Commands.UnitCommands.Run")
+                                && !f.ends_with("UnitEntityData.set_Position")
+                        })
+                        .is_some_and(|f| f.ends_with("UnitRoamingController.TickOnUnit"))
+                }))
+    })
+}
+
+/// The roaming move's `uc_run` in turn-based combat (after the synchronization).
+fn roam_run(recs: &[V]) -> usize {
+    let s = pos(recs, |r| ev(r, "ag_sync"));
+    s + roam_at(&recs[s..], 0, "uc_run")
+}
+
+/// A roll in turn-based combat (after the synchronization).
+fn roam_roll(recs: &[V]) -> usize {
+    let s = pos(recs, |r| ev(r, "ag_sync"));
+    s + roam_at(&recs[s..], 0, "roam_roll")
+}
+
+/// The sleeping step's `ag_pos` (turn-based).
+fn roam_step(recs: &[V]) -> usize {
+    let s = pos(recs, |r| ev(r, "ag_sync"));
+    s + roam_at(&recs[s..], 0, "ag_pos")
+}
+
+/// The window's first roll (real time): its circle draw.
+fn roll_draw(recs: &[V]) -> usize {
+    pos(recs, |r| ev(r, "roam_roll")) + 1
+}
+
+/// Every roaming record the sim's controller makes, damaged: each reported. (The tape is the
+/// damaged trace's where the case says so: a draw's value.)
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18, the caves' nav and physics files and the poc5-tb-132 capture"]
+fn missing_or_wrong_roaming_records_are_reported() {
+    let Some(dir) = fixture_in(LOOK.0, LOOK.1) else {
+        eprintln!("{LOOK:?} not present: skipped");
+        return;
+    };
+    let cases: Vec<(&str, bool, Change)> = vec![
+        // A roll: missing, of another unit or settings, idle cutscenes, a draw missing or
+        // elsewhere, a draw's value (the point the step and the move go to).
+        ("RollNextPoint's roam_roll: the recording has", false, |recs| {
+            let at = roam_roll(recs);
+            recs.remove(at);
+        }),
+        ("RollNextPoint of 5052: the recording has", false, |recs| {
+            let at = roam_roll(recs);
+            recs[at]["unit"] = json!("5198");
+        }),
+        ("RollNextPoint of 5052: the recording has", false, |recs| {
+            let at = roam_roll(recs);
+            recs[at]["settings"] = json!(false);
+        }),
+        ("RollNextPoint of 5052: the recording has", false, |recs| {
+            let at = roam_roll(recs);
+            recs[at]["idle"] = json!(["0123456789abcdef0123456789abcdef"]);
+        }),
+        ("RollNextPoint of 5052: the recording has", false, |recs| {
+            let at = roam_roll(recs);
+            recs[at]["extra"] = json!(1);
+        }),
+        ("RollNextPoint's draw at", false, |recs| {
+            let at = roam_roll(recs);
+            recs.remove(at + 1);
+        }),
+        ("RollNextPoint's draw at", false, |recs| {
+            let at = roam_roll(recs);
+            recs.swap(at + 1, at + 2);
+        }),
+        ("the sleeping step of 5052: the sim's", true, |recs| {
+            let at = roll_draw(recs);
+            recs[at]["v"][0] = json!(recs[at]["v"][0].as_f64().unwrap() * 0.5);
+        }),
+        // A draw's record unlike the sim's draw: its value, its arguments, its kind.
+        ("RollNextPoint's draws: the sim's", false, |recs| {
+            let at = roam_roll(recs) + 2;
+            recs[at]["v"] = json!(recs[at]["v"].as_f64().unwrap() + 0.25);
+        }),
+        ("RollNextPoint's draws: the sim's", false, |recs| {
+            let at = roam_roll(recs) + 2;
+            recs[at]["a"] = json!([3.0, 8.0, 999.0]);
+        }),
+        ("RollNextPoint's draws: the sim's", false, |recs| {
+            let at = roam_roll(recs) + 1;
+            recs[at]["v"][1] = json!(recs[at]["v"][1].as_f64().unwrap() * 0.5);
+        }),
+        ("RollNextPoint's draw at", false, |recs| {
+            let at = roam_roll(recs) + 1;
+            recs[at]["c"] = json!("pres");
+        }),
+        // An idle time outside `Range`'s bounds, on the tape too.
+        ("RollNextPoint's draws: the sim's", true, |recs| {
+            let at = roam_roll(recs) + 2;
+            recs[at]["v"] = json!(1000.0);
+        }),
+        // A roll the sim's controller didn't make (another frame, or an extra one).
+        ("which the sim's didn't make", false, |recs| {
+            let at = roam_roll(recs);
+            let mut r = recs[at].clone();
+            r["t"] = json!(r["t"].as_i64().unwrap() + 1);
+            let next = pos(recs, |x| x["k"] == "tick" && x["t"] == r["t"]);
+            recs.insert(next + 1, r);
+        }),
+        // The sleeping step: missing, from or to another position, of another unit, unreadable,
+        // a frame early (the idle isn't over), duplicated.
+        ("the sleeping step's ag_pos: the recording has", false, |recs| {
+            let at = roam_step(recs);
+            recs.remove(at);
+        }),
+        ("the sleeping step of 5052: the sim's", false, |recs| {
+            let at = roam_step(recs);
+            recs[at]["v"][0] = json!(recs[at]["v"][0].as_f64().unwrap() + 0.001);
+        }),
+        ("the sleeping step of 5052: the sim's position", false, |recs| {
+            let at = roam_step(recs);
+            recs[at]["pos"][2] = json!(recs[at]["pos"][2].as_f64().unwrap() + 0.25);
+        }),
+        ("the sleeping step of 5052: the recording's is 5198's", false, |recs| {
+            let at = roam_step(recs);
+            recs[at]["u"] = json!("5198");
+        }),
+        ("the sleeping step of 5052: a record it can't read", false, |recs| {
+            let at = roam_step(recs);
+            recs[at]["v"] = json!(null);
+        }),
+        ("which the sim's didn't make", false, |recs| {
+            let at = roam_step(recs);
+            let t = recs[at]["t"].as_i64().unwrap();
+            // (Its `ag_pos` and `ag_look`, moved to the end of the frame before.)
+            let moved: Vec<V> = recs.drain(at..at + 2).collect();
+            let next = pos(recs, |x| x["k"] == "tick" && x["t"] == json!(t));
+            for (n, mut r) in moved.into_iter().enumerate() {
+                r["t"] = json!(t - 1);
+                recs.insert(next + n, r);
+            }
+        }),
+        ("which the sim's didn't make", false, |recs| {
+            let at = roam_step(recs);
+            let copy = recs[at].clone();
+            recs.insert(at + 2, copy);
+        }),
+        // The roaming move: to another point, not roaming, another approach radius, missing,
+        // of another unit.
+        ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
+            let at = roam_run(recs) - 1;
+            recs[at]["pt"][0] = json!(recs[at]["pt"][0].as_f64().unwrap() + 0.5);
+        }),
+        ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
+            let at = roam_run(recs) - 1;
+            recs[at]["mv"] = json!("000|-|-|0");
+        }),
+        ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
+            let at = roam_run(recs) - 1;
+            recs[at]["ap"] = json!("2|1000000|10");
+        }),
+        // Not a fresh `UnitMoveTo` (a cooldown time limit, a player's), or not `Run(cmd)`'s
+        // flags.
+        ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
+            let at = roam_run(recs) - 1;
+            recs[at]["ign_before"] = json!(1000);
+        }),
+        ("the roaming move of 5052: the sim's UnitMoveTo", false, |recs| {
+            let at = roam_run(recs) - 1;
+            recs[at]["player"] = json!(true);
+        }),
+        ("the roaming move of 5052: the recording runs", false, |recs| {
+            let at = roam_run(recs);
+            recs[at]["ncq"] = json!(true);
+        }),
+        ("the roaming move of 5052: the recording runs", false, |recs| {
+            let at = roam_run(recs);
+            recs[at]["fq"] = json!(true);
+        }),
+        ("the roaming move's uc_new: the recording has", false, |recs| {
+            let at = roam_run(recs);
+            recs.remove(at - 1);
+        }),
+        ("the roaming move of 5052: the recording runs", false, |recs| {
+            let at = roam_run(recs);
+            recs[at]["c"] = json!(recs[at]["c"].as_u64().unwrap() + 1000);
+        }),
+        // The window's start: the saved state not confirmed by the running roaming move.
+        ("state isn't known (the save's unconfirmed", false, |recs| {
+            let at = pos(recs, |r| ev(r, "uc_new") && r["mv"] == "100|-|-|0");
+            recs[at]["pt"][0] = json!(recs[at]["pt"][0].as_f64().unwrap() + 0.01);
+        }),
+    ];
+    let base = {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let out = replay::run_with_tape(&mut w, &trace, &trace);
+        assert!(w.valid(), "the undamaged run: {:?}", w.coverage.unsupported.keys());
+        let r = &out.roam;
+        assert!(r.rolls == 2 && r.steps == 1 && r.looks == 1 && r.moves == 1, "{r:?}");
+        w.coverage.unsupported.keys().cloned().collect::<Vec<_>>()
+    };
+    let threads =
+        std::env::var("WR_TEST_REPLAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let missed = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((want, own_tape, change)) = cases.get(i) else { break };
+                    let (mut w, trace) =
+                        replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+                    let changed = trace.edited(|recs| {
+                        change(recs);
+                        for (n, r) in recs.iter_mut().enumerate() {
+                            r["seq"] = json!(n);
+                        }
+                    });
+                    let tape = if *own_tape { &changed } else { &trace };
+                    let _ = replay::run_with_tape(&mut w, &changed, tape);
+                    let new: Vec<&String> =
+                        w.coverage.unsupported.keys().filter(|k| !base.contains(k)).collect();
+                    if w.valid() || !new.iter().any(|k| k.contains(want)) {
+                        missed.lock().unwrap().push(format!("case {i}: {want}: {new:?}"));
+                    }
+                }
+            });
+        }
+    });
+    let missed = missed.into_inner().unwrap();
+    assert!(missed.is_empty(), "{missed:#?}");
 }

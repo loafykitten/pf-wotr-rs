@@ -360,6 +360,15 @@ impl Driver<'_> {
             take(w);
             return;
         }
+        // With the roaming controller the sim's, a write of its the sim's didn't make was
+        // reported where it was reached: taken.
+        if self.ags.roam.on
+            && rec.origin.split(" < ").next()
+                == Some("Kingmaker.Controllers.Units.UnitRoamingController.TickOnUnit")
+        {
+            take(w);
+            return;
+        }
         if self.look_unsynced(w) {
             Self::look_unsupported(
                 w,

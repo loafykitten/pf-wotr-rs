@@ -97,7 +97,7 @@ fn phases_follow_the_registration_order() {
     let mut f = Frame::default();
     assert_eq!(f.start(mode::DEFAULT), vec![]);
     assert_eq!(f.to(Commands), Ok(vec![Groups, Turn, TurnChoose, Move, Sleeping, Cooldowns]));
-    assert_eq!(f.to(Projectiles), Ok(vec![Buffs]));
+    assert_eq!(f.to(Projectiles), Ok(vec![Buffs, Roaming]));
     assert_eq!(f.to(Projectiles), Ok(vec![]), "nothing between two resolves");
     assert_eq!(f.to(Fx), Ok(vec![]));
     assert_eq!(f.to(Commands), Err(Misplaced::Late));
@@ -111,8 +111,8 @@ fn phases_follow_the_registration_order() {
     assert_eq!(f.start(mode::DEFAULT), vec![]);
     // A frame without events: everything at its end.
     let all = vec![
-        Groups, Turn, TurnChoose, Move, Sleeping, Cooldowns, Buffs, Abilities, Life, Leave,
-        Conscious, Helpless, Inspect, GameLog, Post,
+        Groups, Turn, TurnChoose, Move, Sleeping, Cooldowns, Buffs, Roaming, Abilities, Life,
+        Leave, Conscious, Helpless, Inspect, GameLog, Post,
     ];
     assert_eq!(f.start(mode::DEFAULT), all);
     assert_eq!(f.finish(), all);
@@ -139,16 +139,16 @@ fn phases_follow_the_game_modes_registrations() {
     assert_eq!(
         f.finish(),
         vec![
-            Groups, Turn, TurnChoose, Move, Sleeping, Abilities, Life, Conscious, Helpless,
-            Inspect, GameLog, Post
+            Groups, Turn, TurnChoose, Move, Sleeping, Roaming, Abilities, Life, Conscious,
+            Helpless, Inspect, GameLog, Post
         ]
     );
     f.start(mode::DIALOG);
     assert_eq!(
         f.finish(),
         vec![
-            Groups, Move, Sleeping, Buffs, Abilities, Life, Conscious, Helpless, Inspect, GameLog,
-            Post
+            Groups, Move, Sleeping, Buffs, Roaming, Abilities, Life, Conscious, Helpless, Inspect,
+            GameLog, Post
         ]
     );
     f.start(2);
