@@ -14,6 +14,7 @@ wr-save.workspace = true
 wr-text.workspace = true
 wr-nav.workspace = true
 wr-phys.workspace = true
+wr-los.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

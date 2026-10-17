@@ -294,6 +294,16 @@ impl AiInputs for Driver<'_> {
         }
     }
 
+    fn ai_obstacle(
+        &mut self,
+        w: &mut World,
+        me: crate::world::EntityIdx,
+        target: crate::world::EntityIdx,
+    ) -> R<bool> {
+        let rec = self.ai_bool(w, "los", None)?;
+        Ok(self.vis_ai(w, me, target, rec))
+    }
+
     fn ai_float(&mut self, w: &mut World, f: &'static str, u: Option<&str>) -> R<f32> {
         let at = self.ai_leaf(w, f, with_unit(u))?;
         self.ai_unit_check(at, f, u)?;

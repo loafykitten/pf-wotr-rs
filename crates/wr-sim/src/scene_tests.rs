@@ -1965,6 +1965,7 @@ fn area_with_part(w: &mut World) {
         mechanic_bounds: mech.unwrap_or(b([0.0; 3], [25.0; 3])),
         override_local_map_bounds: false,
         local_map_bounds: b([0.0; 3], [25.0; 3]),
+        fog_of_war: None,
     };
     let mut table = AreaBoundsTable { schema: AREA_BOUNDS_SCHEMA.into(), ..Default::default() };
     table.bounds.insert(1, asset(b([0.0; 3], [10.0; 3]), None));

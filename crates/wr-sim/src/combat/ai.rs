@@ -104,6 +104,8 @@ pub struct BestCheck {
 pub trait AiInputs: Inputs {
     /// A boolean leaf named `f` (of unit `u`, when the record names one).
     fn ai_bool(&mut self, w: &mut World, f: &'static str, u: Option<&str>) -> R<bool>;
+    /// `LineOfSightGeometry.HasObstacle(me.EyePosition, target.Position)` (`TargetInfo.InLos`).
+    fn ai_obstacle(&mut self, w: &mut World, me: EntityIdx, target: EntityIdx) -> R<bool>;
     /// A `float` leaf.
     fn ai_float(&mut self, w: &mut World, f: &'static str, u: Option<&str>) -> R<f32>;
     /// A unit leaf (`manual`, `last`, `rider`, `ipt`): a unit id or none.
@@ -1684,7 +1686,8 @@ fn in_los<I: AiInputs>(w: &mut World, inp: &mut I, i: usize) -> R<bool> {
     if let Some(v) = w.combat.ai.ctx.enemies[i].los {
         return Ok(v);
     }
-    let v = !inp.ai_bool(w, "los", None)?;
+    let (me, target) = (ctx_unit(w)?, w.combat.ai.ctx.enemies[i].unit);
+    let v = !inp.ai_obstacle(w, me, target)?;
     ctx(w).enemies[i].los = Some(v);
     Ok(v)
 }

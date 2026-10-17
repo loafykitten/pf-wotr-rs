@@ -8,6 +8,7 @@ pub mod area;
 pub mod blueprints;
 pub mod catalog;
 pub mod families;
+pub mod los;
 pub mod nav;
 pub mod oracle_diff;
 pub mod pack;

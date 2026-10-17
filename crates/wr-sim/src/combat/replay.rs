@@ -160,6 +160,9 @@ pub struct Outcome {
     /// the memory states checked (initial, between ticks, after each pass, at the tick's end), the
     /// caches filled by readers the sim doesn't run (checked as fills), the memory's changes
     /// matched in order.
+    /// Line of sight computed (docs/poc5/vision.md): the counts, or why not.
+    pub vision: Option<vision::VisCounts>,
+    pub vision_off: Option<String>,
     pub mem_ticks: usize,
     pub mem_reads: usize,
     pub mem_inputs: usize,
@@ -461,6 +464,9 @@ pub enum Phase {
     /// The rest of `CombatController.Tick`: an ended (or missing) turn makes it choose the next
     /// unit, and is cleared (`turn_clear`).
     TurnChoose,
+    /// `UnitLineOfSightCacheController`: the awake units' sight caches clear if they should
+    /// (the oracle's `los_clear`).
+    LosCache,
     /// `UnitFollowUnitController`: followers' moves (commands, run there).
     Follow,
     /// `UnitMoveController`: units move; the current unit's movement spends its turn's budget
@@ -526,10 +532,11 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 19] = [
+const WORK: [Phase; 20] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
+    Phase::LosCache,
     Phase::Move,
     Phase::Sleeping,
     Phase::Cooldowns,
@@ -575,6 +582,7 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         Phase::TurnPrefix | Phase::Turn | Phase::TurnChoose => m == DEFAULT || m == CUTSCENE,
         Phase::Buffs => m == DEFAULT || m == DIALOG,
         Phase::Follow | Phase::Impatience | Phase::Ai | Phase::Engagement => m == DEFAULT,
+        Phase::LosCache => m == DEFAULT || m == CUTSCENE,
         Phase::Roaming | Phase::Prone | Phase::ProneEnd => {
             m == DEFAULT || m == DIALOG || m == CUTSCENE
         }
@@ -969,6 +977,7 @@ struct Driver<'t> {
     ags: agent::AgDriver,
     /// The group memory is the sim's (the `memory` observer).
     mem: memory::MemDriver,
+    vis: vision::VisDriver,
     imp_init_n: usize,
     imp_init_closed: bool,
     imp_tick_frame: Option<i64>,
@@ -1226,6 +1235,7 @@ impl<'t> Driver<'t> {
             ag: false,
             ags: agent::AgDriver::default(),
             mem: memory::MemDriver::default(),
+            vis: vision::VisDriver::default(),
             imp_init_n: 0,
             imp_init_closed: false,
             imp_tick_frame: None,
@@ -1489,6 +1499,8 @@ impl<'t> Driver<'t> {
             d.nav_start(w);
         }
         d.look_start(w);
+        d.vis_start(w, &declared);
+        d.out.vision_off = d.vis.off.clone();
         d.roam_start(w, &declared);
         // The paths' records need the driven agent (`agent_sync` and its chain).
         // Observer `paths`' records without its declaration (a damaged begin record).
@@ -1585,6 +1597,8 @@ impl<'t> Driver<'t> {
         let rest = self.frame.finish();
         self.draining = outgoing;
         self.run_phases(w, &rest);
+        self.vis_frame_end(w);
+        self.vis_finish(w);
         if self.ag {
             self.ag_finish(w);
         }
@@ -2005,6 +2019,7 @@ impl Driver<'_> {
                     };
                     super::groups::leave_tick(w, gate);
                 }
+                Phase::LosCache => self.vis_cache_phase(w),
                 Phase::Conscious => self.mem_return_to_conscious(w),
                 Phase::Sleeping => {
                     // The prefix's rows were written for the previous snapshot's units.
@@ -3104,6 +3119,7 @@ impl Driver<'_> {
                 self.draining = outgoing;
                 self.run_phases(w, &rest);
                 self.draining = None;
+                self.vis_frame_end(w);
                 self.mem_frame_done(w);
                 if self.ag {
                     self.nav_frame_done(w);
@@ -3187,6 +3203,17 @@ impl Driver<'_> {
             Some("obs") if self.ag && r["ev"] == "path_start" => self.ag_path_start(w, r),
             Some("obs") if r["ev"].as_str().is_some_and(|e| e.starts_with("clog_")) => {
                 self.clog_record(w, r);
+            }
+            Some("obs")
+                if self.vis.on
+                    && matches!(
+                        r["ev"].as_str(),
+                        Some(
+                            "vis" | "los" | "los_clear" | "los_geometry" | "los_geom" | "los_probe"
+                        )
+                    ) =>
+            {
+                self.vis_record(w, r);
             }
             Some("obs")
                 if self.mem.on
@@ -4700,6 +4727,7 @@ mod prone;
 mod roaming;
 mod spells;
 mod targets;
+mod vision;
 
 #[cfg(test)]
 mod tests;

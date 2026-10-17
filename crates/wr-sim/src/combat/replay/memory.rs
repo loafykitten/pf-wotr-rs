@@ -766,7 +766,11 @@ impl<'t> MemWorld<'_, 't> {
             // `UnitEntityData.Group` runs `UpdateGroup` (the sim's own, as it reads `Group`).
             (Some("obs"), Some("group_new" | "group_add" | "group_remove" | "group_dispose")) => {}
             // A sight cache's miss inside `group.HasLOS` (the line of sight the `los` leaf gives).
-            (Some("obs"), Some("los")) => {}
+            (Some("obs"), Some("los")) => {
+                if self.d.vis.on {
+                    self.d.vis_record(self.w, r);
+                }
+            }
             _ => {
                 return Err(Desync(format!("a record inside the memory tick ({})", describe(r))));
             }
@@ -989,8 +993,14 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         let r = self.leaf("los", &["g", "u", "v"])?;
         Self::about(r, "g", &group_key(self.w, g))?;
         Self::about(r, "u", &self.uid(u))?;
-        let v = Self::bool_of(r, "v")?;
-        Ok(self.input(v))
+        let rec = Self::bool_of(r, "v")?;
+        if !self.d.vis.on {
+            return Ok(self.input(rec));
+        }
+        // `group.HasLOS(unit)`: the members' reads, in the group's order.
+        let members = self.w.combat.groups.get(g).units.clone();
+        self.d.out.mem_reads += 1;
+        Ok(self.d.vis_group(self.w, &members, u, rec))
     }
 
     fn invisible(&mut self, u: EntityIdx) -> Result<bool, Desync> {
