@@ -520,23 +520,38 @@ pub fn compare_flags(ours: &J, oracle: &J) -> (BTreeMap<String, (u64, u64)>, Vec
 }
 
 /// The units' `ProneState` (`Active`, `ShouldBeActive`, `Duration`) in the sim's dump against the
-/// oracle's (`state.Prone`): the differences as (unit, field, ours, oracle). A unit or dump
-/// without the posture isn't counted.
+/// oracle's (`state.Prone`): the number of postures compared and the differences as (unit, field,
+/// ours, oracle). Every unit of the oracle's dump that has a posture needs the sim's (and the
+/// other way round): a unit or posture missing on either side is a difference (`field`
+/// `"missing"`). An oracle dump without any posture (an older one) compares nothing.
 #[must_use]
 pub fn compare_prone(ours: &J, oracle: &J) -> (u64, Vec<FlagDiff>) {
     let (a, b) = (by(&ours["units"], "id"), by(&oracle["units"], "id"));
     let mut n = 0;
     let mut diffs = Vec::new();
-    for (id, u) in &a {
-        let Some(o) = b.get(id) else { continue };
-        let (x, y) = (&u["prone"], &o["state"]["Prone"]);
-        if x.is_null() || y.is_null() {
+    let posture = |u: &J, path: &[&str]| -> J { path.iter().fold(u.clone(), |v, k| v[*k].clone()) };
+    for (id, o) in &b {
+        let y = posture(o, &["state", "Prone"]);
+        if y.is_null() {
+            continue;
+        }
+        let x = a.get(id).map_or(J::Null, |u| posture(u, &["prone"]));
+        if x.is_null() {
+            diffs.push((id.clone(), "missing".to_owned(), x, y));
             continue;
         }
         n += 1;
         for f in ["Active", "ShouldBeActive", "Duration"] {
             if x[f] != y[f] {
                 diffs.push((id.clone(), f.to_owned(), x[f].clone(), y[f].clone()));
+            }
+        }
+    }
+    // A unit only the sim has.
+    if n > 0 || !diffs.is_empty() {
+        for (id, u) in &a {
+            if !b.contains_key(id) && !u["prone"].is_null() {
+                diffs.push((id.clone(), "missing".to_owned(), u["prone"].clone(), J::Null));
             }
         }
     }
@@ -548,20 +563,31 @@ mod flag_tests {
     use super::{compare_flags, compare_prone};
     use serde_json::json;
 
-    /// A posture that differs in any field shows; units without one aren't counted.
+    /// A posture that differs in any field shows, and so does one missing on either side (a
+    /// posture object or a whole unit).
     #[test]
     fn prone_differences_show() {
-        let ours = json!({"units": [{"id": "u", "prone": {"Active": true, "ShouldBeActive": false, "Duration": 170000}},
-                                    {"id": "v"}]});
+        let post = |a: bool, d: i64| json!({"Active": a, "ShouldBeActive": false, "Duration": d});
+        let ours = json!({"units": [{"id": "u", "prone": post(true, 170000)},
+                                    {"id": "v", "prone": post(false, 0)}]});
         let theirs = |d: i64| {
-            json!({"units": [{"id": "u", "state": {"Prone": {"Active": true, "ShouldBeActive": false, "Duration": d}}},
-                                                {"id": "v", "state": {"Prone": {"Active": false, "ShouldBeActive": false, "Duration": 0}}}]})
+            json!({"units": [{"id": "u", "state": {"Prone": post(true, d)}},
+                             {"id": "v", "state": {"Prone": post(false, 0)}}]})
         };
         let (n, d) = compare_prone(&ours, &theirs(170000));
-        assert_eq!((n, d.len()), (1, 0));
+        assert_eq!((n, d.len()), (2, 0));
         let (_, d) = compare_prone(&ours, &theirs(180000));
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].1, "Duration");
+        assert_eq!((d.len(), d[0].1.as_str()), (1, "Duration"));
+        // Ours without a posture, without the unit; the oracle without the unit.
+        let bare = json!({"units": [{"id": "u", "prone": post(true, 170000)}, {"id": "v"}]});
+        let (_, d) = compare_prone(&bare, &theirs(170000));
+        assert_eq!((d.len(), d[0].1.as_str()), (1, "missing"));
+        let short = json!({"units": [{"id": "u", "prone": post(true, 170000)}]});
+        let (_, d) = compare_prone(&short, &theirs(170000));
+        assert_eq!((d.len(), d[0].1.as_str()), (1, "missing"));
+        let extra = json!({"units": [{"id": "u", "state": {"Prone": post(true, 170000)}}]});
+        let (_, d) = compare_prone(&ours, &extra);
+        assert_eq!((d.len(), d[0].1.as_str()), (1, "missing"));
     }
 
     /// A unit that is dead in one dump and not in the other, or out of the game, shows.

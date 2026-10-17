@@ -330,8 +330,8 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
     );
     let p = &out.prone;
     println!(
-        "prone: UnitProneController unit ticks {}, falls {}, get-ups {}",
-        p.ticks, p.falls, p.get_ups
+        "prone: UnitProneController unit ticks {}, falls {}, get-ups {}, last-frame units taken as asleep {}",
+        p.ticks, p.falls, p.get_ups, p.assumed_asleep
     );
     let n = &out.nav;
     println!(

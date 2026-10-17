@@ -999,6 +999,10 @@ struct Driver<'t> {
     /// `InterruptAll`s by it, by unit.
     prone_on: bool,
     prone_calls: Vec<EntityIdx>,
+    /// The units the controller ticked early this frame (at their `EnterProneState` stop), and the
+    /// ones that fell.
+    prone_done: HashSet<EntityIdx>,
+    prone_falls: Vec<EntityIdx>,
     out: Outcome,
 }
 
@@ -1244,6 +1248,8 @@ impl<'t> Driver<'t> {
             clog_rule_q: HashMap::new(),
             prone_on: false,
             prone_calls: Vec::new(),
+            prone_done: HashSet::new(),
+            prone_falls: Vec::new(),
             out,
         };
         let mut d = d;

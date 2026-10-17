@@ -1,8 +1,9 @@
 //! The leader's fall and the lizards' loot against WrathOracle's `poc5-tb-131` and `-134`
-//! (`tb-lizard`, local and gitignored): in both, the main character is struck unconscious (the
-//! prone controller makes her fall and the turn controller waits for her to get up), the dying
-//! lizard's skinning items leave its inventory as its loot drops (the combat log's
-//! `GameLogEventItemsCollection`), and the log names her unidentified ring. Every run is valid,
+//! (`tb-lizard`, local and gitignored): in `-131` the main character is struck unconscious (the
+//! prone controller makes her fall, the turn controller waits for her to get up, and she wakes when
+//! the fight ends); in both, a dying lizard's skinning items leave its inventory as its loot drops
+//! (the combat log's `GameLogEventItemsCollection`), every creature that dies falls prone, and
+//! the log names the leader's unidentified ring. Every run is valid,
 //! every unit's posture equals the recording's end state, and a damaged record of the new
 //! families is reported. Ignored by default (needs the game's packs, `cache/sim/log-strings.json`,
 //! Manual_18 and the captures; skipped when a capture is absent).
@@ -52,7 +53,14 @@ fn the_leaders_fall_and_the_lizards_loot_are_the_sims() {
             assert_eq!(c.differences, 0, "{name}");
             assert_eq!(c.queued[0], c.queued[1], "{name}");
             assert_eq!(c.messages[0], c.messages[1], "{name}");
-            assert!(out.prone.falls >= 8, "{name}: {:?}", out.prone);
+            // (-131: the leader and seven creatures; -134: seven, the leader stays on her feet,
+            // and its second replay's fight is shorter.)
+            let falls = match (cap, run) {
+                ("poc5-tb-131", _) => 8,
+                ("poc5-tb-134", "replay-2") => 6,
+                _ => 7,
+            };
+            assert_eq!(out.prone.falls, falls, "{name}: {:?}", out.prone);
             assert_eq!(out.prone.get_ups, 0, "{name}");
             // The postures against the end state.
             let units: Vec<_> = (0..w.entities.len())
@@ -62,7 +70,11 @@ fn the_leaders_fall_and_the_lizards_loot_are_the_sims() {
             let sheet = wr_sim::sheet::dump(&w, &units, "end");
             let end = read_json(&dir.join(format!("state-end-{run}.json")));
             let (n, diffs) = wr_sim::compare::compare_prone(&sheet, &end);
-            assert!(n >= 20 && diffs.is_empty(), "{name}: {n} units, {diffs:?}");
+            let units_in_end = end["units"].as_array().map_or(0, |u| u.len());
+            assert!(
+                diffs.is_empty() && n as usize == units_in_end,
+                "{name}: {n} of {units_in_end} units, {diffs:?}"
+            );
             // The dropped loot joined the state at the creation tick, with its unit remembering it.
             assert_eq!(w.player.created_entities.len(), 1, "{name}");
         }
@@ -237,12 +249,33 @@ fn a_damaged_end_posture_is_found() {
         [("Active", json!(false)), ("Duration", json!(1)), ("ShouldBeActive", json!(true))]
     {
         let mut bad = end.clone();
-        let at = bad["units"]
-            .as_array()
-            .and_then(|u| u.iter().position(|x| x["state"]["Prone"]["Active"] == true))
-            .expect("a prone unit");
+        let at = prone_unit(&bad);
         bad["units"][at]["state"]["Prone"][field] = value;
         let (_, diffs) = wr_sim::compare::compare_prone(&sheet, &bad);
         assert_eq!(diffs.len(), 1, "{field}: {diffs:?}");
     }
+    // A whole posture or a whole unit missing from either side is found too.
+    let at = prone_unit(&end);
+    let mut bad = end.clone();
+    bad["units"][at]["state"]["Prone"] = V::Null;
+    let (_, diffs) = wr_sim::compare::compare_prone(&sheet, &bad);
+    assert_eq!(diffs.len(), 1, "{diffs:?}");
+    let mut bad = end.clone();
+    bad["units"].as_array_mut().expect("units").remove(at);
+    let (_, diffs) = wr_sim::compare::compare_prone(&sheet, &bad);
+    assert_eq!(diffs.len(), 1, "{diffs:?}");
+    let id = end["units"][at]["id"].clone();
+    let mut ours = sheet.clone();
+    let units = ours["units"].as_array_mut().expect("units");
+    units.retain(|u| u["id"] != id);
+    let (_, diffs) = wr_sim::compare::compare_prone(&ours, &end);
+    assert_eq!(diffs.len(), 1, "{diffs:?}");
+}
+
+/// The first unit of a dump whose posture is active.
+fn prone_unit(end: &V) -> usize {
+    end["units"]
+        .as_array()
+        .and_then(|u| u.iter().position(|x| x["state"]["Prone"]["Active"] == true))
+        .expect("a prone unit")
 }

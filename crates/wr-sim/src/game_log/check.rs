@@ -402,6 +402,17 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
     })
 }
 
+/// A removal the sim made inside `UnitEntityData.DropLootToGround` (the dismember branch's skinning
+/// items leaving the inventory) comes right after the bag's rotation draw
+/// (`Quaternion.Euler(0, Random.Range(0, 360), 0)`) in the recording (`recs[i]`, a `clog_q`).
+fn drop_removal_ok(recs: &[Rv], i: usize) -> bool {
+    let not_log =
+        |x: &&Rv| !(x["k"] == "obs" && x["ev"].as_str().is_some_and(|e| e.starts_with("clog_")));
+    recs[..i].iter().rev().find(not_log).is_some_and(|p| {
+        p["k"] == "draw" && p["m"] == "Range_ff" && p["a"] == serde_json::json!([0.0, 360.0])
+    })
+}
+
 /// Where the game raises a non-rule event, against the records around it (`recs[i]`, a `clog_q`),
 /// for the kinds whose raise point the trace shows:
 /// - an attack of opportunity's (`UnitCombatState.AttackOfOpportunity`) right after the command's
@@ -409,10 +420,6 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
 ///   decrement (`cd_write` from its setter) or, without one, the observer's `eng_aoo` of it;
 /// - a party's experience (`Player.GainPartyExperience`) right after its last member's experience
 ///   (`mut` xp);
-/// - a removal from a collection (`ItemsCollection.Remove`) right after the dropped loot's
-///   rotation draw (`UnitEntityData.DropLootToGround`: the dismember branch's skinning items
-///   leave the inventory after `Quaternion.Euler(0, Random.Range(0, 360), 0)`), the only removal
-///   the sim makes in these fights;
 /// - `GameLogEventPartyCombatState` right after `GameLogEventCombatStateChanged` of the same
 ///   state (the next subscriber of the same raise), which comes after the turn controller's
 ///   handler of that raise (its `tb` `combat_start`/`combat_end`, the last of the frame).
@@ -442,14 +449,6 @@ fn raise_point_ok(recs: &[Rv], i: usize) -> bool {
         }
         Some("GameLogEventPartyGainExperience") => {
             prev_other.is_some_and(|p| p["k"] == "mut" && p["what"] == "xp")
-        }
-        Some("GameLogEventItemsCollection") => {
-            f["Event"] != 1
-                || prev_other.is_some_and(|p| {
-                    p["k"] == "draw"
-                        && p["m"] == "Range_ff"
-                        && p["a"] == serde_json::json!([0.0, 360.0])
-                })
         }
         Some("GameLogEventPartyCombatState") => prev.is_some_and(|p| {
             p["ev"] == "clog_q" && p["e"] == "GameLogEventCombatStateChanged" && p["f"] == *f
@@ -804,6 +803,12 @@ pub fn compare(
             && r["f"] != f
         {
             bad.push(format!("fields {} vs {f}", r["f"]));
+        }
+        if let Payload::ItemsCollection { by_drop: true, .. } = ev.payload
+            && let Some(at) = recs.iter().position(|x| x["seq"] == r["seq"])
+            && !drop_removal_ok(recs, at)
+        {
+            bad.push("a dropped loot's removal not right after its rotation draw".into());
         }
         if r["en"].as_bool() != Some(ev.enabled) {
             bad.push(format!("enabled {} vs {}", r["en"], ev.enabled));

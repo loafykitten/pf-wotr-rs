@@ -405,9 +405,11 @@ impl Driver<'_> {
                 );
                 return;
             };
-            // `HasAlive`: a unit that resolves and isn't dead.
+            // `HasAlive`: a reference that still resolves to a unit that isn't dead.
             let alive = enemies.iter().any(|e| {
-                w.unit(*e).is_some_and(|x| x.life_state != crate::combat::life::state::DEAD)
+                crate::combat::memory::sim::resolve(w, *e)
+                    != crate::combat::memory::Resolved::Missing
+                    && w.unit(*e).is_some_and(|x| x.life_state != crate::combat::life::state::DEAD)
             });
             let wakes = w.unit(u).is_some_and(|x| {
                 x.life_state != crate::combat::life::state::CONSCIOUS && !x.finally_dead

@@ -283,6 +283,9 @@ pub enum Payload {
         collection: usize,
         item: EntityIdx,
         count: i32,
+        /// Raised inside `UnitEntityData.DropLootToGround` (its skinning items leaving a dead
+        /// creature's inventory): the record's place is checked against the bag's rotation draw.
+        by_drop: bool,
     },
     /// A recorded input: the bark's speaker and text.
     Bark {
@@ -443,6 +446,8 @@ pub struct GameLog {
     pub frame: i64,
     pub strings: Option<std::rc::Rc<strings::LogStrings>>,
     pub events: Vec<Event>,
+    /// Inside `UnitEntityData.DropLootToGround` (see `Payload::ItemsCollection::by_drop`).
+    pub in_loot_drop: bool,
     /// `m_ReadyEvents`.
     pub ready: Vec<usize>,
     /// `m_EventsStack`.
@@ -797,7 +802,13 @@ pub fn items_collection(
     add_event(
         w,
         "GameLogEventItemsCollection",
-        Payload::ItemsCollection { removed, collection, item, count },
+        Payload::ItemsCollection {
+            removed,
+            collection,
+            item,
+            count,
+            by_drop: w.game_log.in_loot_drop,
+        },
         [None, None],
     );
 }

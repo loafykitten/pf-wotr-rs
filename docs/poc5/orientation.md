@@ -287,8 +287,8 @@ Per run, the same for the record run and both replays:
   rider's copy in `TickUnit`), `TurnToTarget` overrides other than `UnitMoveTo`'s, the paused `ForceLookAt`s.
 - **Left:**
   - ~~port the roaming controller in combat replays~~: done ("Roaming", below);
-  - `-131`'s other reports, which belong to other streams: box and mesh raycasts, the dropped loot, its combat log,
-    a prone rider's turn;
+  - ~~`-131`'s other reports: box and mesh raycasts, the dropped loot, its combat log, a prone rider's turn~~: the boxes
+    (stream boxes), the loot, the log and the prone controller are ported (`docs/poc5/loot-and-prone.md`);
   - WrathOracle's `ReferenceEquals` hardening in `LookPre` (after review, on this branch) is in no build yet. It
     only replaces a null test that read the descriptor.
 

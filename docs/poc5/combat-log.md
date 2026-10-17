@@ -221,6 +221,17 @@ scientific notation. Mirror images, parry, fortification and concealment rolls a
 rules already; the sim's damage has no redirection, `SourceFact`, post-critical bonus or additional
 critical multiplier (none is made by a ported handler).
 
+## The collection event and the unidentified name (stream loot, 2026-10-17)
+
+`GameLogEventItemsCollection` (`ItemsCollection.OnItemAdded`/`OnItemsRemoved` through `IItemsCollectionHandler`) is raised
+by the sim now (`game_log::items_collection`; the observer's `clog_q` has `Event` (0 added, 1 removed), the collection by
+type, the item entity with its class, `Count`). `ItemsCollectionLogThread` makes a message only for the player's inventory
+and a lootable item outside the additional limbs' slots (reported where reached); a dead creature's collection makes none,
+but its removal event takes a place among the frame's five (`MaxLogsInFrame`), which is the whole of the one-frame shift
+`poc5-tb-131` showed. The check places a removal right after the dropped loot's rotation draw. Item names now cover
+`BlueprintItem.DefaultNonIdentifiedName` (`UnidentifiedItemNames[ItemType]`, a usable item's `UsableItemTypeNames`).
+Details, the dropped loot and the prone controller: `docs/poc5/loot-and-prone.md`.
+
 ## Not done
 
 - A spell's tooltip (`TooltipTemplateAbility`, `RulebookCastSpellLogThread`): counted as "not made".

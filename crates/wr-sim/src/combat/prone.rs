@@ -23,7 +23,7 @@
 //!   (the controller keeps it down until it has a command: `IsDirectlyControllable` isn't
 //!   established), a unit that gets up (`HandleUnitWillGetUp`'s subscribers: the engagement
 //!   controller's attack of opportunity, the turn controller's move cooldown), and a unit
-//!   falling with an `AddFallProneTrigger` fact on any unit.
+//!   falling with an active `AddFallProneTrigger` of its own that has actions.
 
 use crate::combat::{commands as uc, cooldowns, life, turns};
 use crate::csharp::timespan::{TICKS_PER_SECOND, TimeSpan};
@@ -164,24 +164,41 @@ pub fn tick_unit(w: &mut World, u: EntityIdx, cutscene: bool) -> Result<Step, St
             x.prone_active = true;
         }
         step.fall = true;
-        // `HandleUnitFallProne`: `AddFallProneTrigger`'s action runs for its owner.
-        let trigger = crate::combat::life::all_units(w).into_iter().any(|o| {
-            w.entity(o).facts.list.iter().any(|f| {
-                w.fact(*f).bp.as_ref().is_some_and(|b| {
-                    b.components_array()
-                        .iter()
-                        .any(|c| crate::content::is_a(c.ty, "AddFallProneTrigger"))
+        // `HandleUnitFallProne`: an active `AddFallProneTrigger` of the falling unit runs its
+        // actions (`unit == Owner && Action.HasActions`).
+        let trigger = w.entity(u).facts.list.iter().any(|f| {
+            w.fact(*f).is_active
+                && w.fact(*f).bp.as_ref().is_some_and(|b| {
+                    b.components_array().iter().any(|c| {
+                        crate::content::is_a(c.ty, "AddFallProneTrigger")
+                            && crate::content::View(c)
+                                .obj("Action")
+                                .is_some_and(|a| !a.objs("Actions").is_empty())
+                    })
                 })
-            })
         });
         if trigger {
-            err = Some("a unit falls prone with an AddFallProneTrigger fact on a unit".to_owned());
+            err = Some(
+                "a unit falls prone with an active AddFallProneTrigger with actions".to_owned(),
+            );
         }
     }
     if let Some(x) = w.unit_mut(u) {
         x.prone_should_be_active = false;
     }
     err.map_or(Ok(step), Err)
+}
+
+/// Whether ticking a unit would change its posture or make it fall or stand (the unit is left as
+/// it was): for a unit whose awake state the sim can't establish.
+pub fn would_change(w: &mut World, u: EntityIdx, cutscene: bool) -> bool {
+    let Some(x) = w.unit(u) else { return false };
+    let before = (x.prone_active, x.prone_should_be_active, x.prone_duration);
+    let r = tick_unit(w, u, cutscene);
+    let Some(x) = w.unit_mut(u) else { return false };
+    let after = (x.prone_active, x.prone_should_be_active, x.prone_duration);
+    (x.prone_active, x.prone_should_be_active, x.prone_duration) = before;
+    r.is_err() || r.is_ok_and(|s| s != Step::default()) || after != before
 }
 
 #[cfg(test)]
