@@ -765,24 +765,33 @@ doesn't need to know.
     has no identity to follow: the record says `ambiguous`, which makes a recording unfollowable and a replay
     invalid. It returns the recorded result without running the original, which reads nothing else. The replay's
     own record says `pin`.
-- **The camera's view, checked:** `EntitiesInCameraFrustumController` sets every entity's `IsInCameraFrustum` from
-  the rig's position and frustum. Gameplay reads it:
-  - for extra units (`SleepingUnitsController`: they sleep out of view);
-  - for finally dead ones (`IsDeathRevealed`, then `HasDummyView`, which is saved);
+- **The camera's view, pinned (2026-10-17; checked before):** `EntitiesInCameraFrustumController` sets every
+  entity's `IsInCameraFrustum` from the rig's position and frustum. Gameplay reads it:
+  - for extra units (`SleepingUnitsController`: they sleep out of view; `EntityVisibilityForPlayerController` for
+    awake ones);
+  - for finally dead ones (`IsDeathRevealed`, saved, then `HasDummyView`, which is saved too: a revealed body updates
+    it even asleep);
   - for dead ones whose view's visibility changes (`UnitEntityView.OnVisibilityChanged`);
-  - for the dying unit itself (`HandleDeath`, before the controller's next tick). `DeathFxPin`'s `death_fx` now
-    carries this as `view`, and a replay must match it.
+  - for the dying unit itself (`HandleDeath`, before the controller's next tick).
   - The state of extra and dead units (the ids in view and out of view) is noted as `cam_frustum` (`in`, `out`):
     once at the window's open (tick -1, the state the first ticks read, since `SleepingUnitsController` runs before
-    the frustum controller), then after each of the controller's ticks when it changes.
-  - A replay's state must be the recording's on every tick (its last change at or before the tick, plus the
-    offset). Each recorded change must first be checked on its own tick: one the replay's controller skipped is
-    caught at the next tick's start, and one matched later is refused. A snapshot naming a unit twice is refused
-    at load. Ids are matched group by group (`Sched.SameUnitGroups`): the window's starting units and short ids by
-    id, units made in the window by the binding the root rules and deaths made. A made unit not bound yet is bound
-    only when it is the only one; several unbound ones are only counted, and only while they are all in one group
-    (unbound units in both groups could have swapped unseen, which fails).
-  - It is checked, not pinned: it follows from the camera's position, which no pin sets.
+    the frustum controller), then after each of the controller's ticks when it changes. A recording's records are
+    as before.
+  - A replay sets those units' `IsInCameraFrustum` to the recording's state on every tick (its last change at or
+    before the tick, plus the offset), at the window's open and after each of the controller's ticks; where the
+    game's own differs, the replay's record says `pin` and carries `nat_in`, `nat_out`. Each recorded change must
+    first be applied on its own tick: one the replay's controller skipped is caught at the next tick's start, and
+    one applied later is refused. A snapshot naming a unit twice is refused at load.
+  - The recording's ids are mapped onto the replay's units (`Sched.MapUnitGroups`, replacing `SameUnitGroups` with
+    the same rules): the window's starting units and short ids by id, units made in the window by the binding the
+    root rules and deaths made. The units must be the same: an extra or dead unit only one side has fails. A made
+    unit not bound yet is bound only when it is the only one; several unbound ones take their group only while the
+    recording's are all in one group (unbound units in both groups could have swapped unseen, which fails).
+  - The dying unit's view (`HandleDeath` reads it) is `DeathFxPin`'s `death_fx` `view`: a replay's matched death sets
+    it to the recorded one before `HandleDeath` runs (`nat_view` when the game's differed).
+  - End record: `camera_view_pins` (controller ticks where the pin overrode the game), `death_view_pins`.
+  - Not restored when the window closes: after a replay window the plan reloads or quits, and nothing after it is
+    compared.
 - **Alushenyrra's isles, checked:** `IslesController.TickCameraRotation` turns the camera's yaw into a direction
   whose changes drive isle states (their actions, navmesh cuts). Combat locks it, but a window's walks don't. Each
   change is noted as `cam_isle` (`dir`), and a replay's change must be the recording's next, on its tick plus the
@@ -811,8 +820,30 @@ Results [M]:
 - `poc5-tb-134` (`tb-lizard`): replay-1 tick-exact (455 scroll queries, 19 view changes). **Replay-2 invalid on the view
   check**: at tick 12321 the dead fly 529A is in the camera's view where the recording had it leave at tick 11800. So the
   camera's position, presentation, drifts enough to change a gameplay read (dead bodies' reveal, extra units' sleep).
-  Open: pin `IsInCameraFrustum`'s results for these readers (a recorded input, as the scroll gate), rather than only
-  checking them.
+  Hence the view pin (above).
+
+Results of the view pin [M] (plan `poc5-tb10`: `tb-lizard` with four replays; `poc5-tb11`: one replay and one with a
+view state flipped, `view#K:flip` or `view#last:flip`, which swaps that recorded state's groups):
+- `poc5-tb-136` (`poc5-tb10`): all four replays valid, T0-equal tick-exact (`oracle-trace-diff --t0`; the 8 aligned
+  differences are projectiles' `CorePosition` within its tolerance), end states equal to the recording's; 378 scroll
+  queries, 20 view changes, 7 deaths each. The camera didn't drift in any of them: `camera_view_pins` and
+  `death_view_pins` 0 (the pin applied the recording's state on every tick and agreed with the game's). The sim's driven
+  replay (`wr-combat replay`) is valid on all five runs.
+- `poc5-tb-137` (`poc5-tb11`, `view#20:flip`): state 20 of 33 (tick 7964, five dead bodies put in view and the fly
+  529A out for 373 controller ticks) was applied (`nat_in` notes the game's 529A); the replay stays valid and
+  T0-equal, and its end state is the plain replay's: the next recorded state puts the bodies back, and
+  `IsDeathRevealed` follows the view each tick.
+- `poc5-tb-138` (`poc5-tb11`, `view#last:flip`): state 62 of 62 (tick 11302) flipped. The perturbed replay ends with
+  the seven units' `m_IsDeathRevealed` swapped (six revealed, 5052 not; the recording and the plain replay have only
+  5052): `oracle-state-diff` reports exactly those 7 differences. So the pin drives a saved field. The T0 stream
+  doesn't compare it (states are compared at the end), so the oracle's validity alone doesn't catch a wrong view.
+- **Open, not the camera:** a game replay's end state can differ from its recording by one frame in a finally dead
+  unit's `TimeToNextRoundTick` (523B: 4.883342 vs 4.90000868): `-132` (both fights, record ahead in one, behind in
+  the other), `-134` replay-1, `-137` (both replays, the plain one with no view pin applied). Both replays of a
+  capture agree with each other. [C] `UnitTicksController` adds `GameDeltaTime` only to a living unit
+  (`BaseUnitController.ShouldTickOnUnit` skips the dead) while turn-based combat is off or the unit isn't in combat,
+  so the frame was gained or lost while 523B was alive and out of the fight: before it joined, or before the window. [I] Not established which; an
+  observation of 523B's timer per tick until it joins combat would settle it.
 
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 

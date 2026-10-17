@@ -301,40 +301,38 @@ internal static class Sched
     // A long id the window made (run-specific), not one existing at its open.
     private static bool Made(string id) => id != null && id.Length > 8 && !StartUnits.Contains(id);
 
-    // Whether the recording's two groups of unit ids (recIn, recOut: units in and out of the camera's view) and the
-    // replay's name the same units in the same groups. Existing and short ids must be the same id in the same group,
-    // made ids bound before (roots, deaths) must land in the same group. Made ids not bound yet have no identity
-    // to follow: one per side in the same group is bound; several in one group only on both sides are counted;
-    // unbound ones in both groups are ambiguous (a swap couldn't be told) and fail.
-    public static bool SameUnitGroups(IList<string> recIn, IList<string> recOut, IList<string> nowIn, IList<string> nowOut)
+    // The recording's group (true: in) for each of the replay's units `now`, given the recording's two groups of unit
+    // ids (recIn, recOut: units in and out of the camera's view), when both name the same units. Existing and short
+    // ids must be the same id, made ids bound before (roots, deaths) their binding. Made ids not bound yet have no
+    // identity to follow: they take the recording's group only when its unbound ones are all in one group, as many as
+    // the replay's (one per side is bound); unbound ones in both groups are ambiguous (a swap couldn't be told).
+    // Null when the units differ or the groups can't be told.
+    public static Dictionary<string, bool> MapUnitGroups(IList<string> recIn, IList<string> recOut, IList<string> now)
     {
-        var restIn = new List<string>(nowIn);
-        var restOut = new List<string>(nowOut);
-        var unboundIn = 0;
-        var unboundOut = 0;
-        bool Take(IList<string> rec, List<string> rest, ref int unbound)
+        var rest = new HashSet<string>(now, StringComparer.Ordinal);
+        if (rest.Count != now.Count) return null;
+        var map = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var unbound = new List<(string id, bool inView)>();
+        foreach (var (rec, inView) in recIn.Select(r => (r, true)).Concat(recOut.Select(r => (r, false))))
         {
-            foreach (var r in rec)
-            {
-                if (!Made(r)) { if (!rest.Remove(r)) return false; }
-                else if (RootBind.TryGetValue(r, out var b)) { if (!rest.Remove(b)) return false; }
-                else unbound++;
-            }
-            return true;
+            string id;
+            if (!Made(rec)) id = rec;
+            else if (!RootBind.TryGetValue(rec, out id)) { unbound.Add((rec, inView)); continue; }
+            if (!rest.Remove(id)) return null;
+            map[id] = inView;
         }
-        if (!Take(recIn, restIn, ref unboundIn) || !Take(recOut, restOut, ref unboundOut)) return false;
         // What's left on the replay's side must be made ids no recorded id is bound to, as many as the recording's.
-        if (restIn.Concat(restOut).Any(x => !Made(x) || RootBindBack.ContainsKey(x))) return false;
-        if (restIn.Count != unboundIn || restOut.Count != unboundOut) return false;
-        if (unboundIn > 0 && unboundOut > 0) return false;
-        if (unboundIn + unboundOut == 1)
+        if (rest.Any(x => !Made(x) || RootBindBack.ContainsKey(x)) || rest.Count != unbound.Count) return null;
+        if (unbound.Count == 0) return map;
+        if (unbound.Any(x => x.inView != unbound[0].inView)) return null;
+        if (unbound.Count == 1)
         {
-            var r = (recIn.Concat(recOut)).First(x => Made(x) && !RootBind.ContainsKey(x));
-            var x2 = restIn.Concat(restOut).First();
-            RootBind[r] = x2;
-            RootBindBack[x2] = r;
+            var x2 = rest.First();
+            RootBind[unbound[0].id] = x2;
+            RootBindBack[x2] = unbound[0].id;
         }
-        return true;
+        foreach (var x in rest) map[x] = unbound[0].inView;
+        return map;
     }
 
     // ---- inputs ----

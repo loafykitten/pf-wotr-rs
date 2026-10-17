@@ -239,6 +239,8 @@ internal static class Fixture
                 j.Prop("camera_scroll_queries", CamPin.Scrolls);
                 j.Prop("camera_command_queries", CamPin.Commands);
                 j.Prop("camera_view_changes", CamPin.FrustumChanges);
+                j.Prop("camera_view_pins", CamPin.PinnedViews);
+                j.Prop("death_view_pins", DeathFxPin.ViewPins);
                 j.Prop("init_tie_compares_turn", TieObs.TurnCompares);
                 j.Prop("init_tie_compares_prepare", TieObs.PrepareCompares);
                 j.Prop("init_ties_turn", TieObs.TurnTies);

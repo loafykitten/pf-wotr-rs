@@ -37,12 +37,15 @@ namespace WrathOracle;
 //    IsRotationActive; their result decides when a cutscene's track moves on. Each call is noted ("cam_cmd": the
 //    command, its ordinal, the cutscene player's id, the result) and a replay returns the recorded result in the
 //    same way, the player bound as units are (Sched.SameUnit).
-//  - The entities in the camera's frustum (checked, not pinned): EntitiesInCameraFrustumController sets
-//    IsInCameraFrustum from the rig's position; SleepingUnitsController reads it for extra units (asleep out of
-//    view) and finally dead ones (IsDeathRevealed), UnitEntityView.OnVisibilityChanged for dead ones, HandleDeath
-//    for the dying (DeathFxPin's "view"). The state of extra and dead units (in view, out of view: their ids) is
-//    noted at the window's open and after each of the controller's ticks when it changes ("cam_frustum"); a
-//    replay's must be the recording's on every tick (Sched.SameUnitGroups).
+//  - The entities in the camera's frustum (pinned): EntitiesInCameraFrustumController sets IsInCameraFrustum
+//    from the rig's position; SleepingUnitsController reads it for extra units (asleep out of view) and finally
+//    dead ones (IsDeathRevealed), EntityVisibilityForPlayerController for awake extra units,
+//    UnitEntityView.OnVisibilityChanged for dead ones, HandleDeath for the dying (pinned in DeathFxPin). The state
+//    of extra and dead units (in view, out of view: their ids) is noted at the window's open and after each of the
+//    controller's ticks when it changes ("cam_frustum"). A replay sets it to the recording's on every tick, on the
+//    same units (Sched.MapUnitGroups), each change applied on its own tick; the game's own is noted where it differs
+//    ("nat_in", "nat_out"). [M] poc5-tb-134/tb-lizard replay-2: the camera's drift kept the dead fly 529A in view
+//    past tick 11800, where the recording had it leave.
 //  - Alushenyrra's isles (checked): IslesController.TickCameraRotation turns the camera's yaw into a direction
 //    whose changes drive isle states (their actions, navmesh cuts). Each change is noted ("cam_isle") and a
 //    replay's must be the recording's, on its tick.
@@ -50,7 +53,7 @@ namespace WrathOracle;
 internal static class CamPin
 {
     public static bool Installed, RecordedOn;
-    public static long Scrolls, Commands, FrustumChanges;
+    public static long Scrolls, Commands, FrustumChanges, PinnedViews;
 
     private sealed class Query { public string Site, Key, Unit; public int T; public bool Routine, V, Used; }
     private sealed class Frustum { public int T; public List<string> In, Out; }
@@ -80,7 +83,7 @@ internal static class CamPin
         _frustumLast = null;
         _perturbNote = null;
         RecordedOn = false;
-        Scrolls = Commands = FrustumChanges = 0;
+        Scrolls = Commands = FrustumChanges = PinnedViews = 0;
     }
 
     private static bool On => Installed && Sched.On;
@@ -142,7 +145,25 @@ internal static class CamPin
     // The replay then follows a result the game didn't give; it must end invalid.
     public static bool Perturb(string perturb)
     {
-        if (perturb == null || !perturb.StartsWith("scroll#", StringComparison.Ordinal)) return false;
+        if (perturb == null) return false;
+        // view#K:flip: the K-th recorded view state (1-based, the window's open first; "last" for the last) with its
+        // groups swapped. The replay then sets the units in view the recording had out of it and the other way round,
+        // until the next recorded state; a finally dead unit's IsDeathRevealed (saved) follows its view on each tick.
+        if (perturb.StartsWith("view#", StringComparison.Ordinal))
+        {
+            var vp = perturb.Split(':');
+            var kv = vp[0] == "view#last" ? FrustumTape.Count : int.TryParse(vp[0].Substring(5), out var k1) ? k1 : 0;
+            if (vp.Length == 2 && vp[1] == "flip" && kv >= 1 && kv <= FrustumTape.Count)
+            {
+                var f = FrustumTape[kv - 1];
+                (f.In, f.Out) = (f.Out, f.In);
+                _perturbNote = $"view state {kv} of {FrustumTape.Count} (tick {f.T}) flipped: in [{string.Join(",", f.In)}], out [{string.Join(",", f.Out)}]";
+            }
+            else _perturbNote = $"perturbation {perturb} not applicable ({FrustumTape.Count} view states)";
+            Rng.PerturbNote = _perturbNote;
+            return true;
+        }
+        if (!perturb.StartsWith("scroll#", StringComparison.Ordinal)) return false;
         var parts = perturb.Split(':');
         if (parts.Length == 2 && parts[1] == "flip" && int.TryParse(parts[0].Substring(7), out var k) && k >= 1 && k <= ScrollTape.Count)
         {
@@ -287,56 +308,82 @@ internal static class CamPin
         if (On) View(Trace.Tick);
     }
 
-    // The extra and dead units in view and out of view (raw ids, sorted), noted when changed; a replay's checked.
+    // The extra and dead units in view and out of view (raw ids, sorted), noted when changed. A replay sets them to
+    // the recording's state on this tick (the game's own noted as "nat_in"/"nat_out" where it differs).
     private static void View(int now)
     {
         try
         {
-            var inView = new List<string>();
-            var outView = new List<string>();
+            var units = new List<UnitEntityData>();
             foreach (var u in StateDump.AllUnits(Kingmaker.Game.Instance))
             {
                 if (u == null || u.UniqueId == null) continue;
                 var st = u.Descriptor.State;
-                if (!(u.IsExtra || st.IsDead || st.IsFinallyDead)) continue;
-                (u.IsInCameraFrustum ? inView : outView).Add(u.UniqueId);
+                if (u.IsExtra || st.IsDead || st.IsFinallyDead) units.Add(u);
             }
-            inView.Sort(StringComparer.Ordinal);
-            outView.Sort(StringComparer.Ordinal);
-            var s = string.Join(",", inView) + "|" + string.Join(",", outView);
-            if (s != _frustumLast)
+            List<string> Ids(bool inView) => units.Where(u => u.IsInCameraFrustum == inView).Select(u => u.UniqueId).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            var natIn = Ids(true);
+            var natOut = Ids(false);
+            var pinned = Sched.Replay && Sched.Invalid == null && Pin(now, units);
+            var inView = pinned ? Ids(true) : natIn;
+            var outView = pinned ? Ids(false) : natOut;
+            var differs = pinned && !natIn.SequenceEqual(inView);
+            if (differs) PinnedViews++;
+            var s = string.Join(",", inView) + "|" + string.Join(",", outView) + (differs ? "|" + string.Join(",", natIn) : "");
+            if (s == _frustumLast) return;
+            _frustumLast = s;
+            FrustumChanges++;
+            Sched.Obs("cam_frustum", j =>
             {
-                _frustumLast = s;
-                FrustumChanges++;
-                Sched.Obs("cam_frustum", j =>
+                j.Arr("in"); foreach (var x in inView) j.W.WriteValue(x); j.EndArr();
+                j.Arr("out"); foreach (var x in outView) j.W.WriteValue(x); j.EndArr();
+                if (pinned) j.Prop("pin", true);
+                if (differs)
                 {
-                    j.Arr("in"); foreach (var x in inView) j.W.WriteValue(x); j.EndArr();
-                    j.Arr("out"); foreach (var x in outView) j.W.WriteValue(x); j.EndArr();
-                });
-            }
-            if (!Sched.Replay || Sched.Invalid != null) return;
-            // The recording's state on this tick: its last change at or before it. Moving past a recorded state needs
-            // it checked first, and a change is first checked on its own tick (plus the offset): a change the replay
-            // makes later (a controller tick it skipped) was read late by the controllers before it.
-            while (_frustumPos + 1 < FrustumTape.Count && FrustumTape[_frustumPos + 1].T + Sched.Offset <= now)
-            {
-                if (_frustumChecked < _frustumPos)
-                {
-                    Sched.Invalidate($"the recording's view at tick {FrustumTape[_frustumPos].T} was never checked in the replay (passed at tick {now})");
-                    return;
+                    j.Arr("nat_in"); foreach (var x in natIn) j.W.WriteValue(x); j.EndArr();
+                    j.Arr("nat_out"); foreach (var x in natOut) j.W.WriteValue(x); j.EndArr();
                 }
-                _frustumPos++;
-            }
-            var want = FrustumTape.Count > 0 && FrustumTape[_frustumPos].T + Sched.Offset <= now ? FrustumTape[_frustumPos] : null;
-            if (want == null) Sched.Invalidate($"units in the camera's view at tick {now}: the recording has no state for them yet");
-            else if (_frustumChecked < _frustumPos && want.T + Sched.Offset != now)
-                Sched.Invalidate($"the recording's view at tick {want.T} first checked in the replay at tick {now} (offset so far {Sched.Offset})");
-            else if (Sched.SameUnitGroups(want.In, want.Out, inView, outView)) _frustumChecked = _frustumPos;
-            else
-                Sched.Invalidate($"units in the camera's view at tick {now}: in [{string.Join(",", inView)}], out [{string.Join(",", outView)}]; " +
-                                 $"the recording's in [{string.Join(",", want.In)}], out [{string.Join(",", want.Out)}] (tick {want.T})");
+            });
         }
         catch (Exception e) { Trace.HookFailed("camera frustum", e); }
+    }
+
+    // A replay's view (WindowOpen, or after the controller's tick): the recording's state on this tick, its last change
+    // at or before it, set on the same units. Moving past a recorded state needs it applied first, and a change is
+    // first applied on its own tick (plus the offset): a change the replay would make later (a controller tick it
+    // skipped) was read late by the controllers before it. False (invalid) when it can't be applied.
+    private static bool Pin(int now, List<UnitEntityData> units)
+    {
+        while (_frustumPos + 1 < FrustumTape.Count && FrustumTape[_frustumPos + 1].T + Sched.Offset <= now)
+        {
+            if (_frustumChecked < _frustumPos)
+            {
+                Sched.Invalidate($"the recording's view at tick {FrustumTape[_frustumPos].T} was never applied in the replay (passed at tick {now})");
+                return false;
+            }
+            _frustumPos++;
+        }
+        var want = FrustumTape.Count > 0 && FrustumTape[_frustumPos].T + Sched.Offset <= now ? FrustumTape[_frustumPos] : null;
+        if (want == null)
+        {
+            Sched.Invalidate($"units in the camera's view at tick {now}: the recording has no state for them yet");
+            return false;
+        }
+        if (_frustumChecked < _frustumPos && want.T + Sched.Offset != now)
+        {
+            Sched.Invalidate($"the recording's view at tick {want.T} first applied in the replay at tick {now} (offset so far {Sched.Offset})");
+            return false;
+        }
+        var map = Sched.MapUnitGroups(want.In, want.Out, units.Select(u => u.UniqueId).ToList());
+        if (map == null)
+        {
+            Sched.Invalidate($"extra and dead units at tick {now}: [{string.Join(",", units.Select(u => u.UniqueId).OrderBy(x => x, StringComparer.Ordinal))}]; " +
+                             $"the recording's in view [{string.Join(",", want.In)}], out [{string.Join(",", want.Out)}] (tick {want.T})");
+            return false;
+        }
+        foreach (var u in units) u.IsInCameraFrustum = map[u.UniqueId];
+        _frustumChecked = _frustumPos;
+        return true;
     }
 
     // ---- Alushenyrra's isles: the camera direction's changes ----
@@ -379,7 +426,7 @@ internal static class CamPin
         var now = Trace.Tick;
         var i = _frustumChecked + 1;
         if (i < FrustumTape.Count && FrustumTape[i].T + Sched.Offset < now)
-            Sched.Invalidate($"the recording's view at tick {FrustumTape[i].T} was never checked in the replay (tick {now})");
+            Sched.Invalidate($"the recording's view at tick {FrustumTape[i].T} was never applied in the replay (tick {now})");
     }
 
     // Before the window closes (Sched.CheckComplete): every recorded query made.
@@ -408,7 +455,7 @@ internal static class CamPin
         }
         // Every recorded view must have been matched by a check (the controller may not tick on the last ticks).
         if (_frustumChecked < FrustumTape.Count - 1)
-            Sched.Invalidate($"the recording's view at tick {FrustumTape[_frustumChecked + 1].T} was never checked in the replay");
+            Sched.Invalidate($"the recording's view at tick {FrustumTape[_frustumChecked + 1].T} was never applied in the replay");
     }
 
     public static void Install(Harmony h)

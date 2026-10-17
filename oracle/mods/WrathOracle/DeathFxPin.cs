@@ -31,8 +31,10 @@ namespace WrathOracle;
 // in the window) and noted ("death_fx": whether PlayDeathEffect started, ShouldDismember's and
 // CanDismemberLimbsApart's results inside it and GetDismemberType's, null where not reached), and every
 // DismemberUnitFX.Init ("dismember": the unit, whether it is in game, so whether Init adds the buff).
-// Replay: inside HandleDeath, ShouldDismember and CanDismemberLimbsApart return the recording's results (their
-// presentation inputs are not the recording's; GetDismemberType then runs natively, its draw from the tape),
+// Replay: inside HandleDeath, the unit's IsInCameraFrustum (whether the body is revealed: the camera's position,
+// presentation) is set to the recording's ("nat_view" notes the game's own where it differs), and ShouldDismember
+// and CanDismemberLimbsApart return the recording's results (their presentation inputs are not the recording's;
+// GetDismemberType then runs natively, its draw from the tape),
 // and the rest of the death must be the recording's: the same death on the same tick, the coroutine started
 // or not, the same type. Each DismemberUnitFX.Init must be the recording's next for its unit, on the recorded
 // tick (plus the replay's offset): its tick follows the effect's spawn through FxSpawnController's queue,
@@ -41,9 +43,9 @@ namespace WrathOracle;
 internal static class DeathFxPin
 {
     public static bool Installed, RecordedOn;
-    public static long Deaths, Pinned, Inits;
+    public static long Deaths, Pinned, Inits, ViewPins;
 
-    private sealed class Death { public string K, Id, Type; public int T; public bool Start, Ambiguous, View; public bool? Dsm, Limbs; public bool Matched; }
+    private sealed class Death { public string K, Id, Type; public int T; public bool Start, Ambiguous, View; public bool? Dsm, Limbs, NatView; public bool Matched; }
     private sealed class Init { public string U, Id; public int T; public bool InGame, Seen; }
 
     private static readonly Dictionary<string, Death> Tape = new Dictionary<string, Death>();
@@ -62,7 +64,7 @@ internal static class DeathFxPin
         Held.Clear();
         _view = null; _now = _rec = null;
         RecordedOn = false;
-        Deaths = Pinned = Inits = 0;
+        Deaths = Pinned = Inits = ViewPins = 0;
     }
 
     private static bool On => Installed && Sched.On;
@@ -129,7 +131,18 @@ internal static class DeathFxPin
                 Sched.Invalidate($"death {k} handled twice");
             else if (Trace.Tick != rec.T + Sched.Offset)
                 Sched.Invalidate($"death {k} at tick {Trace.Tick}; the recording's at tick {rec.T} (offset so far {Sched.Offset})");
-            else { rec.Matched = true; _rec = rec; }
+            else
+            {
+                rec.Matched = true;
+                _rec = rec;
+                // The camera's view of the dying unit is the recording's (CamPin pins the rest of the view).
+                if (unit != null && unit.IsInCameraFrustum != rec.View)
+                {
+                    _now.NatView = unit.IsInCameraFrustum;
+                    unit.IsInCameraFrustum = _now.View = rec.View;
+                    ViewPins++;
+                }
+            }
         }
         catch (Exception e) { Trace.HookFailed("death effect", e); }
     }
@@ -145,6 +158,7 @@ internal static class DeathFxPin
             Note("death_fx", j =>
             {
                 j.Prop("p", now.K); j.Prop("id", now.Id); j.Prop("view", now.View); j.Prop("start", now.Start); j.Prop("dsm", now.Dsm); j.Prop("limbs", now.Limbs); j.Prop("type", now.Type);
+                if (now.NatView != null) j.Prop("nat_view", now.NatView);
                 if (now.Ambiguous) j.Prop("ambiguous", true);
                 if (__exception != null) j.Prop("exc", __exception.GetType().Name);
             });
