@@ -248,9 +248,10 @@ and `LastUpdateTime` changes (blockers updated at run time, e.g. doors: an input
 ### H3: vision range (done, stream "visrange", 2026-10-17)
 
 `CanBeInVisionRange` as the capsule-sphere overlap, in `Phase::Visibility` (after `Phase::Move`), checked against the
-`vis` records. The design said the order would stay an input (order is observable through the dictionary's slots whenever
+`vis` records on every pair the sim can decide (an unknown corpulence, most units' since only the fights read it, and the
+unknown view scale leave pairs to the recording: `docs/poc5/vision.md`). The design said the order would stay an input (order is observable through the dictionary's slots whenever
 removals and additions interleave in a group's tick, and through the free list in later ticks), and the margin would be
-reported; the recordings let both be computed exactly: the order is the colliders' creation order (the pool's), every
+reported; the recordings let both be computed: the order is the colliders' creation order (the pool's), every
 recorded `near` leaf of the 24 captures agrees (so `near` is a check, not an input), and the margin never mattered (closest
 pair 27 um, `f32` and exact arithmetic agree on every pair). The collider positions lag the units by a physics step
 (`autoSyncTransforms` off) and the step schedule follows the physics clock including the oracle's time scale 3 stretches.

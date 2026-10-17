@@ -83,16 +83,25 @@ pub struct VisCounts {
     /// `vis` records applied.
     pub vis_records: usize,
     /// The vision controller's sets the sim computed (an awake unit in a frame) and compared with
-    /// the recording's, of which the frames with a `vis` record (a change), and the differences
-    /// found (reported). Pairs (a unit and a collider) the recording decided because the
-    /// collider's corpulence is unknown.
+    /// the recording's, of which the frames with a `vis` record (a change), the sets that had a
+    /// pair left to the recording, and the differences found (reported).
     pub range_sets: usize,
     pub range_changes: usize,
+    pub range_sets_open: usize,
+    pub range_changes_open: usize,
     pub range_differences: usize,
-    pub range_maybe_pairs: usize,
-    /// Pairs computed with a known corpulence, the pairs within 1 cm and within 1 mm of the
-    /// capsule's surface, the closest pair's distance in micrometres, and the pairs whose `f32`
-    /// decision differs from the exact one.
+    /// Pairs (a unit and a collider) the sim left to the recording, by cause: an unknown
+    /// corpulence, an unknown position, an unknown `enabled`, the view-scale band.
+    pub range_open: [usize; 4],
+    /// Pairs the sim decided, each equal to the recording's.
+    pub range_decided: usize,
+    /// Of the pairs left open only by the view-scale band, those where the answer with scale 1
+    /// and the corpulence as radius equals / differs from the recording's.
+    pub range_guess_agree: usize,
+    pub range_guess_differ: usize,
+    /// Pairs with one position and a corpulence the recording shows, taken at scale 1: the pairs
+    /// within 5 cm, 1 cm and 1 mm of the capsule's surface, the closest pair's distance in
+    /// micrometres, and the pairs whose `f32` decision differs from the exact one.
     pub range_pairs: usize,
     pub range_within_1cm: usize,
     pub range_within_1mm: usize,

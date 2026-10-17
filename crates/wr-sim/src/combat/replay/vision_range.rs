@@ -14,17 +14,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::combat::oracle::{Rv, Trace};
 use crate::combat::vision::V3;
-use crate::combat::vision::range::{self, BoundsUnit, Enabled, Hit};
+use crate::combat::vision::range::{self, BoundsUnit, Enabled, Hit, Step};
 use crate::world::{EntityIdx, World};
 
 use super::vision::vision_radius;
 use super::{Driver, Phase};
-
-/// The view's `lossyScale` (larger horizontal component) a collider is made with: the sim doesn't
-/// have it (the unit prefab's root scale times the size scale), and 1 is assumed. The
-/// recordings agree with the assumption: pairs within 5 cm of the capsule's surface, the ones another
-/// scale could decide, are counted (`range_within_5cm`) and every one of them equals the recording's.
-const ASSUMED_VIEW_SCALE: f32 = 1.0;
 
 /// The vision controller's side: the sets the sim computes, checked against the `vis` records.
 #[derive(Debug, Default)]
@@ -115,11 +109,26 @@ impl Driver<'_> {
         rest.sort();
         order.extend(rest);
         w.combat.vision.near_order.insert(u, order);
-        let (diffs, maybe) = range::differences(&hits, set);
+        let d = range::differences(&hits, set);
+        let diffs = d.diffs;
+        // A set holding a collider of unknown place in the order has an unknown order.
+        if hits.iter().filter(|h| set.contains(&h.unit)).all(|h| h.order_known) {
+            w.combat.vision.near_inexact.remove(&u);
+        } else {
+            w.combat.vision.near_inexact.insert(u);
+        }
         let c = &mut self.vis.counts;
         c.range_sets += 1;
         c.range_changes += usize::from(rec);
-        c.range_maybe_pairs += maybe;
+        let open: usize = d.open.iter().sum();
+        c.range_sets_open += usize::from(open > 0);
+        c.range_changes_open += usize::from(open > 0 && rec);
+        for (k, n) in d.open.iter().enumerate() {
+            c.range_open[k] += n;
+        }
+        c.range_decided += d.decided;
+        c.range_guess_agree += d.guess_agree;
+        c.range_guess_differ += d.guess_differ;
         if diffs.is_empty() {
             return;
         }
@@ -171,13 +180,15 @@ impl Driver<'_> {
 
     /// Whether a physics step ran since the last tick (a fixed update before this frame's
     /// controllers): the clock `Time.time - Time.fixedTime` gains the frame's scaled delta in each
-    /// frame and loses a fixed step for each fixed update. Without the clock, every frame is
-    /// taken to run one.
-    fn vis_steps(&mut self) -> bool {
-        let Some(&(frame, dt)) = self.vis.range.frames.get(&self.tick) else { return true };
-        let Some((mut phase, mut at, step)) = self.vis.range.clock else { return true };
+    /// frame and loses a fixed step for each fixed update. Without the clock, or when the frame
+    /// can't be followed from the last, whether it did isn't known.
+    fn vis_steps(&mut self) -> Step {
+        let Some(&(frame, dt)) = self.vis.range.frames.get(&self.tick) else {
+            return Step::Unknown;
+        };
+        let Some((mut phase, mut at, step)) = self.vis.range.clock else { return Step::Unknown };
         if frame <= at || frame - at > 100_000 {
-            return true;
+            return Step::Unknown;
         }
         let mut ran = false;
         while at < frame {
@@ -189,7 +200,7 @@ impl Driver<'_> {
             }
         }
         self.vis.range.clock = Some((phase, at, step));
-        ran
+        if ran { Step::Ran } else { Step::NotRan }
     }
 
     /// `EntityBoundsController.Tick` and `UnitVisionRangeController.Tick` (the vision controller
@@ -225,15 +236,7 @@ impl Driver<'_> {
             };
             self.vis.counts.range_fade_unit_frames += usize::from(enabled == Enabled::Unknown);
             let corpulence = self.vis_corpulence(w, u);
-            list.push(BoundsUnit {
-                unit: u,
-                pos,
-                prefix,
-                in_game,
-                enabled,
-                corpulence,
-                view_scale: ASSUMED_VIEW_SCALE,
-            });
+            list.push(BoundsUnit { unit: u, pos, prefix, in_game, enabled, corpulence });
         }
         let step = self.vis_steps();
         for gone in w.combat.vision.bounds.tick(&list, step).removed {
@@ -289,6 +292,9 @@ impl Driver<'_> {
         }
         let mut out: Vec<EntityIdx> = Vec::new();
         for m in members {
+            if w.combat.vision.near_inexact.contains(m) {
+                return None;
+            }
             match w.combat.vision.near_order.get(m) {
                 Some(l) => {
                     for x in l {
@@ -330,5 +336,6 @@ impl Driver<'_> {
             w.combat.awake.iter().chain(&w.combat.awake_unknown).copied().collect();
         w.combat.vision.near.retain(|u, _| awake.contains(u));
         w.combat.vision.near_order.retain(|u, _| awake.contains(u));
+        w.combat.vision.near_inexact.retain(|u| awake.contains(u));
     }
 }

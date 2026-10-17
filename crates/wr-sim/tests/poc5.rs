@@ -6564,13 +6564,47 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
             renumber(recs);
         },
         |recs| {
+            // A unit whose corpulence the recording shows, far from the observer (more than 14 m: out of reach of a 11.7 m capsule and the radii, by
+            // the last observation rows) and not in its set, added to the set.
             let at = pos(recs, |r| ev(r, "vis") && r["t"].as_i64() > Some(300));
-            let far = recs
-                .iter()
-                .find(|r| ev(r, "u") && r["u"] == "4F22")
-                .map(|r| r["u"].clone())
+            let o = recs[at]["u"].as_str().unwrap().to_owned();
+            let mut set = std::collections::HashSet::new();
+            let mut at_row: std::collections::HashMap<String, [f64; 2]> = Default::default();
+            for r in &recs[..at] {
+                if ev(r, "vis") && r["u"] == o.as_str() {
+                    for x in r["rem"].as_array().unwrap() {
+                        set.remove(x.as_str().unwrap());
+                    }
+                    for x in r["add"].as_array().unwrap() {
+                        set.insert(x.as_str().unwrap().to_owned());
+                    }
+                }
+                if ev(r, "u") && r["u"].as_str().is_some_and(|u| !u.starts_with('~')) {
+                    let p: Vec<f64> = r["s"]
+                        .as_str()
+                        .unwrap()
+                        .split('|')
+                        .next()
+                        .unwrap()
+                        .split(',')
+                        .filter_map(|x| x.parse().ok())
+                        .collect();
+                    at_row.insert(r["u"].as_str().unwrap().to_owned(), [p[0], p[2]]);
+                }
+            }
+            let me = at_row[&o];
+            let known =
+                ["35fffa0a-06ba-4cba-be40-7914924be190", "558A", "5671", "51DD", "51FC", "523B"];
+            let far = known
+                .into_iter()
+                .find(|x| {
+                    !set.contains(*x)
+                        && at_row.get(*x).is_some_and(|p| {
+                            ((p[0] - me[0]).powi(2) + (p[1] - me[1]).powi(2)).sqrt() > 14.0
+                        })
+                })
                 .expect("a far unit");
-            recs[at]["add"].as_array_mut().unwrap().push(far);
+            recs[at]["add"].as_array_mut().unwrap().push(json!(far));
         },
         // The geometry changed at run time (not modelled).
         |recs| {

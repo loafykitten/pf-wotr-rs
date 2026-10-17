@@ -138,6 +138,8 @@ pub struct Vision {
     /// `CanBeInVisionRange`'s enumeration order (the set is refilled in the overlap's order each
     /// tick), for the units whose set the sim computed this way.
     pub near_order: HashMap<EntityIdx, Vec<EntityIdx>>,
+    /// Units whose set holds a collider of unknown place in the order: `near_order` isn't exact.
+    pub near_inexact: HashSet<EntityIdx>,
     /// `EntityBoundsController`'s sphere colliders (the overlap behind `near`).
     pub bounds: range::Bounds,
     /// Units a `HideUnit` with `Fade` hid: while the fade runs (`EntityViewBase.m_IsFadeHide`)
