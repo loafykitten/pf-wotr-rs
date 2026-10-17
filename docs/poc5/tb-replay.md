@@ -837,13 +837,18 @@ view state flipped, `view#K:flip` or `view#last:flip`, which swaps that recorded
   the seven units' `m_IsDeathRevealed` swapped (six revealed, 5052 not; the recording and the plain replay have only
   5052): `oracle-state-diff` reports exactly those 7 differences. So the pin drives a saved field. The T0 stream
   doesn't compare it (states are compared at the end), so the oracle's validity alone doesn't catch a wrong view.
-- **Open, not the camera:** a game replay's end state can differ from its recording by one frame in a finally dead
-  unit's `TimeToNextRoundTick` (523B: 4.883342 vs 4.90000868): `-132` (both fights, record ahead in one, behind in
-  the other), `-134` replay-1, `-137` (both replays, the plain one with no view pin applied). Both replays of a
-  capture agree with each other. [C] `UnitTicksController` adds `GameDeltaTime` only to a living unit
-  (`BaseUnitController.ShouldTickOnUnit` skips the dead) while turn-based combat is off or the unit isn't in combat,
-  so the frame was gained or lost while 523B was alive and out of the fight: before it joined, or before the window. [I] Not established which; an
-  observation of 523B's timer per tick until it joins combat would settle it.
+- **Open, not the camera: a replay's window can start one frame apart.** A game replay's end state can differ from its
+  recording by one frame in 523B's `TimeToNextRoundTick` (4.883342 vs 4.90000868): `-132` (both fights, the recording
+  ahead in one, behind in the other), `-134` replay-1, `-137` (both replays, the plain one with no view pin applied).
+  The difference is already in the window's start state (`state-start-*.json`): 523B's `TimeToNextRoundTick` 2.01666546
+  vs 2.033332 and its fact 19's `TimeToNextRound` 4.01664 vs 3.99997354, nothing else; `-136`'s five start states are
+  equal. [C] `UnitTicksController` adds `GameDeltaTime` only to a living unit (`BaseUnitController.ShouldTickOnUnit`
+  skips the dead) while turn-based combat is off or the unit isn't in combat, so 523B, awake, ticked one more or one
+  fewer real-time frame between the reload and the window's open, which isn't pinned. Inside the window the replay
+  is exact (T0-equal tick-exact, and the end state carries the same one-frame offset). Nothing compares a replay's
+  start state with its recording's; the sim replays each run from its own start state, so it is unaffected. Next:
+  have the replay's window open compare its start state with the recording's (at least the units' timers) and
+  invalidate on a difference, or pin the frames between the reload and the window.
 
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
