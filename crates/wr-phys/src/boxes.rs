@@ -103,6 +103,43 @@ pub fn transform_point(chain: &[LocalTrs], p: [f32; 3]) -> [f32; 3] {
     chain.iter().rev().fold(p, |p, l| transform_point_level(l, p))
 }
 
+/// Whether a recorded transform (`Transform.position`, `.rotation`, `.lossyScale`) places a
+/// shape where `local_to_world` (column-major, the importer's) does, within the conservative
+/// test's allowance for the game's own `f32` placement (a millionth of the translation and of
+/// the basis): the scene's geometry then encloses the game's, so the conservative test can
+/// stand in for a shape whose exact mapping isn't established.
+#[must_use]
+pub fn placement_agrees(
+    local_to_world: &[f32; 16],
+    position: [f32; 3],
+    rotation: [f32; 4],
+    lossy_scale: [f32; 3],
+) -> bool {
+    let m = local_to_world.map(f64::from);
+    let [x, y, z, w] = rotation.map(f64::from);
+    let n = (x * x + y * y + z * z + w * w).sqrt();
+    if !(n > 0.5 && n < 2.0) || !lossy_scale.iter().chain(&position).all(|v| v.is_finite()) {
+        return false;
+    }
+    let (x, y, z, w) = (x / n, y / n, z / n, w / n);
+    let r = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w)],
+        [2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w)],
+        [2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    let basis = (0..12).fold(0.0f64, |a, k| a.max(m[k].abs()));
+    let columns = (0..3).all(|j| {
+        (0..3).all(|k| {
+            let want = r[j][k] * f64::from(lossy_scale[j]);
+            (m[4 * j + k] - want).abs() <= 1e-6 * basis
+        })
+    });
+    let translation = (0..3).all(|k| {
+        (m[12 + k] - f64::from(position[k])).abs() <= 1e-6 * (1.0 + f64::from(position[k]).abs())
+    });
+    columns && translation
+}
+
 /// `PxQuat::getNormalized`: `s = 1 / sqrt(((x² + y²) + z²) + w²)`, each component times `s`.
 #[must_use]
 pub fn px_normalized(q: [f32; 4]) -> Quat {

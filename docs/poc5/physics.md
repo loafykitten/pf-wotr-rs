@@ -279,11 +279,20 @@ association or dropping the `FLT_EPSILON` clamp is caught.
 refuses a mesh or box collider under a `Rigidbody`, whose shape is posed relative to the body; none in the caves), its
 ancestors only translating (rotation `(0, 0, 0, 1)`, scale exactly one: every recorded box's; the code takes the same
 path under any hierarchy [I], but no probe covers one), its hierarchy placing the GameObject where the recording has
-it with the recorded rotation and (to a millionth) scale (else the scene's centre needn't be the game's), a positive
-lossy scale (a negative one takes the same code [C], but no recorded box has one). In the caves 61
+it with the recorded rotation and (to a millionth) scale, a positive lossy scale (a negative one takes the same code [C], but no recorded box has one). In the caves 61
 boxes are computed; `Loot/Loot_1/luxery_chest_02_Collider` (a rotated ancestor; layer 10, outside the walkable mask)
 keeps the conservative test, and 26 recorded inactive or disabled (loot, interactions, Terendelev's scales, all layer
 10) are left out.
+
+**The centre is computed, not recorded** [I]: `TransformPoint(center)` runs on the scene file's local transforms,
+taken to be the ones the game holds. The recording pins the GameObject's world position and rotation bit for bit and
+its scale only to the lossy scale's rounding (a scale one ulp off, or translations moved between ancestors, would
+leave those checks passing and could move the centre's last bit); nothing in the caves changes a static box's
+transform at load, and all 176,106 probe hits agree. Recording `TransformPoint(center)` itself (observer change 3,
+below) would make it an input. A box the mapping isn't established for keeps the conservative test only when its
+recorded transform agrees with the scene's within that test's allowance (`boxes::placement_agrees`: a millionth of
+the translation and basis); otherwise the importer refuses the recording, and the driven replay reports a recording
+whose unestablished box differs.
 
 **The importer** (`wr-import phys-pack --colliders`): each box keeps its local transforms from the root down (the
 scene's, which Unity loads unchanged) and, from its `ph_col` record (matched by scene, path, sibling path, type,
@@ -400,6 +409,10 @@ Unbuilt, for the main session to build and record (`oracle/mods/WrathOracle/`):
    global query settings the file now assumes. The probe's raycasts are reads, but with `autoSyncTransforms` on (the
    begin record's `physics_auto_sync`) each query first syncs pending transforms into PhysX, as the agent's own
    queries do every tick; the recording should confirm the replays stay tick-exact with it.
+
+3. **`ph_col` `wcenter`** (stream boxes, `PhysProbe.cs`): for a `BoxCollider`, `transform.TransformPoint(center)`
+   (round-trip floats), so the importer can take the box's world centre as recorded (and check it against its
+   `TransformPoint` port) instead of computing it from the scene's local transforms.
 
 ## Reproduce
 

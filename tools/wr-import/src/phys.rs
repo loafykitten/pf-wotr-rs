@@ -427,7 +427,21 @@ pub fn apply_recorded_colliders(
                     rep.boxes += 1;
                     *runtime = Some(r);
                 }
-                Err(e) => rep.boxes_unestablished.push(format!("{name} {:?}: {e}", s.sibling_path)),
+                // The conservative test then answers with the scene's geometry, which must
+                // enclose the game's.
+                Err(e) => {
+                    ensure!(
+                        wr_phys::boxes::placement_agrees(
+                            local_to_world,
+                            r.position,
+                            r.rotation,
+                            r.lossy_scale
+                        ),
+                        "{name} {:?}: the recorded transform {p:?} {q:?} {l:?} isn't the scene's ({e}), and the conservative test can't stand in",
+                        s.sibling_path
+                    );
+                    rep.boxes_unestablished.push(format!("{name} {:?}: {e}", s.sibling_path));
+                }
             }
             continue;
         }

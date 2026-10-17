@@ -1050,6 +1050,15 @@ fn what_the_recordings_dont_cover_isnt_computed_or_accepted() {
     assert_eq!(w.check_recorded_colliders(std::slice::from_ref(&rec)), Ok(()));
     let moved = RecordedCollider { layer: 0, ..rec.clone() };
     assert!(w.check_recorded_colliders(&[moved]).is_err(), "another layer");
+    // Scaled, turned or moved at run time: the scene's box no longer encloses the game's.
+    let scaled = RecordedCollider { lossy_scale: [100.0, 1.0, 1.0], ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[scaled]).is_err(), "scaled");
+    let turned = RecordedCollider { rotation: [0.0, 0.6, 0.0, 0.8], ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[turned]).is_err(), "turned");
+    let shifted = RecordedCollider { position: [2.0, 2.5, 2.001], ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[shifted]).is_err(), "shifted");
+    let rounded = RecordedCollider { lossy_scale: [1.000_000_1, 0.999_999_94, 1.0], ..rec.clone() };
+    assert_eq!(w.check_recorded_colliders(&[rounded]), Ok(()), "the game's rounding");
     // A scene whose every collider was left out still has its recordings checked.
     let other = RecordedCollider { name: "T:c (BoxCollider)".into(), ..rec.clone() };
     assert!(w.check_recorded_colliders(&[rec, other]).is_err(), "a collider the file lacks");

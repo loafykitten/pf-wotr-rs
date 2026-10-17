@@ -238,7 +238,15 @@ impl World {
                         || !c.position.iter().zip(&m[12..15]).all(|(x, y)| {
                             (f64::from(*x) - f64::from(*y)).abs()
                                 <= 1e-4 * (1.0 + f64::from(*x).abs())
-                        })))
+                        })
+                        // A box's whole placement, within the conservative test's allowance.
+                        || (matches!(s.kind, ShapeKind::Box { .. })
+                            && !boxes::placement_agrees(
+                                m,
+                                c.position,
+                                c.rotation,
+                                c.lossy_scale,
+                            ))))
                 .then(|| {
                     format!("recorded {c:?}, the physics file's (no recorded transform) differs")
                 }),
