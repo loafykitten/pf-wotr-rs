@@ -403,6 +403,12 @@ no write is left an outside input (`writes by code the sim doesn't run {}`).
 | `-134/tb-lizard` | 9,104 | 9 | 8 | 8 (5) | 10 | record and replay-1 no (the dropped loot and its log, another port's); replay-2 yes |
 | `-135/tb-nearest` (record, replay-1) | 2,072 | 2 | 1 | 1 (1) | 3 | yes |
 
+The captures before `look` with the driven agent, each run valid with the controller computed (rolls, steps, moves
+checked; the `LookAt`s the sim's, unrecorded): `-120` (2 rolls, 1 step), `-122/tb-focus` (2, 1), `-123` and `-124`
+(4, 3), `-125/tb-focus` (3, 2), `-125/tb-nearest` (1, 1), `-126` (1, 1; 2, 1), `-127` (2, 1); `-113` to `-117` in
+`poc5_agent`. `-122/tb-nearest` stays invalid on its tie (no roaming report). Captures without the driven agent
+(`-95`, `-96`, `-109`, `-111`, `-112`) don't run the controller: unchanged.
+
 - **The roll's point** is the spawner's position (the scene cache's) plus the circle times `Radius` 3, unchanged by
   `TraceAlongNavmesh` here, bit for bit; the idle times `Range(3, 8)`; the saved point's idle time 7.51869631 s.
 - **The step** is `CurrentSpeedMps` 3.048 (30 ft), halved for the spawner's `Slow` movement type, times the frame's
