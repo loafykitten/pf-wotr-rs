@@ -12,9 +12,9 @@
 //! fade) could change is left to the recording ([`Tri::Maybe`], counted by [`Cause`]). What the
 //! sim *hypothesizes* about the state of the colliders at the window's start (the creation order
 //! of the colliders made before it, no fade in progress, the positions PhysX has at the first
-//! frame) is not an unknown in that sense: a wrong hypothesis shows as a reported difference, never as
-//! a masked one, and everything decided rests on them (docs/poc5/vision.md, "Hypotheses about the
-//! window's start").
+//! frame) is not an unknown in that sense: everything decided rests on them, and a wrong one is
+//! found only when the recording disagrees with the sim (a wrong hypothesis matched by an equally
+//! wrong recording would pass; docs/poc5/vision.md, "Hypotheses about the window's start").
 //! - **Population.** `State.EntitiesWithBounds` in the order its entities joined their states; the
 //!   first tick (`m_UpdateAll`) walks it through `EntityPoolEnumerator`, which skips entities that are
 //!   not `ShouldBeEnumeratedByEntityPoolEnumerator` (in the game and not suppressed): a unit hidden
@@ -169,6 +169,9 @@ pub struct BoundsUnit {
     pub enabled: Enabled,
     /// `Corpulence` now, when the recording shows it.
     pub corpulence: Option<f32>,
+    /// How many size writes (`HandleUnitSizeChanged`) the sim has seen of the unit: the update
+    /// list's reason to run `TickEntity` for it besides position and game state.
+    pub size_gen: u64,
 }
 
 /// One `SphereCollider`.
@@ -193,7 +196,7 @@ struct Collider {
     history_unknown: bool,
     /// The unit's state at the collider's last tick: what the update list reacts to.
     seen_in_game: bool,
-    seen_corpulence: Option<f32>,
+    seen_size_gen: u64,
 }
 
 /// One pair of a query.
@@ -330,13 +333,14 @@ impl Bounds {
                         && (first
                             || c.transform != Some(u.pos)
                             || !c.seen_in_game
-                            || c.seen_corpulence.map(f32::to_bits)
-                                != u.corpulence.map(f32::to_bits));
+                            || c.seen_size_gen != u.size_gen);
+                    // Only a `TickEntity` changes the collider: learning what the corpulence is
+                    // doesn't (the radius moves at an update, by the rule, from what it was).
                     if listed {
                         c.transform = Some(u.pos);
                         c.radius = next_radius(Some(c.radius), u.corpulence);
                         c.centre = u.corpulence.map(|x| x.max(0.05));
-                        c.seen_corpulence = u.corpulence;
+                        c.seen_size_gen = u.size_gen;
                     }
                     c.seen_in_game = u.in_game;
                 }
@@ -360,7 +364,7 @@ impl Bounds {
                         enabled: u.enabled,
                         history_unknown: !known,
                         seen_in_game: known,
-                        seen_corpulence: if known { u.corpulence } else { None },
+                        seen_size_gen: u.size_gen,
                     });
                 }
                 None if u.in_game => {
@@ -377,7 +381,7 @@ impl Bounds {
                         enabled: u.enabled,
                         history_unknown: false,
                         seen_in_game: true,
-                        seen_corpulence: u.corpulence,
+                        seen_size_gen: u.size_gen,
                     });
                 }
                 None => {}
@@ -506,7 +510,15 @@ mod tests {
 
     /// A unit in the game with a corpulence (`None`: unknown).
     fn unit(u: EntityIdx, pos: V3, corpulence: Option<f32>) -> BoundsUnit {
-        BoundsUnit { unit: u, pos, prefix: pos, in_game: true, enabled: Enabled::Yes, corpulence }
+        BoundsUnit {
+            unit: u,
+            pos,
+            prefix: pos,
+            in_game: true,
+            enabled: Enabled::Yes,
+            corpulence,
+            size_gen: 0,
+        }
     }
 
     fn k(u: EntityIdx, pos: V3) -> BoundsUnit {
@@ -547,6 +559,32 @@ mod tests {
         let (_, m, rounding) = capsule_sphere(pos, 10.0, [10.0, 0.0, 0.0], 0.5);
         assert!((m + 0.5).abs() < 1e-9, "{m}");
         assert!(!rounding);
+    }
+
+    #[test]
+    fn learning_the_corpulence_doesnt_change_a_collider_only_an_update_does() {
+        // Made at the first tick with the corpulence unknown: the radius has no bound.
+        let mut b = settled(&[unit(A, [10.2, 0.0, 0.0], None)]);
+        // The sim learns the corpulence (0.5) while the unit stands still: no update, so the
+        // collider's radius is still unbounded and a pair out of reach at 0.45 is the recording's.
+        let still = unit(A, [10.2, 0.0, 0.0], Some(0.5));
+        b.tick(&[still], RAN);
+        b.tick(&[still], RAN);
+        let hits = b.overlap([0.0; 3], 9.0);
+        assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Corpulence)));
+        // A move is an update: the rule runs with the corpulence now.
+        let moved = unit(A, [20.0, 0.0, 0.0], Some(0.5));
+        b.tick(&[moved], RAN);
+        b.tick(&[moved], RAN);
+        assert_eq!(tris(&b, [0.0; 3], 9.0), vec![(A, Tri::Out)]);
+        // A size write the sim saw is an update too.
+        let mut b = settled(&[unit(A, [20.0, 0.0, 0.0], None)]);
+        let mut grown = unit(A, [20.0, 0.0, 0.0], Some(0.9));
+        b.tick(&[grown], RAN);
+        assert_eq!(b.overlap([0.0; 3], 9.0)[0].tri, Tri::Maybe);
+        grown.size_gen = 1;
+        b.tick(&[grown], RAN);
+        assert_eq!(b.overlap([0.0; 3], 9.0)[0].tri, Tri::Out);
     }
 
     #[test]

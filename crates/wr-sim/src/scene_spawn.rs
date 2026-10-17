@@ -202,6 +202,7 @@ fn spawn(w: &mut World, id: &str, view: &ViewInfo) -> Option<EntityIdx> {
     if let Some(u) = w.unit_mut(e) {
         u.view_prefab = prefab;
     }
+    crate::combat::vision::note_size_change(w, e);
     let yaw = quat_yaw_degrees(view.rotation);
     if let Some(u) = w.unit_mut(e) {
         u.position = view.position;

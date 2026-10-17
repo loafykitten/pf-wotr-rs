@@ -253,7 +253,7 @@ unknown view scale leave pairs to the recording: `docs/poc5/vision.md`). The des
 removals and additions interleave in a group's tick, and through the free list in later ticks), and the margin would be
 reported; the recordings let both be computed: the order is the colliders' creation order (the pool's), every
 recorded `near` leaf of the 24 captures agrees (so `near` is a check, not an input), and the margin never mattered (closest
-pair 27 um, `f32` and exact arithmetic agree on every pair). The collider positions lag the units by a physics step
+decided pair 70 um at scale 1, `f32` and `f64` sums agree on every pair). The collider positions lag the units by a physics step
 (`autoSyncTransforms` off) and the step schedule follows the physics clock including the oracle's time scale 3 stretches.
 `docs/poc5/vision.md`, "The sets in vision range".
 

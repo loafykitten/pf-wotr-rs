@@ -611,6 +611,7 @@ pub fn manager_post_load(w: &mut World, e: EntityIdx) {
         if w.fact(f).bp.is_none() {
             w.log("error", format!("Fact {} had no blueprint and was removed!", w.fact(f).clr));
             w.entity_mut(e).facts.list.retain(|x| *x != f);
+            crate::combat::vision::note_corpulence_change(w, e);
         } else {
             post_load(w, f);
         }
@@ -703,6 +704,7 @@ pub fn manager_remove_with(
     let list = &mut w.entity_mut(e).facts.list;
     if let Some(p) = list.iter().position(|x| *x == f) {
         list.remove(p);
+        crate::combat::vision::note_corpulence_change(w, e);
         let rank = crate::components::fact_rank(w, f);
         w.events.mutation(
             "fact_detach",
@@ -775,6 +777,7 @@ pub fn manager_add_attach_with(
         list.capacity = if list.capacity == 0 { 4 } else { list.capacity * 2 };
     }
     list.list.push(f);
+    crate::combat::vision::note_corpulence_change(w, e);
     w.fact_mut(f).owner = Some(e);
     w.fact_mut(f).attach_time = w.clock.game_time;
     w.trace("Fact.Attach", |w| label(w, f));

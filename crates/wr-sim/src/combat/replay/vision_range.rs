@@ -42,9 +42,8 @@ pub(super) struct RangeDriver {
     /// The bounds controller has ticked in this run.
     started: bool,
     /// What sets each unit's corpulence as of the last phase (sizes, a producer the sim can't
-    /// follow) and the record from which a read counts, after a change.
+    /// follow), sampled: a change is an event too.
     size_watch: HashMap<EntityIdx, SizeWatch>,
-    size_epoch: HashMap<EntityIdx, usize>,
     /// The physics clock after the last frame it was advanced to: `Time.time - Time.fixedTime`,
     /// the frame, and the fixed step; `None` without the begin record's `fixed_phase0` (every
     /// frame is then assumed to run a step).
@@ -160,36 +159,36 @@ impl Driver<'_> {
     }
 
     /// A unit's `Corpulence` as the recording shows it: the last `corp` read before the record the
-    /// phase is placed at (a read in the frame's later phases comes after it) and not before
-    /// the last change the sim saw in what sets it. `None` until the unit's first valid read
-    /// (counted).
+    /// phase is placed at (a read in the frame's later phases comes after it) and after the last
+    /// event the sim saw that could change it ([`crate::combat::vision::note_corpulence_change`]:
+    /// a size write, a fact or buff added or removed, a view replaced; the stream index the
+    /// event was made at). `None` until the unit's first valid read (counted).
     ///
     /// What sets it (`View.Corpulence` = the prefab's `m_Corpulence` times `GetSizeScale()`): the
-    /// unit's size against its original size (`HandleUnitSizeChanged`), the progression's scale
-    /// percent (`AddUnitScale`), a polymorph (`DisableSizeScaling`), and a mount's size for its
-    /// rider. The sim sees the sizes; for a unit with one of the other producers it can't tell
-    /// when the corpulence changes, so from the first frame it has one the unit's reads count for
-    /// nothing, and neither do the ones before the last frame it had one.
-    fn vis_corpulence(&mut self, w: &World, u: EntityIdx) -> Option<f32> {
+    /// unit's size against its original size, the progression's scale percent (`AddUnitScale`),
+    /// a polymorph (`DisableSizeScaling`), a mount's size for its rider, the view. The events
+    /// are what the sim runs; for a unit that has one of the producers it can't follow (the
+    /// three named) the corpulence is unknown while it has one, and a change of what the unit has
+    /// seen between two phases (sampled) counts as an event too. An event the sim doesn't run
+    /// (an unported action) isn't seen: a limit of the inference.
+    fn vis_corpulence(&mut self, w: &mut World, u: EntityIdx) -> Option<f32> {
         let at = w.combat.nav.at;
-        let r = &mut self.vis.range;
         let key = w.unit(u).map(|x| {
             (x.state_size.or(x.original_size).map(|s| s as i32), x.original_size.map(|s| s as i32))
         });
         let producer = ["AddUnitScale", "Polymorph"].iter().any(|c| super::has_component(w, u, c))
             || w.entity(u).parts.iter().any(|p| p.clr == "UnitPartRider");
-        let was = r.size_watch.insert(u, (key, producer));
-        let changed = was.is_some_and(|(k, p)| k != key || p || producer);
-        if changed {
-            r.size_epoch.insert(u, at);
+        let was = self.vis.range.size_watch.insert(u, (key, producer));
+        if was.is_some_and(|(k, p)| k != key || p || producer) {
+            w.combat.vision.corp_bumps.entry(u).or_default().push(at);
         }
-        let from = r.size_epoch.get(&u).copied().unwrap_or(0);
-        let series = r.corp.get(&w.entity(u).unique_id);
-        let latest = series.and_then(|series| {
+        let from = w.combat.vision.corp_bumps.get(&u).and_then(|b| b.iter().max().copied());
+        let latest = self.vis.range.corp.get(&w.entity(u).unique_id).and_then(|series| {
             let i = series.partition_point(|(i, _)| *i < at);
             (i > 0).then(|| series[i - 1])
         });
-        let read = latest.filter(|(i, _)| *i >= from && !producer).map(|(_, c)| c);
+        // A read at the stream index of an event may be from before it: it doesn't count.
+        let read = latest.filter(|(i, _)| from.is_none_or(|f| *i > f) && !producer).map(|(_, c)| c);
         if read.is_none() {
             self.vis.counts.range_corp_unknown += 1;
             if latest.is_some() {
@@ -261,6 +260,11 @@ impl Driver<'_> {
             // `ShouldBeEnumeratedByEntityPoolEnumerator` is `IsInGame && !Suppressed`; `m_Suppressed`
             // only exists in an area with parts, which the vision run refuses.
             let in_game = w.entity(u).is_in_game;
+            // A unit not in the game at the window's first tick may be fade-hiding with its
+            // collider enabled: unknown until the sim sees it in the game.
+            if first && !in_game {
+                w.combat.vision.fade_hidden.insert(u);
+            }
             if in_game {
                 w.combat.vision.fade_hidden.remove(&u);
             }
@@ -272,7 +276,8 @@ impl Driver<'_> {
             };
             self.vis.counts.range_fade_unit_frames += usize::from(enabled == Enabled::Unknown);
             let corpulence = self.vis_corpulence(w, u);
-            list.push(BoundsUnit { unit: u, pos, prefix, in_game, enabled, corpulence });
+            let size_gen = w.combat.vision.size_gen.get(&u).copied().unwrap_or(0);
+            list.push(BoundsUnit { unit: u, pos, prefix, in_game, enabled, corpulence, size_gen });
         }
         for gone in w.combat.vision.bounds.tick(&list, step).removed {
             let id = w.entity(gone).unique_id.clone();

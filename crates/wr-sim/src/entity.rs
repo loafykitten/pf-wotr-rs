@@ -609,6 +609,7 @@ pub fn dispose(w: &mut World, e: EntityIdx) {
         }
     }
     w.entity_mut(e).facts.list.clear();
+    crate::combat::vision::note_corpulence_change(w, e);
     // `EntityService.Unregister`.
     let id = w.entity(e).unique_id.clone();
     if w.by_id.get(&id) == Some(&e) {

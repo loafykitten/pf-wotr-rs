@@ -25,7 +25,7 @@ use std::rc::Rc;
 use wr_los::Geometry;
 use wr_nav::cs::{d, r};
 
-use crate::world::EntityIdx;
+use crate::world::{EntityIdx, World};
 
 pub mod range;
 
@@ -142,9 +142,19 @@ pub struct Vision {
     pub near_inexact: HashSet<EntityIdx>,
     /// `EntityBoundsController`'s sphere colliders (the overlap behind `near`).
     pub bounds: range::Bounds,
-    /// Units a `HideUnit` with `Fade` hid: while the fade runs (`EntityViewBase.m_IsFadeHide`)
-    /// `UpdateViewActive` returns early and their collider keeps its `enabled`; when the fade
-    /// ends isn't modelled.
+    /// Records (stream indices) of the events that could change a unit's `Corpulence` (a size
+    /// write, a fact added or removed, a view replaced), per unit: a `corp` read is valid only
+    /// after the last of them.
+    pub corp_bumps: HashMap<EntityIdx, Vec<usize>>,
+    /// Per unit, how many size writes (`UnitState.Size`'s setter, which raises
+    /// `HandleUnitSizeChanged` and puts the entity on the bounds controller's update list) or
+    /// view replacements the sim has seen.
+    pub size_gen: HashMap<EntityIdx, u64>,
+    /// Units whose collider may be fade-hiding with its `enabled` kept: a `HideUnit` with `Fade`
+    /// hid them, or they were not in the game at the window's first tick (a fade may have begun
+    /// before). While the fade runs (`EntityViewBase.m_IsFadeHide`) `UpdateViewActive` returns
+    /// early and the collider keeps its `enabled`; when the fade ends isn't modelled. Until the
+    /// sim sees them in the game again their pairs in reach are the recording's.
     pub fade_hidden: HashSet<EntityIdx>,
     /// Each awake unit's vision radius at the frame's cache phase (a miss adopted later in the
     /// frame may have been made before a unit joined combat).
@@ -670,3 +680,23 @@ pub fn check_probes(g: &Geometry, probes: &[Probe]) -> Result<usize, VisError> {
 
 #[cfg(test)]
 mod tests;
+
+/// An event the sim sees that could change a unit's `Corpulence` (a fact or buff added or removed,
+/// a view replaced, a size write): a `corp` read made before it, or while it was being processed,
+/// doesn't tell the corpulence after it ([`Vision::corp_bumps`]). Events the sim doesn't run
+/// (an unported action) aren't seen: that is a limit of the inference, noted in docs/poc5/vision.md.
+pub fn note_corpulence_change(w: &mut World, e: EntityIdx) {
+    if w.unit(e).is_some() {
+        let at = w.combat.nav.at;
+        w.combat.vision.corp_bumps.entry(e).or_default().push(at);
+    }
+}
+
+/// A size write or a view replacement: [`note_corpulence_change`], and the entity goes on the
+/// bounds controller's update list (`HandleUnitSizeChanged`).
+pub fn note_size_change(w: &mut World, e: EntityIdx) {
+    note_corpulence_change(w, e);
+    if w.unit(e).is_some() {
+        *w.combat.vision.size_gen.entry(e).or_default() += 1;
+    }
+}
