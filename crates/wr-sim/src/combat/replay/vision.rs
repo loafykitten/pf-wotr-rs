@@ -115,6 +115,9 @@ impl VisionWorld for Vw<'_> {
     fn position(&self, u: EntityIdx) -> V3 {
         self.pos(u)
     }
+    fn units(&self) -> Vec<EntityIdx> {
+        crate::combat::life::all_units(self.w)
+    }
     fn is_fake(&self, u: EntityIdx) -> bool {
         self.w
             .unit(u)
@@ -209,8 +212,25 @@ impl Driver<'_> {
         w.coverage.unsupported(format!("driven replay: vision: {what}"));
     }
 
+    /// Whether a read is after `UnitMoveController` in its frame (the units' positions are then the
+    /// next prefix's, without the driven agent).
+    fn after_move(&self) -> bool {
+        self.frame.at > Phase::Move
+    }
+
+    /// Without the driven agent, a position after the movement of the recording's last frame isn't
+    /// established (there is no next prefix to read it from).
+    fn positions_unestablished(&self, after_move: bool) -> bool {
+        !self.vis.ag && after_move && self.tick >= self.vis.last_tick
+    }
+
     /// A `vis`, `los`, `los_clear` or `los_geometry` record.
     pub(super) fn vis_record(&mut self, w: &mut World, r: &Rv) {
+        // Each is of the frame it's made in.
+        if r["t"].as_i64() != Some(self.tick) {
+            Self::vis_report(w, "a record of another frame");
+            return;
+        }
         match r["ev"].as_str() {
             Some("vis") => self.vis_set(w, r),
             Some("los") => self.vis_miss(w, r),
@@ -320,12 +340,20 @@ impl Driver<'_> {
             return;
         };
         self.vis.counts.vis_records += 1;
+        // The delta of two sets: unique, disjoint, removals present, additions absent.
         let set = w.combat.vision.near.entry(u).or_default();
+        let unique =
+            |a: &[EntityIdx]| a.iter().collect::<std::collections::HashSet<_>>().len() == a.len();
+        if !unique(&add)
+            || !unique(&rem)
+            || add.iter().any(|x| rem.contains(x) || set.contains(x))
+            || rem.iter().any(|x| !set.contains(x))
+        {
+            Self::vis_report(w, "a vis record that isn't the difference of two sets");
+            return;
+        }
         for x in rem {
-            if !set.remove(&x) {
-                Self::vis_report(w, "a vis record removes a unit that wasn't in vision range");
-                return;
-            }
+            set.remove(&x);
         }
         set.extend(add);
     }
@@ -371,6 +399,11 @@ impl Driver<'_> {
             }
             return;
         }
+        // (`ClearIfNeeded` is called for the awake units only.)
+        if !w.combat.awake.contains(&u) {
+            Self::vis_report(w, "a sight cache cleared whose owner the controller doesn't visit");
+            return;
+        }
         let res = self.with_vision(w, false, |v, vw| v.adopt_clear(vw, u, at));
         if let Err(e) = res {
             Self::vis_report(w, &e);
@@ -411,9 +444,15 @@ impl Driver<'_> {
         if pending.is_empty() {
             return;
         }
-        let units = crate::combat::life::all_units(w);
+        if self.positions_unestablished(true) {
+            Self::vis_report(
+                w,
+                "misses in the last frame (the units' positions then aren't established)",
+            );
+            return;
+        }
         for m in pending {
-            let res = self.with_vision(w, true, |v, vw| v.adopt_miss(vw, &units, m));
+            let res = self.with_vision(w, true, |v, vw| v.adopt_miss(vw, m));
             if let Err(e) = res {
                 Self::vis_report(w, &e);
             }
@@ -452,11 +491,19 @@ impl Driver<'_> {
         if !self.vis.on {
             return recorded;
         }
+        if self.positions_unestablished(self.after_move()) {
+            Self::vis_report(
+                w,
+                "a read in the last frame (the units' positions then aren't established)",
+            );
+            return recorded;
+        }
         let (Some(ua), Some(ub)) = (w.by_id.get(a).copied(), w.by_id.get(b).copied()) else {
             Self::vis_report(w, "an engagement read of a unit the sim doesn't have");
             return recorded;
         };
-        let res = self.with_vision(w, true, |v, vw| v.has_los(vw, ua, ub));
+        let am = self.after_move();
+        let res = self.with_vision(w, am, |v, vw| v.has_los(vw, ua, ub));
         match res {
             Ok(Los::Value(v)) => {
                 if v != recorded {
@@ -473,7 +520,7 @@ impl Driver<'_> {
                 v
             }
             Ok(Los::Pre) => {
-                let res = self.with_vision(w, true, |v, vw| v.resolve_pre(vw, ua, ub, recorded));
+                let res = self.with_vision(w, am, |v, vw| v.resolve_pre(vw, ua, ub, recorded));
                 if let Err(e) = res {
                     Self::vis_report(w, &e);
                 }
@@ -499,8 +546,15 @@ impl Driver<'_> {
         if !self.vis.on {
             return recorded;
         }
+        if self.positions_unestablished(self.after_move()) {
+            Self::vis_report(
+                w,
+                "a read in the last frame (the units' positions then aren't established)",
+            );
+            return recorded;
+        }
         let (from, to) = {
-            let vw = self.vis_world(w, true);
+            let vw = self.vis_world(w, self.after_move());
             let p = vw.pos(me);
             ([p[0], p[1] + 1.0, p[2]], vw.pos(target))
         };
@@ -528,14 +582,23 @@ impl Driver<'_> {
         if !self.vis.on {
             return recorded;
         }
+        if self.positions_unestablished(self.after_move()) {
+            Self::vis_report(
+                w,
+                "a read in the last frame (the units' positions then aren't established)",
+            );
+            return recorded;
+        }
+        let am = self.after_move();
         let mut pre = false;
         let mut pre_members = Vec::new();
+        let mut stopped: Option<EntityIdx> = None;
         let mut found = false;
         for (k, &m) in members.iter().enumerate() {
             if !(w.entity(m).is_in_game && !crate::combat::units::is_helpless(w, m)) {
                 continue;
             }
-            let res = self.with_vision(w, true, |v, vw| v.has_los(vw, m, target));
+            let res = self.with_vision(w, am, |v, vw| v.has_los(vw, m, target));
             match res {
                 Ok(Los::Value(true)) => {
                     found = true;
@@ -548,7 +611,7 @@ impl Driver<'_> {
                     // The game stopped at this member if the aggregate is true and no later
                     // member's read follows.
                     let later = {
-                        let vw = self.vis_world(w, true);
+                        let vw = self.vis_world(w, am);
                         let eye = [0, 1, 2].map(|i| vw.pos(target)[i] + vision::EYE[i]);
                         members[k + 1..].iter().any(|o| {
                             w.combat.vision.pending.iter().any(|p| {
@@ -558,6 +621,7 @@ impl Driver<'_> {
                     };
                     if recorded && !later {
                         found = true;
+                        stopped = Some(m);
                         break;
                     }
                 }
@@ -579,13 +643,20 @@ impl Driver<'_> {
         self.vis.counts.memory += 1;
         if pre {
             self.vis.counts.memory_pre += 1;
-            // The entries made before the window: the aggregate the recording gave, against a
-            // fresh computation of their members' reads (evidence, not an answer).
-            let fresh = pre_members.iter().any(|&m| {
-                self.with_vision(w, true, |v, vw| v.fresh(vw, m, target)).unwrap_or(false)
-            });
-            let equal = fresh == found;
-            w.combat.vision.note_fresh(equal);
+            // The members of entries made before the window: all but the one the game stopped at
+            // returned false (a false aggregate, or a later member's read followed); that is the
+            // entry's value now, compared with a fresh computation (evidence, not an answer).
+            for m in pre_members {
+                if Some(m) == stopped {
+                    let fresh =
+                        self.with_vision(w, am, |v, vw| v.fresh(vw, m, target)).unwrap_or(false);
+                    w.combat.vision.note_fresh(fresh);
+                } else if let Err(e) =
+                    self.with_vision(w, am, |v, vw| v.resolve_pre(vw, m, target, false))
+                {
+                    Self::vis_report(w, &e);
+                }
+            }
         }
         found
     }

@@ -43,6 +43,8 @@ pub trait VisionWorld {
     fn radius(&self, u: EntityIdx) -> f32;
     /// `UnitEntityData.Blueprint.IsFake`.
     fn is_fake(&self, u: EntityIdx) -> bool;
+    /// Every unit (to tell whom a miss was about).
+    fn units(&self) -> Vec<EntityIdx>;
 }
 
 /// One sight cache miss as WrathOracle records it (`los`).
@@ -57,12 +59,21 @@ pub struct Miss {
 }
 
 /// An entry of a sight cache.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     /// Where the target stood; `None`: made before the window (not known).
     pub pos: Option<V3>,
     /// `HasLOS`; `None`: made before the window and not read since.
     pub has_los: Option<bool>,
+    /// An entry made before the window: where the target stood at each hit on it. The cached
+    /// position is within 0.5 m of every one, so no two are 1 m apart (a necessary condition).
+    pub hits: Vec<V3>,
+}
+
+impl Entry {
+    fn pre() -> Self {
+        Self { pos: None, has_los: None, hits: Vec::new() }
+    }
 }
 
 /// `UnitSightCache`.
@@ -159,6 +170,20 @@ pub fn check_los(
     Ok((flag && !flag2, !flag2))
 }
 
+/// A hit on an entry made before the window, with the target at `there`: the cached position is
+/// within 0.5 m of every position the target has had at a hit, so two 1 m apart can't both be.
+fn note_hit(e: &mut Entry, there: V3) -> Result<(), VisError> {
+    if let Some(far) = e.hits.iter().find(|h| sqr_distance_2d(**h, there) >= 1.0) {
+        return Err(format!(
+            "hits on one cache entry with the target at {far:?} and at {there:?}: the cache would have missed"
+        ));
+    }
+    if !e.hits.iter().any(|h| bits(*h) == bits(there)) {
+        e.hits.push(there);
+    }
+    Ok(())
+}
+
 fn bits(a: V3) -> [u32; 3] {
     a.map(f32::to_bits)
 }
@@ -192,16 +217,16 @@ impl Vision {
     /// `los_clear` writes). A cache not known yet isn't decided here (the recording's clear is).
     pub fn clear_if_needed(&mut self, vw: &dyn VisionWorld, u: EntityIdx) -> Option<V3> {
         let c = self.caches.get_mut(&u)?;
-        if !c.known {
-            return None;
-        }
         let pos = vw.position(u);
         let radius = vw.radius(u);
         let moved = c.sample.is_some_and(|s| sqr_distance_2d(pos, s) >= MAX_POSITION_ERROR2);
-        if moved || c.radius != Some(radius) {
+        // A cache not known yet is decided only by the owner's movement from a sample a recorded
+        // miss gave (its vision radius and its geometry stamp before the window aren't known).
+        if moved || (c.known && c.radius != Some(radius)) {
             c.entries.clear();
             c.sample = Some(pos);
             c.radius = Some(radius);
+            c.known = true;
             return Some(pos);
         }
         None
@@ -265,26 +290,32 @@ impl Vision {
         let geometry = self.geometry()?;
         let there = vw.position(other);
         let eye = add(there, EYE);
+        // Misses recorded before this read's, of readers the sim doesn't run, were made (and
+        // filled their entries) first.
+        self.settle(vw, owner, eye)?;
         let front = self.front_is(owner, eye);
         let c = self.caches.entry(owner).or_default();
         // A cached answer: an entry within 0.5 m of where the target stands.
-        match c.entries.get(&other).copied() {
-            Some(Entry { pos: Some(p), has_los })
-                if sqr_distance_2d(p, there) < MAX_POSITION_ERROR2 =>
+        match c.entries.get_mut(&other) {
+            Some(Entry { pos: Some(p), has_los, .. })
+                if sqr_distance_2d(*p, there) < MAX_POSITION_ERROR2 =>
             {
                 if front {
                     return Err(format!(
                         "the sim answers {owner:?}'s read of {other:?} from its cache, the game missed"
                     ));
                 }
+                let has_los = *has_los;
                 self.counts.hits += 1;
                 return Ok(match has_los {
                     Some(v) => Los::Value(v),
                     None => Los::Pre,
                 });
             }
-            Some(Entry { pos: None, has_los }) if !front => {
+            Some(e @ Entry { pos: None, .. }) if !front => {
                 // An entry made before the window, and no miss recorded: the game hit it.
+                note_hit(e, there)?;
+                let has_los = e.has_los;
                 self.counts.pre_hits += 1;
                 return Ok(match has_los {
                     Some(v) => Los::Value(v),
@@ -294,7 +325,9 @@ impl Vision {
             None if !c.known && !front => {
                 // No entry the sim made, no miss recorded: the game hit an entry made before the
                 // window, which the sim doesn't have.
-                c.entries.insert(other, Entry { pos: None, has_los: None });
+                let mut e = Entry::pre();
+                note_hit(&mut e, there)?;
+                c.entries.insert(other, e);
                 self.counts.pre_hits += 1;
                 return Ok(Los::Pre);
             }
@@ -329,7 +362,8 @@ impl Vision {
         if c.sample.is_none() {
             c.sample = Some(sample);
         }
-        c.entries.insert(other, Entry { pos: Some(there), has_los: Some(has_los) });
+        c.entries
+            .insert(other, Entry { pos: Some(there), has_los: Some(has_los), hits: Vec::new() });
         self.counts.misses += 1;
         Ok(Los::Value(has_los))
     }
@@ -353,7 +387,7 @@ impl Vision {
         let sample = c.sample.unwrap_or_else(|| vw.position(owner));
         let fresh = check_los(&geometry, vw.radius(owner), sample, eye)?.0;
         let c = self.caches.entry(owner).or_default();
-        let e = c.entries.entry(other).or_insert(Entry { pos: None, has_los: None });
+        let e = c.entries.entry(other).or_insert_with(Entry::pre);
         if e.has_los.is_some_and(|old| old != v) {
             return Err(format!(
                 "{owner:?}'s entry for {other:?} was {:?}, the recording has {v}",
@@ -368,6 +402,22 @@ impl Vision {
             }
         }
         e.has_los = Some(v);
+        Ok(())
+    }
+
+    /// Adopts the recorded misses ahead of the miss the read by `owner` of the eye point `eye`
+    /// made (they were made first, by readers the sim doesn't run). A read that made none leaves
+    /// them: they may be a later read's of the same aggregate, or a frame end's.
+    fn settle(&mut self, vw: &dyn VisionWorld, owner: EntityIdx, eye: V3) -> Result<(), VisError> {
+        let ahead = self
+            .pending
+            .iter()
+            .position(|m| m.owner == owner && bits(m.point) == bits(eye))
+            .unwrap_or(0);
+        for _ in 0..ahead {
+            let Some(m) = self.pending.pop_front() else { break };
+            self.adopt_miss(vw, m)?;
+        }
         Ok(())
     }
 
@@ -406,12 +456,8 @@ impl Vision {
     /// # Errors
     ///
     /// The miss isn't `CheckLOS` of its sample, or its target can't be told.
-    pub fn adopt_miss(
-        &mut self,
-        vw: &dyn VisionWorld,
-        units: &[EntityIdx],
-        m: Miss,
-    ) -> Result<(), VisError> {
+    pub fn adopt_miss(&mut self, vw: &dyn VisionWorld, m: Miss) -> Result<(), VisError> {
+        let units = vw.units();
         let geometry = self.geometry()?;
         let radius = vw.radius(m.owner);
         let (has_los, _) = check_los(&geometry, radius, m.sample, m.point)?;
@@ -421,10 +467,12 @@ impl Vision {
                 m.owner
             ));
         }
+        // (A reader asks the cache only about units in vision range.)
         let targets: Vec<EntityIdx> = units
             .iter()
             .copied()
             .filter(|t| bits(add(vw.position(*t), EYE)) == bits(m.point))
+            .filter(|t| vw.is_fake(m.owner) || self.in_vision_range(m.owner, *t))
             .collect();
         let [target] = targets[..] else {
             return Err(format!(
@@ -435,6 +483,14 @@ impl Vision {
             ));
         };
         let c = self.caches.entry(m.owner).or_default();
+        if let Some(Entry { pos: Some(p), .. }) = c.entries.get(&target)
+            && sqr_distance_2d(*p, vw.position(target)) < MAX_POSITION_ERROR2
+        {
+            return Err(format!(
+                "an unexplained miss of {:?} on {target:?}, which its cache answers",
+                m.owner
+            ));
+        }
         match c.sample {
             Some(s) if bits(s) != bits(m.sample) => {
                 return Err(format!(
@@ -445,7 +501,10 @@ impl Vision {
             None => c.sample = Some(m.sample),
             _ => {}
         }
-        c.entries.insert(target, Entry { pos: Some(vw.position(target)), has_los: Some(has_los) });
+        c.entries.insert(
+            target,
+            Entry { pos: Some(vw.position(target)), has_los: Some(has_los), hits: Vec::new() },
+        );
         self.counts.unmodelled_fills += 1;
         Ok(())
     }

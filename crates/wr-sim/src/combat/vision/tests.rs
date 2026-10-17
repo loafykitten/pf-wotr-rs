@@ -38,6 +38,9 @@ impl VisionWorld for Wv {
     fn is_fake(&self, u: EntityIdx) -> bool {
         self.fake.borrow().contains(&u)
     }
+    fn units(&self) -> Vec<EntityIdx> {
+        vec![O, T, U]
+    }
 }
 
 fn wall(x: f32) -> Blocker {
@@ -209,15 +212,14 @@ fn a_miss_by_a_reader_the_sim_doesnt_run_is_verified_and_kept() {
     wv.put(U, [0.0, 0.0, 9.0]);
     let mut v = vision(&[]);
     known(&mut v, &wv);
-    let units = [O, T, U];
-    v.adopt_miss(&wv, &units, miss(&wv, O, T, [0.0; 3], true)).unwrap();
+    v.adopt_miss(&wv, miss(&wv, O, T, [0.0; 3], true)).unwrap();
     // The entry is there: a read now hits.
     assert_eq!(v.has_los(&wv, O, T), Ok(Los::Value(true)));
     // A wrong result, or no unit at the point, is refused.
-    assert!(v.adopt_miss(&wv, &units, miss(&wv, O, U, [0.0; 3], false)).is_err());
+    assert!(v.adopt_miss(&wv, miss(&wv, O, U, [0.0; 3], false)).is_err());
     let mut lost = miss(&wv, O, U, [0.0; 3], true);
     lost.point = [50.0, 1.0, 50.0];
-    assert!(v.adopt_miss(&wv, &units, lost).is_err());
+    assert!(v.adopt_miss(&wv, lost).is_err());
 }
 
 #[test]
@@ -267,4 +269,72 @@ fn the_geometry_and_its_probes_are_checked_against_a_dump() {
     let mut bad = probes;
     bad[1].result = true;
     assert!(check_probes(&g, &bad).unwrap_err().contains("probe 1"));
+}
+
+#[test]
+fn misses_of_readers_the_sim_doesnt_run_are_adopted_before_the_read_that_follows_them() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    wv.put(U, [0.0, 0.0, 6.0]);
+    let mut v = vision(&[]);
+    known(&mut v, &wv);
+    // An unmodelled reader missed on T, then the modelled read missed on U.
+    v.pending.push_back(miss(&wv, O, T, [0.0; 3], true));
+    v.pending.push_back(miss(&wv, O, U, [0.0; 3], true));
+    assert_eq!(v.has_los(&wv, O, U), Ok(Los::Value(true)));
+    assert_eq!((v.counts.unmodelled_fills, v.counts.misses), (1, 1));
+    assert!(v.pending.is_empty());
+    // T's entry is the adopted one: a read hits; a second adoption of it is refused.
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Value(true)));
+    assert!(v.adopt_miss(&wv, miss(&wv, O, T, [0.0; 3], true)).is_err());
+    // A read that made no miss leaves the pending ones to later reads.
+    v.pending.push_back(miss(&wv, O, T, [0.0; 3], true));
+    wv.put(T, [5.2, 0.0, 0.0]);
+    assert!(v.has_los(&wv, O, U).is_ok());
+    assert_eq!(v.pending.len(), 1);
+}
+
+#[test]
+fn an_unknown_cache_is_cleared_by_the_owners_movement_once_its_sample_is_known() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
+    // A miss on another unit tells the sample.
+    wv.put(U, [0.0, 0.0, 3.0]);
+    v.pending.push_back(miss(&wv, O, U, [0.0; 3], true));
+    v.has_los(&wv, O, U).unwrap();
+    assert!(!v.caches[&O].known);
+    wv.put(O, [0.6, 0.0, 0.0]);
+    assert_eq!(v.clear_if_needed(&wv, O), Some([0.6, 0.0, 0.0]));
+    assert!(v.caches[&O].known && v.caches[&O].entries.is_empty());
+}
+
+#[test]
+fn hits_on_an_entry_from_before_the_window_cant_span_a_metre() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
+    wv.put(T, [5.9, 0.0, 0.0]);
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
+    // 1.0 m from the first hit: the cached position can't be within 0.5 m of both.
+    wv.put(T, [6.0, 0.0, 0.0]);
+    assert!(v.has_los(&wv, O, T).is_err());
+}
+
+#[test]
+fn an_entry_from_before_the_window_resolved_false_stays_false() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
+    v.resolve_pre(&wv, O, T, false).unwrap();
+    // True later without a miss or a clear: refused.
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Value(false)));
+    assert!(v.resolve_pre(&wv, O, T, true).is_err());
 }
