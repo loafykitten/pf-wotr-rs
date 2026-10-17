@@ -355,6 +355,11 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         "roaming: UnitRoamingController ticks {} (waiting {}), rolls {}, sleeping steps {}, LookAts {}, moves run {}, arrivals {}; states established {}, unknown {}",
         r.ticks, r.idle, r.rolls, r.steps, r.looks, r.moves, r.arrivals, r.established, r.unknown
     );
+    let p = &out.prone;
+    println!(
+        "prone: UnitProneController unit ticks {}, falls {}, get-ups {}, last-frame units taken as asleep {}",
+        p.ticks, p.falls, p.get_ups, p.assumed_asleep
+    );
     let n = &out.nav;
     println!(
         "physics and paths: physics queries computed {} (agent {}, movement simulation {}, spans taken from the recording {}; taken {}), simulation steps {} (grid reads checked {}, taken {}); paths computed {} (line-of-sight answers taken {}), deliveries checked {}, paths the agent took from the sim {}; graph events matched {}, turn starts {}, removals {}, tag refreshes {} (navigation clock reads taken {}); place-on-ground steps computed {} (rays {})",
@@ -436,6 +441,10 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         let (flags, flag_diffs) = wr_sim::compare::compare_flags(&sheet, &read_json(&end_path)?);
         println!(
             "end-state flags (in_game, is_dead, is_conscious): {flags:?}; differences {flag_diffs:?}"
+        );
+        let (prone_n, prone_diffs) = wr_sim::compare::compare_prone(&sheet, &read_json(&end_path)?);
+        println!(
+            "end-state postures (prone): units compared {prone_n}; differences {prone_diffs:?}"
         );
         std::fs::write(
             dir.join(format!("{name}.compare-end.json")),

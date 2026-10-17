@@ -1447,10 +1447,16 @@ impl Driver<'_> {
         }
         match fname {
             "Stop" => {
+                // `UnitEntityView.EnterProneState` (the prone controller's fall: `Prone.Active =
+                // true` first, then `IsProne = true; StopMoving(); ObstaclesHelper.
+                // RemoveFromGroup(AgentASP); Wake(6f)`): the sim's controller makes this unit
+                // fall now, before the stop reads the view's posture.
+                let enter = by == "Kingmaker.View.UnitEntityView.EnterProneState";
+                if enter {
+                    self.prone_stop(w, u)?;
+                }
                 ag::stop(w, u, self)?;
-                // `UnitEntityView.EnterProneState`: `IsProne = true; StopMoving();
-                // ObstaclesHelper.RemoveFromGroup(AgentASP); Wake(6f)`.
-                if by == "Kingmaker.View.UnitEntityView.EnterProneState" {
+                if enter {
                     ag::remove_from_group(w, u, self)?;
                 }
                 Ok(())
@@ -2486,10 +2492,11 @@ impl AgentInputs for Driver<'_> {
     }
     fn prone(&mut self, w: &mut World, u: EntityIdx) -> R<bool> {
         // Read by `ConnectToGroups` inside `Stop` (its only caller), which can't change it: the
-        // Stop's end state has it (a unit going prone is stopped by `EnterProneState`).
-        self.ag_input("prone");
+        // Stop's end state has it (a unit going prone is stopped by `EnterProneState`). The
+        // view's flag is set with the posture (`EnterProneState`/`LeaveProneState` are the
+        // prone controller's), so with the prone controller the sim's, it is the sim's posture.
         let id = self.ag_unit_id(w, u);
-        self.trace.records[self.i..]
+        let recorded = self.trace.records[self.i..]
             .iter()
             .take_while(|x| x["k"] != "tick")
             .find(|x| {
@@ -2498,7 +2505,17 @@ impl AgentInputs for Driver<'_> {
                     && x["u"].as_str() == Some(id.as_str())
             })
             .and_then(|x| x["s"]["prone"].as_bool())
-            .ok_or_else(|| Desync("IsProne: no end of the Stop that reads it".into()))
+            .ok_or_else(|| Desync("IsProne: no end of the Stop that reads it".into()))?;
+        if self.prone_on {
+            if w.unit(u).is_some_and(|x| x.prone_active) != recorded {
+                return Err(Desync(
+                    "IsProne: the view's posture differs from the sim's prone controller's".into(),
+                ));
+            }
+        } else {
+            self.ag_input("prone");
+        }
+        Ok(recorded)
     }
     fn repath_all(&mut self, w: &mut World) -> R<()> {
         for u in self.ags.all.clone() {

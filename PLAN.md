@@ -63,6 +63,7 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   - *Boxes* (stream boxes, `crates/wr-phys/src/boxes.rs`, `docs/poc5/physics.md` "Boxes"): `TransformPoint(center)`
     and PhysX's normalised rotation, `max(|lossy * size| / 2, FLT_EPSILON)`, Unity's distance-0 post-filter; every
     probe and `ag_phys` query exact or failing closed (25 presentation queries left, none wrong). Physics file format 3.
+  - *Loot and the prone controller* (stream loot, `docs/poc5/loot-and-prone.md`): `UnitProneController` (every unit's posture equals the recording's end state), `UnitReturnToConsciousController`, the combat log's `GameLogEventItemsCollection`, unidentified item names and the dropped bag's creation tick (its prefab, bounds and reveal a stub); `poc5-tb-131` and `-134` valid on every run.
   - *Facing* (stream T, `docs/poc5/orientation.md`, observer `look`): `DesiredOrientation` computed from `LookAt`,
     `ForceLookAt` and the orientation writers. Stopped at wrap-up after a clean review, before its final checks: the
     main session's merge sweep is its verification.

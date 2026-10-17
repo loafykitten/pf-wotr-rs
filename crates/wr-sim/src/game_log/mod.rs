@@ -276,6 +276,17 @@ pub enum Payload {
     },
     /// `IKnowledgeHandler` (no thread handles it).
     Knowledge,
+    /// `IItemsCollectionHandler.HandleItemsAdded`/`HandleItemsRemoved`
+    /// (`GameLogEventItemsCollection`): the collection (its identity), the item, the count.
+    ItemsCollection {
+        removed: bool,
+        collection: usize,
+        item: EntityIdx,
+        count: i32,
+        /// Raised inside `UnitEntityData.DropLootToGround` (its skinning items leaving a dead
+        /// creature's inventory): the record's place is checked against the bag's rotation draw.
+        by_drop: bool,
+    },
     /// A recorded input: the bark's speaker and text.
     Bark {
         unit: Option<EntityIdx>,
@@ -435,6 +446,8 @@ pub struct GameLog {
     pub frame: i64,
     pub strings: Option<std::rc::Rc<strings::LogStrings>>,
     pub events: Vec<Event>,
+    /// Inside `UnitEntityData.DropLootToGround` (see `Payload::ItemsCollection::by_drop`).
+    pub in_loot_drop: bool,
     /// `m_ReadyEvents`.
     pub ready: Vec<usize>,
     /// `m_EventsStack`.
@@ -777,6 +790,29 @@ pub fn knowledge_updated(w: &mut World) {
     add_event(w, "GameLogEventKnowledge", Payload::Knowledge, [None, None]);
 }
 
+/// `IItemsCollectionHandler.HandleItemsAdded`/`HandleItemsRemoved` (`ItemsCollection.OnItemAdded`,
+/// `OnItemsRemoved`, unless the events are suppressed): a `GameLogEventItemsCollection`.
+pub fn items_collection(
+    w: &mut World,
+    removed: bool,
+    collection: usize,
+    item: EntityIdx,
+    count: i32,
+) {
+    add_event(
+        w,
+        "GameLogEventItemsCollection",
+        Payload::ItemsCollection {
+            removed,
+            collection,
+            item,
+            count,
+            by_drop: w.game_log.in_loot_drop,
+        },
+        [None, None],
+    );
+}
+
 /// The `GameEventsHandler`s of `IPartyCombatHandler`, in subscription order.
 pub const PARTY_COMBAT_HANDLERS: [&str; 2] =
     ["GameLogEventCombatStateChanged", "GameLogEventPartyCombatState"];
@@ -866,6 +902,10 @@ fn handle(w: &mut World, th: usize, e: usize) {
         ("PartyGainExperienceLogThread", Payload::PartyExperience { experience }) => {
             party_xp_thread(w, th, e, experience)
         }
+        (
+            "ItemsCollectionLogThread",
+            Payload::ItemsCollection { removed, collection, item, .. },
+        ) => items_collection_thread(w, removed, collection, item),
         ("ProjectileHitLogThread", Payload::ProjectileHit { attack }) => {
             projectile_thread(w, th, e, attack)
         }
@@ -1423,6 +1463,31 @@ fn aoo_thread(w: &mut World, th: usize, e: usize, attacker: EntityIdx, target: E
     Ok(())
 }
 
+/// `ItemsCollectionLogThread.HandleItemsAdded`/`HandleItemsRemoved`: a message only for the
+/// player's inventory (the collection the main character holds) and a lootable item that isn't in
+/// one of the unit's additional limbs' slots. A unit's own inventory (a dead creature's, whose
+/// skinning items leave it as its loot drops) makes none, but the event still takes its place in
+/// the queue, so every later message of the frame shifts.
+fn items_collection_thread(w: &mut World, removed: bool, collection: usize, item: EntityIdx) -> R {
+    if !crate::items::is_player_inventory(w, collection) {
+        return Ok(());
+    }
+    match crate::items::is_lootable(w, item) {
+        Some(false) => return Ok(()),
+        Some(true) => {}
+        None => {
+            return Err(TextError::Unsupported(
+                "ItemsCollectionLogThread: IsLootable of a weapon whose type isn't available"
+                    .into(),
+            ));
+        }
+    }
+    Err(TextError::Unsupported(format!(
+        "ItemsCollectionLogThread's {} message for the player's inventory",
+        if removed { "lost" } else { "gained" }
+    )))
+}
+
 /// `PartyGainExperienceLogThread`: `Count = Experience * ExperienceRatePercent / 100`.
 fn party_xp_thread(w: &mut World, th: usize, e: usize, experience: i32) -> R {
     w.game_log.retain();
@@ -1658,5 +1723,55 @@ impl Env for LogEnv<'_> {
                 Err(TextError::Unsupported("a roll's history (RuleRollDice.RollHistory)".into()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::Item;
+    use crate::stats::tests::world_with_unit;
+    use crate::world::{Entity, EntityKind, FactsManager};
+
+    fn item(w: &mut World) -> EntityIdx {
+        w.add_entity(Entity {
+            unique_id: "i1".into(),
+            clr: "ItemEntitySimple",
+            kind: EntityKind::Item(Box::new(Item { count: 1, ..Item::default() })),
+            facts: FactsManager::default(),
+            parts: Vec::new(),
+            is_turned_on: true,
+            post_load_executed: true,
+            is_in_game: true,
+            subscribed: false,
+            disposing: false,
+            is_disposed: false,
+        })
+    }
+
+    /// A collection's event is queued like any other (it takes a place among the frame's five),
+    /// but only the player's inventory makes a message: a unit's own collection (a dead
+    /// creature's, as its skinning items leave) makes none, the player's reports (not ported).
+    #[test]
+    fn an_items_collection_event_is_queued_and_only_the_players_inventory_speaks() {
+        let (mut w, u) = world_with_unit();
+        let it = item(&mut w);
+        items_collection(&mut w, true, 7, it, 1);
+        assert!(w.game_log.events.is_empty(), "the log is off");
+        w.game_log.on = true;
+        items_collection(&mut w, true, 7, it, 1);
+        assert_eq!(w.game_log.events.len(), 1);
+        assert_eq!(w.game_log.events[0].ty.name(), "GameLogEventItemsCollection");
+        assert_eq!(w.game_log.ready, vec![0]);
+        // Not the player's inventory: no message, no report.
+        assert!(items_collection_thread(&mut w, true, 7, it).is_ok());
+        // The main character's collection: a message the sim doesn't make yet.
+        w.main_character = Some(u);
+        w.unit_mut(u).expect("unit").inventory_collection = Some(7);
+        assert!(items_collection_thread(&mut w, true, 7, it).is_err());
+        assert!(items_collection_thread(&mut w, false, 7, it).is_err());
+        // An item that isn't lootable (a natural weapon, `m_NotLootable`) makes none.
+        w.item_mut(it).expect("item").not_lootable = true;
+        assert!(items_collection_thread(&mut w, true, 7, it).is_ok());
     }
 }

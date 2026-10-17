@@ -366,6 +366,7 @@ pub fn raised_by_sim(ty: &str) -> bool {
                 | "GameLogEventPartyCombatState"
                 | "GameLogEventPartyGainExperience"
                 | "GameLogEventKnowledge"
+                | "GameLogEventItemsCollection"
         )
 }
 
@@ -389,7 +390,26 @@ fn event_fields(w: &World, p: &Payload) -> Option<J> {
         Payload::PartyExperience { experience } => serde_json::json!({"Experience": experience}),
         // `InspectUnitsManager`'s `UnitInfo` (an object the observer names by type).
         Payload::Knowledge => serde_json::json!({"UnitInfo": {"$type": "UnitInfo"}}),
+        // `Event` is the enum (`Added`, `Removed`); the collection and item as the observer names
+        // them (an object by type, an entity with its class).
+        Payload::ItemsCollection { removed, item, count, .. } => serde_json::json!({
+            "Event": i32::from(*removed),
+            "Collection": {"$type": "ItemsCollection"},
+            "Item": {"$entity": w.entity(*item).unique_id, "class": w.entity(*item).clr},
+            "Count": count,
+        }),
         _ => return None,
+    })
+}
+
+/// A removal the sim made inside `UnitEntityData.DropLootToGround` (the dismember branch's skinning
+/// items leaving the inventory) comes right after the bag's rotation draw
+/// (`Quaternion.Euler(0, Random.Range(0, 360), 0)`) in the recording (`recs[i]`, a `clog_q`).
+fn drop_removal_ok(recs: &[Rv], i: usize) -> bool {
+    let not_log =
+        |x: &&Rv| !(x["k"] == "obs" && x["ev"].as_str().is_some_and(|e| e.starts_with("clog_")));
+    recs[..i].iter().rev().find(not_log).is_some_and(|p| {
+        p["k"] == "draw" && p["m"] == "Range_ff" && p["a"] == serde_json::json!([0.0, 360.0])
     })
 }
 
@@ -651,6 +671,12 @@ pub fn compare(
                 Some("GameLogEventProjectileHit") => {
                     Some(("HandleProjectileHit", "Projectile.OnHit"))
                 }
+                // The raise is `ItemsCollection.OnItemAdded` / `OnItemsRemoved`, whichever its
+                // callers (`Add`, `Remove`, ...).
+                Some("GameLogEventItemsCollection") => Some(match r["f"]["Event"].as_i64() {
+                    Some(0) => ("HandleItemsAdded", "ItemsCollection.OnItemAdded"),
+                    _ => ("HandleItemsRemoved", "ItemsCollection.OnItemsRemoved"),
+                }),
                 Some("GameLogEventBark") => Some(("HandleOnShowBark", "")),
                 _ => None,
             };
@@ -777,6 +803,12 @@ pub fn compare(
             && r["f"] != f
         {
             bad.push(format!("fields {} vs {f}", r["f"]));
+        }
+        if let Payload::ItemsCollection { by_drop: true, .. } = ev.payload
+            && let Some(at) = recs.iter().position(|x| x["seq"] == r["seq"])
+            && !drop_removal_ok(recs, at)
+        {
+            bad.push("a dropped loot's removal not right after its rotation draw".into());
         }
         if r["en"].as_bool() != Some(ev.enabled) {
             bad.push(format!("enabled {} vs {}", r["en"], ev.enabled));

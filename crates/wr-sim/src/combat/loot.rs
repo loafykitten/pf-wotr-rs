@@ -8,10 +8,33 @@
 //! `TransferInventoryToDroppedLoot`), with a random yaw drawn from Unity's generator. The unit
 //! remembers it in `m_DroppedLootEntityDataRef`.
 //!
-//! Not ported, and reported where the drop happens: everything the dropped-loot *prefab*
-//! decides (the view, its scale, the parts its components create: `InteractionLootPart`'s
-//! settings and `Enabled`, `LocalMapMarkerPart`'s description, `InteractionLootPart.SetUnit`)
-//! and the creation tick (`EntityCreationController.m_ToCreate`, the map object's handlers).
+//! The entity joins its state at the next `EntityCreationController` tick
+//! (`EntityCreationController.AddEntity` queues it; [`crate::spawn::entity_creator_tick`] runs in
+//! the frame's `Phase::Creation`, after `UnitLifeController` and before `EntityDestructionController`):
+//! `SceneEntitiesState.AddEntityData` and `IMapObjectHandler.HandleMapObjectSpawned`, whose
+//! subscribers are the overtip managers.
+//!
+//! Presentation and spatial state, noted as a stub ([`crate::registry::Coverage::stub`]): what the
+//! dropped-loot *prefab* (`BlueprintRoot.Prefabs.DroppedLootBag`, or
+//! `HitSystemRoot.GetDismemberLoot(BloodType)`) decides: the view and its transform (the scale
+//! `GetScaleMultiplierBySize`, the rotation, the position the save keeps), the parts its
+//! components create (`InteractionLootPart`'s `Settings`, `Enabled`; `LocalMapMarkerPart`'s marker
+//! and description) and `InteractionLootPart.SetUnit`'s marker update; and what the entity's
+//! being a map object adds once it is in a state (`RequiresSphereBoundsCollider`: the bounds
+//! collider `EntityBoundsController` makes from the view's bounds, found by the fog of war's
+//! revealers (`IsRevealed`, saved) and the camera's frustum controller). [C] Nothing the
+//! turn-based fights run reads them: the part is a global `IItemsCollectionHandler` subscriber,
+//! but acts only on its own collection (`collection == Loot`; its `Loot` is the placeholder
+//! `new ItemsCollection(Owner)` while the skinning items leave the unit's inventory, and the
+//! unit's inventory afterwards, which changes only when the player loots), the marker is read by
+//! the local map UI, `Enabled` and the settings by interaction (clicking the bag) and the loot
+//! window, and a bag's reveal by the overtips and highlights (`HandleMapObjectSpawned`'s
+//! subscribers are the overtip managers too). The recorded end states carry the unit's
+//! `m_DroppedLootEntityDataRef`, not the entity. **Unverified, not proven irrelevant**: before the
+//! sim writes a save of such a state, or runs a loot interaction, the entity's saved fields
+//! (position, `IsRevealed`, its parts) must be computed or recorded (WrathOracle's `dropped_loot`
+//! observation, `docs/poc5/loot-and-prone.md`); [`crate::narrative::Player::created_entities`]
+//! records the state it joined.
 
 use crate::content::is_a;
 use crate::rng::sites;
@@ -116,9 +139,13 @@ pub fn drop_loot_to_ground(w: &mut World, u: EntityIdx, dismember: bool, force: 
     });
     // `localScale *= GetScaleMultiplierBySize` is the view's; the yaw is Unity's generator.
     w.rng.range_float(sites::DROP_LOOT_ROTATION, 0.0, 360.0);
-    w.coverage.unsupported(
-        "UnitEntityData.DropLootToGround: the dropped loot prefab's view, scale and parts (InteractionLootPart.SetUnit, map marker settings) and its creation tick",
+    w.coverage.stub(
+        "UnitEntityData.DropLootToGround: the dropped loot prefab's view, scale and parts, and the bag's bounds, reveal and saved position: presentation and spatial state no rule of the fights reads (docs/poc5/loot-and-prone.md)",
     );
+    // `AddEntity(entity, state)`: queued for the next `EntityCreationController` tick, into the
+    // state holding the unit (the cross-scene one, else the loaded area's main state).
+    let cross = w.player.cross_scene_units.contains(&u);
+    w.player.creation_queue.push((dropped, cross));
     if dismember {
         // `entityData.IsDismember = true; BloodType = BloodType;` then the items that need
         // skinning leave the inventory.
@@ -134,6 +161,7 @@ pub fn drop_loot_to_ground(w: &mut World, u: EntityIdx, dismember: bool, force: 
         }
         // `Inventory.Items.Where(i => i.NeedSkinningForCollect).ToArray().ForEach(Inventory.Remove)`.
         let col = w.unit(u).and_then(|x| x.inventory_collection);
+        w.game_log.in_loot_drop = true;
         for item in w.unit(u).map(|x| x.inventory.clone()).unwrap_or_default() {
             if need_skinning_for_collect(w, u, item)
                 && let Some(col) = col
@@ -141,6 +169,7 @@ pub fn drop_loot_to_ground(w: &mut World, u: EntityIdx, dismember: bool, force: 
                 crate::items::collection_remove(w, col, item);
             }
         }
+        w.game_log.in_loot_drop = false;
     }
     // `droppedLoot.Loot = Inventory` (`Ensure<InteractionLootPart>()`), `DroppedBy = unit`
     // (`IsDroppedByPlayer = unit.IsPlayerFaction`), `m_DroppedLootEntityDataRef`.
@@ -226,7 +255,7 @@ mod tests {
 
     /// A lootable item drops: the next unique id names a new `DroppedLoot` entity holding the
     /// unit's own collection and remembering who dropped it, the rotation is drawn, and the unit
-    /// remembers the entity; the view and parts the prefab decides are reported.
+    /// remembers the entity; the view and parts the prefab decides are a stub.
     #[test]
     fn a_unit_with_loot_drops_a_loot_entity() {
         let (mut w, u) = world_with_unit();
@@ -246,12 +275,22 @@ mod tests {
         let draws = w.rng.log();
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].site, sites::DROP_LOOT_ROTATION.0);
+        // The prefab's presentation is a stub, not a report; the entity joins its state at the
+        // next `EntityCreationController` tick.
         assert!(
-            w.coverage
-                .unsupported
-                .keys()
-                .any(|k| k.starts_with("UnitEntityData.DropLootToGround:"))
+            w.coverage.stubbed.keys().any(|k| k.starts_with("UnitEntityData.DropLootToGround:"))
         );
+        // (The synthetic unit has no visual settings: its blood type is the one report.)
+        assert!(
+            w.coverage.unsupported.keys().all(|k| k.starts_with("UnitEntityData.BloodType")),
+            "{:?}",
+            w.coverage.unsupported
+        );
+        assert_eq!(w.player.creation_queue, vec![(d[0], false)]);
+        assert!(w.player.created_entities.is_empty());
+        crate::spawn::entity_creator_tick(&mut w);
+        assert_eq!(w.player.created_entities, vec![(d[0], false)]);
+        assert!(w.player.creation_queue.is_empty());
         // Dropped once: `m_DroppedLootEntityDataRef` is set, so `HasLoot` is false.
         drop_loot_to_ground(&mut w, u, true, false);
         assert_eq!(dropped(&w).len(), 1);

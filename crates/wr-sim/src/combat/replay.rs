@@ -192,6 +192,8 @@ pub struct Outcome {
     pub look: look::LookCounts,
     /// The roaming controller (`replay/roaming.rs`).
     pub roam: roaming::RoamCounts,
+    /// The prone controller (`replay/prone.rs`).
+    pub prone: prone::ProneCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
     /// messages against the recording's ([`crate::game_log::check`]).
     pub clog: Option<crate::game_log::check::Summary>,
@@ -510,12 +512,18 @@ pub enum Phase {
     Leave,
     /// `UnitReturnToConsciousController`: out of combat, each unit's group memory's `Enemies`.
     Conscious,
-    /// `UnitProneController`.
+    /// `UnitProneController`: the place of its recorded calls (the stop of `EnterProneState`, the
+    /// commands' `InterruptAll`), each of which ticks its unit; it runs nothing of its own.
     Prone,
+    /// The rest of `UnitProneController`'s units, and the check of its falls against the calls.
+    ProneEnd,
     /// `UnitHelplessController`.
     Helpless,
     /// `InspectUnitsController`: dead units' knowledge checks.
     Inspect,
+    /// `EntityCreationController`: the entities queued for creation join their state
+    /// (a dropped loot bag, a spawned unit).
+    Creation,
     /// `GameLogController`, the frame's last controller: the combat log's queued events to their
     /// threads.
     GameLog,
@@ -524,7 +532,7 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 17] = [
+const WORK: [Phase; 20] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
@@ -538,8 +546,11 @@ const WORK: [Phase; 17] = [
     Phase::Life,
     Phase::Leave,
     Phase::Conscious,
+    Phase::Prone,
+    Phase::ProneEnd,
     Phase::Helpless,
     Phase::Inspect,
+    Phase::Creation,
     Phase::GameLog,
     Phase::Post,
 ];
@@ -560,6 +571,7 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         | Phase::Projectiles
         | Phase::Fx
         | Phase::Abilities
+        | Phase::Creation
         | Phase::Life => m != PAUSE,
         Phase::Join | Phase::Prepare | Phase::LeavePrefix | Phase::Leave => m == DEFAULT,
         Phase::Memory => m == DEFAULT,
@@ -571,7 +583,9 @@ pub fn registered(m: i64, p: Phase) -> Option<bool> {
         Phase::Buffs => m == DEFAULT || m == DIALOG,
         Phase::Follow | Phase::Impatience | Phase::Ai | Phase::Engagement => m == DEFAULT,
         Phase::LosCache => m == DEFAULT || m == CUTSCENE,
-        Phase::Roaming | Phase::Prone => m == DEFAULT || m == DIALOG || m == CUTSCENE,
+        Phase::Roaming | Phase::Prone | Phase::ProneEnd => {
+            m == DEFAULT || m == DIALOG || m == CUTSCENE
+        }
     })
 }
 
@@ -996,6 +1010,18 @@ struct Driver<'t> {
     clog: bool,
     clog_inputs: BTreeMap<String, usize>,
     clog_rule_q: HashMap<i64, usize>,
+    /// The prone controller is the sim's (the commands are): the frame's recorded
+    /// `InterruptAll`s by it, by unit.
+    prone_on: bool,
+    prone_calls: Vec<EntityIdx>,
+    /// The units the controller ticked early this frame (at their `EnterProneState` stop), and the
+    /// ones that fell.
+    prone_done: HashSet<EntityIdx>,
+    prone_falls: Vec<EntityIdx>,
+    /// The awake list's index of the last unit a record named (the controller's order).
+    prone_cursor: Option<usize>,
+    /// Each unit's visit this frame: 1 stopped (`EnterProneState`), 2 its `InterruptAll` came.
+    prone_visit: HashMap<EntityIdx, u8>,
     out: Outcome,
 }
 
@@ -1240,6 +1266,12 @@ impl<'t> Driver<'t> {
             clog: false,
             clog_inputs: BTreeMap::new(),
             clog_rule_q: HashMap::new(),
+            prone_on: false,
+            prone_calls: Vec::new(),
+            prone_done: HashSet::new(),
+            prone_falls: Vec::new(),
+            prone_cursor: None,
+            prone_visit: HashMap::new(),
             out,
         };
         let mut d = d;
@@ -1280,6 +1312,7 @@ impl<'t> Driver<'t> {
             .iter()
             .any(|r| r["k"] == "obs" && r["ev"].as_str().is_some_and(|e| e.starts_with("uc_")));
         d.uc = d.tt && uc_family;
+        d.prone_on = d.uc;
         if uc_family && !d.tt {
             w.coverage.unsupported(
                 "driven replay: the command records without the turn controller's tick records",
@@ -2018,8 +2051,10 @@ impl Driver<'_> {
                     }
                 }
                 Phase::Life => super::life::life_tick(w),
+                Phase::ProneEnd => self.prone_end(w),
                 Phase::Helpless => super::life::helpless_tick(w),
                 Phase::Inspect => super::inspect::tick(w),
+                Phase::Creation => crate::spawn::entity_creator_tick(w),
                 Phase::GameLog => crate::game_log::tick(w),
                 // A recording with `loot_timer` records fires each timer at its record.
                 Phase::Post => {
@@ -4694,6 +4729,7 @@ mod impatience;
 mod look;
 mod memory;
 mod nav;
+mod prone;
 mod roaming;
 mod spells;
 mod targets;

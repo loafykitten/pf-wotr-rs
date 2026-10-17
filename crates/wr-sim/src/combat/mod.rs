@@ -33,6 +33,7 @@ pub mod order;
 pub mod orientation;
 pub mod paths;
 pub mod project;
+pub mod prone;
 pub mod replay;
 pub mod roaming;
 pub mod rules;

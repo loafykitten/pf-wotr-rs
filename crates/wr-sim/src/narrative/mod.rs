@@ -157,6 +157,10 @@ pub struct Player {
     pub cross_scene_units: Vec<EntityIdx>,
     /// The loaded area's main-state units, in order.
     pub area_units: Vec<EntityIdx>,
+    /// The entities that are not units and joined a state after the load (a dropped loot bag),
+    /// in order, with the state's flag as [`Self::creation_queue`]'s (`SceneEntitiesState.
+    /// AddEntityData`). The area's own are not tracked.
+    pub created_entities: Vec<(EntityIdx, bool)>,
     /// `Units.All` appends a unit when it joins a state (`EntityPool.HandleAdded`): the units
     /// that joined one after the load, in that order (the load's are in their states' order).
     pub joined_after_load: Vec<EntityIdx>,

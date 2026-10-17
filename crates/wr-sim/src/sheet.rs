@@ -175,6 +175,9 @@ pub fn unit_json(w: &World, u: EntityIdx) -> J {
         "flags": {"in_game": w.entity(u).is_in_game, "is_main_character": unit.is_main_character,
                   "is_dead": unit.life_state == 2, "is_conscious": unit.life_state == 0,
                   "is_player_faction": unit.is_player_faction, "is_turned_on": w.entity(u).is_turned_on},
+        // `UnitState.Prone` (`ProneState`, `Duration` in 100 ns ticks).
+        "prone": {"Active": unit.prone_active, "ShouldBeActive": unit.prone_should_be_active,
+                  "Duration": unit.prone_duration},
         "faction": guid(unit.faction),
         "original_size": unit.original_size.map(|s| s as i32),
         "hp": {"max": max, "damage": unit.damage, "nonlethal": nonlethal, "temporary": temp,

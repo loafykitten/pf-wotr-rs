@@ -234,7 +234,7 @@ fn stats_text(w: &World, v: i64, weapon: bool) -> Res<String> {
 
 /// An `EnumStrings<T>.GetText(value)` container (`DamageForm`, `SpellSchoolNames`…): the last
 /// entry with the value, else the enum's name (reported).
-fn enum_text(w: &World, container: &str, v: i64) -> Res<String> {
+pub(super) fn enum_text(w: &World, container: &str, v: i64) -> Res<String> {
     let s = super::strings(w)?;
     let entries = s
         .get(&format!("{container}/Entries"))
