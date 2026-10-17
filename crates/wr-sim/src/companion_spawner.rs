@@ -342,6 +342,14 @@ fn ensure_interactions(w: &mut World, u: EntityIdx) {
     }
 }
 
+/// `MyData.ApplyOnSpawn()`: each part's `OnSpawn`, then its `OnInitialize`.
+fn apply_on_spawn(w: &mut World, id: &str, inits: &[Init], u: EntityIdx) {
+    for i in inits {
+        on_spawn(w, std::slice::from_ref(i), u);
+        on_initialize(w, id, std::slice::from_ref(i), u);
+    }
+}
+
 /// `IUnitInitializer.OnSpawn` of each part.
 fn on_spawn(w: &mut World, inits: &[Init], u: EntityIdx) {
     for i in inits {
@@ -429,8 +437,7 @@ fn set_spawned_unit(w: &mut World, id: &str, u: EntityIdx) {
         s.spawned_unit = Some(uid);
     }
     let inits = inits_of(w, id);
-    on_spawn(w, &inits, u);
-    on_initialize(w, id, &inits, u);
+    apply_on_spawn(w, id, &inits, u);
     if let Some(s) = w.player.spawners.get_mut(id) {
         s.has_spawned = true;
         s.need_init_on_place = false;
@@ -703,6 +710,13 @@ impl ExternalHandler for SpawnerView {
                 let Some(u) = unit else { return };
                 if spawned_unit(w, id).is_none() && same_bp(w, u) && can_control(w, id, &s) {
                     begin_controlling(w, id, &s, false);
+                }
+            }
+            ("IPartyHandler", "HandleCompanionRemoved") => {
+                // `BeginControllingCompanion(stayInGame)`: the argument isn't in the sim's call.
+                let Some(u) = unit else { return };
+                if same_bp(w, u) && can_control(w, id, &s) {
+                    w.coverage.unsupported("CompanionSpawner.HandleCompanionRemoved");
                 }
             }
             ("ICompanionChangeHandler", "HandleUnrecruit") => {
