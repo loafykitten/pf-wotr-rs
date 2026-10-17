@@ -75,8 +75,10 @@ fn the_leaders_fall_and_the_lizards_loot_are_the_sims() {
                 diffs.is_empty() && n as usize == units_in_end,
                 "{name}: {n} of {units_in_end} units, {diffs:?}"
             );
-            // The dropped loot joined the state at the creation tick, with its unit remembering it.
-            assert_eq!(w.player.created_entities.len(), 1, "{name}");
+            // The dropped loot joined the state at the creation tick (`-134`'s second replay's
+            // shorter fight drops none).
+            let drops = usize::from(!(cap == "poc5-tb-134" && run == "replay-2"));
+            assert_eq!(w.player.created_entities.len(), drops, "{name}");
         }
     }
 }

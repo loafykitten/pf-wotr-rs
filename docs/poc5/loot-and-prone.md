@@ -187,6 +187,9 @@ player's faction).
   Unit tests: the prone controller's cases (`combat/prone.rs`), the item type of every blueprint class, the collection event
   and its thread, `compare_prone`, the dropped bag's creation, the phase order.
 
+Suites on the tree merged with `poc` (vision): the POC-5 capture suites through `scripts/heavy.sh` pass (36 of 36 as on `poc`) with
+`poc5_loot`'s three (39 of 39); `scripts/check.sh` 659 of 659.
+
 ## Reviews (gpt-6.1-sol, high)
 
 - Round 1, eight findings, fixed: the last frame's unknown-awake units (now taken from the frame's prefix set or reported), the
@@ -197,3 +200,5 @@ player's faction).
   `RemoveConditionAll(Petrified)` made unconditional, an oracle unit without a posture still passing.
 - Round 3, two: recorded falls now follow the awake list's eligibility and order; a subscriber of an items raise that made
   records is reported (the log's event is queued last, the game's order is subscription order).
+- Round 4, one: the order is checked for every recorded prone record, not only a unit's first (a unit's visit is finished before
+  the next's). No finding left after it was fixed (not re-reviewed beyond this).
