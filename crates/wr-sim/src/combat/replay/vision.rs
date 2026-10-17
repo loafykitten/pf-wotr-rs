@@ -332,7 +332,12 @@ impl Driver<'_> {
 
     /// `vis`: the changes of a unit's `CanBeInVisionRange`.
     fn vis_set(&mut self, w: &mut World, r: &Rv) {
-        // `UnitVisionRangeController` follows the movement and precedes the fog of war.
+        // `UnitVisionRangeController` follows the movement and precedes the fog of war; it isn't
+        // registered in the pause mode.
+        if self.frame.mode == Some(super::mode::PAUSE) {
+            Self::vis_report(w, "a vis record in the pause mode");
+            return;
+        }
         self.place(w, Phase::Visibility, "the vision range controller");
         let (true, Some(u), Some(add), Some(rem)) = (
             has_fields(r, &["u", "add", "rem"]),

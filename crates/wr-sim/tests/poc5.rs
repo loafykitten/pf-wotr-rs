@@ -6468,8 +6468,15 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
             renumber(recs);
         },
         // A cache clear: gone, elsewhere, doubled.
+        // (A clear of a cache cleared before: the sim knows that one's sample and predicts it.)
         |recs| {
-            let at = pos(recs, |r| ev(r, "los_clear") && r["t"].as_i64() > Some(300));
+            let mut seen = std::collections::HashSet::new();
+            let at = (0..recs.len())
+                .find(|&i| {
+                    ev(&recs[i], "los_clear")
+                        && !seen.insert(recs[i]["o"].as_str().unwrap().to_owned())
+                })
+                .expect("a second clear of a cache");
             recs.remove(at);
             renumber(recs);
         },

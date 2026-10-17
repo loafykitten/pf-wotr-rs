@@ -226,13 +226,17 @@ impl Vision {
         let moved = c.sample.is_some_and(|s| sqr_distance_2d(pos, s) >= MAX_POSITION_ERROR2);
         // A cache not known yet is decided only by the owner's movement from a sample a recorded
         // miss gave (its vision radius and its geometry stamp before the window aren't known).
-        if moved || (c.known && c.radius != Some(radius)) {
+        // `m_LastVisionRadius` of a cache not cleared in the window is unknown until a controller
+        // tick leaves it: it then equals the owner's radius.
+        let radius_changed = c.radius.is_some_and(|r| r != radius);
+        if moved || radius_changed {
             c.entries.clear();
             c.sample = Some(pos);
             c.radius = Some(radius);
             c.known = true;
             return Some(pos);
         }
+        c.radius.get_or_insert(radius);
         None
     }
 
@@ -341,7 +345,7 @@ impl Vision {
         // hit with the target exactly here answered can't have missed here.
         if let Some(e) = self.caches.get(&owner).and_then(|c| c.entries.get(&other))
             && e.pos.is_none()
-            && e.hits.iter().any(|h| bits(*h) == bits(there))
+            && e.hits.iter().any(|h| sqr_distance_2d(*h, there) == 0.0)
         {
             return Err(format!("{owner:?} missed on {other:?} at a position its cache hit at"));
         }
@@ -511,7 +515,7 @@ impl Vision {
             let there = vw.position(target);
             let answered = match e.pos {
                 Some(p) => sqr_distance_2d(p, there) < MAX_POSITION_ERROR2,
-                None => e.hits.iter().any(|h| bits(*h) == bits(there)),
+                None => e.hits.iter().any(|h| sqr_distance_2d(*h, there) == 0.0),
             };
             if answered {
                 return Err(format!(

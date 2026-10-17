@@ -385,3 +385,18 @@ fn a_miss_at_the_position_a_pre_window_entry_hit_at_is_refused() {
     v.pending.push_back(miss(&wv, O, T, [0.0; 3], true));
     assert!(v.has_los(&wv, O, T).unwrap_err().contains("missed on"));
 }
+
+#[test]
+fn a_cache_tick_that_doesnt_clear_tells_the_radius_of_a_cache_from_before_the_window() {
+    let wv = Wv::new();
+    wv.put(O, [0.0; 3]);
+    wv.put(T, [5.0, 0.0, 0.0]);
+    let mut v = vision(&[]);
+    assert_eq!(v.has_los(&wv, O, T), Ok(Los::Pre));
+    assert_eq!(v.clear_if_needed(&wv, O), None);
+    assert_eq!(v.caches[&O].radius, Some(11.7));
+    // The unit joins combat (another radius): the next tick must clear, whatever else is unknown.
+    *wv.radius.borrow_mut() = 8.5;
+    assert_eq!(v.clear_if_needed(&wv, O), Some([0.0; 3]));
+    assert!(v.caches[&O].known);
+}
