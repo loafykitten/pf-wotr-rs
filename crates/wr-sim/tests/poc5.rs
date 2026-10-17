@@ -6431,7 +6431,7 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
         r[k][i] = json!(f64::from(f32::from_bits((x as f32).to_bits() + 1)));
     }
     const X: &str = "driven replay: vision:";
-    let cases: [Change; 14] = [
+    let cases: [Change; 16] = [
         // The leaves the sim answers.
         |recs| {
             let at = pos(recs, |r| leaf(r, "uc_v") && r["u"].is_string());
@@ -6503,6 +6503,26 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
             let at = pos(recs, |r| ev(r, "vis") && r["t"].as_i64() > Some(300));
             recs[at]["rem"] = json!(["35fffa0a-06ba-4cba-be40-7914924be190"]);
             recs[at]["add"] = json!([]);
+        },
+        // The sim computes the sets: a change the recording has no record of, and a unit far
+        // beyond the vision range added to a set.
+        |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "vis")
+                    && r["t"].as_i64() > Some(300)
+                    && !r["add"].as_array().unwrap().is_empty()
+            });
+            recs.remove(at);
+            renumber(recs);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "vis") && r["t"].as_i64() > Some(300));
+            let far = recs
+                .iter()
+                .find(|r| ev(r, "u") && r["u"] == "4F22")
+                .map(|r| r["u"].clone())
+                .expect("a far unit");
+            recs[at]["add"].as_array_mut().unwrap().push(far);
         },
         // The geometry changed at run time (not modelled).
         |recs| {

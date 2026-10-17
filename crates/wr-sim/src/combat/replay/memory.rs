@@ -901,6 +901,19 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         Self::about(r, "g", &group_key(self.w, g))?;
         let us = mem_units(self.w, &r["v"])
             .ok_or_else(|| Desync("a near unit the sim doesn't have".into()))?;
+        // The sim's: the members' sets in the overlap's order, `ExtractNearUnits`' union.
+        let members = self.w.combat.groups.get(g).units.clone();
+        if let Some(sim) = self.d.vis_near_union(self.w, &members) {
+            self.d.out.mem_reads += 1;
+            if sim == us {
+                self.d.vis.counts.near_unions += 1;
+            } else {
+                self.w.coverage.unsupported(
+                    "driven replay: memory: the sim's near units (vision range sets, their order) differ from the recording's",
+                );
+            }
+            return Ok(us);
+        }
         Ok(self.input(us))
     }
 

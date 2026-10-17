@@ -88,7 +88,7 @@ fn alive(w: &World, u: EntityIdx, f: crate::world::FactIdx) -> bool {
 const S: i64 = 10_000_000;
 
 /// The controllers run in their registration order: groups, the turn controller, movement,
-/// sleeping units, cooldowns, commands, buffs, projectiles, effects, life, leaving combat, helpless, inspection, then what follows
+/// vision range and bounds, sleeping units, cooldowns, commands, buffs, projectiles, effects, life, leaving combat, helpless, inspection, then what follows
 /// `Game.Tick`. Each runs once per frame, also in a frame without any event; an event of an
 /// earlier phase than the frame has reached can't be placed.
 #[test]
@@ -98,7 +98,7 @@ fn phases_follow_the_registration_order() {
     assert_eq!(f.start(mode::DEFAULT), vec![]);
     assert_eq!(
         f.to(Commands),
-        Ok(vec![Groups, Turn, TurnChoose, LosCache, Move, Sleeping, Cooldowns])
+        Ok(vec![Groups, Turn, TurnChoose, LosCache, Move, Visibility, Sleeping, Cooldowns])
     );
     assert_eq!(f.to(Projectiles), Ok(vec![Buffs, Roaming]));
     assert_eq!(f.to(Projectiles), Ok(vec![]), "nothing between two resolves");
@@ -117,8 +117,9 @@ fn phases_follow_the_registration_order() {
     assert_eq!(f.start(mode::DEFAULT), vec![]);
     // A frame without events: everything at its end.
     let all = vec![
-        Groups, Turn, TurnChoose, LosCache, Move, Sleeping, Cooldowns, Buffs, Roaming, Abilities,
-        Life, Leave, Conscious, Prone, ProneEnd, Helpless, Inspect, Creation, GameLog, Post,
+        Groups, Turn, TurnChoose, LosCache, Move, Visibility, Sleeping, Cooldowns, Buffs, Roaming,
+        Abilities, Life, Leave, Conscious, Prone, ProneEnd, Helpless, Inspect, Creation, GameLog,
+        Post,
     ];
     assert_eq!(f.start(mode::DEFAULT), all);
     assert_eq!(f.finish(), all);
@@ -138,23 +139,23 @@ fn phases_follow_the_game_modes_registrations() {
     let mut f = Frame::default();
     f.start(mode::PAUSE);
     assert_eq!(f.to(Time), Err(Misplaced::NotRegistered));
-    assert_eq!(f.finish(), vec![Sleeping, Helpless, GameLog, Post]);
+    assert_eq!(f.finish(), vec![Visibility, Sleeping, Helpless, GameLog, Post]);
     f.start(mode::CUTSCENE);
     assert_eq!(f.to(Prepare), Err(Misplaced::NotRegistered));
     assert_eq!(f.to(LeavePrefix), Err(Misplaced::NotRegistered));
     assert_eq!(
         f.finish(),
         vec![
-            Groups, Turn, TurnChoose, LosCache, Move, Sleeping, Roaming, Abilities, Life,
-            Conscious, Prone, ProneEnd, Helpless, Inspect, Creation, GameLog, Post
+            Groups, Turn, TurnChoose, LosCache, Move, Visibility, Sleeping, Roaming, Abilities,
+            Life, Conscious, Prone, ProneEnd, Helpless, Inspect, Creation, GameLog, Post
         ]
     );
     f.start(mode::DIALOG);
     assert_eq!(
         f.finish(),
         vec![
-            Groups, Move, Sleeping, Buffs, Roaming, Abilities, Life, Conscious, Prone, ProneEnd,
-            Helpless, Inspect, Creation, GameLog, Post
+            Groups, Move, Visibility, Sleeping, Buffs, Roaming, Abilities, Life, Conscious, Prone,
+            ProneEnd, Helpless, Inspect, Creation, GameLog, Post
         ]
     );
     f.start(2);

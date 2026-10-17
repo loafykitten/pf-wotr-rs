@@ -27,6 +27,8 @@ use wr_nav::cs::{d, r};
 
 use crate::world::EntityIdx;
 
+pub mod range;
+
 pub type V3 = [f32; 3];
 
 /// `LineOfSightGeometry.EyeShift`: `Vector3.up`.
@@ -133,6 +135,11 @@ pub struct Vision {
     pub caches: HashMap<EntityIdx, SightCache>,
     /// `UnitEntityData.CanBeInVisionRange`, per unit (`UnitVisionRangeController`'s sets).
     pub near: HashMap<EntityIdx, HashSet<EntityIdx>>,
+    /// `CanBeInVisionRange`'s enumeration order (the set is refilled in the overlap's order each
+    /// tick), for the units whose set the sim computed this way.
+    pub near_order: HashMap<EntityIdx, Vec<EntityIdx>>,
+    /// `EntityBoundsController`'s sphere colliders (the overlap behind `near`).
+    pub bounds: range::Bounds,
     /// Each awake unit's vision radius at the frame's cache phase (a miss adopted later in the
     /// frame may have been made before a unit joined combat).
     pub frame_radius: HashMap<EntityIdx, f32>,

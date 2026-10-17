@@ -2,7 +2,8 @@
 //! the engagement's and the group memory's `HasLOS` reads and the AI's `InLos` are the sim's,
 //! checked against their leaves, over the sight caches the sim keeps from WrathOracle's `los`
 //! (every cache miss) and `los_clear` (every cache clear) records and the units in vision range
-//! from its `vis` records.
+//! (the sim's overlap, `vision_range.rs`, applied through its `vis` records: the record is the
+//! set's difference from the last one, checked against the sim's).
 //!
 //! Computed only when the area's line-of-sight file is built (`wr-import los-pack`) and its fog of
 //! war bounds are extracted (`wr-rules-data`); otherwise every read stays the recording's, as
@@ -45,13 +46,14 @@ pub(super) struct VisDriver {
     pub off: Option<String>,
     /// Without the driven agent the units' positions are the recording's rows (a unit's position
     /// at a frame's prefix; after `UnitMoveController` it is the next prefix's).
-    rows: HashMap<String, Vec<(i64, V3)>>,
+    pub(super) rows: HashMap<String, Vec<(i64, V3)>>,
     last_tick: i64,
     /// The owners whose `vis` record the frame has had.
     vis_seen: (i64, Vec<EntityIdx>),
     ag: bool,
     /// The frame whose cache phase ran.
     phase_frame: Option<i64>,
+    pub(super) range: super::vision_range::RangeDriver,
     pub counts: VisCounts,
 }
 
@@ -80,6 +82,29 @@ pub struct VisCounts {
     pub obstacle_reads: usize,
     /// `vis` records applied.
     pub vis_records: usize,
+    /// The vision controller's sets the sim computed (an awake unit in a frame) and compared with
+    /// the recording's, of which the frames with a `vis` record (a change), and the differences
+    /// found (reported). Pairs (a unit and a collider) the recording decided because the
+    /// collider's corpulence is unknown.
+    pub range_sets: usize,
+    pub range_changes: usize,
+    pub range_differences: usize,
+    pub range_maybe_pairs: usize,
+    /// Pairs computed with a known corpulence, the pairs within 1 cm and within 1 mm of the
+    /// capsule's surface, the closest pair's distance in micrometres, and the pairs whose `f32`
+    /// decision differs from the exact one.
+    pub range_pairs: usize,
+    pub range_within_1cm: usize,
+    pub range_within_1mm: usize,
+    pub range_closest_um: u64,
+    pub range_rounding: usize,
+    /// Collider radii taken from a read after the frame (the unit's first read is later).
+    pub range_corp_later: usize,
+    /// Colliders made after the window's first frame (units that joined later).
+    pub range_made_later: usize,
+    /// The group memory's near units (`ExtractNearUnits`, the members' sets in the overlap's
+    /// order) the sim computed and found equal to the recording's.
+    pub near_unions: usize,
     /// The game's own segments (`los_geom`) and `HasObstacle` probes (`los_probe`) the sim's
     /// geometry equals.
     pub geometry_segments: usize,
@@ -199,10 +224,17 @@ impl Driver<'_> {
             }
         }
         self.vis.last_tick = last;
+        self.vis.counts.range_closest_um = u64::MAX;
+        self.vis.range.start(trace);
     }
 
     fn vis_world<'a>(&'a self, w: &'a World, after_move: bool) -> Vw<'a> {
         Vw { w, d: &self.vis, tick: self.tick, after_move }
+    }
+
+    /// A unit's position as the model reads it (see [`Vw`]).
+    pub(super) fn vis_pos(&self, w: &World, u: EntityIdx, after_move: bool) -> V3 {
+        self.vis_world(w, after_move).pos(u)
     }
 
     /// Runs `f` on the sim's vision with the world's view.
@@ -221,7 +253,7 @@ impl Driver<'_> {
         out
     }
 
-    fn vis_report(w: &mut World, what: &str) {
+    pub(super) fn vis_report(w: &mut World, what: &str) {
         w.coverage.unsupported(format!("driven replay: vision: {what}"));
     }
 
@@ -338,7 +370,7 @@ impl Driver<'_> {
         }
     }
 
-    /// `vis`: the changes of a unit's `CanBeInVisionRange`.
+    /// `vis`: the changes of a unit's `CanBeInVisionRange` against its last record's set.
     fn vis_set(&mut self, w: &mut World, r: &Rv) {
         // `UnitVisionRangeController` follows the movement and precedes the fog of war; it isn't
         // registered in the pause mode.
@@ -368,7 +400,7 @@ impl Driver<'_> {
         if self.vis.vis_seen.0 != self.tick {
             self.vis.vis_seen = (self.tick, Vec::new());
         }
-        let first = !w.combat.vision.near.contains_key(&u);
+        let first = !self.vis.range.last.contains_key(&u);
         if self.vis.vis_seen.1.contains(&u)
             || !w.combat.awake.contains(&u)
             || (!first && add.is_empty() && rem.is_empty())
@@ -378,7 +410,7 @@ impl Driver<'_> {
         }
         self.vis.vis_seen.1.push(u);
         // The delta of two sets: unique, disjoint, removals present, additions absent.
-        let set = w.combat.vision.near.entry(u).or_default();
+        let mut set = self.vis.range.last.get(&u).cloned().unwrap_or_default();
         let unique =
             |a: &[EntityIdx]| a.iter().collect::<std::collections::HashSet<_>>().len() == a.len();
         if !unique(&add)
@@ -393,6 +425,9 @@ impl Driver<'_> {
             set.remove(&x);
         }
         set.extend(add);
+        self.vis.range.last.insert(u, set.clone());
+        w.combat.vision.near.insert(u, set.clone());
+        self.vis_range_check(w, u, &set, true);
     }
 
     /// `los`: a sight cache miss, queued for the read that made it.
@@ -474,6 +509,7 @@ impl Driver<'_> {
         if !self.vis.on {
             return;
         }
+        self.vis.range.expect.clear();
         if !w.combat.vision.clears.is_empty() {
             w.combat.vision.clears.clear();
             Self::vis_report(w, "the sim cleared a sight cache the game didn't");
@@ -508,6 +544,7 @@ impl Driver<'_> {
         k.adopted_clears = c.adopted_clears;
         k.unmodelled_fills = c.unmodelled_fills;
         k.obstacle_reads = c.obstacle_reads;
+        k.range_made_later = w.combat.vision.bounds.made_later;
         self.out.vision = Some(self.vis.counts.clone());
         self.out.vision_off = None;
     }

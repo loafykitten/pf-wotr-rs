@@ -472,8 +472,10 @@ pub enum Phase {
     /// `UnitMoveController`: units move; the current unit's movement spends its turn's budget
     /// (`TurnController.TickMovement`, the oracle's `cd_move`).
     Move,
-    /// `FogOfWarController` and `EntityVisibilityForPlayerController`: entities revealed
-    /// (`IEntityRevealedHandler`, the oracle's `insp_reveal`).
+    /// `EntityBoundsController` and `UnitVisionRangeController` (the sets of units in vision
+    /// range are the sim's, checked against the oracle's `vis` records), then `FogOfWarController`
+    /// and `EntityVisibilityForPlayerController`: entities revealed (`IEntityRevealedHandler`,
+    /// the oracle's `insp_reveal`).
     Visibility,
     /// `SleepingUnitsController`: the frame's awake units.
     Sleeping,
@@ -532,12 +534,13 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 20] = [
+const WORK: [Phase; 21] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
     Phase::LosCache,
     Phase::Move,
+    Phase::Visibility,
     Phase::Sleeping,
     Phase::Cooldowns,
     Phase::Buffs,
@@ -2026,6 +2029,7 @@ impl Driver<'_> {
                     super::groups::leave_tick(w, gate);
                 }
                 Phase::LosCache => self.vis_cache_phase(w),
+                Phase::Visibility => self.vis_range_phase(w),
                 Phase::Conscious => self.mem_return_to_conscious(w),
                 Phase::Sleeping => {
                     // The prefix's rows were written for the previous snapshot's units.
@@ -2035,6 +2039,7 @@ impl Driver<'_> {
                     if let Some(set) = self.awake_sets.get(&(self.tick + 1)) {
                         self.out.awake_recorded += apply_recorded_awake(w, set);
                     }
+                    self.vis_slept(w);
                 }
                 // The prepare controller's batch ends before the cooldowns controller ticks.
                 Phase::Cooldowns => {
@@ -4734,6 +4739,7 @@ mod roaming;
 mod spells;
 mod targets;
 mod vision;
+mod vision_range;
 
 #[cfg(test)]
 mod tests;

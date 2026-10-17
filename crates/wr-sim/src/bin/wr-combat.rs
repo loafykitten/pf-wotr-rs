@@ -298,7 +298,7 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
     );
     match (&out.vision, &out.vision_off) {
         (Some(v), _) => println!(
-            "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal",
+            "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal; vision range: sets computed {} and equal to the recording's (changes {}, differences {}); {} pairs with a known corpulence (within 1 cm {}, within 1 mm {}, closest {} um, f32 against exact differing {}), {} pairs of an unknown corpulence the recording decided, radii from a later read {}, colliders made after the first frame {}; the memory's near-unit unions (the sets' order) equal {}",
             v.engage,
             v.engage_pre,
             v.memory,
@@ -316,7 +316,19 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
             v.obstacle_reads,
             v.vis_records,
             v.geometry_segments,
-            v.probes
+            v.probes,
+            v.range_sets,
+            v.range_changes,
+            v.range_differences,
+            v.range_pairs,
+            v.range_within_1cm,
+            v.range_within_1mm,
+            v.range_closest_um,
+            v.range_rounding,
+            v.range_maybe_pairs,
+            v.range_corp_later,
+            v.range_made_later,
+            v.near_unions
         ),
         (None, Some(why)) => {
             println!("vision: not computed ({why}); line of sight stays the recording's")
