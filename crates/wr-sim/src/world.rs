@@ -493,6 +493,13 @@ pub struct World {
     /// Units the load's start pass took as awake whose toggles acted (see
     /// `spawn::settle_assumed_awake`), until settled.
     pub assumed_awake_at_load: Vec<EntityIdx>,
+    /// Loaded units woken during the load (`UnitEntityData.Wake()` from a position change:
+    /// `AwakeTimer >= 0` until `SleepingUnitsController` counts it down after the first tick),
+    /// in order: the first tick's start pass ticks them (`spawn::after_area_load`).
+    pub woken_at_load: Vec<EntityIdx>,
+    /// Loaded units whose `IsInGame` the load's spawners and capital mode changed (their
+    /// toggles stopped and activated again), in order.
+    pub in_game_changed_at_load: Vec<EntityIdx>,
     /// `GameLogController` and `GameLogContext` (the combat log), when a run models it.
     pub game_log: crate::game_log::GameLog,
 }
@@ -611,6 +618,8 @@ impl World {
             level_up: Vec::new(),
             unregistered_items: std::collections::HashSet::new(),
             assumed_awake_at_load: Vec::new(),
+            woken_at_load: Vec::new(),
+            in_game_changed_at_load: Vec::new(),
             game_log: crate::game_log::GameLog::default(),
         }
     }

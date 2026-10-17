@@ -22,7 +22,8 @@
 //!   exit).
 //! - `OnPostLoad`: the delegate's `OnPostLoad`; if the fact is active and the activation
 //!   was processed, `Resume` (or, when the linked area is unavailable or the etude is
-//!   read-only, `m_NeedResume`, not saved).
+//!   read-only, `m_NeedResume`, not saved). At a save's load no area is loaded yet, so any
+//!   linked area part is unavailable there.
 //! - `OnEtudesUpdate` / `OnAreaActivated` (the runtime subscribes to both): `MaybeEnter`,
 //!   which `Enter`s the first time and `Resume`s once after a deferred post-load.
 //!
@@ -111,8 +112,12 @@ pub fn runtime_hook(w: &mut World, c: CompRef, h: Hook) {
         }
         Hook::PostLoad => {
             delegate_hook(w, c, h);
+            // `Player.PostLoad` runs before the save's area loads: `AreaService.CurrentAreaPart`
+            // is null then (`CurrentlyLoadedArea == null`), so an etude with a linked area part
+            // (its own or up its parents) defers its resume to `MaybeEnter`.
+            let no_area = w.fact(c.fact).blueprint.is_some_and(|g| unavailable_for(w, g, None));
             if w.fact(c.fact).is_active && processed(w, c) {
-                if linked_area_unavailable(w, c) || etude_read_only(w, c) {
+                if no_area || etude_read_only(w, c) {
                     w.component_mut(c).need_resume = true;
                 } else {
                     phase(w, c, Phase::Resume);
@@ -432,6 +437,13 @@ fn run_phase(w: &mut World, c: CompRef, name: &'static str, p: Phase) -> R {
             rt.remove("$Leader");
             rt.remove("$Followers");
         }
+        // `CapitalCompanionLogic`: the capital mode and the companions' placement
+        // (`crate::companion_spawner`).
+        ("CapitalCompanionLogic", Enter) => {
+            crate::companion_spawner::capital_on_enter(w, v.bool("m_RestAllRemoteCompanions"));
+        }
+        ("CapitalCompanionLogic", Resume) => crate::companion_spawner::place_all_companions(w),
+        ("CapitalCompanionLogic", Exit) => crate::companion_spawner::capital_on_exit(w),
         // Presentation: Wwise events and objects, sound banks, music, weather.
         (
             "EtudeBracketAudioEvents"
@@ -682,7 +694,7 @@ fn set_companion_position(w: &mut World, v: View<'_>) {
     // `m_IgnoreWhenEx` defaults to true.
     let ignore_ex = if v.has("m_IgnoreWhenEx") { v.bool("m_IgnoreWhenEx") } else { true };
     let acts =
-        (state != Some(2) || w.player.capital_party_mode) && (state != Some(3) || !ignore_ex);
+        (state != Some(2) || w.player.capital_party_mode()) && (state != Some(3) || !ignore_ex);
     if acts {
         w.coverage.unsupported("EtudeBracketSetCompanionPosition: locator placement");
     }
@@ -816,6 +828,12 @@ fn set_companion_position_event(w: &mut World, c: CompRef, iface: &str) {
             }
         }
         ("IPartyHandler", Some(("HandleCompanionRemoved", _))) => {}
+        // `HandleCapitalModeChanged`: `OnEnter()` when the capital mode is on.
+        ("IPartyHandler", Some(("HandleCapitalModeChanged", _))) => {
+            if w.player.capital_party_mode() {
+                phase(w, c, Phase::Enter);
+            }
+        }
         _ => w.coverage.unsupported(format!("EtudeBracketSetCompanionPosition: {iface}")),
     }
 }
@@ -858,7 +876,13 @@ fn disable_mount_riding_event(w: &mut World, _c: CompRef, iface: &str) {
                 add_condition(w, u, DISABLE_MOUNT_RIDING, None);
             }
         }
-        ("IPartyHandler", Some(("HandleCompanionActivated" | "HandleCompanionRemoved", _))) => {}
+        (
+            "IPartyHandler",
+            Some((
+                "HandleCompanionActivated" | "HandleCompanionRemoved" | "HandleCapitalModeChanged",
+                _,
+            )),
+        ) => {}
         _ => w.coverage.unsupported(format!("DisableMountRiding: {iface} (method unknown)")),
     }
 }

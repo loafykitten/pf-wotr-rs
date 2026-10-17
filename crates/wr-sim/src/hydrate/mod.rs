@@ -1353,6 +1353,15 @@ pub fn hydrate(
     ld.resolve_masters();
     let mut w = ld.w;
     w.main_character = main_id.as_deref().and_then(|id| w.by_id.get(id).copied());
+    // The loaded scenes, and the spawners' data in the order they join `State.Entities` (their
+    // states' `PostLoad`, main state first).
+    w.scene.loaded_scenes = states.iter().map(|st| st.scene.clone()).collect();
+    w.player.spawner_order = states
+        .iter()
+        .flat_map(|st| st.saved.iter())
+        .filter(|(_, clr)| is_spawner_data(clr))
+        .map(|(id, _)| id.clone())
+        .collect();
     w.player.cross_scene_units = party_entities.clone();
     let mut area_units: Vec<EntityIdx> =
         states.iter().flat_map(|st| st.units.iter().copied()).collect();
@@ -1468,6 +1477,9 @@ pub fn hydrate(
     // with its scene and turns it on; `LoadAreaCoroutine` has chosen the area part by then ----
     w.coverage.context = None;
     crate::area_parts::establish(&mut w);
+    // The area's scenes load (`MatchAreaStaticAndDynamicScenesCoroutine`) before its states are
+    // post-loaded: the companion spawner views subscribe as they're enabled.
+    crate::companion_spawner::subscribe_views(&mut w);
     let spawned = load_area_states(&mut w, &states);
     // `Game.AfterSceneLoaderFinishedArea`: the creation queue joins the scene state there,
     // then controllers tick (the activatable-abilities controller restarts stopped toggles).
@@ -1492,6 +1504,11 @@ pub fn hydrate(
     Ok((w, report))
 }
 
+/// A `UnitSpawnerBase.MyData` (or `CompanionSpawner.MyData`), read by `area_narrative`.
+fn is_spawner_data(clr: &str) -> bool {
+    clr.contains("UnitSpawnerBase+MyData") || clr.contains("CompanionSpawner+MyData")
+}
+
 /// `SceneLoader.LoadAreaCoroutine` for a loaded save's area states: first
 /// `AreaPersistentState.PostLoad` (`m_MainState.PostLoad()`, then each loaded additional
 /// state's, then `m_Area.PostLoad()`, whose area facts aren't modelled), then for each active
@@ -1512,6 +1529,15 @@ fn load_area_states(w: &mut World, states: &[SceneState]) -> Vec<EntityIdx> {
                 crate::scene_parts::view_attach(w, *e);
             }
         }
+        // The companion spawners' data attach to their views too (`OnViewDidAttach`).
+        let spawners: Vec<String> = st
+            .saved
+            .iter()
+            .filter(|(_, clr)| clr.contains("CompanionSpawner+MyData"))
+            .map(|(id, _)| id.clone())
+            .collect();
+        w.coverage.context = None;
+        crate::companion_spawner::view_did_attach(w, &spawners);
         // `SceneEntitiesState.TurnOn`: every entity not yet on, in order.
         for entry in &st.order {
             match entry {
@@ -1531,6 +1557,9 @@ fn load_area_states(w: &mut World, states: &[SceneState]) -> Vec<EntityIdx> {
             }
         }
     }
+    // `ProcessSpawnerActivationCoroutine(enterPoint)`: no enter point when loading a save.
+    w.coverage.context = None;
+    crate::companion_spawner::process_activation(w);
     spawned
 }
 
@@ -1676,8 +1705,7 @@ impl Loader<'_> {
             } else {
                 *report.not_hydrated.entry(o.ty().to_owned()).or_default() += 1;
                 // Other scene entities aren't hydrated, so their load-time callbacks can't run.
-                let read = o.clr().contains("UnitSpawnerBase+MyData")
-                    || o.ty() == "UnitPlaceholderEntityData";
+                let read = is_spawner_data(o.clr()) || o.ty() == "UnitPlaceholderEntityData";
                 if !read {
                     self.w
                         .coverage

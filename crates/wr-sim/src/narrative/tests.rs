@@ -214,12 +214,24 @@ fn unported_bracket_phases_fail_closed_and_presentation_is_stubbed() {
     let (mut w, _) = world();
     let music = bracket(&w, 0xB3, "Kingmaker.AreaLogic.Etudes.EtudeBracketMusic");
     loaded_etude(&mut w, &music, true, false);
+    let trigger = bracket(&w, 0xB4, "Kingmaker.AreaLogic.Etudes.EtudeBracketTriggerAction");
+    loaded_etude(&mut w, &trigger, true, false);
+    load(&mut w);
+    bus::raise_global(&mut w, "IEtudesUpdateHandler", None);
+    assert!(w.coverage.stubbed.keys().any(|k| k.starts_with("EtudeBracketMusic.OnEnter")));
+    assert!(w.coverage.unsupported.contains_key("EtudeBracketTriggerAction.OnEnter"));
+}
+
+/// `CapitalCompanionLogic.OnEnter` turns the capital mode on (`crate::companion_spawner`).
+#[test]
+fn capital_companion_logic_turns_the_capital_mode_on() {
+    let (mut w, _) = world();
     let capital = bracket(&w, 0xB4, "Kingmaker.AreaLogic.Capital.CapitalCompanionLogic");
     loaded_etude(&mut w, &capital, true, false);
     load(&mut w);
     bus::raise_global(&mut w, "IEtudesUpdateHandler", None);
-    assert!(w.coverage.stubbed.keys().any(|k| k.starts_with("EtudeBracketMusic.OnEnter")));
-    assert!(w.coverage.unsupported.contains_key("CapitalCompanionLogic.OnEnter"));
+    assert!(w.coverage.executed.contains_key("CapitalCompanionLogic.OnEnter"));
+    assert!(w.player.capital_party_mode());
 }
 
 fn check(w: &mut World, c: &Object) -> bool {

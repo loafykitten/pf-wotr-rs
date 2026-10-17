@@ -4,6 +4,7 @@
 # groups), from the game install via the importer. Known areas:
 #   Prologue_Caves_1     bad465e5404604346bdf71ef50b3299a
 #   Prologue_Neathholm   61fcf2a352daa394ebae399b1348ba62
+#   DrezenCapital        2570015799edf594daf2f076f2f975d8   (Manual_10)
 # The sim loads the file when it exists; without it an area's scene entities are reported
 # unsupported (the run is not valid), never approximated. The unit prefab table
 # (cache/sim/unit-prefabs.json: each unit prefab's IsInGameBySettings, which every unit built

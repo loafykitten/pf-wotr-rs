@@ -511,7 +511,7 @@ fn dialog_cr_override(w: &World) -> bool {
 fn capital_party_checks_enabled(w: &World, ab: &Rc<Blueprint>) -> bool {
     match ab.view().obj("CharacterSelection").map_or(0, |c| c.int("SelectionType")) {
         6 => true,
-        0 => w.player.capital_party_mode,
+        0 => w.player.capital_party_mode(),
         _ => false,
     }
 }
@@ -1000,7 +1000,7 @@ fn play_check(w: &mut World, c: Guid, b: &Rc<Blueprint>) {
     let result = if let Some(u) = unit {
         // `GameHelper.TriggerStatCheck(RuleStatCheck.Create(...), null, !BanPartyCheckInCamp)`:
         // a party check in capital mode, else the unit's own check.
-        if !v.bool("BanPartyCheckInCamp") && w.player.capital_party_mode {
+        if !v.bool("BanPartyCheckInCamp") && w.player.capital_party_mode() {
             w.coverage.unsupported("GameHelper.TriggerStatCheck: capital party mode");
         }
         let Some(mut r) = stat_check_create(w, u, stat, dc) else { return };

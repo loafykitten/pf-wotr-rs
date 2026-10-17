@@ -205,6 +205,7 @@ pub(super) fn check_scene_views(w: &mut crate::world::World, states: &[super::Sc
 fn needs_scene_view(clr: &str) -> bool {
     (KINDS.iter().any(|k| clr.ends_with(k)) && !clr.ends_with("Cutscenes.CutscenePlayerData"))
         || clr.contains("UnitSpawnerBase+MyData")
+        || clr.contains("CompanionSpawner+MyData")
 }
 
 /// `EntityViewBase.CreatesDataOnLoad` by view class (`false` in the base; `true` in

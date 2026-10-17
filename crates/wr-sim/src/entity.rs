@@ -367,6 +367,16 @@ pub fn set_is_in_game(w: &mut World, e: EntityIdx, value: bool) {
         "HandleObjectInGameChanged",
         unit.then_some(e),
     );
+    // `UnitPartCompanion.HandleObjectInGameChanged` (the part is a global `IInGameHandler`,
+    // subscribed while its owner is turned on; only its owner's change matters): back in the
+    // game, `IsIgnoreFixInGame` clears.
+    if value
+        && w.entity(e).is_turned_on
+        && w.entity(e).parts.iter().any(|p| p.clr == "UnitPartCompanion")
+        && let Some(x) = w.unit_mut(e)
+    {
+        x.ignore_fix_in_game = false;
+    }
     if !unit {
         match w.entity(e).clr {
             "MapObjectEntityData" | "ScriptZoneData" => {

@@ -51,6 +51,7 @@ pub fn registry() -> Registry {
     shifters_fury::register(&mut r);
     enchant::register(&mut r);
     crate::spawn::register(&mut r);
+    crate::companion_spawner::register(&mut r);
     crate::combat::weapon::register(&mut r);
     crate::combat::components::register(&mut r);
     crate::combat::counts::register(&mut r);

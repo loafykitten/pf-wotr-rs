@@ -227,7 +227,7 @@ pub fn gain_party_experience(w: &mut World, gained: i32, gain: GainType) {
     }
     let only_active =
         w.settings.difficulty.settings.only_active_companions_receive_experience.unwrap_or(false);
-    let flag = !only_active || w.player.capital_party_mode;
+    let flag = !only_active || w.player.capital_party_mode();
     let lists = crate::narrative::party::character_lists(w);
     let units: Vec<EntityIdx> = if flag {
         lists

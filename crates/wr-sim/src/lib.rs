@@ -17,6 +17,7 @@
 pub mod area_parts;
 pub mod armor;
 pub mod combat;
+pub mod companion_spawner;
 pub mod compare;
 pub mod components;
 pub mod content;
