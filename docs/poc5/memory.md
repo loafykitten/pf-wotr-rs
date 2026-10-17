@@ -439,6 +439,14 @@ range), line of sight, stealth and the invisibility loop, `Passive`, `AwakeTimer
 `LastSurpriseActionTime` and a neutral target's `AttackFactions`, `UnitGroupsController`'s deferred faction updates
 (a faction change: its enemy list clear would show as a cache difference, reported).
 
+## Vision, line of sight: now the sim's (stream "vision", 2026-10-17)
+
+`LineOfSightGeometry` is ported (`crates/wr-los`, the area's blockers imported by `wr-import los-pack`), with
+`UnitSightCache` and `UnitLineOfSightCacheController` (`combat/vision.rs`, `Phase::LosCache`): the engagement's `los`, the
+memory's `los` (`group.HasLOS`), the AI's `InLos` and the `HasObstacle` answers of the movement simulation and the path
+search are computed and checked in the driven replay, every sight cache miss and clear too. `CanBeInVisionRange` stays the
+`vis` records (PhysX), so does the ready groups' fog of war. Evidence, counts and the limits: `docs/poc5/vision.md`.
+
 ## Observer changes requested
 
 Done for H1 (above; the names differ from this list's: `mem_` records, `mem_v` leaves). For H1, a WrathOracle observer `memory` (requires `impatience`), following

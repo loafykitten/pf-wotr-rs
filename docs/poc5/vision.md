@@ -191,3 +191,31 @@ The caches' state before the window (entries, sample, radius) is the only other 
 (`los_cache` at the window's start: for each awake unit `m_LastSamplePosition`, `m_LastVisionRadius`, `m_LastGeometryUpdateTime`,
 and each entry's target id, position and two results) every read would be computed, not just the ones after a unit's first
 clear in the window. It is a private field (`UnitSightCache.m_Cache`, a `Dictionary<string, CacheEntry>`), read by reflection.
+
+Two small additions would remove the sim's remaining inferences about the caches:
+
+- the target's id in `los` (`t`): today the target of a miss by a reader the sim doesn't run is the unit standing at the
+  eye point (in vision range when several do; a `GetLOS` called directly, as `AreaEffectEntityData.ShouldUnitBeInside`
+  does, bypasses that range gate), and a deferred miss may have been made at the frame's starting radius or the current one;
+- the caller of each miss (`callers`, as `mem_add` has), so a reader the sim doesn't run is named.
+
+## Limits of the model (accepted, each at worst a false report)
+
+- A group read over several entries from before the window leaves them unresolved when the aggregate is true; a later
+  contradictory aggregate isn't caught (9,336 of 1.49 million group reads touch such entries; every one agrees with a
+  fresh computation).
+- `vis_group` takes a miss pending for a later member and the same target as that member's read (an earlier unmodelled
+  miss on the same pair could be mistaken for it: only in a capture with unmodelled readers and then a false report).
+- The clears are matched by owner, not in `AwakeUnits` order (independent caches).
+- `CanBeInVisionRange` is the recording's (`vis`): the capsule-sphere overlap isn't ported (PhysX; membership is what
+  `HasLOS` needs, but the sets' order, which the memory dictionary observes, is PhysX's).
+- The TransformPoint rounding of the blockers and the grid's bounds are derived, not compared (above).
+- Without the driven agent (`-95`, `-96`, `-109`, `-111`, `-112`) a unit's position is the recording's rows, and in the
+  recording's last frame the last prefix's (counted in `last_frame_reads`; checked against the leaves like any other).
+
+## Rebuilding after merging
+
+`wr-rules-data` (once per install; the area bounds table gains the fog of war bounds; an old table leaves line of sight
+a recorded input, reported in the run's `vision:` line), then per area `scripts/scene-cache.sh <name> <guid>` (now writes
+the line-of-sight file too) or just `wr-import los-pack --area <name> --guid <guid>`.
+
