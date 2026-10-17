@@ -201,4 +201,4 @@ Suites on the tree merged with `poc` (vision): the POC-5 capture suites through 
 - Round 3, two: recorded falls now follow the awake list's eligibility and order; a subscriber of an items raise that made
   records is reported (the log's event is queued last, the game's order is subscription order).
 - Round 4, one: the order is checked for every recorded prone record, not only a unit's first (a unit's visit is finished before
-  the next's). No finding left after it was fixed (not re-reviewed beyond this).
+  the next's). - Round 5, two: the last-frame fallback units in the pool's order, a unit's visit can't reopen (a stop after its call, a second stop). Fixed; the sweep (105 runs) and the suites (39 of 39) are of the final tree.
