@@ -476,6 +476,15 @@ fn set_position(w: &mut World, u: EntityIdx, p: [f32; 3]) {
     }
 }
 
+/// `unit.IsInGame = value`, the unit recorded when it changes (its toggles stop and activate
+/// again: the first tick's start pass looks at it, `spawn::after_area_load`).
+fn set_in_game(w: &mut World, u: EntityIdx, value: bool) {
+    if w.entity(u).is_in_game != value && !w.in_game_changed_at_load.contains(&u) {
+        w.in_game_changed_at_load.push(u);
+    }
+    crate::entity::set_is_in_game(w, u, value);
+}
+
 /// `UnitEntityData.Orientation = value` (also `DesiredOrientation`).
 fn set_orientation(w: &mut World, u: EntityIdx, yaw: f32) {
     if let Some(x) = w.unit_mut(u) {
@@ -495,12 +504,12 @@ fn place_companion(w: &mut World, id: &str, s: &Settings, u: EntityIdx, stay_in_
     if should_show_unit(w, s, Some(u)) {
         set_position(w, u, v.position);
         set_orientation(w, u, view_yaw(&v));
-        crate::entity::set_is_in_game(w, u, true);
+        set_in_game(w, u, true);
         did_place = true;
     } else if !stay_in_game
         && (!has_part(w, u, "UnitPartCompanion") || !is_controllable_in_party(w, u))
     {
-        crate::entity::set_is_in_game(w, u, false);
+        set_in_game(w, u, false);
     }
     on_place_companion(w, id, did_place);
 }
@@ -667,6 +676,28 @@ pub fn view_did_attach(w: &mut World, ids: &[String]) {
     }
 }
 
+/// Before a subscribed spawner takes its companion in an event: if another subscribed spawner
+/// could take the same companion now, the outcome depends on the views' subscription order,
+/// which is inferred (the cache's object order): reported.
+fn report_order_dependence(w: &mut World, id: &str, s: &Settings) {
+    let Some(mine) = my_companion(w, s) else { return };
+    for other in w.scene.companion_views.clone() {
+        if other == id || !w.player.spawners.contains_key(&other) {
+            continue;
+        }
+        let Some(os) = settings_of(w, &other) else { continue };
+        if os.blueprint != s.blueprint || os.use_pet != s.use_pet {
+            continue;
+        }
+        if my_companion(w, &os) == Some(mine) && can_control(w, &other, &os) {
+            w.coverage.unsupported(
+                "CompanionSpawner: two spawners can take a companion in one event (their subscription order is inferred)",
+            );
+            return;
+        }
+    }
+}
+
 /// The external-handler id base of the companion spawner views.
 const VIEW_HANDLER_BASE: u32 = 0x4353_0000;
 
@@ -694,6 +725,7 @@ impl ExternalHandler for SpawnerView {
             ("IPartyHandler", "HandleCapitalModeChanged") => {
                 w.coverage.executed("CompanionSpawner.HandleCapitalModeChanged");
                 if can_control(w, id, &s) {
+                    report_order_dependence(w, id, &s);
                     begin_controlling(w, id, &s, false);
                 }
             }
@@ -703,12 +735,14 @@ impl ExternalHandler for SpawnerView {
                     s.use_pet && w.unit(u).and_then(|x| x.master).is_some_and(|m| same_bp(w, m));
                 let matches = same_bp(w, u) || (method == "HandleAddCompanion" && pet_of);
                 if matches && can_control(w, id, &s) {
+                    report_order_dependence(w, id, &s);
                     begin_controlling(w, id, &s, false);
                 }
             }
             ("ICompanionChangeHandler", "HandleRecruit") => {
                 let Some(u) = unit else { return };
                 if spawned_unit(w, id).is_none() && same_bp(w, u) && can_control(w, id, &s) {
+                    report_order_dependence(w, id, &s);
                     begin_controlling(w, id, &s, false);
                 }
             }
@@ -750,6 +784,7 @@ pub fn subscribe_views(w: &mut World) {
         let key = VIEW_HANDLER_BASE + n;
         n += 1;
         w.bus.external.insert(key, Rc::new(SpawnerView(v.unique_id.clone())));
+        w.scene.companion_views.push(v.unique_id.clone());
         crate::rulebook::bus::subscribe(w, Sub::External(key));
     }
 }
@@ -774,14 +809,21 @@ fn should_process(w: &mut World, id: &str, v: &ViewInfo) -> Option<bool> {
     Some(on_init && !has_spawned)
 }
 
-/// The spawner's blueprint's `Prefab.AssetId` (`GetPrefabId`), `None` when it has none.
+/// The spawner's blueprint's `Prefab?.AssetId` (`GetPrefabId`): `None` for no blueprint, no
+/// link or a null `AssetId`; an empty one stays `""` (`string.Compare` sorts null before it).
 fn prefab_id(w: &World, v: &ViewInfo) -> Option<String> {
+    use wr_content::node::Node;
     let c = v
         .components
         .iter()
         .find(|c| c.class.ends_with(".UnitSpawner") || c.class.ends_with(".CompanionSpawner"))?;
     let bp: Rc<Blueprint> = guid_field(&c.fields["m_Blueprint"]).and_then(|g| w.content.get(g))?;
-    crate::scene_spawn::blueprint_prefab(&bp)
+    let view = bp.view();
+    match view.node("Prefab")? {
+        Node::WeakLink(Some(s)) | Node::WeakLinkLegacy(s, _) | Node::Str(s) => Some(s.to_string()),
+        Node::Object(o) => crate::content::View(o).str("AssetId").map(str::to_owned),
+        _ => None,
+    }
 }
 
 /// `string.Compare(a, b, StringComparison.Ordinal)` with null first.
@@ -914,7 +956,7 @@ pub fn place_all_companions(w: &mut World) {
         }
         let companion = has_part(w, u, "UnitPartCompanion");
         if !companion || (current_spawner(w, u).is_none() && !counter(w, u, "IgnoresSpawners")) {
-            crate::entity::set_is_in_game(w, u, false);
+            set_in_game(w, u, false);
         }
     }
     w.coverage.stub("CapitalCompanionLogic.PlaceAllCompanions: select the main character (UI)");
@@ -979,7 +1021,7 @@ pub fn capital_on_exit(w: &mut World) {
         if has_part(w, u, "UnitPartCompanion")
             && w.unit(u).and_then(|x| x.companion_state) == Some(REMOTE)
         {
-            crate::entity::set_is_in_game(w, u, false);
+            set_in_game(w, u, false);
         }
     }
     set_capital_mode(w, false);
@@ -1232,5 +1274,36 @@ mod tests {
         assert_eq!(ordinal(Some("a"), Some("b")), -1);
         assert_eq!(ordinal(None, Some("")), -1);
         assert_eq!(ordinal(Some("b"), Some("b")), 0);
+    }
+
+    /// Two spawners that could both take a companion in one event: the views' subscription
+    /// order (inferred) decides, which is reported; the first in that order takes it.
+    #[test]
+    fn competing_spawners_report_their_inferred_order() {
+        let (mut w, u) = setup();
+        w.unit_mut(u).expect("unit").companion_spawner = None;
+        let d = w.player.spawners.get_mut("sp").expect("sp");
+        d.spawned_unit = None;
+        d.has_spawned = false;
+        d.parts.clear();
+        let mut cache = (**w.scene.cache.as_ref().expect("cache")).clone();
+        cache.views.push(spawner_view("sp2", COMPANION_BP, true, false, [5.0, 0.0, 5.0]));
+        w.scene.cache = Some(Rc::new(cache));
+        w.player.spawners.insert(
+            "sp2".into(),
+            crate::narrative::Spawner {
+                did_spawn_once: true,
+                companion: true,
+                in_game: true,
+                ..Default::default()
+            },
+        );
+        subscribe_views(&mut w);
+        set_capital_mode(&mut w, true);
+        assert!(
+            w.coverage.unsupported.keys().any(|k| k.contains("subscription order is inferred"))
+        );
+        assert_eq!(w.unit(u).expect("unit").companion_spawner.as_deref(), Some("sp"));
+        assert_eq!(w.unit(u).expect("unit").position, [-13.467, 40.136, 60.642]);
     }
 }

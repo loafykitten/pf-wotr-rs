@@ -22,7 +22,8 @@
 //!   exit).
 //! - `OnPostLoad`: the delegate's `OnPostLoad`; if the fact is active and the activation
 //!   was processed, `Resume` (or, when the linked area is unavailable or the etude is
-//!   read-only, `m_NeedResume`, not saved).
+//!   read-only, `m_NeedResume`, not saved). At a save's load no area is loaded yet, so any
+//!   linked area part is unavailable there.
 //! - `OnEtudesUpdate` / `OnAreaActivated` (the runtime subscribes to both): `MaybeEnter`,
 //!   which `Enter`s the first time and `Resume`s once after a deferred post-load.
 //!
@@ -111,8 +112,12 @@ pub fn runtime_hook(w: &mut World, c: CompRef, h: Hook) {
         }
         Hook::PostLoad => {
             delegate_hook(w, c, h);
+            // `Player.PostLoad` runs before the save's area loads: `AreaService.CurrentAreaPart`
+            // is null then (`CurrentlyLoadedArea == null`), so an etude with a linked area part
+            // (its own or up its parents) defers its resume to `MaybeEnter`.
+            let no_area = w.fact(c.fact).blueprint.is_some_and(|g| unavailable_for(w, g, None));
             if w.fact(c.fact).is_active && processed(w, c) {
-                if linked_area_unavailable(w, c) || etude_read_only(w, c) {
+                if no_area || etude_read_only(w, c) {
                     w.component_mut(c).need_resume = true;
                 } else {
                     phase(w, c, Phase::Resume);

@@ -885,27 +885,41 @@ pub fn after_area_load(w: &mut World, order: &[AreaEntry], spawned: &[EntityIdx]
     // know: it acts on nothing and is reported if it would (as in the controller's tick; the
     // extras of Manual_10's crowds sleep). Another unit in the game is taken as awake, as the
     // recordings have it (its fog of war isn't modelled).)
-    // The controller ticks `AwakeUnits` in `State.Units` order: the units spawned at load, and
-    // the loaded units the load woke (`Wake()` on a position change: a companion placed by its
-    // spawner), whose `AwakeTimer` keeps them awake at the first tick unless a check before it
-    // puts them to sleep (out of the game, a fake blueprint, suppressed, a companion while the
-    // party is hidden); other loaded units' toggles are as saved [C].
+    // The controller ticks `AwakeUnits` in `State.Units` order. Beside the units spawned at
+    // load, it acts on the loaded units the load touched: those it woke (`Wake()` on a
+    // position change: a companion placed by its spawner, whose `AwakeTimer` keeps it awake at
+    // the first tick unless a check before the timer puts it to sleep: out of the game, a fake
+    // blueprint, suppressed, a companion while the party is hidden) and those whose toggles it
+    // stopped and activated again (`IsInGame` changes: awake as `awake_state` says, an unknown
+    // state reported if a toggle would act). Other loaded units' toggles are as saved [C]. A
+    // touched unit's started toggle gets the controller's round (a timer, `OnNewRound`), which
+    // the start pass doesn't run: reported unless the round can change nothing but its timer.
     let party = crate::narrative::party::character_lists(w).party_and_pets;
     let woken = std::mem::take(&mut w.woken_at_load);
+    let touched = std::mem::take(&mut w.in_game_changed_at_load);
     let order: Vec<EntityIdx> = crate::scene::units_pool(w)
         .into_iter()
-        .filter(|e| spawned.contains(e) || woken.contains(e))
+        .filter(|e| spawned.contains(e) || woken.contains(e) || touched.contains(e))
         .collect();
     for e in order {
         if !spawned.contains(&e) {
-            if awake_state_in(w, e, &party, true) == Awake::No
+            let state = awake_state_in(w, e, &party, true);
+            if state == Awake::No
                 || (crate::scene::area_has_parts(w)
                     && crate::area_parts::suppressed_at_load(w, e).is_err())
             {
                 continue;
             }
+            let mode = if woken.contains(&e) || state == Awake::Yes {
+                TickMode::StartPass
+            } else {
+                TickMode::AreaUnit
+            };
             w.coverage.context = Some(w.entity(e).unique_id.clone());
-            activatable_abilities_unit_tick(w, e, false, TickMode::StartPass);
+            if mode == TickMode::StartPass {
+                report_started_rounds(w, e);
+            }
+            activatable_abilities_unit_tick(w, e, false, mode);
             continue;
         }
         let extra = w.unit(e).is_some_and(|x| x.is_extra);
@@ -1439,6 +1453,33 @@ fn activatable_abilities_unit_tick(
             }
             assumed(w);
             crate::unit_facts::try_start(w, f);
+        }
+    }
+}
+
+/// A loaded unit's started toggles at the first tick (`TickAbility`): `ShouldBeDisabled` stops
+/// one, otherwise its round timer runs, which the start pass doesn't model; reported unless the
+/// round is plain ([`activatable_round_is_plain`]: only the timer changes).
+fn report_started_rounds(w: &mut World, e: EntityIdx) {
+    let acts: Vec<_> = w
+        .entity(e)
+        .facts
+        .list
+        .iter()
+        .copied()
+        .filter(|f| w.fact(*f).kind == FactKind::ActivatableAbility)
+        .collect();
+    for f in acts {
+        let (on, started, _) = w.fact(f).activatable.unwrap_or((false, false, None));
+        let Some(abp) = w.fact(f).bp.clone() else { continue };
+        if started
+            && (activatable_should_be_disabled(w, abp.view())
+                || !activatable_round_is_plain(w, f, &abp, on))
+        {
+            w.coverage.unsupported(
+                "UnitActivatableAbilitiesController: the first tick's round of a started toggle on a loaded unit the load touched",
+            );
+            return;
         }
     }
 }

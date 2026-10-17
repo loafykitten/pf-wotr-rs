@@ -226,7 +226,20 @@ and the loaded units the load woke.
 **Inferred** [I]: Unity's enable order within a scene (the order the capital mode reaches the
 spawners) is taken to be the scene cache's object order; on Manual_10 the seven spawners placed
 their companions in that order (WrathOracle's `in_game` events) [M]. The order matters only when two
-spawners can take the same companion.
+spawners can take the same companion in one event, which is reported (`CompanionSpawner: two
+spawners can take a companion in one event`; not on Manual_10).
+
+**Also fixed on the way** [C]: an etude bracket's `OnPostLoad` resumed at once when its linked area
+part was the saved one; `Player.PostLoad` runs before the area loads, when `AreaService.CurrentAreaPart`
+is null, so a bracket with a linked area part (`CapitalCompanionLogic` requires one) defers to
+`MaybeEnter`, as the C# does (no save in the regression resumed such a bracket at post-load).
+
+**The first tick** [C]: beside the units spawned at load, the start pass now looks at the loaded
+units the load touched, in `State.Units` order: those it woke (awake unless a check before the timer
+puts them to sleep) and those whose `IsInGame` the spawners or capital mode changed (awake as
+`awake_state` says; an unknown state is reported if a toggle would act). A touched unit's started
+toggle would get the controller's round, which the start pass doesn't run: reported unless the
+round can change only its timer.
 
 **Still reported**: a unit spawner that would spawn at load (none in the slice's saves), a pet's
 `UnitPartPet.ShouldBeHidden` (`HideAllPets` isn't ported; on Manual_10 the main character's dragon
@@ -236,7 +249,11 @@ spawners ask: `CompanionSpawner.ShouldShowUnit: a pet`, and one of their show co
 port, the respawn of a dead companion, `HandleCompanionRemoved` (its `stayInGame` argument isn't in
 the sim's event call), `HandleUnrecruit` when it would act, `AttachPartyMember` for a detached
 companion, and the remote companions' rest. `UnitSpawnerBase.MyData.OnViewDidAttach` of *unit*
-spawners (their units' interactions and position) is still not modelled, as before. Each
+spawners is still not modelled, and not reported, as before this work: at load it runs the spawned
+unit's `IUnitInitializer` parts' `OnInitialize` (interactions, roaming, guards, brains…) and moves a
+unit that stands where it was spawned to the spawner's exact position, which wakes it. Reporting it
+would invalidate every capture of the slice; porting it (the initializers and the wake's effect on
+the first tick) is a separate piece of work. Each
 companion's two changes of `IsInGame` add to the existing `UnitEntityData.OnIsInGameChanged: group
 membership` reports (58 -> 72: `m_Group` isn't saved, and whether something read it before is
 unknown). Every unit's `IsInGame` after the load equals the oracle's dump [M].

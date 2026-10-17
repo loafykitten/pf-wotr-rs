@@ -492,6 +492,8 @@ pub struct SceneState {
     /// The scenes whose entity states the load matched (`SceneEntitiesState.SceneName`, main
     /// state first): their views are the loaded ones.
     pub loaded_scenes: Vec<String>,
+    /// The companion spawner views subscribed to the event bus, in subscription order.
+    pub companion_views: Vec<String>,
 }
 
 /// A saved `CutscenePlayerData` (`Kingmaker.AreaLogic.Cutscenes/CutscenePlayerData.cs`).
