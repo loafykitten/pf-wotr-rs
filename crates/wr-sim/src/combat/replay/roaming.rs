@@ -203,7 +203,7 @@ impl Driver<'_> {
                 Self::roam_unsupported(
                     w,
                     format!(
-                        "{id}'s state isn't established (no roam_init: the save's, unconfirmed)"
+                        "{id}'s state isn't known (the save's unconfirmed at the window's start: no roam_init; or after a report)"
                     ),
                 );
                 continue;

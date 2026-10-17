@@ -536,7 +536,7 @@ fn missing_or_wrong_roaming_records_are_reported() {
             recs[at]["c"] = json!(recs[at]["c"].as_u64().unwrap() + 1000);
         }),
         // The window's start: the saved state not confirmed by the running roaming move.
-        ("state isn't established", false, |recs| {
+        ("state isn't known (the save's unconfirmed", false, |recs| {
             let at = pos(recs, |r| ev(r, "uc_new") && r["mv"] == "100|-|-|0");
             recs[at]["pt"][0] = json!(recs[at]["pt"][0].as_f64().unwrap() + 0.01);
         }),

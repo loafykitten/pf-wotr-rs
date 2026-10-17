@@ -422,6 +422,11 @@ no write is left an outside input (`writes by code the sim doesn't run {}`).
   - the window's start: the running roaming move not to the saved next point.
 - `missing_or_wrong_look_records_are_reported`'s roaming cases now name the sim's `LookAt` (its state before,
   result, point, missing, a rider's, another unit's).
+- `poc5_agent`'s damaged position write (`-113`'s one `ag_pos`, the roaming step) is now reported by the roaming
+  port.
+- The capture suites pass with the port (stream roaming's final build): `poc5` 17/17, `poc5_look` 3/3,
+  `poc5_agent` 3/3, `poc5_log` 3/3, `poc5_spells` and `poc5_ties` (15 with `poc5_agent` and `poc5_log`); POC-4's
+  `poc4` 9/9.
 
 Reviews (gpt-6.1-sol, high), four rounds:
 - round 1: the roll's draw records checked against the sim's draws (kind, arguments, value); the move's

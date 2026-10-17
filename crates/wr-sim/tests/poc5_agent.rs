@@ -491,7 +491,7 @@ fn missing_or_wrong_agent_records_are_reported() {
         }),
         // (The window's one outside position write is the roaming controller's sleeping step, the
         // sim's since its port: `replay/roaming.rs`.)
-        ("the sleeping step of 5052: the sim's position", |recs| {
+        ("driven replay: roaming: 5052: the sleeping step of 5052: the sim's position", |recs| {
             let at = pos(recs, |r| ev(r, "ag_pos"));
             recs[at]["pos"][0] = json!(1.0);
         }),
