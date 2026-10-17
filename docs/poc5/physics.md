@@ -279,7 +279,8 @@ association or dropping the `FLT_EPSILON` clamp is caught.
 refuses a mesh or box collider under a `Rigidbody`, whose shape is posed relative to the body; none in the caves), its
 ancestors only translating (rotation `(0, 0, 0, 1)`, scale exactly one: every recorded box's; the code takes the same
 path under any hierarchy [I], but no probe covers one), its hierarchy placing the GameObject where the recording has
-it, a positive lossy scale (a negative one takes the same code [C], but no recorded box has one). In the caves 61
+it with the recorded rotation and (to a millionth) scale (else the scene's centre needn't be the game's), a positive
+lossy scale (a negative one takes the same code [C], but no recorded box has one). In the caves 61
 boxes are computed; `Loot/Loot_1/luxery_chest_02_Collider` (a rotated ancestor; layer 10, outside the walkable mask)
 keeps the conservative test, and 26 recorded inactive or disabled (loot, interactions, Terendelev's scales, all layer
 10) are left out.
@@ -288,7 +289,9 @@ keeps the conservative test, and 26 recorded inactive or disabled (loot, interac
 scene's, which Unity loads unchanged) and, from its `ph_col` record (matched by scene, path, sibling path, type,
 centre and size: a GameObject can have several), the recorded rotation, lossy scale, position and layer; its world
 centre is `transform_point(chain, center)`. The driven replay checks a recording's box `ph_col` against the file as it
-does the meshes' (`World::check_recorded_colliders`); every capture with `phys_probe` (`-112` onward, 98 runs) records
+does the meshes' (`World::check_recorded_colliders`: a mesh or box without a recorded transform must be recorded on
+its scene layer, trigger flag and position too, and a scene whose colliders were all left out is still checked);
+every capture with `phys_probe` (`-112` onward, 98 runs) records
 the same boxes and meshes as `-129`'s record.
 
 **The scene query.** A box with its recorded transform joins the meshes: a candidate when it hits the whole ray

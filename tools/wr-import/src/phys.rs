@@ -66,7 +66,9 @@ fn bool_of(v: &Value, key: &str) -> Option<bool> {
 
 /// Builds the world from the area's scenes.
 pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackReport)> {
-    let mut world = World::default();
+    let mut world =
+        World { scenes: scenes.iter().map(|s| s.scene.clone()).collect(), ..World::default() };
+    world.scenes.dedup();
     let mut rep = PackReport::default();
     for s in scenes {
         for g in s.game_objects() {
@@ -362,8 +364,12 @@ pub fn apply_recorded_colliders(
     };
     for (i, s) in world.shapes.iter_mut().enumerate() {
         if let ShapeKind::Box { local_to_world, center, size, chain, runtime } = &mut s.kind {
+            // Bit-equal, zeros of either sign equal (the recording doesn't keep a zero's sign).
             let same_bits = |a: &[f32], b: &[f32]| {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b)
+                        .all(|(x, y)| x.to_bits() == y.to_bits() || (*x == 0.0 && *y == 0.0))
             };
             let found: Vec<&serde_json::Value> = cols
                 .iter()

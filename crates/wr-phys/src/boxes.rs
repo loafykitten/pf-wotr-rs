@@ -145,8 +145,9 @@ impl BoxRuntime {
 impl BoxRuntime {
     /// Whether the mapping is established for this box (`docs/poc5/physics.md`, "Boxes"):
     /// ancestors that only translate (the recorded boxes'; Unity's `TransformPoint` is checked
-    /// on deeper hierarchies too, but no recorded box sits in one), its world position the
-    /// recorded one and its centre's [`transform_point`], a positive lossy scale (no recorded
+    /// on deeper hierarchies too, but no recorded box sits in one), its world position, its own
+    /// rotation and (to a millionth) its own scale the recorded ones, its world centre its
+    /// centre's [`transform_point`], a positive lossy scale (no recorded
     /// box has a negative one) and finite half extents. Otherwise the box keeps the
     /// conservative test.
     pub fn established(
@@ -169,6 +170,28 @@ impl BoxRuntime {
                 "its hierarchy places it at {:?}, the recording at {:?}",
                 transform_point(chain, [0.0; 3]),
                 self.position
+            ));
+        }
+        // Under ancestors that only translate, the world rotation is the GameObject's own and
+        // the lossy scale its own scale (to rounding): the scene's must be what the game holds,
+        // or the centre computed from it isn't the game's (a transform changed at load).
+        let own = chain.last().expect("non-empty");
+        let zero_eq = |x: f32, y: f32| x.to_bits() == y.to_bits() || (x == 0.0 && y == 0.0);
+        if !own.rotation.iter().zip(&self.rotation).all(|(&x, &y)| zero_eq(x, y)) {
+            return Err(format!(
+                "its rotation {:?} isn't the recorded {:?}",
+                own.rotation, self.rotation
+            ));
+        }
+        if !own
+            .scale
+            .iter()
+            .zip(&self.lossy_scale)
+            .all(|(&x, &y)| (f64::from(x) - f64::from(y)).abs() <= 1e-6 * f64::from(y).abs())
+        {
+            return Err(format!(
+                "its scale {:?} isn't the recorded lossy scale {:?}",
+                own.scale, self.lossy_scale
             ));
         }
         if transform_point(chain, center).map(f32::to_bits) != self.world_center.map(f32::to_bits) {

@@ -206,9 +206,17 @@ impl Player {
     }
 }
 
-/// Returned through `x8` (a composite over 16 bytes): the callee writes the first 12 bytes.
+/// Returned through `x8` (a composite over 16 bytes): the callee writes only the first 12
+/// bytes, so it is received as `MaybeUninit` and only those are read.
 #[repr(C)]
 struct Indirect([f32; 6]);
+
+/// The three floats the callee wrote.
+fn written(out: &std::mem::MaybeUninit<Indirect>) -> [f32; 3] {
+    let p = out.as_ptr().cast::<f32>();
+    // SAFETY: the callee initialised the first three floats of the return storage.
+    unsafe { [p.read(), p.add(1).read(), p.add(2).read()] }
+}
 
 impl Player {
     /// The player's `Transform::TransformPoint(p)` for a hierarchy whose local transforms run
@@ -232,11 +240,11 @@ impl Player {
         transform[8] = chain.len() - 1;
         // SAFETY: the function reads the transform's hierarchy and index, the hierarchy's fence
         // (zero: no job to wait for), locals and parents, the point; it writes 12 bytes at x8.
-        let fun: extern "C" fn(*const usize, *const [f32; 3]) -> Indirect =
+        let fun: extern "C" fn(*const usize, *const [f32; 3]) -> std::mem::MaybeUninit<Indirect> =
             unsafe { std::mem::transmute(self.base + TRANSFORM_POINT.0) };
         let out = fun(transform.as_ptr(), &p);
         drop((locals, parents));
-        [out.0[0], out.0[1], out.0[2]]
+        written(&out)
     }
 
     /// The player's box half extents for `size` under `lossy` (the second factor one).
@@ -248,10 +256,14 @@ impl Player {
         let one = [1.0f32; 3];
         // SAFETY: with no shape and no list node the function only reads `m_Size` and its two
         // vectors, and writes 12 bytes at x8.
-        let fun: extern "C" fn(*const u8, *const [f32; 3], *const [f32; 3]) -> Indirect =
+        let fun: extern "C" fn(
+            *const u8,
+            *const [f32; 3],
+            *const [f32; 3],
+        ) -> std::mem::MaybeUninit<Indirect> =
             unsafe { std::mem::transmute(self.base + BOX_EXTENTS.0) };
         let out = fun(collider.as_ptr(), &lossy, &one);
-        [out.0[0], out.0[1], out.0[2]]
+        written(&out)
     }
 }
 

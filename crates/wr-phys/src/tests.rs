@@ -19,6 +19,7 @@ fn flat_field(height: i16) -> HeightField {
 
 fn terrain_world(field: HeightField) -> World {
     World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "terrain".into(),
             sibling_path: Vec::new(),
@@ -222,6 +223,7 @@ fn small_mesh(
 fn meshes_and_other_shapes_fail_closed() {
     let id = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
     let world = World {
+        scenes: Vec::new(),
         shapes: vec![
             Shape {
                 name: "mesh".into(),
@@ -262,6 +264,7 @@ fn meshes_and_other_shapes_fail_closed() {
     // A sliver beside a far triangle: its f32 arithmetic can hit outside its own bounds, inside
     // the mesh's (the player's BV4_RaycastSingle hits this at 0.5).
     let sliver = World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "sliver".into(),
             sibling_path: Vec::new(),
@@ -290,6 +293,7 @@ fn meshes_and_other_shapes_fail_closed() {
     ));
     // The sliver with an unused vertex widening PhysX's bounds.
     let unused = World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "unused".into(),
             sibling_path: Vec::new(),
@@ -331,6 +335,7 @@ fn meshes_and_other_shapes_fail_closed() {
     // A long ray far out: the origin's rounding, amplified by the triangle's angle (the player's
     // midphase hits at 999996.625).
     let long = World {
+        scenes: Vec::new(),
         shapes: vec![Shape {
             name: "long".into(),
             sibling_path: Vec::new(),
@@ -437,7 +442,7 @@ fn recorded_colliders_are_checked_against_the_file() {
     s.sibling_path = vec![3];
     let mut b = recorded_box("S:Static/b (BoxCollider)", [1.0, 2.0, 3.0], [0.0, 0.5, 0.0]);
     b.sibling_path = vec![4];
-    let w = World { shapes: vec![s, b.clone()] };
+    let w = World { shapes: vec![s, b.clone()], scenes: Vec::new() };
     let good = RecordedCollider {
         name: "S:Static/sq (MeshCollider)".into(),
         sibling_path: vec![3],
@@ -615,7 +620,8 @@ fn the_box_mapping_is_unitys() {
 fn a_shape_the_pruner_may_skip_fails_closed() {
     // From 1e8 m up, the ray ending 8 m above the square: the mesh's raycast, rounding at that
     // scale, can report a hit the player's pruner never asks for (its segment stops short).
-    let w = World { shapes: vec![recorded_square("square", [0.0, 0.0, 0.0], 0)] };
+    let w =
+        World { shapes: vec![recorded_square("square", [0.0, 0.0, 0.0], 0)], scenes: Vec::new() };
     let scene = Scene::new(&w);
     let r = scene.raycast_down([1.119_281_8, 1.0e8, 1.425_916_6], 99_999_992.0, 1);
     assert!(!matches!(r, Ok(Some(_))), "{r:?}");
@@ -635,13 +641,14 @@ fn a_shape_the_pruner_may_skip_fails_closed() {
         mesh.tree.center = [1.0e8 + 4.0, 0.0, 4.0];
         mesh.tree.extents_magnitude = 32f32.sqrt();
     }
-    let w = World { shapes: vec![far] };
+    let w = World { shapes: vec![far], scenes: Vec::new() };
     let scene = Scene::new(&w);
     let r = scene.raycast_down([6.0, 10.0, 2.0], 100.0, 1);
     assert!(!matches!(r, Ok(Some(_))), "{r:?}");
     // Another shape 1e8 m out (on another layer): the pruner's node over both rounds at that
     // scale and can cut the square off.
-    let mut w = World { shapes: vec![recorded_square("near", [-2.0, 0.0, 0.0], 0)] };
+    let mut w =
+        World { shapes: vec![recorded_square("near", [-2.0, 0.0, 0.0], 0)], scenes: Vec::new() };
     w.shapes.push(recorded_square("far", [1.0e8, 0.0, 0.0], 5));
     let scene = Scene::new(&w);
     let r = scene.raycast_down([-1.0, 10.0, 1.4], 100.0, 1);
@@ -1002,4 +1009,48 @@ fn quat_helpers_are_inverse() {
     assert!(
         (back.x - v.x).abs() < 1e-5 && (back.y - v.y).abs() < 1e-5 && (back.z - v.z).abs() < 1e-5
     );
+}
+
+#[test]
+fn what_the_recordings_dont_cover_isnt_computed_or_accepted() {
+    // A box whose own rotation or scale isn't the recorded one (changed at load): its centre
+    // computed from the scene wouldn't be the game's.
+    let b = recorded_box("b", [2.0, 2.5, 2.0], [1.0, 0.5, 0.0]);
+    let ShapeKind::Box { center, size, chain, runtime: Some(r), .. } = &b.kind else {
+        unreachable!()
+    };
+    assert_eq!(r.established(chain, *center, *size), Ok(()));
+    let mut scaled = r.clone();
+    scaled.lossy_scale = [2.0, 1.0, 1.0];
+    assert!(scaled.established(chain, *center, *size).is_err());
+    let mut turned = r.clone();
+    turned.rotation = [0.0, 0.6, 0.0, 0.8];
+    assert!(turned.established(chain, *center, *size).is_err());
+    let mut negative = r.clone();
+    negative.lossy_scale = [-1.0, 1.0, 1.0];
+    assert!(negative.established(chain, *center, *size).is_err());
+    // A box without a recorded transform: the recording must agree with the scene's layer.
+    let mut plain = b.clone();
+    if let ShapeKind::Box { runtime, .. } = &mut plain.kind {
+        *runtime = None;
+    }
+    plain.name = "S:b (BoxCollider)".into();
+    let w = World { shapes: vec![plain], scenes: vec!["S".into(), "T".into()] };
+    let rec = RecordedCollider {
+        name: "S:b (BoxCollider)".into(),
+        sibling_path: Vec::new(),
+        present: true,
+        layer: 8,
+        position: [2.0, 2.5, 2.0],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        lossy_scale: [1.0; 3],
+        trigger: false,
+        kind: RecordedKind::Box { center: [1.0, 0.5, 0.0], size: [2.0, 1.0, 4.0] },
+    };
+    assert_eq!(w.check_recorded_colliders(std::slice::from_ref(&rec)), Ok(()));
+    let moved = RecordedCollider { layer: 0, ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[moved]).is_err(), "another layer");
+    // A scene whose every collider was left out still has its recordings checked.
+    let other = RecordedCollider { name: "T:c (BoxCollider)".into(), ..rec.clone() };
+    assert!(w.check_recorded_colliders(&[rec, other]).is_err(), "a collider the file lacks");
 }

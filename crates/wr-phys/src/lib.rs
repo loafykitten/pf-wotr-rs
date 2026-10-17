@@ -57,6 +57,9 @@ pub struct PhysFile {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct World {
     pub shapes: Vec<Shape>,
+    /// The scenes the shapes were imported from (`Shape::name`'s prefix), the shapes left out
+    /// included: a recording's colliders of these scenes are checked against the shapes.
+    pub scenes: Vec<String>,
 }
 
 /// One collider.
@@ -194,7 +197,7 @@ impl World {
         }
         let scene = |name: &str| name.split(':').next().unwrap_or("").to_owned();
         let scenes: std::collections::HashSet<String> =
-            self.shapes.iter().map(|s| scene(&s.name)).collect();
+            self.shapes.iter().map(|s| scene(&s.name)).chain(self.scenes.iter().cloned()).collect();
         for c in recorded.iter().filter(|c| scenes.contains(&scene(&c.name))) {
             let shape = self.shapes.iter().find(|s| s.is_recorded(c));
             let differs = |layer: u32, position: &[f32], rotation: &[f32], lossy: &[f32]| {
@@ -221,6 +224,24 @@ impl World {
                             format!("recorded {c:?}, the physics file's (from {}) {r:?}", r.source)
                         })
                 }
+                // A shape without a recorded transform answers with the conservative test,
+                // which takes its layer, trigger flag and placement from the scene: present,
+                // they must be the game's (its position within the test's tolerance).
+                Some((
+                    s,
+                    ShapeKind::Box { local_to_world: m, runtime: None, .. }
+                    | ShapeKind::Mesh { local_to_world: m, runtime: None, .. },
+                )) => (c.present
+                    && (c.trigger != s.is_trigger
+                        || !(c.layer == s.layer
+                            || (s.visual_layer_move && c.layer == VISUAL_LAYER))
+                        || !c.position.iter().zip(&m[12..15]).all(|(x, y)| {
+                            (f64::from(*x) - f64::from(*y)).abs()
+                                <= 1e-4 * (1.0 + f64::from(*x).abs())
+                        })))
+                .then(|| {
+                    format!("recorded {c:?}, the physics file's (no recorded transform) differs")
+                }),
                 _ => None,
             };
             if let Some(e) = bad {
@@ -230,6 +251,9 @@ impl World {
         Ok(())
     }
 }
+
+/// `Layers.OptimizeShadow`, where the load moves `*_!Visual` objects.
+const VISUAL_LAYER: u32 = 11;
 
 /// FNV-1a, 64 bit (detects truncation and stale or torn files, not tampering).
 #[must_use]
