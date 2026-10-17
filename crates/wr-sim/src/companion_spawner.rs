@@ -775,10 +775,18 @@ pub fn subscribe_views(w: &mut World) {
     let Some(cache) = w.scene.cache.clone() else { return };
     let mut n = 0u32;
     for v in &cache.views {
-        if !v.class.ends_with(".CompanionSpawner")
-            || !v.active_in_hierarchy
-            || !w.scene.loaded_scenes.contains(&v.scene)
-        {
+        if !v.class.ends_with(".CompanionSpawner") || !w.scene.loaded_scenes.contains(&v.scene) {
+            continue;
+        }
+        if !v.active_in_hierarchy {
+            // Saved data attaching to an inactive view activates its object (`UpdateViewActive`:
+            // `MyData.IsViewActive` is true), whose `OnEnable` then subscribes it, at attach time
+            // and only when its parents are active: not modelled.
+            if w.player.spawners.contains_key(&v.unique_id) {
+                w.coverage.unsupported(
+                    "CompanionSpawner: an inactive view that its data's attachment activates",
+                );
+            }
             continue;
         }
         // `OnEnable` runs only for an enabled component.
