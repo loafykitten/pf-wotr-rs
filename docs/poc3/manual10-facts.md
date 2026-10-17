@@ -270,6 +270,16 @@ too: `SceneLoader: no scene cache`, `ScriptZone.OnAreaDidLoad: scene settings un
 (`EntityDataBase.OnViewDidAttach: … removed`, `DestructionComponent`, a loot table) and the
 suppression enumerator are reported instead.
 
+**Checks** [M]: gpt-6.1-sol (high) reviewed the branch in four rounds until it found nothing (from
+it: brackets with a linked area defer their resume at post-load, the start pass's touched units and
+started rounds, competing spawners reported, empty against null prefab ids, disabled and inactive
+spawner views, `IsIgnoreFixInGame` only while turned on, `ApplyOnSpawn`'s per-part order).
+`scripts/check.sh` (621 tests) passes; the ignored `wr-sim` suites (56 tests, real saves and POC-5
+captures) pass. The regression (`scripts/regress.sh`, with Drezen's scene cache for both runs)
+against the branch point differs only in Manual_10's compare (`facts.order` 537 -> 538) and
+coverage: Manual_13, 19, 20 and 18 (combat) hydrate and compare as before, and every dialogue run's
+log is unchanged.
+
 ## What is left
 
 - **4 ids allocated after the load** [M, `manual10-ids-2`]: the three `AddAreaEffect` area effects
