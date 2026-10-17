@@ -166,6 +166,12 @@ pub struct Outcome {
     pub mem_ticks: usize,
     pub mem_reads: usize,
     pub mem_inputs: usize,
+    /// The leaves of the controller's tick the sim decides (`combat::senses`), compared with the
+    /// recording's (equal or differing), and the ones (or parts) it takes, by leaf. `ready` counts group decisions.
+    pub mem_leaf_checked: BTreeMap<&'static str, usize>,
+    pub mem_leaf_taken: BTreeMap<&'static str, usize>,
+    /// Of the checked leaves, the ones whose value differed from the recording's (each reported).
+    pub mem_leaf_differs: BTreeMap<&'static str, usize>,
     pub mem_rows: usize,
     pub mem_fills: usize,
     pub mem_changes: usize,

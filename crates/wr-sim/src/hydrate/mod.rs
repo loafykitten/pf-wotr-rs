@@ -1783,6 +1783,42 @@ mod tests {
         assert_eq!(parent_params(child), Some(expected));
     }
 
+    /// A unit's `Stealth` (the property `UnitEntityData.Stealth`, as the original writes it: a Manual_10 area save's
+    /// unit lists four spotters) and `Descriptor.State.IsInStealth` are read; a
+    /// placeholder's `m_Stealth` is not a unit's key.
+    #[test]
+    fn a_units_saved_stealth_state_is_read_from_its_stealth_property() {
+        let ty = "Kingmaker.EntitySystem.Entities.UnitEntityData, Assembly-CSharp";
+        let json = format!(
+            r#"{{"$id":"1","$type":"{ty}","UniqueId":"u",
+            "Stealth":{{"$id":"2","m_SpottedBy":["15DCEA","15DEC9"],"CachedRoll":17,"FullSpeed":true,
+                "WantEnterStealth":true}},
+            "Descriptor":{{"$id":"3","State":{{"$id":"4","IsInStealth":true}}}}}}"#
+        );
+        let parsed = wr_save::json::parse(json.as_bytes()).expect("json");
+        let (doc, _) = wr_save::decode::decode(&parsed, None);
+        let ix = DocIndex::new(&doc);
+        let saved = super::narrative::saved_stealth(ix.root().expect("root"));
+        assert_eq!(
+            saved,
+            super::narrative::SavedStealth {
+                in_stealth: true,
+                spotted_by: vec!["15DCEA".into(), "15DEC9".into()],
+                bad_spotters: 0,
+                pending: true,
+            }
+        );
+        // No stealth state: nothing set.
+        let json = format!(r#"{{"$id":"1","$type":"{ty}","UniqueId":"u"}}"#);
+        let parsed = wr_save::json::parse(json.as_bytes()).expect("json");
+        let (doc, _) = wr_save::decode::decode(&parsed, None);
+        let ix = DocIndex::new(&doc);
+        assert_eq!(
+            super::narrative::saved_stealth(ix.root().expect("root")),
+            super::narrative::SavedStealth::default()
+        );
+    }
+
     /// `AreaDataStash.FileName` cuts a scene name to 62 characters: the shipped
     /// `AlushinyrraMediumCity_TenThousandDelights_TableHouseOfSweetTerror_Mechanics` (75) is
     /// saved under its first 62.

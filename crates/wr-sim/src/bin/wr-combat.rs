@@ -296,6 +296,10 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.mem_changes,
         out.mem_checked
     );
+    println!(
+        "memory leaves: decided by the sim and compared with the recording's {:?}, of which differing {:?}; taken from the recording {:?}",
+        out.mem_leaf_checked, out.mem_leaf_differs, out.mem_leaf_taken
+    );
     match (&out.vision, &out.vision_off) {
         (Some(v), _) => println!(
             "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal; vision range: sets computed {} and equal to the recording's (changes {}, differences {}); {} pairs with a known corpulence (within 5 cm {}, within 1 cm {}, within 1 mm {}, closest {} um, f32 against exact differing {}), {} pairs of an unknown corpulence the recording decided, unit-frames of unknown corpulence {}, of a fade-hidden collider {}, colliders made after the first frame {}; the memory's near-unit unions (the sets' order) equal {}",
