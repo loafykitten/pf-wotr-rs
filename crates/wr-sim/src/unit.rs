@@ -234,6 +234,13 @@ pub struct Unit {
     pub replace_blueprint_for_inspection: Option<Guid>,
     /// `State.IsFinallyDead` (saved).
     pub finally_dead: bool,
+    /// `State.IsInStealth` (saved; set by `RuleEnterStealth`, which isn't ported: a recording
+    /// that shows it is reported by the checks that read it).
+    pub in_stealth: bool,
+    /// `UnitStealth.m_SpottedBy` (saved): the unique ids of the units that spotted it, in order.
+    pub stealth_spotted_by: Vec<String>,
+    /// The unit has a `UnitPartBlindsense` (saved; its range isn't hydrated).
+    pub has_blindsense: bool,
     /// `State.MarkedForDeath`, `State.ForceKill` (saved).
     pub marked_for_death: bool,
     pub force_kill: bool,

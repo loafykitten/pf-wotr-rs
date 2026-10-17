@@ -351,6 +351,22 @@ impl Loader<'_> {
             );
         }
         let group = o.str("GroupId").map(str::to_owned);
+        // `UnitState.IsInStealth` and `UnitStealth.m_SpottedBy` (`InStealthFor`), and the blindsense
+        // part (`UnitPartBlindsense`, which `UnitMemoryController` asks `Reach`).
+        let in_stealth = state.is_some_and(|s| s.bool_or("IsInStealth", false));
+        let mut stealth_spotted_by = Vec::new();
+        if let Some(Value::Seq(items)) = o.obj("m_Stealth").and_then(|s| s.get("m_SpottedBy")) {
+            for v in items {
+                match super::graph::str_of(v) {
+                    Some(id) => stealth_spotted_by.push(id.to_owned()),
+                    None => self
+                        .w
+                        .coverage
+                        .unsupported("UnitStealth.m_SpottedBy: an entry that isn't a unit id"),
+                }
+            }
+        }
+        let has_blindsense = parts.iter().any(|p| p.ty() == "UnitPartBlindsense");
         let marked_for_death = state.is_some_and(|s| s.bool_or("MarkedForDeath", false));
         let force_kill = state.is_some_and(|s| s.bool_or("ForceKill", false));
         let no_xp_on_death = !o.bool_or("GiveExperienceOnDeath", true);
@@ -376,6 +392,9 @@ impl Loader<'_> {
             u.alignment = alignment;
             u.life_state = life;
             u.finally_dead = finally_dead;
+            u.in_stealth = in_stealth;
+            u.stealth_spotted_by = stealth_spotted_by;
+            u.has_blindsense = has_blindsense;
             u.marked_for_death = marked_for_death;
             u.force_kill = force_kill;
             u.no_xp_on_death = no_xp_on_death;

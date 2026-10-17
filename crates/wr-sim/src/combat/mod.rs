@@ -37,6 +37,7 @@ pub mod prone;
 pub mod replay;
 pub mod roaming;
 pub mod rules;
+pub mod senses;
 pub mod spells;
 pub mod targets;
 pub mod ties;

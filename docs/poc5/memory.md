@@ -394,8 +394,9 @@ captures replay as before (`-109`, `-95`, `-96` unchanged).
   `gdt` (the clock), `unit` and `ingame` (the entities), `disp`, `inv` (conditions), `wake`'s arithmetic; the frame
   (the `tick` record's, plus the replay's shift: the record run's begin frame when given, else the replay's first
   tick, then checked on every tick), GameTime, the queue and `s_UnitsForRemove` at the entry. Taken from their
-  leaves: `apeace`, `ready` (fog of war), `near` (vision range, in the set's order), `pass`, `los`, `stl`, `seen`
-  (the invisibility loop), the identity hashes (the run's `hash` records). Each `pass` row, each `end` row and every
+  leaves: `near` (vision range, in the set's order), the identity hashes (the run's `hash` records), and the parts of
+  `ready` (fog of war) and `seen` (a member's line of sight) the sim can't decide; `apeace`, `pass`, `stl` and the rest of
+  `ready` are the sim's ("The tick's other leaves"), `los` is ("Vision"). Each `pass` row, each `end` row and every
   memory at the tick's entry and end is compared slot for slot with the sim's, and the memory's own `mem_add` /
   `mem_remove` records with the sim's changes, in order, at every read (a group made during the tick logs its own,
   every memory's changes being logged). A difference is reported and the recorded state taken. The rows are compared
@@ -428,14 +429,15 @@ unmodelled readers verified …, changes matched …; readers' reads checked {�
 2,484 / 2,713, 3,007 / 1,992, 2,033 / 1,873, 2,883 / 2,656, 2,139 / 2,606 (focus / nearest, `-111` to `-115`), 2,618
 (`-116`, hold), 2,488 (`-117`, solo), 164,786 to 290,262 tick reads checked.
 `computed_memory_replays_are_valid_and_damage_is_reported` (`tests/poc5.rs`) replays `-111` and `-114`'s 12 runs and
-damages `-111` 23 ways (an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
+damages `-111` 28 ways (a flipped `apeace`, `pass` or `stl`, a ready list with a group dropped or two swapped, an input flipped or reordered, each kind of computed read, a pass row, the initial memory, a
 fill that can't be one, a pre row's `Enemies` or `UnitsList` missing an entry, a `mem_clear`'s count, the record
 itself, a frame early or before the initial state, the frame, a hash, `queued`, `peaceful`, a reader's `Enemies`, a flat-footed `Contains`, a leave row) and a
 replay's hashes against the record run's tape 2 ways (a value, the flag): each reported. The POC-5 suite and the agent's stay as they were.
 
-Still inputs (the design's later steps): the ready groups and `IsInFogOfWar` (fog of war), the near units (vision
-range), line of sight, stealth and the invisibility loop, `Passive`, `AwakeTimer` (not tracked), the area's
-`Peaceful`, and the caches a reader the sim doesn't run fills. Not modelled, as before: the offensive action's
+Still inputs (the design's later steps): the ready groups that rest on `IsInFogOfWar`, the near units (vision
+range), the invisibility loop where a member could see the target, `AwakeTimer` (not tracked), and the caches a reader
+the sim doesn't run fills (`Passive`, the area's `Peaceful`, stealth and the rest of the ready groups are the sim's now:
+"The tick's other leaves"). Not modelled, as before: the offensive action's
 `LastSurpriseActionTime` and a neutral target's `AttackFactions`, `UnitGroupsController`'s deferred faction updates
 (a faction change: its enemy list clear would show as a cache difference, reported).
 
@@ -446,6 +448,54 @@ range), line of sight, stealth and the invisibility loop, `Passive`, `AwakeTimer
 memory's `los` (`group.HasLOS`), the AI's `InLos` and the `HasObstacle` answers of the movement simulation and the path
 search are computed and checked in the driven replay, every sight cache miss and clear too. `CanBeInVisionRange` stays the
 `vis` records (PhysX), so does the ready groups' fog of war. Evidence, counts and the limits: `docs/poc5/vision.md`.
+
+## The tick's other leaves: now the sim's (stream "memleaves", 2026-10-17)
+
+`apeace`, `pass`, `stl` and `ready` were recorded inputs of the controller's tick, and `seen` too. They are computed in
+`combat/senses.rs` (pure functions over the sim's state, unit-tested) and checked in the driven replay
+(`replay/memory.rs`: the sim's value against the leaf's, a difference reported and the recorded value used so the run
+goes on; the counts print as `memory leaves: computed and equal to the recording's {...}; taken from it {...}`).
+
+- **`apeace`** [C]: `LoadedAreaState.Settings.Peaceful` is a `CountableFlag`; `EtudePeacefulZone` retains it on enter and
+  resume and releases it on exit. The sim already keeps it as the counter `area.Peaceful` (`components/etudes.rs`).
+- **`pass`** [C]: `unit.Passive` is an `ObservableCountFlag` (not saved). Its sources: `EtudeBracketMakePassive` (the
+  sim's `unit:<id>.Passive` counter), `MarkPassive` (a fact component, fail-closed in the registry), `SpawnerMakePassivePart`
+  (a spawner view part), the cutscene commands `CommandMarkPassiveSpan` and `CommandIgnoreCombat`, and `UnitPartPet`'s
+  synchronizer (a pet's flag follows its master's, and a change of the pet's own is reverted). The sim computes the counter
+  and the pet rule; the spawner part and the two commands aren't ported, so a unit passive through them would show as a
+  difference where a recording reads it.
+- **`stl`** [C]: `InStealthFor(group)` is `State.IsInStealth && !Stealth.IsSpottedBy(group)`; `IsSpottedBy` is a spotter in
+  `m_SpottedBy` that resolves, is conscious and whose `Group` is the group. `State.IsInStealth` and `m_SpottedBy` are
+  hydrated from the save (`Unit::in_stealth`, `stealth_spotted_by`). `RuleEnterStealth`, `UnitStealthController` and
+  `ForceExitStealth` aren't ported, so a unit entering stealth in a recording shows as a difference.
+- **`ready`** [C]: `SleepingUnitsController` lists a group of `UnitGroups` (in that order, once) when a member is not
+  sleeping, not of a peaceful faction, and (not in fog of war, or in combat, or `AwakeTimer > 0`). The sim decides a group
+  with a member that is awake (the frame's awake units, themselves the recording's `AwakeUnits` where the sim can't
+  establish them), of a faction that isn't peaceful, and in combat or of the party (never in fog of war): listed. A group
+  whose members are all asleep or of peaceful factions: not listed. Both are checked against the recorded list, as is the
+  order. **What stays recorded:** a group whose only candidates are awake, unpeaceful members out of combat and not of the
+  party: it rests on their `IsInFogOfWar` (the revealers' physics and the renderers' bounds) and `AwakeTimer`, neither
+  modelled. Those group decisions are counted as taken.
+- **`seen`** [C]: the loop over the group's members for an invisible target: `(IsSeeInvisibility && member.HasLOS(target))
+  || (UnitPartBlindsense?.Reach(target))`, `IsSeeInvisibility` being `SeeInvisibility` or `TrueSeeing`. The sim computes the
+  case where no member could (false), and takes the leaf where one could, since that rests on the member's own line of
+  sight and the blindsense range, which the leaf doesn't give apart. **No recording exercises it**: no target of these
+  fights is invisible when the controller looks at it (every `inv` read is false), so `seen` is never read. A capture with
+  an invisible unit (a party member under Invisibility next to enemies) would exercise it; the observer would also need
+  per-member `HasLOS` and `Reach` leaves in the invisibility loop.
+
+[M] None of the captures has a true value of `apeace`, `pass` (of a non-peaceful near unit), `stl` or `seen`: the sim's
+computations equal the recordings' on every read, but only the false branches are confirmed by recordings. The true
+branches are the decompiled code's, covered by `combat/senses/tests.rs` and by `computed_memory_replays_are_valid_and_damage_is_reported`
+(a recorded flip of each leaf, and a ready list with a group dropped or two out of order, is reported).
+
+[M] Counts over every run (record, replays and the perturbed replays) of `poc5-tb-95`, `-96`, `-109`, `-111` to `-117`,
+`-120`, `-122` to `-127`, `-129` and `-131` to `-136` (111 runs, 96 with the `memory` observer; the others replay as before;
+all valid but `-122`'s `tb-nearest`, the known initiative tie, and `-135`'s `replay-3-perturbed`, which fails the same way
+without this change: a `RuleCheckTargetFlatFooted` root whose call site isn't placed). Reads computed and equal to the
+recording's, differences none: `apeace` 416,596; `pass` 5,440,764; `stl` 2,991,862; `ready` 3,922,255 group decisions
+(listed or not, the order too), 813,653 more group decisions taken as recorded (fog of war); `seen` 0 reads. The
+perturbed replays are in the counts.
 
 ## Observer changes requested
 

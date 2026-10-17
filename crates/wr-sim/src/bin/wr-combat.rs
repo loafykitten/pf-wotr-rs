@@ -296,6 +296,10 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.mem_changes,
         out.mem_checked
     );
+    println!(
+        "memory leaves: computed and equal to the recording's {:?}; taken from it {:?}",
+        out.mem_leaf_checked, out.mem_leaf_taken
+    );
     match (&out.vision, &out.vision_off) {
         (Some(v), _) => println!(
             "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal",

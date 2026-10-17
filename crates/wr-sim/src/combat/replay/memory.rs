@@ -24,6 +24,7 @@ use crate::combat::memory::{
     Change, GroupMemory, MemError, MemoryController, MemoryLayout, MemoryWorld, Resolved, UnitInfo,
     tick,
 };
+use crate::combat::senses::{self, Tri};
 use crate::csharp::{RawSlot, TimeSpan};
 use crate::world::{EntityIdx, World};
 
@@ -867,6 +868,26 @@ impl<'t> MemWorld<'_, 't> {
         self.d.out.mem_inputs += 1;
         v
     }
+
+    /// A leaf the sim computes (`senses`): its value checked against the leaf's and counted by
+    /// leaf; a difference is reported and the recorded value used, so the run goes on from the
+    /// recording's state.
+    fn leaf_checked<T: PartialEq + std::fmt::Debug>(
+        &mut self,
+        f: &'static str,
+        sim: T,
+        recorded: T,
+    ) -> T {
+        *self.d.out.mem_leaf_checked.entry(f).or_default() += 1;
+        self.checked(f, sim, &recorded);
+        recorded
+    }
+
+    /// A leaf (or part of one) the sim can't compute, taken from the recording and counted by leaf.
+    fn leaf_taken<T>(&mut self, f: &'static str, v: T) -> T {
+        *self.d.out.mem_leaf_taken.entry(f).or_default() += 1;
+        self.input(v)
+    }
 }
 
 impl From<MemError> for Desync {
@@ -881,7 +902,8 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
     fn area_peaceful(&mut self) -> Result<bool, Desync> {
         let r = self.leaf("apeace", &["v"])?;
         let v = Self::bool_of(r, "v")?;
-        Ok(self.input(v))
+        let sim = senses::area_peaceful(self.w);
+        Ok(self.leaf_checked("apeace", sim, v))
     }
 
     fn ready_groups(&mut self) -> Result<Vec<GroupIdx>, Desync> {
@@ -893,6 +915,51 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
             .map(|g| g.as_str().and_then(|id| self.w.combat.groups.find(id)))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| Desync("a ready group the sim doesn't have".into()))?;
+        // `SleepingUnitsController`: every group of `UnitGroups`, in order, once, that has a member
+        // the test lists. The sim decides a group whose member is in combat or of the party (never
+        // in fog of war); a group that rests on another member's fog of war is taken as recorded.
+        let party = crate::narrative::party::character_lists(self.w).party_and_pets;
+        let order = self.w.combat.groups.list.clone();
+        let mut wrong = None;
+        let mut last: Option<usize> = None;
+        for g in &groups {
+            let at = order.iter().position(|x| x == g);
+            if at.is_none() || last.is_some_and(|l| at <= Some(l)) {
+                wrong = Some(format!(
+                    "ready group {} out of the sim's group order (or twice)",
+                    group_key(self.w, *g)
+                ));
+            }
+            last = at;
+        }
+        for &g in &order {
+            let listed = groups.contains(&g);
+            match senses::ready_for_combat(self.w, g, &party) {
+                Tri::Unknown => {
+                    *self.d.out.mem_leaf_taken.entry("ready").or_default() += 1;
+                }
+                t => {
+                    *self.d.out.mem_leaf_checked.entry("ready").or_default() += 1;
+                    if (t == Tri::Yes) != listed {
+                        wrong = Some(format!(
+                            "group {} is {} ready, the recording {} it",
+                            group_key(self.w, g),
+                            if t == Tri::Yes { "" } else { "not" },
+                            if listed { "lists" } else { "doesn't list" }
+                        ));
+                    }
+                }
+            }
+        }
+        self.d.out.mem_reads += 1;
+        if let Some(why) = wrong {
+            if std::env::var_os("WR_DEBUG_MEMORY").is_some() {
+                eprintln!("DEBUG memory tick {} ready: {why}", self.d.tick);
+            }
+            self.w
+                .coverage
+                .unsupported("driven replay: memory: the sim's ready differs from the recording's");
+        }
         Ok(self.input(groups))
     }
 
@@ -918,7 +985,8 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         let r = self.leaf("pass", &["u", "v"])?;
         Self::about(r, "u", &self.uid(u))?;
         let v = Self::bool_of(r, "v")?;
-        Ok(self.input(v))
+        let sim = senses::passive(self.w, u);
+        Ok(self.leaf_checked("pass", sim, v))
     }
 
     fn group_of(&mut self, u: EntityIdx) -> Result<GroupIdx, Desync> {
@@ -953,7 +1021,8 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         Self::about(r, "u", &self.uid(u))?;
         Self::about(r, "g", &group_key(self.w, g))?;
         let v = Self::bool_of(r, "v")?;
-        Ok(self.input(v))
+        let sim = senses::in_stealth_for(self.w, u, g);
+        Ok(self.leaf_checked("stl", sim, v))
     }
 
     fn is_enemy(&mut self, g: GroupIdx, u: EntityIdx) -> Result<bool, Desync> {
@@ -1014,11 +1083,18 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         Ok(self.checked("inv", sim, &rec))
     }
 
-    fn sees_invisible(&mut self, _g: GroupIdx, u: EntityIdx) -> Result<bool, Desync> {
+    fn sees_invisible(&mut self, g: GroupIdx, u: EntityIdx) -> Result<bool, Desync> {
         let r = self.leaf("seen", &["u", "v"])?;
         Self::about(r, "u", &self.uid(u))?;
         let v = Self::bool_of(r, "v")?;
-        Ok(self.input(v))
+        // The loop over the group's members: nobody who could see it (no see-invisibility, no
+        // blindsense) is false for certain; a member that could rests on its line of sight to the
+        // target (a sight-cache read per member, whose answer the leaf doesn't give apart).
+        let members = self.w.combat.groups.get(g).units.clone();
+        Ok(match senses::invisible_target_seen(self.w, &members) {
+            Some(sim) => self.leaf_checked("seen", sim, v),
+            None => self.leaf_taken("seen", v),
+        })
     }
 
     fn game_time(&mut self) -> Result<TimeSpan, Desync> {
