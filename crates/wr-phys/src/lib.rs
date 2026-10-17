@@ -240,13 +240,17 @@ impl World {
                                 <= 1e-4 * (1.0 + f64::from(*x).abs())
                         })
                         // A box's whole placement, within the conservative test's allowance.
-                        || (matches!(s.kind, ShapeKind::Box { .. })
-                            && !boxes::placement_agrees(
+                        || match &s.kind {
+                            ShapeKind::Box { chain, center, .. } => !boxes::placement_agrees(
                                 m,
+                                chain,
+                                *center,
                                 c.position,
                                 c.rotation,
                                 c.lossy_scale,
-                            ))))
+                            ),
+                            _ => false,
+                        }))
                 .then(|| {
                     format!("recorded {c:?}, the physics file's (no recorded transform) differs")
                 }),

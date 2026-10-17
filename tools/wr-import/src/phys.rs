@@ -433,6 +433,8 @@ pub fn apply_recorded_colliders(
                     ensure!(
                         wr_phys::boxes::placement_agrees(
                             local_to_world,
+                            chain,
+                            *center,
                             r.position,
                             r.rotation,
                             r.lossy_scale

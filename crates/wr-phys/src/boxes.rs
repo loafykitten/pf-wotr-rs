@@ -106,11 +106,15 @@ pub fn transform_point(chain: &[LocalTrs], p: [f32; 3]) -> [f32; 3] {
 /// Whether a recorded transform (`Transform.position`, `.rotation`, `.lossyScale`) places a
 /// shape where `local_to_world` (column-major, the importer's) does, within the conservative
 /// test's allowance for the game's own `f32` placement (a millionth of the translation and of
-/// the basis): the scene's geometry then encloses the game's, so the conservative test can
-/// stand in for a shape whose exact mapping isn't established.
+/// the basis), and the box's centre as the game places it (`TransformPoint`, exact under any
+/// hierarchy, where cancellation in large ancestor translations can move it far from the
+/// matrix's) where the matrix places it: the scene's geometry then encloses the game's, so
+/// the conservative test can stand in for a box whose exact mapping isn't established.
 #[must_use]
 pub fn placement_agrees(
     local_to_world: &[f32; 16],
+    chain: &[LocalTrs],
+    center: [f32; 3],
     position: [f32; 3],
     rotation: [f32; 4],
     lossy_scale: [f32; 3],
@@ -137,7 +141,15 @@ pub fn placement_agrees(
     let translation = (0..3).all(|k| {
         (m[12 + k] - f64::from(position[k])).abs() <= 1e-6 * (1.0 + f64::from(position[k]).abs())
     });
-    columns && translation
+    let game = transform_point(chain, center);
+    let centre = (0..3).all(|k| {
+        let ours = m[k] * f64::from(center[0])
+            + m[4 + k] * f64::from(center[1])
+            + m[8 + k] * f64::from(center[2])
+            + m[12 + k];
+        (ours - f64::from(game[k])).abs() <= 1e-6 * (1.0 + f64::from(game[k]).abs())
+    });
+    !chain.is_empty() && columns && translation && centre
 }
 
 /// `PxQuat::getNormalized`: `s = 1 / sqrt(((x² + y²) + z²) + w²)`, each component times `s`.

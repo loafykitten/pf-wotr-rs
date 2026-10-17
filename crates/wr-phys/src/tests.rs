@@ -1059,6 +1059,31 @@ fn what_the_recordings_dont_cover_isnt_computed_or_accepted() {
     assert!(w.check_recorded_colliders(&[shifted]).is_err(), "shifted");
     let rounded = RecordedCollider { lossy_scale: [1.000_000_1, 0.999_999_94, 1.0], ..rec.clone() };
     assert_eq!(w.check_recorded_colliders(&[rounded]), Ok(()), "the game's rounding");
+    // A hierarchy whose large translations cancel: the matrix is the identity, but the game's
+    // TransformPoint places the centre elsewhere (x = 8, not 10).
+    let chain = [
+        boxes::LocalTrs {
+            position: [-1.0e8, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [2.0, 1.0, 1.0],
+        },
+        boxes::LocalTrs {
+            position: [5.0e7, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [0.5, 1.0, 1.0],
+        },
+    ];
+    let mut id = [0.0f32; 16];
+    (id[0], id[5], id[10], id[15]) = (1.0, 1.0, 1.0, 1.0);
+    assert_eq!(boxes::transform_point(&chain, [10.0, 0.0, 0.0])[0], 8.0);
+    assert!(!boxes::placement_agrees(
+        &id,
+        &chain,
+        [10.0, 0.0, 0.0],
+        [0.0; 3],
+        [0.0, 0.0, 0.0, 1.0],
+        [1.0; 3]
+    ));
     // A scene whose every collider was left out still has its recordings checked.
     let other = RecordedCollider { name: "T:c (BoxCollider)".into(), ..rec.clone() };
     assert!(w.check_recorded_colliders(&[rec, other]).is_err(), "a collider the file lacks");

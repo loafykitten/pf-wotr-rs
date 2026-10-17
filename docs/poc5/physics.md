@@ -291,7 +291,8 @@ leave those checks passing and could move the centre's last bit); nothing in the
 transform at load, and all 176,106 probe hits agree. Recording `TransformPoint(center)` itself (observer change 3,
 below) would make it an input. A box the mapping isn't established for keeps the conservative test only when its
 recorded transform agrees with the scene's within that test's allowance (`boxes::placement_agrees`: a millionth of
-the translation and basis); otherwise the importer refuses the recording, and the driven replay reports a recording
+the translation and basis, and its centre's `TransformPoint` where the scene's matrix puts it, which cancellation
+in large ancestor translations could otherwise break); otherwise the importer refuses the recording, and the driven replay reports a recording
 whose unestablished box differs.
 
 **The importer** (`wr-import phys-pack --colliders`): each box keeps its local transforms from the root down (the
