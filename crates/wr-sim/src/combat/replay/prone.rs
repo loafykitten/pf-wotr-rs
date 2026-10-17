@@ -51,28 +51,47 @@ impl Driver<'_> {
     /// end); returns whether it fell.
     fn prone_unit(&mut self, w: &mut World, u: EntityIdx) -> R<bool> {
         self.place(w, Phase::Prone, "the prone controller");
-        if !self.prone_done.contains(&u) {
-            // `BaseUnitController.Tick` visits `AwakeUnits` in order: the named unit must be awake
-            // (the window's last frame: in its prefix's set) and not before one already named.
-            match w.combat.awake.iter().position(|x| *x == u) {
-                Some(i) if i < self.prone_cursor => {
-                    return Err(Desync(
-                        "a prone controller record out of the awake list's order".into(),
-                    ));
-                }
-                Some(i) => self.prone_cursor = i,
-                None => {
-                    let id = &w.entity(u).unique_id;
-                    let listed = self.awake_sets.get(&self.tick).is_some_and(|s| s.contains(id));
-                    if !(listed && !self.awake_sets.contains_key(&(self.tick + 1))) {
-                        return Err(Desync(
-                            "a prone controller record of a unit that isn't awake".into(),
-                        ));
-                    }
-                }
+        // `BaseUnitController.Tick` visits `AwakeUnits` in order and finishes a unit's visit (its
+        // stop, then its `InterruptAll`) before the next: a named unit must be awake and neither
+        // before the unit last named, nor after it while that unit's records are still coming.
+        let at = self.prone_order(w).iter().position(|x| *x == u);
+        let Some(at) = at else {
+            return Err(Desync("a prone controller record of a unit that isn't awake".into()));
+        };
+        match self.prone_cursor {
+            Some(c) if at < c => {
+                return Err(Desync(
+                    "a prone controller record out of the awake list's order".into(),
+                ));
             }
+            Some(c) if at > c && self.prone_open => {
+                return Err(Desync(
+                    "a prone controller record of the next unit before the last one's calls came"
+                        .into(),
+                ));
+            }
+            _ => {}
         }
+        self.prone_cursor = Some(at);
         self.prone_tick_unit(w, u)
+    }
+
+    /// The units the controller visits, in order: the awake list, and in the window's last frame
+    /// (no recorded next awake set) the units of the frame's prefix set the sim couldn't place.
+    fn prone_order(&self, w: &World) -> Vec<EntityIdx> {
+        let mut units = w.combat.awake.clone();
+        if !self.awake_sets.contains_key(&(self.tick + 1))
+            && let Some(set) = self.awake_sets.get(&self.tick)
+        {
+            units.extend(
+                w.combat
+                    .awake_unknown
+                    .iter()
+                    .copied()
+                    .filter(|u| set.contains(&w.entity(*u).unique_id)),
+            );
+        }
+        units
     }
 
     /// [`Self::prone_unit`] in the phase (no placing: the phase's end runs inside the frame's).
@@ -103,6 +122,7 @@ impl Driver<'_> {
             return Ok(());
         }
         if self.prone_unit(w, u)? {
+            self.prone_open = true;
             Ok(())
         } else {
             Err(Desync(
@@ -124,7 +144,10 @@ impl Driver<'_> {
             return;
         };
         match self.prone_unit(w, u) {
-            Ok(true) => self.prone_calls.push(u),
+            Ok(true) => {
+                self.prone_calls.push(u);
+                self.prone_open = false;
+            }
             Ok(false) => w.coverage.unsupported(
                 "driven replay: the recording has an InterruptAll by the prone controller for a unit the sim's controller doesn't make fall (or not awake)",
             ),
@@ -183,6 +206,7 @@ impl Driver<'_> {
             );
         }
         self.prone_done.clear();
-        self.prone_cursor = 0;
+        self.prone_cursor = None;
+        self.prone_open = false;
     }
 }
