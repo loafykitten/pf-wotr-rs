@@ -41,6 +41,7 @@ pub mod ties;
 pub mod turn_tick;
 pub mod turns;
 pub mod units;
+pub mod vision;
 pub mod weapon;
 
 use crate::csharp::TimeSpan;
@@ -176,6 +177,9 @@ pub struct CombatWorld {
     pub commands_paused: bool,
     /// Spellcasting: the abilities' execution contexts and `AbilityExecutionController`.
     pub spells: spells::Spells,
+    /// Line of sight: the geometry, the sight caches and the units in vision range, when the
+    /// replay computes them (docs/poc5/vision.md).
+    pub vision: vision::Vision,
 }
 
 /// `UnitEntityData.IsInCombat`.

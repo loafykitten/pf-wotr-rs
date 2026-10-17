@@ -296,6 +296,33 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         out.mem_changes,
         out.mem_checked
     );
+    match (&out.vision, &out.vision_off) {
+        (Some(v), _) => println!(
+            "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal",
+            v.engage,
+            v.engage_pre,
+            v.memory,
+            v.memory_pre,
+            v.ai,
+            v.misses,
+            v.hits,
+            v.pre_hits,
+            v.pre_fresh_equal,
+            v.pre_fresh_different,
+            v.out_of_range,
+            v.clears,
+            v.adopted_clears,
+            v.unmodelled_fills,
+            v.obstacle_reads,
+            v.vis_records,
+            v.geometry_segments,
+            v.probes
+        ),
+        (None, Some(why)) => {
+            println!("vision: not computed ({why}); line of sight stays the recording's")
+        }
+        (None, None) => println!("vision: not computed (no engage observer or no vis records)"),
+    }
     println!(
         "agent: entries {}, commands' calls {}, states checked {}, units ticked {}, requests checked {}, draws {}, synchronizations {}, getters checked {}, rows checked {}; inputs {:?}",
         out.ag_entries,

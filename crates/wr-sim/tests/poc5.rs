@@ -6378,3 +6378,166 @@ fn computed_memory_replays_are_valid_and_damage_is_reported() {
     }
     assert!(missed.is_empty(), "{missed:#?}");
 }
+
+/// Line of sight computed (docs/poc5/vision.md): the engagement's and the group memory's
+/// `HasLOS` reads, the sight caches' misses and clears, over the units in vision range, on the
+/// captures with and without the driven agent; every way of damaging what they follow is
+/// reported. Needs the area's line-of-sight file and fog of war bounds
+/// (`scripts/scene-cache.sh`, `wr-rules-data`).
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18, the captures and the area's line-of-sight file"]
+#[allow(clippy::too_many_lines)]
+fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
+    use serde_json::Value as V;
+    for (capture, fight) in
+        [("poc5-tb-95", "tb-focus"), ("poc5-tb-111", "tb-nearest"), ("poc5-tb-114", "tb-focus")]
+    {
+        let Some(dir) = fixture_in(capture, fight) else {
+            eprintln!("{capture}/{fight} not present: skipped");
+            continue;
+        };
+        for run in ["record", "replay-1", "replay-2"] {
+            let name = format!("{capture}/{fight} {run}");
+            let (out, w) = replay::run_fixture(SAVE, &dir, run).expect("replay");
+            assert!(w.valid(), "{name}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+            assert!(out.diff.equal, "{name}: {:?}", out.diff.first_difference);
+            let Some(v) = &out.vision else {
+                panic!("{name}: line of sight not computed: {:?}", out.vision_off);
+            };
+            assert!(v.engage > 1000 && v.misses > 100 && v.clears > 20, "{name}: {v:?}");
+        }
+    }
+    let Some(dir) = fixture_in("poc5-tb-111", "tb-nearest") else { return };
+    type Change = fn(&mut Vec<V>);
+    fn ev(r: &V, e: &str) -> bool {
+        r["k"] == "obs" && r["ev"] == e
+    }
+    fn leaf(r: &V, e: &str) -> bool {
+        ev(r, e) && r["f"] == "los" && r["t"].as_i64() > Some(300)
+    }
+    fn pos(recs: &[V], f: impl Fn(&V) -> bool) -> usize {
+        recs.iter().position(f).expect("a record to damage")
+    }
+    fn renumber(recs: &mut [V]) {
+        for (n, r) in recs.iter_mut().enumerate() {
+            r["seq"] = json!(n);
+        }
+    }
+    fn nudge(r: &mut V, k: &str, i: usize) {
+        let x = r[k][i].as_f64().unwrap();
+        r[k][i] = json!(f64::from(f32::from_bits((x as f32).to_bits() + 1)));
+    }
+    const X: &str = "driven replay: vision:";
+    let cases: [Change; 14] = [
+        // The leaves the sim answers.
+        |recs| {
+            let at = pos(recs, |r| leaf(r, "uc_v") && r["u"].is_string());
+            let b = recs[at]["v"].as_bool().unwrap();
+            recs[at]["v"] = json!(!b);
+        },
+        |recs| {
+            let at = pos(recs, |r| leaf(r, "mem_v") && r["v"] == false);
+            recs[at]["v"] = json!(true);
+        },
+        // A cache miss: its result, its sample, its point, gone, doubled.
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los") && r["t"].as_i64() > Some(300));
+            let b = recs[at]["r"].as_bool().unwrap();
+            recs[at]["r"] = json!(!b);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los") && r["t"].as_i64() > Some(300));
+            nudge(&mut recs[at], "s", 0);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los") && r["t"].as_i64() > Some(300));
+            nudge(&mut recs[at], "p", 2);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los") && r["t"].as_i64() > Some(300));
+            recs.remove(at);
+            renumber(recs);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los") && r["t"].as_i64() > Some(300));
+            let c = recs[at].clone();
+            recs.insert(at, c);
+            renumber(recs);
+        },
+        // A cache clear: gone, elsewhere, doubled.
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los_clear") && r["t"].as_i64() > Some(300));
+            recs.remove(at);
+            renumber(recs);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los_clear") && r["t"].as_i64() > Some(300));
+            nudge(&mut recs[at], "at", 0);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "los_clear") && r["t"].as_i64() > Some(300));
+            let c = recs[at].clone();
+            recs.insert(at, c);
+            renumber(recs);
+        },
+        // The units in vision range: one missing, one removed that was never there.
+        |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "vis")
+                    && r["t"].as_i64() > Some(300)
+                    && !r["add"].as_array().unwrap().is_empty()
+            });
+            recs[at]["add"].as_array_mut().unwrap().remove(0);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "vis") && r["t"].as_i64() > Some(300));
+            recs[at]["rem"] = json!(["35fffa0a-06ba-4cba-be40-7914924be190"]);
+            recs[at]["add"] = json!([]);
+        },
+        // The geometry changed at run time (not modelled).
+        |recs| {
+            let at = pos(recs, |r| ev(r, "vis") && r["t"].as_i64() > Some(300));
+            let mut g = recs[at].clone();
+            g["ev"] = json!("los_geometry");
+            g.as_object_mut().unwrap().retain(|k, _| ["seq", "k", "t", "ev"].contains(&k.as_str()));
+            recs.insert(at, g);
+            renumber(recs);
+        },
+        // A probe the game answered differently from the sim's geometry (a wall of the caves'
+        // mechanics scene; the eye below its top).
+        |recs| {
+            let at = pos(recs, |r| ev(r, "vis") && r["t"].as_i64() > Some(300));
+            let mut g = recs[at].clone();
+            g["ev"] = json!("los_probe");
+            g.as_object_mut().unwrap().retain(|k, _| ["seq", "k", "t", "ev"].contains(&k.as_str()));
+            g["v"] = json!([[125.0, 47.0, 85.0, 125.0, 47.0, 97.0, 0.0, 0]]);
+            recs.insert(at, g);
+            renumber(recs);
+        },
+    ];
+    let mut missed = Vec::new();
+    for (i, change) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let changed = trace.edited(change);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(X)) {
+            missed
+                .push(format!("case {i}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>()));
+        }
+    }
+    // The same probe as the game answers it is valid.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = pos(recs, |r| ev(r, "vis") && r["t"].as_i64() > Some(300));
+        let mut g = recs[at].clone();
+        g["ev"] = json!("los_probe");
+        g.as_object_mut().unwrap().retain(|k, _| ["seq", "k", "t", "ev"].contains(&k.as_str()));
+        g["v"] = json!([[125.0, 47.0, 85.0, 125.0, 47.0, 97.0, 0.0, 1]]);
+        recs.insert(at, g);
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+    assert_eq!(out.vision.as_ref().map(|v| v.probes), Some(1));
+    assert!(missed.is_empty(), "{missed:#?}");
+}
