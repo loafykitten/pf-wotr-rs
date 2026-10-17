@@ -6,7 +6,7 @@ anything**: it's the handoff, with the goal, the fidelity contract, decisions, f
 measured so far, and the proof-of-concept milestones. `docs/research/` holds the code
 survey and notes on other rewrites.
 
-- **Current status (2026-10-15, twenty-second session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
+- **Current status (2026-10-17, twenty-third session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
   certification) passed**. Ember's fixture saves exist: `Manual_18_WR_FirstBattle`,
   `Manual_19_WR_PreHorgus` and `Manual_20_WR_PreCamelia` (read-only copies in `fixtures/saves/`, gitignored).
   Where each workstream stands, with its handoff:
@@ -30,7 +30,7 @@ survey and notes on other rewrites.
   - The movement agent (`docs/poc5/movement.md`): computed in the driven replay with its physics (`crates/wr-phys`:
     terrain, boxes and triangle meshes exact against the player), paths, the AI's simulation steps, place-on-ground and
     facing (`docs/poc5/orientation.md`); memory (`docs/poc5/memory.md`), spells, the combat log with its tooltips and
-    initiative ties are computed too. PLAN's "Where things stand" lists the twenty-second session's streams, the
+    initiative ties are computed too. PLAN's "Where things stand" lists the twenty-second and twenty-third sessions' streams (line of sight, roaming, loot and prone, the view pin), the
     captures (`poc5-tb-111` to `-135`) and what's open (the camera-view pin for `-134`).
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in

@@ -7,10 +7,40 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-15, twenty-second session): start here
+## Where things stand (2026-10-17, twenty-third session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **Twenty-third session (2026-10-16/17; Opus 5.5 (high) streams, then Sonnet 5.5 (high) from 2026-10-17).** Merged,
+  each reviewed by gpt-6.1-sol (high) to no findings:
+  - *Drezen* (stream drezen): Manual_10's companion spawners and the capital mode; the 13 companion toggles restart at
+    the first tick as in the oracle; Drezen's scene cache.
+  - *Boxes* (below, under the twenty-second session's streams): physics file format 3.
+  - *Roaming* (stream roaming, `combat/roaming.rs`, `replay/roaming.rs`, `Phase::Roaming`, `docs/poc5/orientation.md`):
+    `UnitRoamingController` in the turn-based driven replay (rolls, idle waits, arrivals, the sleeping unit's steps;
+    `insideUnitCircle` draws), checked against `roam_roll`, `ag_pos`, `ag_look` and `uc_new`.
+  - *Line of sight* (stream vision, `crates/wr-los`, `combat/vision.rs`, `replay/vision.rs`, `Phase::LosCache`,
+    `docs/poc5/vision.md`): `LineOfSightGeometry` from the scenes' `FogOfWarBlocker`s (`wr-import los-pack`,
+    `cache/sim/los/<guid>.wrlos`), the sight caches and `HasLOS`/`CheckLOS` for the engagement, the group memory and the
+    AI: every recorded read, miss and clear equal on 96 runs. `CanBeInVisionRange` stays recorded (`vis`); stream
+    visrange (running at this writing) computes it.
+  - *Loot and the prone controller* (below).
+  - *The camera-view pin* (`docs/poc5/tb-replay.md`, plans `poc5-tb10`/`-tb11`, captures `-136` to `-138`): extra and
+    dead units' `IsInCameraFrustum` pinned to the recording each tick; `-136` valid on all five runs, the flips of
+    `-137`/`-138` show the pin drives the saved `m_IsDeathRevealed`.
+  - *`life::all_units` in `State.Units.All` order* (the pool's, then other unit entities), from Sol's review of loot:
+    the awake list, the prone order and every other caller follow the game's pool instead of entity indices.
+  - **Valid on every run** after these merges (sweep 2026-10-17: 106 runs; `check.sh` 659 tests; POC-5 suites 39/39):
+    every capture of the twenty-second session's list, plus `-131`, `-134` and `-136`. Not valid: `-122/tb-nearest`
+    (the known tie).
+  - **WrathOracle observers added, not yet recorded** (the next capture should be a `poc5-tb10` tb-lizard run, number
+    `-139`): `ph_col`'s `wcenter` (a box's `TransformPoint(center)`, for the importer), `roam_init` (each
+    `UnitPartRoaming` at the window's first tick, for roaming's start state), `los_geom`/`los_probe` (the game's line of
+    sight grid and `HasObstacle` on seeded segments; the replay's reader exists, and should require both records when
+    the observer is declared). The sim reads none of them yet from a recording.
+  - Open: a replay's window can start one frame apart (523B's `TimeToNextRoundTick`; `docs/poc5/tb-replay.md`, end);
+    loot's proposed observers (`loot_drop`, `ent_created`, `prone_step`, `tt_prep` Duration, `awake_set`,
+    `docs/poc5/loot-and-prone.md`).
 - **Parallel streams (twenty-second session, Opus 5.5 (high) agents in git worktrees, `scripts/worktree-setup.sh`;
   only the main session builds WrathOracle and records).** Merged, each reviewed by gpt-6.1-sol (high) to no findings:
   - *The agent in the driven replay* (`combat/replay/agent.rs`; hardening A2 per
