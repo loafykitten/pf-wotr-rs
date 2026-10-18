@@ -2142,6 +2142,10 @@ impl Inputs for Driver<'_> {
             w.combat.impatience.rolls.entry(c).or_default().push(seq);
         }
         self.imp_span(w, at, end);
+        self.out.spans.oracle_invalid += trace.records[at..=end]
+            .iter()
+            .filter(|x| x["k"] == "obs" && x["ev"] == "invalid")
+            .count();
         match rule.attack_hit {
             Some(hit) => Ok(hit),
             None => Err(Desync(format!("command {c}'s attack rule made no roll"))),
@@ -2906,6 +2910,9 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 }
                 ok
             }
+            // The oracle's own note that the game's replay left its recording: not a rule's
+            // record, counted by the caller (`attack_rule`).
+            Some("obs") if x["ev"] == "invalid" => true,
             Some("env") => {
                 // Written in the rule's `OnTrigger` prefix.
                 // (A flat-footed check's only at the root: `FlatFootedPrefix` writes it when one rule

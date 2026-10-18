@@ -396,7 +396,8 @@ fn plan_origins(t: &Trace) -> HashMap<usize, (usize, Option<Caller>)> {
 
 /// A root computed at its call site may hold only its own rule's steps and handlers, draws of the
 /// presentation class and at most one `env`, its own (a flat-footed check's, for the same units):
-/// no observation (a combat join), mutation, nested rule, sim draw or handler exception.
+/// no observation (a combat join; the oracle's `invalid` note apart), mutation, nested rule, sim
+/// draw or handler exception.
 fn origin_span_is_inert(root: &Rv, inner: &[Rv]) -> bool {
     let class = short(root["class"].as_str().unwrap_or(""));
     let own_env = |x: &Rv| {
@@ -411,6 +412,8 @@ fn origin_span_is_inert(root: &Rv, inner: &[Rv]) -> bool {
             Some("about" | "trig" | "trig_end" | "did" | "rule_end" | "h" | "h_end") => true,
             Some("draw") => x["c"] == "pres",
             Some("env") => own_env(x),
+            // The oracle's own note that the game's replay left its recording (`spans.rs`).
+            Some("obs") => x["ev"] == "invalid",
             _ => false,
         })
 }

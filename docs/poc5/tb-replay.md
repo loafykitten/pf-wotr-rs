@@ -902,7 +902,8 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   sim's rule handler makes the same call when it fires such a rule (a phase `RuleAttackWithWeapon`). **Gap:** in any
   other root nothing took it. Now every `eng_prov` in a non-command span is placed as `span_ok` places the commands'
   (`spans::provoke_placed`: the root's frame, inside the engagement controller's did handler of the rule its caller
-  names, of that rule's initiator, once per rule), then queued like theirs (`Driver::eng_prov`) and matched with the
+  names, of that rule's initiator, once per rule, while that rule is the innermost open one and between `trig_end`
+  and `did`: `Open` follows the rules' stages as `span_ok` does), then queued like theirs (`Driver::eng_prov`) and matched with the
   sim's provoke calls at the next engagement tick, so a root the sim doesn't fire, or fires without the provoke,
   reports "the attacks of opportunity provoked differ from the sim's queue"; a record that isn't such a provoke is
   reported at once.
@@ -919,16 +920,25 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   raw one in a trace is ignored as input), so a stray one is reported.
 - `invalid`: the oracle's own statement that the game's replay left its recording (`Sched.Invalidate`). The sim is
   checked against the game's actual trace, so it is not the sim's matter: accepted everywhere, inside spans too
-  (counted as `oracle_invalid`). The runs that hold one (`-134` tb-lizard replay-2, `-135` replay-2-perturbed and
-  replay-3-perturbed) are judged by what the sim computes: `-135` replay-3-perturbed stays invalid for its other
-  reason (its root flat-footed check whose call site isn't placed).
+  (counted as `oracle_invalid`): in a phase-driven root's span, in a presentation root's (`origin_span_is_inert`
+  takes it, so the root keeps its call site), and in a command's (`span_ok`). The runs that hold one (`-134`
+  tb-lizard replay-2, `-135` replay-2-perturbed and replay-3-perturbed) are judged by what the sim computes.
+  **`-135` replay-3-perturbed is valid now** (it was invalid only because its `invalid` note, written inside the root
+  flat-footed check of tick 442, made the planner drop that root's call site, which left its `env` unread). That run
+  is the perturbed replay of `poc5-tb9`: the game's replay flipped a camera scroll result, at tick 442 made a
+  `RuleCheckTargetFlatFooted` where the recording had a `RuleCalculateAttacksCount`, wrote the note, and went on to
+  tick 443 (111,442 records). The trace is the game's actual run, and the sim reproduces it: 20 roots driven, T0
+  equal, no report. "Valid" says the sim agrees with the game's trace; whether the game's replay stayed on its
+  recording is the oracle's own verdict, the note.
+- Frame: a root rule fires within one frame, so every record of its span (its `rule_end` too) carries the root's `t`;
+  one that doesn't is reported. It holds on all 111 runs (no exception).
 - Any other observation, or a record of another kind (`cmd`, `tb`, `time`, `input`) in a span: reported. The replay
   doesn't take a record it can't name.
 
 **Counters** (`Outcome::spans`, one line of `wr-combat replay`: "inside root rules' spans (the commands' own apart)"):
 `clog_q`, `imp_s`, `mem_q`, `eng_prov`, `proj_launch` found in non-command spans, each checked as above,
-`oracle_invalid` and `reported`. Totals of the sweep [M]: `clog_q` 2,328, `imp_s` 304, `mem_q` 0, `eng_prov` 0, `proj_launch` 0, `oracle_invalid` 1, reported 1 (an unread `env` in `-135` replay-3-perturbed's root flat-footed check whose call site isn't placed, so not driven); the same four runs are invalid as before
-(-122 `tb-nearest`, record and both replays; -135 `replay-3-perturbed`), every other run valid.
+`oracle_invalid` and `reported`. Totals of the sweep [M]: `clog_q` 2,328, `imp_s` 304, `mem_q` 0, `eng_prov` 0, `proj_launch` 0, `oracle_invalid` 1, reported 0; invalid: -122 `tb-nearest` (record and both replays), every other run valid
+(`-135` replay-3-perturbed turned valid, above).
 
 **Tests** (`poc5_spells.rs`, `records_inside_driven_root_spans_are_checked_or_reported`, `poc5-tb-123/tb-chain`; the
 unit tests `a_root_attacks_launch_is_placed_like_a_commands` and `a_root_spans_provoke_is_placed_like_a_commands`
@@ -936,9 +946,11 @@ in `replay/tests.rs`): the initiative roll's event removed and doubled (the even
 the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
 `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
 `proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
-the initiative roll's span; an `invalid` note added there is accepted and counted. The phase-driven placing of a
+the initiative roll's span, and a root's `rule_end` of another frame; an `invalid` note added to a phase-driven root, a
+presentation root and a command's attack is accepted and counted (the run stays valid). The phase-driven placing of a
 launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
-and phase, rule, unit, once per rule) is tested on fabricated spans, since no capture has a phase-driven attack with
+and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is
+tested on spans fed record by record, since no capture has a phase-driven attack with
 either. On the code of `04bc016` the `result`, `bonuses` and `env` cases are not reported (and a valid `eng_prov` copy only
 by the provoke queue's mismatch at the next engagement tick, without being placed).
 

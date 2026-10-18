@@ -66,35 +66,91 @@ pub struct SpanCounts {
     pub reported: usize,
 }
 
-/// What `span_records` knows of the span so far.
+/// What `span_records` knows of the span so far: the rules and handlers open and where each
+/// rule is in its life (`span_ok`'s frames), fed the span's records in order.
 pub(super) struct Open {
     /// The root's frame.
     pub(super) t: i64,
     /// Its rules by id: short class and initiator.
     pub(super) rules: HashMap<i64, (String, Rv)>,
+    /// The open rules, outermost first, with their stage: 0 pushed, 1 `about`, 2 `trig`, 3
+    /// `trig_end`, 4 `did`.
+    pub(super) stack: Vec<(i64, u8)>,
     /// The open handlers: class, rule, phase.
     pub(super) handlers: Vec<(String, i64, String)>,
     /// The rules that made their provoke.
     pub(super) provoked: HashSet<i64>,
 }
 
+impl Open {
+    /// The state at the root's record.
+    pub(super) fn new(root: &Rv) -> Self {
+        let mut open = Self {
+            t: root["t"].as_i64().unwrap_or(-1),
+            rules: HashMap::new(),
+            stack: Vec::new(),
+            handlers: Vec::new(),
+            provoked: HashSet::new(),
+        };
+        open.feed(root);
+        open
+    }
+
+    /// The next record of the span: a rule pushed or ended, one of its steps, a handler opened or
+    /// closed.
+    pub(super) fn feed(&mut self, r: &Rv) {
+        let id = r["id"].as_i64();
+        let step = |stack: &mut Vec<(i64, u8)>, stage: u8| {
+            if let Some(top) = stack.last_mut().filter(|t| Some(t.0) == id) {
+                top.1 = stage;
+            }
+        };
+        match r["k"].as_str() {
+            Some("rule") => {
+                let class =
+                    r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
+                if let Some(id) = id {
+                    self.rules.insert(id, (class.to_owned(), r["initiator"].clone()));
+                    self.stack.push((id, 0));
+                }
+            }
+            Some("about") => step(&mut self.stack, 1),
+            Some("trig") => step(&mut self.stack, 2),
+            Some("trig_end") => step(&mut self.stack, 3),
+            Some("did") => step(&mut self.stack, 4),
+            Some("rule_end") => {
+                if self.stack.last().is_some_and(|t| Some(t.0) == id) {
+                    self.stack.pop();
+                }
+            }
+            Some("h") => self.handlers.push((
+                r["class"].as_str().unwrap_or("").to_owned(),
+                r["rule"].as_i64().unwrap_or(0),
+                r["phase"].as_str().unwrap_or("").to_owned(),
+            )),
+            Some("h_end") => {
+                self.handlers.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A provoke (`r`, whose caller names `rule`) placed like `span_ok` places a command's: in the
 /// root's frame, in the engagement controller's did handler of that rule, of the rule's
-/// initiator, once per rule.
+/// initiator, once per rule, while the rule is the innermost open one and between `trig_end` and
+/// `did`.
 pub(super) fn provoke_placed(open: &mut Open, r: &Rv, rule: Option<&str>) -> bool {
-    r["t"].as_i64() == Some(open.t)
-        && open.handlers.last().is_some_and(|(class, id, phase)| {
-            class == ENGAGEMENT
-                && phase == "did"
-                && open.rules.get(id).is_some_and(|(rc, initiator)| {
-                    Some(rc.as_str()) == rule && r["u"] == initiator["$unit"]
-                })
-                && !open.provoked.contains(id)
-        })
-        && {
-            let id = open.handlers.last().map_or(0, |h| h.1);
-            open.provoked.insert(id)
-        }
+    let Some((class, id, phase)) = open.handlers.last() else { return false };
+    let placed = r["t"].as_i64() == Some(open.t)
+        && class == ENGAGEMENT
+        && phase == "did"
+        && open.stack.last() == Some(&(*id, 3))
+        && open.rules.get(id).is_some_and(|(rc, initiator)| {
+            Some(rc.as_str()) == rule && r["u"] == initiator["$unit"]
+        });
+    let id = *id;
+    placed && open.provoked.insert(id)
 }
 
 impl Driver<'_> {
@@ -102,34 +158,26 @@ impl Driver<'_> {
     /// fired it (or didn't).
     pub(super) fn span_records(&mut self, w: &mut World, start: usize, end: usize) {
         let trace = self.trace;
-        let mut open = Open {
-            t: trace.records[start]["t"].as_i64().unwrap_or(-1),
-            rules: HashMap::new(),
-            handlers: Vec::new(),
-            provoked: HashSet::new(),
-        };
-        let note = |open: &mut Open, r: &Rv| {
-            let class = r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
-            if let Some(id) = r["id"].as_i64() {
-                open.rules.insert(id, (class.to_owned(), r["initiator"].clone()));
-            }
-        };
-        note(&mut open, &trace.records[start]);
-        for k in start + 1..end {
+        let mut open = Open::new(&trace.records[start]);
+        for k in start + 1..=end {
             let r = &trace.records[k];
+            // A root rule fires within one frame: every record of its span is of it.
+            if r["t"].as_i64() != Some(open.t) {
+                self.span_reported(
+                    w,
+                    format!("a {} record", r["k"].as_str().unwrap_or("?")),
+                    "a record of another frame than its root's",
+                );
+            }
             match r["k"].as_str() {
                 // The rule's own: its steps and nested rules, and its handlers (read by the code
                 // that fires it), and the draws and mutations (compared in the T0 streams).
-                Some("rule") => note(&mut open, r),
-                Some("h") => open.handlers.push((
-                    r["class"].as_str().unwrap_or("").to_owned(),
-                    r["rule"].as_i64().unwrap_or(0),
-                    r["phase"].as_str().unwrap_or("").to_owned(),
-                )),
-                Some("h_end") => {
-                    open.handlers.pop();
+                Some(
+                    "rule" | "h" | "h_end" | "rule_end" | "about" | "trig" | "trig_end" | "did",
+                ) => {
+                    open.feed(r);
                 }
-                Some("rule_end" | "about" | "trig" | "trig_end" | "did" | "draw" | "mut") => {}
+                Some("draw" | "mut") => {}
                 // The environment the root's code looked up.
                 Some("env") => {
                     let read = self.env_reads.iter().any(|(rule, a, t)| {

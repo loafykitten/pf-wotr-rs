@@ -428,7 +428,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             }
         }
     }
-    let cases: [(&str, Change); 15] = [
+    let cases: [(&str, Change); 16] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
         // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
         ("events queued, the sim queued", |recs| {
@@ -505,6 +505,15 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             recs.insert(root + 1, json!({"seq": 0, "k": "cmd", "t": t, "ev": "start"}));
             renumber(recs);
         }),
+        // A record of another frame than its root's (the span is one frame's).
+        ("driven replay: a rule_end record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let id = recs[root]["id"].clone();
+            let end = (root..recs.len())
+                .find(|&i| recs[i]["k"] == "rule_end" && recs[i]["id"] == id)
+                .expect("its end");
+            recs[end]["t"] = json!(recs[end]["t"].as_i64().unwrap_or(0) + 1);
+        }),
         // The oracle writes no raw `result` or `bonuses` records, and an environment is only the
         // one the root's code reads (the initiative roll reads none).
         ("driven replay: a result record inside a root rule's span", |recs| {
@@ -539,17 +548,36 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
         }
     }
     assert!(missed.is_empty(), "{missed:#?}");
-    // The oracle's own `invalid` note is accepted inside a span, counted.
+    // The oracle's own `invalid` note is accepted in every kind of root, counted: a phase-driven
+    // one, a presentation root computed at its call site, and a command's attack.
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
     let changed = trace.edited(|recs| {
-        let root = initiative(recs);
-        let t = recs[root]["t"].clone();
-        recs.insert(root + 1, json!({"seq": 0, "k": "obs", "t": t, "ev": "invalid", "why": "x"}));
+        let note = |recs: &mut Vec<V>, root: usize| {
+            let t = recs[root]["t"].clone();
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "obs", "t": t, "ev": "invalid", "why": "x"}),
+            );
+        };
+        let class = |r: &V, c: &str| {
+            r["k"] == "rule"
+                && r["depth"] == 0
+                && r["class"].as_str().is_some_and(|x| x.ends_with(c))
+        };
+        let at = initiative(recs);
+        note(recs, at);
+        let at = recs
+            .iter()
+            .position(|r| class(r, "RuleCheckTargetFlatFooted") && r["origin"].is_string())
+            .expect("a presentation root with a call site");
+        note(recs, at);
+        let at = recs.iter().position(|r| class(r, "RuleAttackWithWeapon")).expect("an attack");
+        note(recs, at);
         renumber(recs);
     });
     let out = replay::run_with_tape(&mut w, &changed, &trace);
     assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
-    assert_eq!((out.spans.oracle_invalid, out.spans.reported), (1, 0));
+    assert_eq!((out.spans.oracle_invalid, out.spans.reported), (3, 0));
 }
 
 /// The ranged centipede's spit (`GiantCentipedeSpitAbilityAiAction`, a `BlueprintAiCastSpell`).

@@ -1407,44 +1407,72 @@ fn a_root_attacks_launch_is_placed_like_a_commands() {
 
 /// A provoke inside a phase-driven root's span is placed as a command's is (`span_ok`): in the
 /// root's frame, in the engagement controller's did handler of the rule its caller names, of that
-/// rule's initiator, once per rule.
+/// rule's initiator, once per rule, while the rule is between `trig_end` and `did`. Built from
+/// spans, fed to the placing record by record.
 #[test]
 fn a_root_spans_provoke_is_placed_like_a_commands() {
     use super::spans::{Open, provoke_placed};
     let engagement = "Kingmaker.Controllers.Combat.UnitCombatEngagementController";
-    let r = |v: J| rvs(&[v]).remove(0);
-    let prov = r(json!({"k": "obs", "t": 5, "ev": "eng_prov", "u": "a"}));
-    let open = |handler: (&str, i64, &str)| Open {
-        t: 5,
-        rules: [(1, ("RuleAttackRoll".to_owned(), r(json!({"$unit": "a"}))))].into(),
-        handlers: vec![(handler.0.to_owned(), handler.1, handler.2.to_owned())],
-        provoked: std::collections::HashSet::new(),
+    let class = "Kingmaker.RuleSystem.Rules.RuleAttackRoll";
+    // The pieces of a span: `T` trig, `E` trig_end, `D` did, `h` the engagement handler's open,
+    // `H` its close, `P` the provoke (its position is the one placed).
+    let piece = |c: char, handler: &str, phase: &str, prov: &J| match c {
+        'T' => json!({"k": "trig", "t": 5, "id": 1}),
+        'E' => json!({"k": "trig_end", "t": 5, "id": 1}),
+        'D' => json!({"k": "did", "t": 5, "id": 1}),
+        'h' => json!({"k": "h", "t": 5, "id": 3, "class": handler, "rule": 1, "phase": phase}),
+        'H' => json!({"k": "h_end", "t": 5, "id": 3}),
+        _ => prov.clone(),
     };
+    let prov = json!({"k": "obs", "t": 5, "ev": "eng_prov", "u": "a"});
     let rule = Some("RuleAttackRoll");
-    assert!(provoke_placed(&mut open((engagement, 1, "did")), &prov, rule));
-    // Once per rule.
-    let mut o = open((engagement, 1, "did"));
-    assert!(provoke_placed(&mut o, &prov, rule));
-    assert!(!provoke_placed(&mut o, &prov, rule), "a second provoke of a rule");
-    assert!(!provoke_placed(&mut open((engagement, 1, "about")), &prov, rule), "another phase");
+    let placed = |order: &str, handler: &str, phase: &str, prov: &J, rule: Option<&str>| {
+        let mut v = vec![
+            json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+        ];
+        v.extend(order.chars().map(|c| piece(c, handler, phase, prov)));
+        let recs = rvs(&v);
+        let mut open = Open::new(&recs[0]);
+        for r in &recs[1..] {
+            if r["ev"] == "eng_prov" {
+                return provoke_placed(&mut open, r, rule);
+            }
+            open.feed(r);
+        }
+        false
+    };
+    assert!(placed("TEhPHD", engagement, "did", &prov, rule), "as the game raises it");
+    // The rule still in `OnTrigger` (`trig_end` after the handler), or past `did`.
+    assert!(!placed("ThPHE", engagement, "did", &prov, rule), "before trig_end");
+    assert!(!placed("TEDhPH", engagement, "did", &prov, rule), "after did");
+    assert!(!placed("EThPH", engagement, "did", &prov, rule), "stages out of order");
+    assert!(!placed("TEhPHD", engagement, "about", &prov, rule), "another phase");
+    assert!(!placed("TEhPHD", "Other.Handler", "did", &prov, rule), "another handler");
+    assert!(!placed("TEPD", engagement, "did", &prov, rule), "outside any handler");
     assert!(
-        !provoke_placed(&mut open(("Other.Handler", 1, "did")), &prov, rule),
-        "another handler"
-    );
-    assert!(
-        !provoke_placed(&mut open((engagement, 2, "did")), &prov, rule),
-        "a rule it doesn't know"
-    );
-    assert!(
-        !provoke_placed(&mut open((engagement, 1, "did")), &prov, Some("RuleAttackWithWeapon")),
+        !placed("TEhPHD", engagement, "did", &prov, Some("RuleAttackWithWeapon")),
         "another rule's"
     );
-    assert!(!provoke_placed(&mut open((engagement, 1, "did")), &prov, None), "no rule named");
-    let other = r(json!({"k": "obs", "t": 5, "ev": "eng_prov", "u": "b"}));
-    assert!(!provoke_placed(&mut open((engagement, 1, "did")), &other, rule), "another unit");
-    let later = r(json!({"k": "obs", "t": 6, "ev": "eng_prov", "u": "a"}));
-    assert!(!provoke_placed(&mut open((engagement, 1, "did")), &later, rule), "another frame");
-    let mut none = open((engagement, 1, "did"));
-    none.handlers.clear();
-    assert!(!provoke_placed(&mut none, &prov, rule), "outside any handler");
+    assert!(!placed("TEhPHD", engagement, "did", &prov, None), "no rule named");
+    let mut other = prov.clone();
+    other["u"] = json!("b");
+    assert!(!placed("TEhPHD", engagement, "did", &other, rule), "another unit");
+    let mut later = prov.clone();
+    later["t"] = json!(6);
+    assert!(!placed("TEhPHD", engagement, "did", &later, rule), "another frame");
+    // Once per rule: a second provoke of the same handler's rule.
+    let recs = rvs(&[
+        json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+        piece('T', "", "", &prov),
+        piece('E', "", "", &prov),
+        piece('h', engagement, "did", &prov),
+        prov.clone(),
+        prov.clone(),
+    ]);
+    let mut open = Open::new(&recs[0]);
+    for r in &recs[1..4] {
+        open.feed(r);
+    }
+    assert!(provoke_placed(&mut open, &recs[4], rule));
+    assert!(!provoke_placed(&mut open, &recs[5], rule), "a second provoke of a rule");
 }
