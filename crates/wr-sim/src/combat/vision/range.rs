@@ -610,16 +610,7 @@ impl Bounds {
                 extra_slots: c.replaced,
             });
         }
-        // `OverlapCapsule` fills a buffer of 512: with more colliders in reach, which ones it keeps
-        // is PhysX's order.
-        // (A replaced view's old collider may take a slot too.)
-        let possible = out.iter().filter(|h| h.tri != Tri::Out).count() + extra_slots(&out);
-        if possible > RESULT_BUFFER {
-            for h in out.iter_mut().filter(|h| h.tri != Tri::Out) {
-                h.capped = Some(h.tri);
-                (h.tri, h.cause) = (Tri::Maybe, Some(Cause::Capacity));
-            }
-        }
+        cap(&mut out);
         out
     }
 
@@ -631,6 +622,20 @@ impl Bounds {
 }
 
 /// The slots old colliders of replaced views may take.
+/// `OverlapCapsule` fills a buffer of 512: with more colliders possibly in reach, which ones it
+/// keeps is PhysX's order, so every possible hit is left to the recording (its decision before,
+/// `capped`). A replaced view's old collider may take a slot too. Run again whenever a hit may
+/// have become possible (a later downgrade); hits already capped keep their `capped`.
+pub fn cap(hits: &mut [Hit]) {
+    let possible = hits.iter().filter(|h| h.tri != Tri::Out).count() + extra_slots(hits);
+    if possible > RESULT_BUFFER {
+        for h in hits.iter_mut().filter(|h| h.tri != Tri::Out && h.cause != Some(Cause::Capacity)) {
+            h.capped = Some(h.tri);
+            (h.tri, h.cause) = (Tri::Maybe, Some(Cause::Capacity));
+        }
+    }
+}
+
 fn extra_slots(hits: &[Hit]) -> usize {
     hits.iter().map(|h| h.extra_slots as usize).sum()
 }
@@ -1109,6 +1114,22 @@ mod tests {
         let hits = b.overlap([0.0; 3], 5.0);
         assert!(hits.iter().all(|h| h.tri == Tri::In));
         assert!(differences(&hits, &set(512)).diffs.is_empty());
+        // Sol's round 19: 512 sure hits and one out, which a later move makes possible (the frame
+        // end's downgrade): capping again leaves them all to the recording, so a full set that
+        // holds the moved one and leaves a sure one out is no difference.
+        let mut more = units[..512].to_vec();
+        more.push(k(EntityIdx(512), [100.0, 0.0, 0.0]));
+        let mut b = Bounds::default();
+        b.tick(&more, RAN);
+        let mut hits = b.overlap([0.0; 3], 5.0);
+        let late = hits.iter_mut().find(|h| h.unit == EntityIdx(512)).expect("far hit");
+        assert_eq!(late.tri, Tri::Out);
+        (late.tri, late.cause) = (Tri::Maybe, Some(Cause::Position));
+        let rec: HashSet<EntityIdx> = (1..513).map(EntityIdx).collect();
+        assert_eq!(differences(&hits, &rec).diffs, vec![Difference::Missing(EntityIdx(0))]);
+        cap(&mut hits);
+        assert!(hits.iter().all(|h| h.cause == Some(Cause::Capacity)));
+        assert!(differences(&hits, &rec).diffs.is_empty());
         // Sol's round 8: 500 sure and 20 uncertain colliders in reach; a set of 480 sure ones and
         // the 20 uncertain ones leaves out sure hits without being full.
         let mut mixed: Vec<BoundsUnit> = units[..500].to_vec();

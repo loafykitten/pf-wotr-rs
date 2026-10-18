@@ -570,6 +570,8 @@ impl Driver<'_> {
                         (range::Tri::Maybe, Some(range::Cause::Position), None, None, None);
                 }
             }
+            // A target that was out may now be in reach: the buffer may overflow after all.
+            range::cap(&mut hits);
             self.vis_range_judge(w, u, &hits, &set, rec);
         }
     }
