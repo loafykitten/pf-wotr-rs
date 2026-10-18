@@ -13,6 +13,10 @@
 //! `SharedStringAsset`, the key its string resolves to (`LocalizedString.GetActualKey`:
 //! `m_Key`, or the end of its `Shared` chain).
 //!
+//! And `cache/sim/doll-prefabs.json`: the `UnitEntityView` settings (`m_Corpulence`, the size scale
+//! override) of `BlueprintRoot.CharGen.MaleDoll` and `FemaleDoll`, the prefabs a unit with a
+//! doll gets its view from (`DollData.CreateUnitView`).
+//!
 //! And `cache/sim/log-strings.json` ([`LogStrings`]): `BlueprintRoot.LocalizedTexts`' string
 //! containers, plus `SettingsRoot` (`BlueprintRoot.SettingsRoot.Settings`' `DamageToParty` and
 //! `EnemyCriticalHits` entities, whose texts the combat log's damage tooltip reads).
@@ -100,6 +104,7 @@ fn main() -> Result<()> {
     let mut shared: Option<SharedStrings> = None;
     let mut log: Option<LogStrings> = None;
     let mut area: Option<AreaBoundsTable> = None;
+    let mut dolls: Option<serde_json::Value> = None;
     for node in &bundle.header.nodes {
         if node.path.ends_with(".resS") || node.path.ends_with(".resource") {
             continue;
@@ -133,6 +138,7 @@ fn main() -> Result<()> {
         }
         log = Some(l);
         area = Some(area_bounds(&f, entries, &node.path, &script)?);
+        dolls = Some(doll_prefabs(&f, entries, &root, &node.path)?);
         let idx = usize::try_from(asset_index)?;
         let entry = entries.get(idx).context("asset index out of range")?;
         let p = entry.get("Asset").and_then(Value::as_pptr).context("entry Asset")?;
@@ -190,6 +196,10 @@ fn main() -> Result<()> {
         if log.containers.contains_key("SettingsRoot") { ", SettingsRoot" } else { "" },
         lpath.display()
     );
+    let dolls = dolls.context("no doll prefabs")?;
+    let dpath = wr_paths::cache_root().join("sim/doll-prefabs.json");
+    std::fs::write(&dpath, serde_json::to_string_pretty(&dolls)?)?;
+    eprintln!("doll prefabs -> {}", dpath.display());
     let area = area.context("no area bounds")?;
     let apath = cli.area_bounds_out.unwrap_or_else(AreaBoundsTable::default_path);
     if let Some(d) = apath.parent() {
@@ -280,6 +290,50 @@ fn shared_strings(
 }
 
 /// A blueprint object's field by name.
+/// `CharGen.MaleDoll` and `FemaleDoll` (each an index into `BlueprintReferencedAssets`, an entry
+/// whose object is the `Character` of the doll's prefab, in this file): the `UnitEntityView`s on
+/// that game object, as [`wr_import::prefabs::summarize`] reads a unit prefab's.
+fn doll_prefabs(
+    f: &SerializedFile<'_>,
+    entries: &[Value],
+    root: &wr_content::node::Object,
+    file: &str,
+) -> Result<serde_json::Value> {
+    let Some(Node::Object(chargen)) = field_node(root, "CharGen") else {
+        bail!("BlueprintRoot.CharGen")
+    };
+    let views = wr_import::prefabs::views_in(f)?;
+    let mut out = serde_json::Map::new();
+    out.insert("schema".into(), wr_sim::scene_spawn::DOLL_PREFABS_SCHEMA.into());
+    out.insert("source".into(), format!("wr-rules-data {file}").into());
+    for (key, field) in [("male", "MaleDoll"), ("female", "FemaleDoll")] {
+        let Some(Node::AssetIndex(ix)) = field_node(&chargen, field) else {
+            bail!("CharGen.{field} isn't an asset index")
+        };
+        let entry = entries
+            .get(usize::try_from(ix).with_context(|| format!("CharGen.{field}"))?)
+            .with_context(|| format!("CharGen.{field}: index {ix} out of range"))?;
+        let p = entry.get("Asset").and_then(Value::as_pptr).context("doll entry Asset")?;
+        ensure!(p.file_id == 0, "CharGen.{field}: the prefab is in another file");
+        let o = f.object(p.path_id).with_context(|| format!("CharGen.{field}: object"))?;
+        // (The `Character` component, or the game object itself.)
+        let go = if o.class_id == class_id::GAME_OBJECT {
+            p.path_id
+        } else {
+            f.read(o)?.get("m_GameObject").and_then(Value::as_pptr).map_or(0, |g| g.path_id)
+        };
+        let found: Vec<wr_import::prefabs::ViewFound> =
+            views.iter().filter(|(g, _)| *g == go).map(|(_, v)| v.clone()).collect();
+        ensure!(
+            found.len() == 1,
+            "CharGen.{field}: {} UnitEntityViews on its game object",
+            found.len()
+        );
+        out.insert(key.into(), serde_json::to_value(wr_import::prefabs::summarize(&found))?);
+    }
+    Ok(out.into())
+}
+
 fn field_node(o: &wr_content::node::Object, name: &str) -> Option<Node> {
     let t = wr_content::schema::ty(o.ty);
     t.fields.iter().position(|f| f.name == name).map(|i| o.fields[i].clone())

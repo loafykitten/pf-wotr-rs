@@ -1096,9 +1096,15 @@ fn a_unit_starts_with_its_prefabs_in_game_setting() {
     assert!(!w.coverage.valid(), "and reported");
     let (mut w, _) = world();
     w.scene.unit_prefabs = Some(Rc::new(
-        [("hiddenprefab".to_owned(), Some(false)), ("ambiguous".to_owned(), None)]
-            .into_iter()
-            .collect(),
+        [
+            (
+                "hiddenprefab".to_owned(),
+                crate::scene_spawn::UnitPrefab { in_game: Some(false), ..Default::default() },
+            ),
+            ("ambiguous".to_owned(), crate::scene_spawn::UnitPrefab::default()),
+        ]
+        .into_iter()
+        .collect(),
     ));
     assert!(!prefab_in_game(&mut w, Some("hiddenprefab")), "the prefab's setting");
     assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);

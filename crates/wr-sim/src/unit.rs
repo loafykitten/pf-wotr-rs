@@ -268,6 +268,12 @@ pub struct Unit {
     pub custom_prefab_guid: Option<String>,
     /// The prefab of the view a unit built in this run was given (`EntityCreator.SpawnUnit`).
     pub view_prefab: Option<String>,
+    /// `UnitPartDollData.Default`'s gender when it has a `RacePreset` (`UnitEntityData.CreateView`
+    /// builds such a unit's view from the doll prefab: `true` female), for a unit hydrated from
+    /// a save without one; `None` for a unit without the part or not hydrated.
+    pub doll_gender_female: Option<bool>,
+    /// The save had a `UnitPartDollData` (read: [`Self::doll_gender_female`], or no `RacePreset`).
+    pub doll_hydrated: bool,
     /// `UnitState.Prone.Active` (saved).
     pub prone_active: bool,
     /// `UnitState.Prone.ShouldBeActive` (saved): a knockdown's request, consumed by the next

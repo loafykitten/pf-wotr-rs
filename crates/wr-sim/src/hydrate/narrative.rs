@@ -368,9 +368,18 @@ impl Loader<'_> {
         }
         let custom_prefab =
             d.and_then(|d| d.str("CustomPrefabGuid")).filter(|s| !s.is_empty()).map(str::to_owned);
+        // `UnitPartDollData.Default` (`DollData.Gender`, `RacePreset`): with a preset the view is
+        // built from the doll prefab of its gender (`CreateView`).
+        let doll = parts.iter().find(|p| p.ty() == "UnitPartDollData").map(|p| {
+            let default = p.obj("Default");
+            let preset = default.is_some_and(|d| d.guid("RacePreset").is_some());
+            (preset, default.is_some_and(|d| d.int("Gender").unwrap_or(0) != 0))
+        });
         if let Some(u) = self.w.unit_mut(e) {
             u.is_extra = is_extra;
             u.custom_prefab_guid = custom_prefab;
+            u.doll_hydrated = doll.is_some();
+            u.doll_gender_female = doll.and_then(|(preset, female)| preset.then_some(female));
             if pos.len() == 3 {
                 u.position = [pos[0], pos[1], pos[2]];
             }

@@ -116,7 +116,8 @@ enum Cmd {
         nav_file: Option<PathBuf>,
     },
     /// Writes `cache/sim/unit-prefabs.json`: each unit prefab's `UnitEntityView.m_IsInGame`
-    /// (the `IsInGameBySettings` a unit built from it starts with), for the sim.
+    /// (the `IsInGameBySettings` a unit built from it starts with), `m_Corpulence` and
+    /// `OverrideSizeScale`, for the sim.
     UnitPrefabs,
     /// Prints a pack's metadata as JSON (blobs as offsets).
     PackInfo { pack: PathBuf },
@@ -295,10 +296,14 @@ fn main() -> Result<()> {
             let t = Instant::now();
             let ctx = context()?;
             let t1 = wr_import::prefabs::unit_prefabs(&ctx.paths.bundles(), &ctx.locations);
-            let known = t1.prefabs.values().filter(|v| v.is_some()).count();
-            let hidden = t1.prefabs.values().filter(|v| **v == Some(false)).count();
+            let known = t1.prefabs.values().filter(|v| v.in_game.is_some()).count();
+            let hidden = t1.prefabs.values().filter(|v| v.in_game == Some(false)).count();
+            let corp = t1.prefabs.values().filter(|v| v.corpulence.is_some()).count();
+            let odd =
+                t1.prefabs.values().filter(|v| v.corpulence.is_some_and(|c| c != 0.5)).count();
+            let over = t1.prefabs.values().filter(|v| v.override_present == Some(true)).count();
             eprintln!(
-                "unit prefabs: {} ({known} with one view, {hidden} not in game by settings, {} errors) in {:?}",
+                "unit prefabs: {} ({known} with one view, {hidden} not in game by settings, {corp} with a corpulence ({odd} not 0.5), {over} with an OverrideSizeScale, {} errors) in {:?}",
                 t1.prefabs.len(),
                 t1.errors.len(),
                 t.elapsed()

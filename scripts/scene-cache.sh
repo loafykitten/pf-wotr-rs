@@ -8,10 +8,11 @@
 # The sim loads the file when it exists; without it an area's scene entities are reported
 # unsupported (the run is not valid), never approximated. The unit prefab table
 # (cache/sim/unit-prefabs.json: each unit prefab's IsInGameBySettings, which every unit built
-# from a view starts with) is built once per install with `wr-import unit-prefabs`, here too
-# when it is missing. The area's nav file (cache/sim/nav/<guid>.wrnav: its navigation graphs in
-# wr-nav's format) is written alongside, and its line-of-sight file (cache/sim/los/<guid>.wrlos: the
-# scenes' FogOfWarBlockers, `wr-import los-pack`). Line of sight in the driven replay also needs the
+# from a view starts with, and its corpulence settings) is built once per install with
+# `wr-import unit-prefabs`, here too when it is missing or of an older schema. The area's nav
+# file (cache/sim/nav/<guid>.wrnav: its navigation graphs in wr-nav's format) is written
+# alongside, and its line-of-sight file (cache/sim/los/<guid>.wrlos: the scenes'
+# FogOfWarBlockers, `wr-import los-pack`). Line of sight in the driven replay also needs the
 # area bounds table's fog of war bounds (`cargo run -p wr-rules-data`, once per install).
 set -euo pipefail
 name=${1:?area name, e.g. Prologue_Neathholm}
@@ -24,6 +25,8 @@ lower=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
 cargo run --release -q -p wr-import -- import --area "$lower" --no-census
 cargo run --release -q -p wr-import -- nav-pack --area "$lower" --guid "$guid"
 cargo run --release -q -p wr-import -- los-pack --area "$lower" --guid "$guid"
-[ -f "$WR_CACHE/sim/unit-prefabs.json" ] || cargo run --release -q -p wr-import -- unit-prefabs
+# (rebuilt when the file is another schema than the sim reads: v2 holds the corpulence settings)
+grep -q '"wr-sim-unit-prefabs-v2"' "$WR_CACHE/sim/unit-prefabs.json" 2>/dev/null ||
+  cargo run --release -q -p wr-import -- unit-prefabs
 cargo run --release -q -p wr-sim --bin wr-sim -- scene-import \
   "$WR_CACHE/import/$lower/inventory.json" --area "$guid"
