@@ -109,15 +109,7 @@ pub fn build(universe: &Universe, scenes: &[SceneData]) -> Result<(World, PackRe
                         local_to_world: m,
                         center: vec3(v, "m_Center")?,
                         size: vec3(v, "m_Size")?,
-                        chain: s
-                            .local_chain(g.path_id)
-                            .iter()
-                            .map(|t| wr_phys::boxes::LocalTrs {
-                                position: t.position.to_array(),
-                                rotation: t.rotation.to_array(),
-                                scale: t.scale.to_array(),
-                            })
-                            .collect(),
+                        chain: s.transform_chain(g.path_id),
                         runtime: None,
                     },
                     "MeshCollider" => mesh_shape(universe, s, v, &g, m, &name, &mut rep)?,

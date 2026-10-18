@@ -70,6 +70,9 @@ pub struct NavCounts {
     pub removals: usize,
     pub refreshes: usize,
     pub clock_reads: usize,
+    /// Boxes whose recorded `wcenter` (`ph_col`) equals the physics file's `TransformPoint(center)`
+    /// bit for bit (a difference is reported).
+    pub box_centres: usize,
 }
 
 /// Where a physics query is made: in the agent's `Move` the sim runs, in a movement simulation
@@ -269,7 +272,20 @@ fn recorded_collider(r: &Rv) -> Option<wr_phys::RecordedCollider> {
         },
         "BoxCollider" => {
             let (c, s) = (floats(&r["center"], 3)?, floats(&r["size"], 3)?);
-            wr_phys::RecordedKind::Box { center: [c[0], c[1], c[2]], size: [s[0], s[1], s[2]] }
+            // (`wcenter` is newer than the first `phys_probe` captures: absent there, but a
+            // present one must read.)
+            let world_center = match r.get("wcenter") {
+                None => None,
+                Some(v) => {
+                    let w = floats(v, 3)?;
+                    Some([w[0], w[1], w[2]])
+                }
+            };
+            wr_phys::RecordedKind::Box {
+                center: [c[0], c[1], c[2]],
+                size: [s[0], s[1], s[2]],
+                world_center,
+            }
         }
         _ => return None,
     };
@@ -342,7 +358,15 @@ impl Driver<'_> {
                 Some(cols) => match self.nav_scene(w) {
                     // A missing physics file is reported by the queries.
                     Err(_) => Ok(()),
-                    Ok(scene) => scene.world().check_recorded_colliders(&cols),
+                    Ok(scene) => {
+                        // Each box's `wcenter` against the file's `TransformPoint(center)` is
+                        // among the checks: counted when they all hold.
+                        let checked = scene.world().check_recorded_colliders(&cols);
+                        if checked.is_ok() {
+                            self.out.nav.box_centres += scene.world().recorded_centres(&cols);
+                        }
+                        checked
+                    }
                 },
             };
             if let Err(e) = checked {

@@ -11,9 +11,10 @@
 //!   plane (`Polygon.ConvexHullXZ`, a gift wrap), closed, `HeightMinMax.y = max y`;
 //! - else the points are null and the registration throws: refused here.
 //!
-//! `TransformPoint` is the world matrix applied to the point in `f32` (`m0 * x + m4 * y +
-//! m8 * z + m12`, left to right); the native routine's rounding isn't established (see
-//! [`transform_point`]).
+//! `TransformPoint` is Unity's own hierarchy walk, not a product with the world matrix:
+//! `wr_phys::boxes::transform_point` over the GameObject's local transforms (the player's
+//! `Transform::TransformPoint`, checked bit for bit against it by `wr-phys`'s `native_check` and
+//! against `poc5-tb-140`'s `los_geom`: every point of its 88 segments).
 
 use anyhow::{Context, Result, bail, ensure};
 use wr_los::{Blocker, FogArea, LosFile};
@@ -40,33 +41,8 @@ pub struct LosReport {
     pub skipped_inactive: usize,
     pub updatable: usize,
     pub areas: usize,
-    /// Transformed points whose `f32` and double-precision sums round differently.
-    pub ambiguous_points: usize,
     /// Per blocker: its scene path, source, points and height.
     pub list: Vec<String>,
-}
-
-/// `transform.TransformPoint(p)`: `m` is the column-major local-to-world matrix. The native
-/// routine's rounding isn't established: the sum is taken in `f32`, left to right (the order of
-/// `Matrix4x4f::MultiplyPoint3`), and a point where a double-precision sum rounds differently is
-/// counted in `ambiguous` (the report says how many, so a recording of the game's own
-/// segments can settle it).
-fn transform_point(m: &[f32; 16], p: [f32; 3], ambiguous: &mut usize) -> [f32; 3] {
-    let mut out = [0.0f32; 3];
-    let mut differs = false;
-    for k in 0..3 {
-        let f = ((m[k] * p[0] + m[4 + k] * p[1]) + m[8 + k] * p[2]) + m[12 + k];
-        let w = f64::from(m[k]) * f64::from(p[0])
-            + f64::from(m[4 + k]) * f64::from(p[1])
-            + f64::from(m[8 + k]) * f64::from(p[2])
-            + f64::from(m[12 + k]);
-        #[allow(clippy::cast_possible_truncation)]
-        let wd = w as f32;
-        differs |= f.to_bits() != wd.to_bits();
-        out[k] = f;
-    }
-    *ambiguous += usize::from(differs);
-    out
 }
 
 /// `VectorMath.RightOrColinearXZ(a, b, p)`.
@@ -154,7 +130,7 @@ pub fn build(
                     rep.skipped_inactive += 1;
                     continue;
                 }
-                let m = g.world.matrix;
+                let chain = s.transform_chain(g.path_id);
                 let two_sided = v.get("TwoSided").and_then(Value::as_bool).unwrap_or(false);
                 let updatable = comps.iter().any(|(c, _)| *c == UPDATER);
                 let (points, closed, height_y, source) = if let Some(poly) =
@@ -168,10 +144,8 @@ pub fn build(
                         .iter()
                         .map(|p| p.vec3().with_context(|| format!("{name}: a point")))
                         .collect::<Result<_>>()?;
-                    let world: Vec<[f32; 3]> = local
-                        .iter()
-                        .map(|p| transform_point(&m, *p, &mut rep.ambiguous_points))
-                        .collect();
+                    let world: Vec<[f32; 3]> =
+                        local.iter().map(|p| wr_phys::boxes::transform_point(&chain, *p)).collect();
                     let mut lo = [f32::MAX; 3];
                     let mut hi = [f32::MIN; 3];
                     for p in &world {
@@ -207,10 +181,8 @@ pub fn build(
                         .with_context(|| format!("{name}: the mesh"))?;
                     let local = crate::phys::positions(&decoded);
                     ensure!(!local.is_empty(), "{name}: a mesh without readable positions");
-                    let world: Vec<[f32; 3]> = local
-                        .iter()
-                        .map(|p| transform_point(&m, *p, &mut rep.ambiguous_points))
-                        .collect();
+                    let world: Vec<[f32; 3]> =
+                        local.iter().map(|p| wr_phys::boxes::transform_point(&chain, *p)).collect();
                     let mut hi_y = f32::MIN;
                     for p in &world {
                         hi_y = hi_y.max(p[1]);

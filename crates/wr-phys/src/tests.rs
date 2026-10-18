@@ -464,10 +464,24 @@ fn recorded_colliders_are_checked_against_the_file() {
         rotation: r.rotation,
         lossy_scale: r.lossy_scale,
         trigger: false,
-        kind: RecordedKind::Box { center: *center, size: *size },
+        kind: RecordedKind::Box { center: *center, size: *size, world_center: None },
     };
     let both = [good.clone(), good_box.clone()];
     assert_eq!(w.check_recorded_colliders(&both), Ok(()));
+    assert_eq!(w.recorded_centres(&both), 0, "no wcenter recorded");
+    // The recorded `wcenter` is the file's `TransformPoint(center)`, bit for bit.
+    let ShapeKind::Box { chain, .. } = &b.kind else { unreachable!() };
+    let wc = boxes::transform_point(chain, *center);
+    let with_centre = |wc: [f32; 3]| RecordedCollider {
+        kind: RecordedKind::Box { center: *center, size: *size, world_center: Some(wc) },
+        ..good_box.clone()
+    };
+    let centred = [good.clone(), with_centre(wc)];
+    assert_eq!(w.check_recorded_colliders(&centred), Ok(()));
+    assert_eq!(w.recorded_centres(&centred), 1);
+    let mut off = wc;
+    off[0] = f32::from_bits(off[0].to_bits() + 1);
+    assert!(w.check_recorded_colliders(&[good.clone(), with_centre(off)]).is_err(), "an ulp off");
     assert!(w.check_recorded_colliders(&[]).is_err(), "unrecorded");
     assert!(w.check_recorded_colliders(std::slice::from_ref(&good)).is_err(), "the box unrecorded");
     assert!(
@@ -501,7 +515,7 @@ fn recorded_colliders_are_checked_against_the_file() {
         |c| c.present = false,
         |c| c.trigger = true,
         // Another box of the same GameObject: this one is then unrecorded.
-        |c| c.kind = RecordedKind::Box { center: [0.0; 3], size: [1.0; 3] },
+        |c| c.kind = RecordedKind::Box { center: [0.0; 3], size: [1.0; 3], world_center: None },
     ];
     for (k, change) in box_changes.iter().enumerate() {
         let mut c = good_box.clone();
@@ -1045,7 +1059,11 @@ fn what_the_recordings_dont_cover_isnt_computed_or_accepted() {
         rotation: [0.0, 0.0, 0.0, 1.0],
         lossy_scale: [1.0; 3],
         trigger: false,
-        kind: RecordedKind::Box { center: [1.0, 0.5, 0.0], size: [2.0, 1.0, 4.0] },
+        kind: RecordedKind::Box {
+            center: [1.0, 0.5, 0.0],
+            size: [2.0, 1.0, 4.0],
+            world_center: None,
+        },
     };
     assert_eq!(w.check_recorded_colliders(std::slice::from_ref(&rec)), Ok(()));
     let moved = RecordedCollider { layer: 0, ..rec.clone() };
@@ -1087,4 +1105,50 @@ fn what_the_recordings_dont_cover_isnt_computed_or_accepted() {
     // A scene whose every collider was left out still has its recordings checked.
     let other = RecordedCollider { name: "T:c (BoxCollider)".into(), ..rec.clone() };
     assert!(w.check_recorded_colliders(&[rec, other]).is_err(), "a collider the file lacks");
+}
+
+/// Values the player's own `Transform::TransformPoint` (`0x6744c0`, called on generated three-level
+/// hierarchies by `native_check`) gave, as bits. Multiplying the point by the f32 product of the
+/// levels' matrices (what the importer did for the line-of-sight blockers before) differs from
+/// them in about four of five such hierarchies: the walk applies the levels one at a time.
+#[test]
+fn transform_point_gives_the_players_values() {
+    let level = |position: [f32; 3], rotation: [f32; 4], s: f32| boxes::LocalTrs {
+        position,
+        rotation,
+        scale: [s; 3],
+    };
+    let chain = [
+        level([-123.186_806, -0.383_492_47, -30.591_873], [0.0, 0.0, 0.0, 1.0], 1.0),
+        level(
+            [-112.158_295, 3.413_322_4, -162.756_32],
+            [0.0, 0.748_922_47, 0.0, 0.662_657_7],
+            0.520_854_7,
+        ),
+        level([-101.104, 2.774_912_8, 111.072_11], [0.0, 0.201_960_49, 0.0, 0.979_393_66], 1.0),
+    ];
+    let p = boxes::transform_point(&chain, [2.890_394_2, -0.083_630_32, 10.680_162]);
+    assert_eq!(p.map(f32::to_bits), [3_274_143_642, 1_083_035_557, 3_273_145_089]);
+    let chain = [
+        level([-54.911_514, -3.039_324_3, 199.708_71], [0.0, 0.0, 0.0, 1.0], 1.890_783_7),
+        level(
+            [-68.4341, -0.624_609, -159.874_05],
+            [0.0, -0.563_557_2, 0.0, 0.826_077_04],
+            1.692_246,
+        ),
+        level(
+            [-45.091_766, 4.505_27, -176.617_34],
+            [0.0, -0.451_339_54, 0.0, 0.892_352_3],
+            0.886_298_3,
+        ),
+    ];
+    let p = boxes::transform_point(&chain, [10.797_363, 1.376_249_6, -6.331_706]);
+    assert_eq!(p.map(f32::to_bits), [1_133_512_952, 1_096_913_164, 3_284_913_203]);
+    let chain = [
+        level([150.739_23, -0.873_205_2, -31.731_064], [0.0, 0.0, 0.0, 1.0], 1.0),
+        level([-57.663_345, -0.976_202_96, 136.984_13], [0.0, 0.278_417_9, 0.0, 0.960_460_07], 1.0),
+        level([20.191_864, -1.008_298_9, -135.323_97], [0.0, 0.396_207_06, 0.0, 0.918_161_2], 1.0),
+    ];
+    let p = boxes::transform_point(&chain, [10.673_759, 0.154_555_08, -12.382_69]);
+    assert_eq!(p.map(f32::to_bits), [1_105_011_336, 3_224_174_705, 3_254_970_768]);
 }

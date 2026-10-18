@@ -261,7 +261,7 @@ fn main() -> Result<()> {
             let back = wr_los::LosFile::read(&path)?;
             anyhow::ensure!(back == file, "{} does not read back as written", path.display());
             eprintln!(
-                "wrote {} ({} blockers: {} polygons, {} meshes; {} inactive left out, {} updatable; {} fog of war areas; {} extended vision spawners; {} transformed points whose f32 and double sums differ; {} bytes) in {:?}",
+                "wrote {} ({} blockers: {} polygons, {} meshes; {} inactive left out, {} updatable; {} fog of war areas; {} extended vision spawners; {} bytes) in {:?}",
                 path.display(),
                 rep.blockers,
                 rep.polygons,
@@ -270,7 +270,6 @@ fn main() -> Result<()> {
                 rep.updatable,
                 rep.areas,
                 file.extended_vision_spawners,
-                rep.ambiguous_points,
                 std::fs::metadata(&path)?.len(),
                 t.elapsed()
             );

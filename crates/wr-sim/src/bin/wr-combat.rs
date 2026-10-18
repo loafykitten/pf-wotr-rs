@@ -419,6 +419,10 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         n.ground_steps,
         n.phys_ground
     );
+    println!(
+        "box centres: the recorded wcenter (TransformPoint(center)) equal to the physics file's, bit for bit: {}",
+        n.box_centres
+    );
     if let Some(c) = &out.clog {
         println!(
             "combat log [oracle, sim]: queued {:?}, ticks {:?}, messages {:?}; messages equal {}, tooltips equal {}, tooltips not made {}, inputs {:?}, differences {}",

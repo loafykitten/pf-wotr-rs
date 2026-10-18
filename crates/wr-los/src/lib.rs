@@ -25,7 +25,7 @@ pub use geometry::{Bounds, Geometry, LosError};
 /// File magic: `WRLOS`, then NULs and the format generation.
 pub const MAGIC: [u8; 8] = *b"WRLOS\0\0\x01";
 /// Bumped whenever [`LosFile`] or anything it holds changes incompatibly.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const HEADER_LEN: usize = 32;
 
 /// One `FogOfWarBlocker` as `Rebuild` leaves it: the polyline `LineOfSightGeometry` registers.
