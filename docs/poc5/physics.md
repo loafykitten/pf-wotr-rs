@@ -284,16 +284,17 @@ boxes are computed; `Loot/Loot_1/luxery_chest_02_Collider` (a rotated ancestor; 
 keeps the conservative test, and 26 recorded inactive or disabled (loot, interactions, Terendelev's scales, all layer
 10) are left out.
 
-**The centre is computed, not recorded** [I]: `TransformPoint(center)` runs on the scene file's local transforms,
-taken to be the ones the game holds. The recording pins the GameObject's world position and rotation bit for bit and
-its scale only to the lossy scale's rounding (a scale one ulp off, or translations moved between ancestors, would
-leave those checks passing and could move the centre's last bit); nothing in the caves changes a static box's
-transform at load, and all 176,106 probe hits agree. Recording `TransformPoint(center)` itself (observer change 3,
-below) would make it an input. A box the mapping isn't established for keeps the conservative test only when its
-recorded transform agrees with the scene's within that test's allowance (`boxes::placement_agrees`: a millionth of
-the translation and basis, and its centre's `TransformPoint` where the scene's matrix puts it, which cancellation
-in large ancestor translations could otherwise break); otherwise the importer refuses the recording, and the driven replay reports a recording
-whose unestablished box differs.
+**The centre is computed, and now compared with the game's** [M]: `TransformPoint(center)` runs on the scene file's local
+transforms, taken to be the ones the game holds. The earlier captures pinned the GameObject's world position and rotation
+bit for bit and its scale only to the lossy scale's rounding (a scale one ulp off, or translations moved between
+ancestors, would have left those checks passing and could move the centre's last bit); `poc5-tb-140` records
+`transform.TransformPoint(center)` itself (`ph_col` `wcenter`, observer change 3 below): of its 167 box records, the 62
+boxes in the area's physics file (51 in `Prologue_Caves_1_Static`, 11 in its `_Mechanics`; 26 more recorded inactive or
+disabled are left out, and the 78 of `BaseMechanics` and `UI_Ingame_Scene` are units' and interface colliders) have
+their `wcenter` **equal to the file's `TransformPoint(center)` bit for bit on all five runs** (0 differences; the
+`box centres:` line of `wr-combat replay`). The importer still computes the centre; the recorded one is a check, reported
+when it differs (also for a box whose mapping isn't established). The caves' boxes are all under translating ancestors, so
+rotated or scaled ancestors are covered by the player check above, not by a recording.
 
 **The importer** (`wr-import phys-pack --colliders`): each box keeps its local transforms from the root down (the
 scene's, which Unity loads unchanged) and, from its `ph_col` record (matched by scene, path, sibling path, type,

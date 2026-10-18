@@ -1,5 +1,12 @@
 # POC-5: line of sight (stream "vision")
 
+Status (2026-10-18, stream "xform"): **the geometry is compared with the game's own** (`poc5-tb-140`'s `los_geom` and
+`los_probe`, all five runs): the 8 caves blockers' 88 segments and the grid are equal bit for bit, and so are the
+1,280 `HasObstacle` probes. The blockers' points are Unity's `Transform.TransformPoint` (its hierarchy walk, ported from the
+player), no longer the product with the `f32` world matrix, which had put 13 of the 88 segments one ulp off ("Observer
+changes requested"). Every run of the 25 captures is valid but `-122`'s tb-nearest runs and `-135`'s perturbed one, as before,
+and no count of the vision range changed.
+
 Status (2026-10-17, stream "visrange"): the sets of units in vision range (`CanBeInVisionRange`) are computed too and
 checked against the recording's `vis` records, on every pair the sim can decide (a pair that an unknown corpulence or view
 scale could change is left to the recording, counted): see "The sets in vision range" below. Before that (stream "vision"):
