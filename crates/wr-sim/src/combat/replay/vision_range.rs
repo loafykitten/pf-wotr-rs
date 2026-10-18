@@ -256,6 +256,21 @@ impl Driver<'_> {
         read
     }
 
+    /// A unit's position after the movement when the sim has it: the driven agent's, or without
+    /// it the next frame's observation row (none in the recording's last frame, or for a unit
+    /// without rows). `None`: [`Driver::vis_pos`]'s answer is a guess.
+    fn vis_pos_known(&self, w: &World, u: EntityIdx) -> Option<V3> {
+        if self.vis.ag {
+            return Some(self.vis_pos(w, u, true));
+        }
+        if self.tick >= self.vis.last_tick {
+            return None;
+        }
+        let rows = self.vis.rows.get(&w.entity(u).unique_id)?;
+        let i = rows.partition_point(|(t, _)| *t <= self.tick + 1);
+        (i > 0).then(|| rows[i - 1].1)
+    }
+
     /// A unit's position at the frame's start, from the observation rows (the previous frame's
     /// end); `None` without a row.
     fn vis_prefix_pos(&self, w: &World, u: EntityIdx) -> Option<V3> {
@@ -315,13 +330,11 @@ impl Driver<'_> {
             w.combat.vision.bounds.lose_track();
             self.vis.counts.range_frames_lost += 1;
         }
-        // Without the driven agent the positions after the movement are the next frame's rows:
-        // the recording's last frame has none (its units' positions are guesses).
-        let positions_known = self.vis.ag || self.tick < self.vis.last_tick;
         let pool = crate::scene::units_with_bounds(w);
         let mut list = Vec::with_capacity(pool.len());
         for &u in &pool {
-            let pos = self.vis_pos(w, u, true);
+            let known = self.vis_pos_known(w, u);
+            let pos = known.unwrap_or_else(|| self.vis_pos(w, u, true));
             let prefix = if first { self.vis_prefix_pos(w, u) } else { Some(pos) };
             // `ShouldBeEnumeratedByEntityPoolEnumerator` is `IsInGame && !Suppressed`; `m_Suppressed`
             // only exists in an area with parts, which the vision run refuses.
@@ -351,6 +364,7 @@ impl Driver<'_> {
                 corpulence,
                 size_gen,
                 in_game_gen,
+                pos_known: known.is_some(),
             });
         }
         for gone in w.combat.vision.bounds.tick(&list, step).removed {
@@ -379,12 +393,15 @@ impl Driver<'_> {
                         continue;
                     }
                 };
-                let pos = self.vis_pos(w, u, true);
+                let known = self.vis_pos_known(w, u);
+                let pos = known.unwrap_or_else(|| self.vis_pos(w, u, true));
                 let mut hits = w.combat.vision.bounds.overlap(pos, r);
-                if !positions_known {
+                if known.is_none() {
+                    // The capsule's place is a guess: nothing is decided, and nothing is evidence
+                    // of the result buffer's capacity.
                     for h in &mut hits {
-                        (h.tri, h.cause, h.margin, h.guess) =
-                            (range::Tri::Maybe, Some(range::Cause::Position), None, None);
+                        (h.tri, h.cause, h.margin, h.guess, h.capped) =
+                            (range::Tri::Maybe, Some(range::Cause::Position), None, None, None);
                     }
                 }
                 hits

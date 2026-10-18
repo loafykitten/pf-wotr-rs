@@ -145,6 +145,12 @@ The record runs decide 5,256,586 pairs (190 fewer) and leave 14,373,101 for the 
 last frames of `-95`, `-96`, `-109`, `-111`, `-112`: 90 to 108 a run) and 14,325 for the scale band; all 111 runs decide
 16,434,480 and leave 44,887,244, 2,592 and 45,726.
 
+Round 8 (a radius known only while the corpulence it was established with is known and unchanged; a guessed position never
+known; a unit that joins hidden has a lost collider of unknown `enabled`; no buffer evidence from a guessed capsule): all
+111 runs as valid as before, 0 differences. The record runs decide 4,926,808 pairs and leave 14,702,936 for the
+corpulence (the reads made stale by a buff now make the radius unknown until the unit's next update), 864 for the
+position and 14,268 for the scale band; all 111 runs decide 15,452,626 and leave 45,869,264, 2,592 and 45,560.
+
 Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, `tests/poc5.rs`, three captures
 valid on all runs; 14 damaged cases on `-111`/tb-nearest, each reported): an engagement leaf and a memory leaf flipped; a
 miss's result, sample or point changed, deleted or doubled; a clear (of a cache cleared before) deleted, moved or doubled;
@@ -246,7 +252,16 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   a first tick without a known step, or a unit without an observation row then, doesn't know the colliders' positions
   either.
 - **Positions.** Without the driven agent a unit's position after the movement is the next frame's row; the recording's
-  last frame has none, so its pairs are the recording's (cause position).
+  last frame has none, nor does a unit without rows. A position that isn't the driven agent's or a row's is never taken as
+  known: a capsule there decides nothing (cause position, and no evidence about the result buffer), and a collider there
+  is lost until its position is known and an update the sim models has run.
+- **Radius against corpulence.** A radius stays known only while the unit's corpulence is known and equal to the one it
+  was established with at the last modelled update: a move away and back between two ticks (which the sim can't see)
+  would apply a changed corpulence. Once the corpulence is unknown or different, the radius is unknown until the next
+  modelled update.
+- **Units that join hidden.** A unit that joined in the game and was hidden before the bounds tick still has its update
+  queued, which makes its collider while it is hidden, enabled (`UpdateViewActive` ran before it existed) and appended at
+  that moment: such a unit has a lost collider of unknown `enabled` and place in the order until it is back in the game.
 - **Result buffer.** `OverlapCapsule` fills a buffer of 512: with more colliders possibly in reach every such pair is the
   recording's (which ones PhysX keeps is its order), and a recorded set of more than 512, or of fewer than 512 when more
   than 512 surely overlap, is reported.
@@ -524,12 +539,10 @@ can also be absorbed:
   it, can stay wrong while the recording (whose sets follow the true radius) disagrees only where a pair crosses the
   boundary; the physics clock (an inference that the decided pairs confirm only where a pair crosses). A wrong radius shows
   as a reported difference when a pair near the boundary disagrees, and is silent otherwise.
-- **Can be absorbed, besides:** an update the sim can't see: a unit that moves and comes back to the same position
-  between two ticks is updated by the game (`TickEntity` runs the radius rule with the corpulence then) while the sim,
-  seeing the same position at both ticks, keeps the radius it had (a hide and a return between two ticks is counted by
-  `set_is_in_game` and is an update). The radius
-  differs only if the corpulence changed since the unit's last update without a size write (a producer the sim marks
-  unknown, an event it doesn't run); a pair that the old radius decides is then decided on a radius that may be stale.
+- **Can be absorbed, besides:** a corpulence change the sim's inference doesn't see (above) combined with an update it
+  can't see (a move away and back between two ticks): the sim keeps the radius because the corpulence it knows didn't
+  change. Any change it knows of (a value, or the corpulence becoming unknown) makes the radius unknown until a modelled
+  update (a hide and a return between two ticks is counted by `set_is_in_game` and is one).
 - **Only a false report:** the memory and line-of-sight items above.
 - **Neither (the pairs are the recording's, counted):** the result buffer (more than 512 colliders possibly in reach; an
   impossible set size is reported); the bounds queue and fades (a collider of a unit out of the game, or after a frame
