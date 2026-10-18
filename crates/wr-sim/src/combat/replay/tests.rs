@@ -884,7 +884,8 @@ fn a_clear_after_its_turn_end_comes_before_the_buffs_controller() {
     let (mut w, u) = world_in_area();
     w.unit_mut(u).expect("unit").combat.in_combat = true;
     let f = timed_buff(&mut w, u, 975, 4 * S);
-    let root = json!({"k": "rule", "t": 1, "id": 1, "depth": 0, "class": "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll",
+    let root = json!({"k": "rule", "t": 1, "id": 1, "depth": 0, "parent": 0, "context_parent": 0, "handler": 0,
+        "reason_at_push": null, "class": "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll",
         "initiator": {"$unit": "u"}, "fields": {}});
     let recs = vec![
         input(-1, "tbm:on"),
@@ -1587,4 +1588,110 @@ fn a_root_spans_structure_follows_span_oks() {
         assert!(open.feed(&r(step(k, 2))));
     }
     assert!(!projected(&open, &r(bonus(2))), "a rule already closed");
+}
+
+/// A resolve nested in an attack takes the roll's positions only if its own record agrees: equal,
+/// and both recorded.
+#[test]
+fn a_nested_resolves_positions_must_agree_with_the_rolls() {
+    let env = |at: J| {
+        rvs(&[json!({"k": "env", "rule": "RuleAttackWithWeaponResolve", "at": at})]).remove(0)
+    };
+    let at = |i: [f64; 3], t: [f64; 3]| json!({"initiator_pos": i, "target_pos": t});
+    let roll = Some(([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]));
+    assert!(positions_agree(&env(at([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])), roll), "equal");
+    assert!(!positions_agree(&env(at([1.0, 2.0, 3.5], [4.0, 5.0, 6.0])), roll), "a coordinate off");
+    assert!(!positions_agree(&env(at([1.0, 2.0, 3.0], [4.0, 5.0, 6.5])), roll), "the target's off");
+    assert!(
+        !positions_agree(&env(at([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])), None),
+        "the roll's not recorded"
+    );
+    let null = json!({"initiator_pos": [1.0, null, 3.0], "target_pos": [4.0, 5.0, 6.0]});
+    assert!(!positions_agree(&env(null), roll), "a null coordinate in the resolve's");
+    let both = json!({"initiator_pos": null, "target_pos": null});
+    assert!(!positions_agree(&env(both), None), "null in both");
+    assert!(!positions_agree(&rvs(&[json!({"k": "env"})]).remove(0), None), "no positions at all");
+}
+
+/// A draw, a mutation and an environment of a root's span belong to the innermost rule, in the
+/// open handler and in the stage `span_ok` allows (a simulation draw and a bonus in `OnTrigger`
+/// or a handler, damage after `did` outside handlers, an environment in `OnTrigger` of the rule it
+/// names); a root's own stack fields are a root's.
+#[test]
+fn a_root_spans_records_are_attributed_like_span_oks() {
+    use super::spans::{Open, root_ok};
+    let class = |c: &str| format!("Kingmaker.RuleSystem.Rules.{c}");
+    let r = |v: J| rvs(&[v]).remove(0);
+    let root = r(
+        json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "parent": 0, "context_parent": 0, "handler": 0,
+        "reason_at_push": null, "class": class("RuleAttackWithWeapon"), "initiator": {"$unit": "a"}}),
+    );
+    assert!(root_ok(&root));
+    for (k, v) in [
+        ("parent", json!(7)),
+        ("handler", json!(7)),
+        ("depth", json!(1)),
+        ("context_parent", json!(null)),
+        ("id", json!(0)),
+    ] {
+        let mut x = root.to_json();
+        x[k] = v;
+        assert!(!root_ok(&r(x)), "a root with its {k} changed");
+    }
+    let mut x = root.to_json();
+    x.as_object_mut().expect("an object").remove("reason_at_push");
+    assert!(!root_ok(&r(x)), "a root without its reason at the push");
+    // A cast's rules carry an ability as their reason, and may be in another event's context.
+    let mut x = root.to_json();
+    x["reason_at_push"] = json!({"ability": "b"});
+    x["context_parent"] = json!(44);
+    assert!(root_ok(&r(x)));
+
+    let step = |k: &str, id: i64| r(json!({"k": k, "t": 5, "id": id}));
+    let draw =
+        |rule: i64, h: i64, c: &str| r(json!({"k": "draw", "t": 5, "c": c, "rule": rule, "h": h}));
+    let m = |what: &str, rule: i64, h: i64| {
+        r(json!({"k": "mut", "t": 5, "what": what, "rule": rule, "h": h}))
+    };
+    let env = |rule: &str| r(json!({"k": "env", "t": 5, "rule": rule}));
+    let nested = r(
+        json!({"k": "rule", "t": 5, "id": 2, "parent": 1, "depth": 1, "handler": 0, "context_parent": 1,
+        "class": class("RuleAttackWithWeaponResolve"), "initiator": {"$unit": "a"}}),
+    );
+    let mut open = Open::new(&root);
+    for rec in [step("about", 1), step("trig", 1)] {
+        assert!(open.feed(&rec));
+    }
+    // In the root's `OnTrigger`.
+    assert!(open.draw_placed(&draw(1, 0, "sim")));
+    assert!(!open.draw_placed(&draw(9, 0, "sim")), "another rule's draw");
+    assert!(!open.draw_placed(&draw(1, 4, "sim")), "a draw in a handler that isn't open");
+    assert!(open.mut_placed(&m("rule_bonus", 1, 0)));
+    assert!(!open.mut_placed(&m("rule_bonus", 9, 0)), "a bonus of another rule");
+    assert!(!open.mut_placed(&m("rule_bonus", 1, 4)), "a bonus in a handler that isn't open");
+    assert!(!open.mut_placed(&m("damage", 1, 0)), "damage before did");
+    assert!(open.env_placed(&env("RuleAttackWithWeapon")));
+    assert!(
+        !open.env_placed(&env("RuleAttackWithWeaponResolve")),
+        "a resolve's env, no resolve open"
+    );
+    // A nested resolve: its env is placed in its `OnTrigger`, not the attack's.
+    assert!(open.feed(&nested));
+    assert!(!open.env_placed(&env("RuleAttackWithWeaponResolve")), "before its about and trig");
+    for rec in [step("about", 2), step("trig", 2)] {
+        assert!(open.feed(&rec));
+    }
+    assert!(open.env_placed(&env("RuleAttackWithWeaponResolve")));
+    assert!(!open.env_placed(&env("RuleAttackWithWeapon")), "the attack's env inside the resolve");
+    assert!(open.draw_placed(&draw(2, 0, "sim")));
+    assert!(!open.draw_placed(&draw(1, 0, "sim")), "the parent's draw while the resolve is open");
+    assert!(open.feed(&step("trig_end", 2)));
+    assert!(!open.env_placed(&env("RuleAttackWithWeaponResolve")), "after trig_end");
+    assert!(!open.draw_placed(&draw(2, 0, "sim")), "a simulation draw after trig_end");
+    assert!(open.draw_placed(&draw(2, 0, "pres")), "a presentation draw has no stage");
+    assert!(open.feed(&step("did", 2)));
+    assert!(open.mut_placed(&m("damage", 2, 0)), "damage after did");
+    assert!(!open.mut_placed(&m("damage", 1, 0)), "damage of the parent");
+    assert!(open.mut_placed(&m("fact_attach", 2, 0)));
+    assert!(!open.mut_placed(&m("fact_attach", 3, 0)), "a fact attached by no open rule");
 }

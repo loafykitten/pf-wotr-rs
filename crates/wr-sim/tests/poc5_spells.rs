@@ -401,6 +401,18 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
         }
         panic!("no {k} in a phase-driven root")
     }
+    /// The first record satisfying `f` inside a depth-0 root of the class (`suffix`) that has one.
+    fn in_span(recs: &[V], suffix: &str, f: impl Fn(&V) -> bool) -> usize {
+        let mut open = false;
+        for (i, r) in recs.iter().enumerate() {
+            if r["k"] == "rule" && r["depth"] == 0 {
+                open = r["class"].as_str().is_some_and(|c| c.ends_with(suffix));
+            } else if open && f(r) {
+                return i;
+            }
+        }
+        panic!("no such record in a {suffix} root")
+    }
     /// The first `clog_q` of that root (its rule event).
     fn event(recs: &[V]) -> usize {
         let root = initiative(recs);
@@ -443,7 +455,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             }
         }
     }
-    let cases: [(&str, Change); 22] = [
+    let cases: [(&str, Change); 27] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
         // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
         ("events queued, the sim queued", |recs| {
@@ -588,6 +600,30 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
                 json!({"seq": 0, "k": "mut", "t": t, "what": "rule_bonus", "target_rule": before}),
             );
             renumber(recs);
+        }),
+        // A draw or a damage of no rule the span has (T0 projects both whatever their rule), a root
+        // whose own stack fields are not a root's.
+        ("driven replay: a draw record inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| r["k"] == "draw");
+            recs[at]["rule"] = json!(999_999_999);
+        }),
+        ("driven replay: a draw record inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| r["k"] == "draw");
+            recs[at]["h"] = json!(5);
+        }),
+        ("driven replay: a damage mutation inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleAttackWithWeaponResolve", |r| {
+                r["k"] == "mut" && r["what"] == "damage"
+            });
+            recs[at]["rule"] = json!(999_999_999);
+        }),
+        ("rule record inside a root rule's span: a root whose stack fields", |recs| {
+            let root = initiative(recs);
+            recs[root]["parent"] = json!(999_999_999);
+        }),
+        ("rule record inside a root rule's span: a root whose stack fields", |recs| {
+            let root = initiative(recs);
+            recs[root]["handler"] = json!(999_999_999);
         }),
         // A mutation the T0 projection drops (stat values, modifiers) compares nowhere.
         ("driven replay: a stat_value mutation inside a root rule's span", |recs| {

@@ -4240,17 +4240,21 @@ impl Driver<'_> {
                 ));
                 let rolled = env_in(trace, start, end, a, t, w);
                 // A resolve nested in the attack (a weapon without a projectile resolves at once)
-                // has its own environment record: the positions its damage reads are the roll's,
-                // so the two must agree.
+                // has its own environment record, which `span_records` places in that resolve's
+                // computation. Its damage reads the distance between the units then
+                // (`DistanceDamageBonus`), and the sim reuses the roll's positions: the two
+                // records must both parse and agree, so the reuse is a check, not an assumption.
                 let (ai, ti) = (w.entity(a).unique_id.clone(), w.entity(t).unique_id.clone());
                 self.env_reads.push(("RuleAttackWithWeaponResolve", ai.clone(), ti.clone()));
                 if let Some(k) =
                     find_env(trace, start, end, "RuleAttackWithWeaponResolve", &ai, &ti)
-                    && pos_pair(&trace.records[k]["at"])
-                        != rolled.as_ref().and_then(|e| e.positions)
+                    && !positions_agree(
+                        &trace.records[k],
+                        rolled.as_ref().and_then(|e| e.positions),
+                    )
                 {
                     w.coverage.unsupported(
-                        "driven replay: a resolve nested in an attack with positions other than the roll's",
+                        "driven replay: a resolve nested in an attack with positions other than the roll's (or not both recorded)",
                     );
                 }
                 if let Some(env) = rolled {
@@ -4800,6 +4804,12 @@ fn pos(v: &Rv) -> Option<[f32; 3]> {
     #[allow(clippy::cast_possible_truncation)]
     let f = |i: usize| a.get(i).and_then(Rv::as_f64).map(|x| x as f32);
     Some([f(0)?, f(1)?, f(2)?])
+}
+
+/// Whether a nested resolve's `env` record (`at`) gives the same positions as the attack roll's:
+/// both parsed (a null coordinate is no position) and equal.
+fn positions_agree(resolve: &Rv, roll: Option<([f32; 3], [f32; 3])>) -> bool {
+    matches!((pos_pair(&resolve["at"]), roll), (Some(a), Some(b)) if a == b)
 }
 
 fn pos_pair(at: &Rv) -> Option<([f32; 3], [f32; 3])> {

@@ -915,9 +915,19 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   observer, is reported.
 - `env`: read by the code that fires the root: the attack roll's (`RuleAttackWithWeapon`'s attack), the resolve's
   and the flat-footed check's, each the first record for its rule and units (`find_env`; `Driver::env_reads`). Any
-  other `env` in a span (a second one, one of a root that reads none) is reported. A resolve nested in a phase-driven
-  attack (a weapon without a projectile resolves at once; `poc5-tb-55` and the older captures without the commands'
-  records) has its own `env`: its positions must equal the roll's, which its damage reads (reported otherwise).
+  other `env` in a span (a second one, one of a root that reads none) is reported, and so is one out of its place: an
+  `env` is written by the rule it names, in its `OnTrigger`, outside its handlers (`Open::env_placed`, through `Life`'s
+  stack). A resolve nested in a phase-driven attack (a weapon without a projectile resolves at once; `poc5-tb-55` and
+  the older captures without the commands' records) has its own `env`, placed in that resolve's computation (so one
+  in an attack without a nested resolve, or moved outside it, is reported; the sim fired the nested resolve if the T0
+  streams agree on its rule records). Its positions must equal the roll's, both recorded
+  (`positions_agree`; a null coordinate is no position): its damage reads the distance then
+  (`DistanceDamageBonus`), and the sim reuses the roll's positions, so the equality is the check that makes the reuse right.
+- Attribution, as `span_ok` does it: a draw and a mutation the projection keeps are the innermost rule's, in the open
+  handler (`rule` and `h`, `Life::attributed`); a simulation draw is in the rule's `OnTrigger` or one of its handlers,
+  damage after `did` outside its handlers, a bonus in `OnTrigger` or a handler. A root's own stack fields are a root's
+  (`spans::root_ok`: depth 0, parent 0, handler 0, a context, a reason at the push, an id; a cast's rules carry an
+  ability as their reason and may be in another event's context, so those aren't required to be null and 0).
 - `result`, `bonuses`: the oracle never writes them (the projection derives them from `rule` and `rule_end`, and a
   raw one in a trace is ignored as input), so a stray one is reported.
 - `invalid`: the oracle's own statement that the game's replay left its recording (`Sched.Invalidate`). The sim is
@@ -965,13 +975,15 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
 
 **Tests** (`poc5_spells.rs`, `records_inside_driven_root_spans_are_checked_or_reported`, `poc5-tb-123/tb-chain`; the
 unit tests `a_root_attacks_launch_is_placed_like_a_commands`, `a_root_spans_provoke_is_placed_like_a_commands` and
-`a_root_spans_structure_follows_span_oks` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
+`a_root_spans_structure_follows_span_oks`, `a_root_spans_records_are_attributed_like_span_oks` and
+`a_nested_resolves_positions_must_agree_with_the_rolls` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
 the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
 `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
 `proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
 the initiative roll's span, a root's `rule_end` of another frame, a `stat_value` mutation, a `did` before
 `trig_end`, an `h_end` of another id, a `mod_after` handler after a `did` one, a `rule_bonus` to a rule never
-allocated and one to a rule already closed; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
+allocated and one to a rule already closed, a draw and a damage mutation of no rule the span has, a draw in no open
+handler, and an initiative root with its `parent` or `handler` changed; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
 accepted and counted (the run stays valid, `oracle_invalid` equal to the notes added). The phase-driven placing of a
 launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
 and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is

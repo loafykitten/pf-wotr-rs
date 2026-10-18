@@ -169,6 +169,48 @@ impl Open {
     }
 }
 
+/// A root rule's own stack fields: depth 0, no parent, no handler open, a context (an event in
+/// context when it was triggered, or none), its reason at the push (null, or an ability's: a spell's
+/// rules carry theirs), an id.
+pub(super) fn root_ok(r: &Rv) -> bool {
+    r["depth"] == 0
+        && r["parent"] == 0
+        && r["handler"] == 0
+        && r["context_parent"].as_i64().is_some_and(|c| c >= 0)
+        && r.get("reason_at_push").is_some()
+        && r["id"].as_i64().is_some_and(|i| i > 0)
+}
+
+impl Open {
+    /// A record of the innermost rule, in the open handler (its `rule` and `h`).
+    fn attributed(&self, r: &Rv) -> bool {
+        self.life.attributed(r["rule"].as_i64(), r["h"].as_i64())
+    }
+
+    /// A draw: attributed, and a simulation draw in the rule's `OnTrigger` or one of its handlers.
+    pub(super) fn draw_placed(&self, r: &Rv) -> bool {
+        self.attributed(r) && (r["c"] != "sim" || self.life.stage() == 2 || self.life.own_handler())
+    }
+
+    /// A mutation: attributed; damage after `did` (`OnDidTrigger`) outside its handlers, a rule
+    /// bonus in the rule's `OnTrigger` or one of its handlers.
+    pub(super) fn mut_placed(&self, r: &Rv) -> bool {
+        self.attributed(r)
+            && match r["what"].as_str() {
+                Some("damage") => self.life.stage() == 4 && !self.life.own_handler(),
+                Some("rule_bonus") => self.life.stage() == 2 || self.life.own_handler(),
+                _ => true,
+            }
+    }
+
+    /// An environment: of the innermost rule (by its class), in its `OnTrigger` outside its handlers.
+    pub(super) fn env_placed(&self, r: &Rv) -> bool {
+        self.rules.get(&self.life.rule()).is_some_and(|(class, _)| r["rule"] == class.as_str())
+            && self.life.stage() == 2
+            && !self.life.own_handler()
+    }
+}
+
 /// A provoke (`r`, whose caller names `rule`) placed like `span_ok` places a command's: in the
 /// root's frame, in the engagement controller's did handler of that rule, of the rule's
 /// initiator, once per rule, while the rule is the innermost open one and between `trig_end` and
@@ -192,7 +234,17 @@ impl Driver<'_> {
     /// fired it (or didn't).
     pub(super) fn span_records(&mut self, w: &mut World, start: usize, end: usize) {
         let trace = self.trace;
-        let mut open = Open::new(&trace.records[start]);
+        let root = &trace.records[start];
+        let mut open = Open::new(root);
+        // The root's own stack fields (what `attack_root` requires of a command's, but for its
+        // context: a root may be triggered while another event is in context, a cast's).
+        if !root_ok(root) {
+            self.span_reported(
+                w,
+                "a root rule record".into(),
+                "a root whose stack fields (depth, parent, handler, context, reason, id) aren't a root's",
+            );
+        }
         for k in start + 1..=end {
             let r = &trace.records[k];
             // A root rule fires within one frame: every record of its span is of it.
@@ -217,20 +269,40 @@ impl Driver<'_> {
                         );
                     }
                 }
-                // A draw is compared in the T0 stream (a presentation draw is none).
-                Some("draw") => {}
-                // So is a mutation of the kinds the projection keeps; the others it drops.
-                Some("mut") if projected(&open, r) => {}
-                // The environment the root's code looked up.
+                // A draw is compared in the T0 stream (a presentation draw is none), and is the
+                // innermost rule's, in the open handler: a simulation draw in its computation
+                // (`OnTrigger`) or a handler of it (`span_ok`'s attribution).
+                Some("draw") => {
+                    if !open.draw_placed(r) {
+                        self.span_reported(
+                            w,
+                            "a draw record".into(),
+                            "a draw not of the innermost rule, its handler or its stage",
+                        );
+                    }
+                }
+                // So is a mutation of the kinds the projection keeps (the others it drops), made
+                // by the innermost rule in the open handler.
+                Some("mut") if projected(&open, r) => {
+                    if !open.mut_placed(r) {
+                        self.span_reported(
+                            w,
+                            format!("a {} mutation", r["what"].as_str().unwrap_or("?")),
+                            "a mutation not of the innermost rule, its handler or its stage",
+                        );
+                    }
+                }
+                // The environment the root's code looked up, written by the rule it names at its
+                // `OnTrigger` (`span_ok`'s placing), outside its handlers.
                 Some("env") => {
                     let read = self.env_reads.iter().any(|(rule, a, t)| {
                         super::find_env(trace, start, end, rule, a, t) == Some(k)
                     });
-                    if !read {
+                    if !read || !open.env_placed(r) {
                         self.span_reported(
                             w,
                             "an env record".into(),
-                            "an environment the root's code didn't read",
+                            "an environment the root's code didn't read, or one out of its rule's computation",
                         );
                     }
                 }
