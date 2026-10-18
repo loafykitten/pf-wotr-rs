@@ -250,9 +250,11 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   step known to run. A frame the sim didn't follow (a skipped Unity frame, a mode it doesn't model; counted as `frames not
   followed`) loses every collider, and the next tick can't tell which units it updates: a radius is re-established only
   by a later move, size write or return to the game. A collider first met right after such a frame may have been made,
-  and synced, in it: it is lost too, at an unknown place in the order. A unit in the game has its collider's transform at its position
-  after every tick (a change of it in the game puts it on the update list); only the radius depends on whether a tick
-  updated it.
+  and synced, in it: it is lost too, at an unknown place in the order. `TickEntity` sets the transform only when it isn't `Vector3 ==` the unit's position (a
+  squared distance of 9.9999994e-11, 1e-5 m; `orientation::vec3_eq`): a unit in the game has its collider's transform
+  within that tolerance of its position after every tick (a change of it in the game puts it on the update list), and
+  exactly where the sim followed the updates (an update keeps a transform that close). After a loss the transform is
+  known only to the tolerance, and a pair the tolerance could decide goes to the recording (cause position).
 - **Enabled.** `IsInGame` (suppression exists only in areas with parts, which the vision run refuses); a unit hidden with a
   fade (`HideUnit` with `Fade`, noted by `scene_spawn::hide_unit`), or not in the game at the first tick, has an unknown
   `enabled` whenever it is out of the game from then on (when the fade ends isn't modelled, and a fade can outlast a return

@@ -35,9 +35,12 @@
 //!   sees where the unit stood at the previous frame's tick; a frame that runs none sees the tick
 //!   before. The capsule is at the querying unit's position of this frame. [`Bounds::tick`] takes
 //!   whether the frame ran a step ([`Step`]); when that isn't known the collider has the
-//!   candidates of both. A collider made in a tick is at the origin until the next step. After a
-//!   tick, a unit in the game has its collider's transform at its position (any change of it while
-//!   in the game puts it on the update list).
+//!   candidates of both. A collider made in a tick is at the origin until the next step. An
+//!   update sets the transform only when it isn't `Vector3 ==` the position (1e-5 m): after a
+//!   tick, a unit in the game has its collider's transform within that tolerance of its position
+//!   (any change of it while in the game puts it on the update list), exactly where the sim
+//!   followed the updates; after a loss only to the tolerance, and pairs that close to deciding
+//!   go to the recording.
 //! - **Radius.** A collider is made with `Max(0.05, Corpulence * view scale)` and, in the same
 //!   tick, set to `Max(0.05, Corpulence)` (its own transform has unit scale) if that is more than
 //!   0.05 away; later ticks of the entity (position, game state or size changed) do the same
@@ -62,6 +65,7 @@ use std::collections::HashSet;
 use crate::world::EntityIdx;
 
 use super::V3;
+use crate::combat::orientation;
 
 /// `UnitEntityView.Corpulence` is at least this (`Mathf.Max(.., 0.5f)`).
 pub const MIN_CORPULENCE: f32 = 0.5;
@@ -205,6 +209,11 @@ struct Collider {
     /// next step); `None` while the collider is lost (its unit out of the game, or a frame the sim
     /// didn't follow).
     transform: Option<V3>,
+    /// The transform is only known to be within `Vector3 ==`'s tolerance of `transform` (an
+    /// update from an unknown transform keeps it when it is that close to the position).
+    fuzzy: bool,
+    /// PhysX's copy is only known to that tolerance (taken from a fuzzy transform).
+    phys_fuzzy: bool,
     /// What the radius can be: [`RadiusIv::UNKNOWN`] while lost.
     radius: RadiusIv,
     /// The corpulence the radius was last established with (at an update the sim modelled);
@@ -239,6 +248,7 @@ impl Collider {
     /// and (from the next step that may take the transform) PhysX's copy are unknown.
     fn lose(&mut self) {
         self.transform = None;
+        self.fuzzy = false;
         self.radius = RadiusIv::UNKNOWN;
         self.radius_corp = None;
         self.centre = None;
@@ -339,6 +349,9 @@ pub fn capsule_sphere(pos: V3, r: f32, centre: V3, rs: f32) -> (bool, f64, bool)
 /// `UnitVisionRangeController.OverlapResults.Length`.
 const RESULT_BUFFER: usize = 512;
 
+/// `Vector3 ==` holds below a squared distance of 9.9999994e-11 (1e-5 m); a little more.
+const FUZZ: f32 = 2e-5;
+
 /// More candidate positions than this make a collider's position unknown.
 const MAX_CANDIDATES: usize = 6;
 
@@ -365,12 +378,14 @@ impl Bounds {
                 (Step::Ran, Some(t)) => {
                     c.phys = vec![t];
                     c.phys_unknown = false;
+                    c.phys_fuzzy = c.fuzzy;
                 }
                 (Step::Unknown, Some(t)) => {
                     if !c.phys.iter().any(|p| p.map(f32::to_bits) == t.map(f32::to_bits)) {
                         c.phys.push(t);
                     }
                     c.phys_unknown |= c.phys.len() > MAX_CANDIDATES;
+                    c.phys_fuzzy |= c.fuzzy;
                 }
             }
         }
@@ -408,7 +423,15 @@ impl Bounds {
                     // new object's place) until a step takes the transform set after it.
                     phys: if first { u.prefix.into_iter().collect() } else { vec![[0.0; 3]] },
                     phys_unknown: first && (u.prefix.is_none() || step != Step::Ran),
-                    transform: Some(u.pos),
+                    // The first tick's update sets the transform only when it isn't already
+                    // `==` the position (the collider is taken to be at the prefix, as PhysX's
+                    // copy is); a collider made now is set to the position.
+                    transform: Some(match (first, u.prefix) {
+                        (true, Some(p)) => orientation::set_position(p, u.pos),
+                        _ => u.pos,
+                    }),
+                    fuzzy: first && u.prefix.is_none(),
+                    phys_fuzzy: false,
                     radius: next_radius(None, u.corpulence),
                     radius_corp: u.corpulence,
                     centre: u.corpulence.map(|x| x.max(0.05)),
@@ -450,9 +473,17 @@ impl Bounds {
                     || s.size_gen != u.size_gen
                     || s.in_game_gen != u.in_game_gen
             });
-            // Whether or not this tick updates it, the transform is the unit's position: an
-            // earlier change in the game was updated already.
-            c.transform = Some(u.pos);
+            // `TickEntity` sets the transform only when it isn't `Vector3 ==` the position. Not
+            // updated, it is where the last update left it (no change in the game since); after
+            // a loss, within the tolerance of the position (whichever update ran last).
+            match (listed, c.transform, c.fuzzy) {
+                (true, Some(t), false) => c.transform = Some(orientation::set_position(t, u.pos)),
+                (true, _, _) | (false, None, _) => {
+                    c.transform = Some(u.pos);
+                    c.fuzzy = true;
+                }
+                (false, Some(_), _) => {}
+            }
             if listed {
                 // The rule, from what the radius was, with the corpulence now.
                 c.radius = next_radius(Some(c.radius), u.corpulence);
@@ -505,16 +536,21 @@ impl Bounds {
         for c in self.colliders.iter().filter(|c| c.enabled != Enabled::No) {
             let (mut tri, mut cause) = (Tri::Maybe, Some(Cause::Position));
             if !c.phys_unknown {
-                let sure_in = c.phys.iter().all(|p| capsule_sphere(pos, r, *p, c.radius.lo).0);
-                let sure_out = c.radius.hi.is_finite()
-                    && c.phys.iter().all(|p| !capsule_sphere(pos, r, *p, c.radius.hi).0);
-                (tri, cause) = if sure_in {
+                // A copy known to the tolerance only: the sphere's centre within it.
+                let sure_in =
+                    |e: f32| c.phys.iter().all(|p| capsule_sphere(pos, r, *p, c.radius.lo - e).0);
+                let sure_out = |e: f32| {
+                    c.radius.hi.is_finite()
+                        && c.phys.iter().all(|p| !capsule_sphere(pos, r, *p, c.radius.hi + e).0)
+                };
+                let e = if c.phys_fuzzy { FUZZ } else { 0.0 };
+                (tri, cause) = if sure_in(e) {
                     (Tri::In, None)
-                } else if sure_out {
+                } else if sure_out(e) {
                     (Tri::Out, None)
                 } else if !c.radius.hi.is_finite() {
                     (Tri::Maybe, Some(Cause::Corpulence))
-                } else if c.phys.len() > 1 {
+                } else if c.phys.len() > 1 || sure_in(0.0) || sure_out(0.0) {
                     (Tri::Maybe, Some(Cause::Position))
                 } else {
                     (Tri::Maybe, Some(Cause::Scale))
@@ -788,6 +824,30 @@ mod tests {
         let r = next_radius(Some(RadiusIv::UNKNOWN), Some(0.2));
         assert!(r.hi < 0.26, "{r:?}");
         assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::Out)]);
+    }
+
+    #[test]
+    fn an_update_moves_the_transform_only_when_it_isnt_vector3_equal() {
+        // Sol's round 12: a collider at 9.000004; the unit moves to 10 and back to 9 between
+        // two ticks: `transform.position != position` is false, the collider stays.
+        let mut b = settled(&[k(A, [9.000_004, 0.0, 0.0])]);
+        b.tick(&[k(A, [9.0, 0.0, 0.0])], RAN);
+        assert_eq!(b.colliders[0].transform, Some([9.000_004, 0.0, 0.0]));
+        b.tick(&[k(A, [9.5, 0.0, 0.0])], RAN);
+        assert_eq!(b.colliders[0].transform, Some([9.5, 0.0, 0.0]));
+        // From an unknown transform an update leaves it within the tolerance of the position:
+        // a pair that close to the boundary is the recording's.
+        let mut b = settled(&[k(A, [0.0; 3])]);
+        b.tick(&[hidden(k(A, [0.0; 3]))], RAN);
+        b.tick(&[k(A, [10.5, 0.0, 0.0])], RAN);
+        b.tick(&[k(A, [10.5, 0.0, 0.0])], RAN);
+        b.tick(&[k(A, [10.5, 0.0, 0.0])], RAN);
+        // Radius 0.5 +- 0.05: the reach of a capsule of 10 is 10.45 to 10.55.
+        assert_eq!(b.overlap([0.0; 3], 10.0)[0].cause, Some(Cause::Scale));
+        let hits = b.overlap([0.0; 3], 10.050_005);
+        assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Position)));
+        assert_eq!(tris(&b, [0.0; 3], 10.1), vec![(A, Tri::In)]);
+        assert_eq!(tris(&b, [0.0; 3], 9.9), vec![(A, Tri::Out)]);
     }
 
     #[test]
