@@ -230,7 +230,9 @@ struct Collider {
     /// an unknown place in the order, and the old one, with its last transform, lives until the
     /// old view is destroyed (now or after a transition the sim doesn't follow). Whether either
     /// overlaps is the recording's for the rest of the run.
-    replaced: bool,
+    /// How many times (each a view that may still own its old collider: its destruction is
+    /// deferred, a transition's longer, and not followed).
+    replaced: u32,
     /// Made (possibly) while its unit was out of the game: enabled until `UpdateViewActive` runs
     /// at its return, so its `enabled` is unknown until then.
     made_hidden: bool,
@@ -280,9 +282,10 @@ pub struct Hit {
     pub order_known: bool,
     /// What the pair was before the result buffer's capacity made it [`Tri::Maybe`].
     pub capped: Option<Tri>,
-    /// The collider's view was replaced: its old collider may still take a slot of the result
-    /// buffer (dropped after, its entity link gone, or a duplicate of the unit).
-    pub extra_slot: bool,
+    /// The collider's view was replaced this many times: as many old colliders may still take
+    /// slots of the result buffer (dropped after, their entity link gone, or duplicates of the
+    /// unit).
+    pub extra_slots: u32,
 }
 
 /// What a tick found beyond updating the colliders.
@@ -449,7 +452,7 @@ impl Bounds {
                     enabled: if made_hidden { Enabled::Unknown } else { u.enabled },
                     history_unknown: !u.in_game || unseen,
                     made_hidden,
-                    replaced: false,
+                    replaced: 0,
                     seen: u.pos_known.then_some(seen),
                 };
                 if !u.in_game || !u.pos_known || unseen {
@@ -538,7 +541,7 @@ impl Bounds {
             c.lose();
             c.seen = None;
             c.history_unknown = true;
-            c.replaced = true;
+            c.replaced += 1;
         }
     }
 
@@ -556,7 +559,7 @@ impl Bounds {
     #[must_use]
     pub fn overlap(&self, pos: V3, r: f32) -> Vec<Hit> {
         let mut out = Vec::new();
-        for c in self.colliders.iter().filter(|c| c.enabled != Enabled::No || c.replaced) {
+        for c in self.colliders.iter().filter(|c| c.enabled != Enabled::No || c.replaced > 0) {
             let (mut tri, mut cause) = (Tri::Maybe, Some(Cause::Position));
             if !c.phys_unknown {
                 // A copy known to the tolerance only: the sphere's centre within it.
@@ -584,13 +587,13 @@ impl Bounds {
             if c.enabled == Enabled::Unknown && tri != Tri::Out {
                 (tri, cause) = (Tri::Maybe, Some(Cause::Enabled));
             }
-            if c.replaced {
+            if c.replaced > 0 {
                 // Which collider exists, where, and enabled or not.
                 (tri, cause) = (Tri::Maybe, Some(Cause::Enabled));
             }
             let (mut margin, mut rounding, mut guess) = (None, false, None);
             if let (Some(centre), [p], false, false) =
-                (c.centre, c.phys.as_slice(), c.phys_unknown, c.replaced)
+                (c.centre, c.phys.as_slice(), c.phys_unknown, c.replaced > 0)
             {
                 let (hit, m, rd) = capsule_sphere(pos, r, *p, centre);
                 (margin, rounding, guess) = (Some(m), rd, Some(hit));
@@ -604,14 +607,13 @@ impl Bounds {
                 guess,
                 order_known: !c.history_unknown,
                 capped: None,
-                extra_slot: c.replaced,
+                extra_slots: c.replaced,
             });
         }
         // `OverlapCapsule` fills a buffer of 512: with more colliders in reach, which ones it keeps
         // is PhysX's order.
         // (A replaced view's old collider may take a slot too.)
-        let possible = out.iter().filter(|h| h.tri != Tri::Out).count()
-            + out.iter().filter(|h| h.extra_slot).count();
+        let possible = out.iter().filter(|h| h.tri != Tri::Out).count() + extra_slots(&out);
         if possible > RESULT_BUFFER {
             for h in out.iter_mut().filter(|h| h.tri != Tri::Out) {
                 h.capped = Some(h.tri);
@@ -626,6 +628,11 @@ impl Bounds {
     pub fn has(&self, u: EntityIdx) -> bool {
         self.colliders.iter().any(|c| c.unit == u)
     }
+}
+
+/// The slots old colliders of replaced views may take.
+fn extra_slots(hits: &[Hit]) -> usize {
+    hits.iter().map(|h| h.extra_slots as usize).sum()
 }
 
 /// How a recorded set differs from the sim's overlap.
@@ -688,7 +695,7 @@ pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
     // holds every hit that surely overlaps; only a full buffer may leave some out.
     if recorded.len() > RESULT_BUFFER {
         out.diffs.push(Difference::Count(recorded.len()));
-    } else if recorded.len() + hits.iter().filter(|h| h.extra_slot).count() < RESULT_BUFFER {
+    } else if recorded.len() + extra_slots(hits) < RESULT_BUFFER {
         // (Old colliders of replaced views may have taken slots and been dropped after.)
         out.diffs.extend(
             hits.iter()
@@ -956,7 +963,22 @@ mod tests {
         b.tick(&[k(A, [2.0, 0.0, 0.0])], RAN);
         b.tick(&[k(A, [2.0, 0.0, 0.0])], RAN);
         let h = b.overlap([0.0; 3], 1.0)[0];
-        assert_eq!((h.margin, h.guess, h.extra_slot), (None, None, true));
+        assert_eq!((h.margin, h.guess, h.extra_slots), (None, None, 1));
+        // Sol's round 17: 510 sure colliders and a unit replaced twice: two old colliders may
+        // take slots, so the buffer may overflow.
+        let mut b = Bounds::default();
+        b.tick(&units[..511], RAN);
+        b.replace_unit(EntityIdx(510));
+        b.replace_unit(EntityIdx(510));
+        let hits = b.overlap([0.0; 3], 5.0);
+        assert!(hits.iter().all(|h| h.tri == Tri::Maybe), "510 + 1 + 2 may exceed 512");
+        assert_eq!(hits[510].extra_slots, 2);
+        // Replaced once, 510 + 1 + 1 fit: the sure ones stay decided.
+        let mut b = Bounds::default();
+        b.tick(&units[..511], RAN);
+        b.replace_unit(EntityIdx(510));
+        let hits = b.overlap([0.0; 3], 5.0);
+        assert_eq!(hits[0].tri, Tri::In);
     }
 
     #[test]
@@ -1316,7 +1338,7 @@ mod tests {
             guess: None,
             order_known: true,
             capped: None,
-            extra_slot: false,
+            extra_slots: 0,
         };
         let hits = [
             hit(A, Tri::In, None),

@@ -167,7 +167,9 @@ pub struct Vision {
     /// Units whose view a polymorph may have replaced since the last vision phase (its start,
     /// `TryReplaceView`, or its end, `RestoreView`, attach a new view): a new collider is made at
     /// the next update, the old one lives until its view is destroyed.
-    pub views_replaced: HashSet<EntityIdx>,
+    /// Each replacement in order: the unit and whether a polymorph made it (else the
+    /// optimization dummy swap, counted in `dummy_swaps`).
+    pub views_replaced: Vec<(EntityIdx, bool)>,
     /// `UnitEntityData.HasDummyView` as far as the sim knows it (`Some(false)` for a unit not
     /// here; `None`: unknown). Hydrated from the save.
     pub dummy: HashMap<EntityIdx, Option<bool>>,
@@ -764,7 +766,7 @@ pub fn note_fact_ending(w: &mut World, f: crate::world::FactIdx) {
     if is_polymorph(w, f) {
         note_explicit_sync(w);
         if let Some(e) = w.fact(f).owner {
-            w.combat.vision.views_replaced.insert(e);
+            w.combat.vision.views_replaced.push((e, true));
         }
     }
 }
@@ -776,7 +778,7 @@ pub fn note_fact_starting(w: &mut World, f: crate::world::FactIdx) {
     if is_polymorph(w, f)
         && let Some(e) = w.fact(f).owner
     {
-        w.combat.vision.views_replaced.insert(e);
+        w.combat.vision.views_replaced.push((e, true));
     }
 }
 
@@ -822,5 +824,5 @@ pub fn update_has_dummy_view(w: &mut World, u: EntityIdx, sleeping: Option<bool>
     } else {
         w.combat.vision.dummy_swaps.1 += 1;
     }
-    w.combat.vision.views_replaced.insert(u);
+    w.combat.vision.views_replaced.push((u, false));
 }

@@ -296,8 +296,10 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   refused with the areas with parts, the build mode's `DisableUnitOptimization` taken to be off) differs from
   `HasDummyView` (hydrated from the save, then followed), the view is replaced; a dummy kept while sleeping depends on
   `IsDeathRevealed`, which isn't modelled, so such a swap is possible, and possible swaps count apart (`dummy view
-  swaps`, `possible`). A replaced view's old collider may also take one of the result buffer's 512 slots (dropped
-  after, its link gone): each counts as one more possible hit for the capacity and for the short-set check. Replaced
+  swaps`, `possible`; a dummy swap isn't counted among the views replaced by a polymorph). A replaced view's old
+  collider may also take one of the result buffer's 512 slots (dropped after, its link gone), and the sim never knows
+  when an old view is destroyed (now, at the frame's end, or after a transition): a unit replaced k times counts as k
+  more possible hits for the capacity and for the short-set check. Replaced
   colliders are left out of the margin statistics.
 - **Every vision record is consumed.** Each `vis`, `los`, `los_clear`, `los_geometry`, `los_geom` and `los_probe` record
   must reach its handler exactly once; one that none consumed by the run's end (inside a root rule's span the replay

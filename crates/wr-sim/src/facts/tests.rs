@@ -1047,11 +1047,11 @@ fn a_polymorph_ending_marks_a_possible_transform_sync() {
     // Its start replaces the owner's view too (no sync).
     crate::combat::vision::note_fact_starting(&mut w, f);
     assert!(!w.combat.vision.explicit_sync);
-    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&(u, true)));
     crate::combat::vision::note_fact_ending(&mut w, f);
     assert!(std::mem::take(&mut w.combat.vision.explicit_sync));
-    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&(u, true)));
     fl::manager_remove_with(&mut w, u, f, false, |_, _| {});
     assert!(w.combat.vision.explicit_sync);
-    assert!(w.combat.vision.views_replaced.contains(&u));
+    assert!(w.combat.vision.views_replaced.contains(&(u, true)));
 }

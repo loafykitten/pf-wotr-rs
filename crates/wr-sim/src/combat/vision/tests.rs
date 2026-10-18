@@ -432,19 +432,19 @@ fn the_optimization_dummy_swap_replaces_the_view() {
     w.combat.awake.push(u);
     // Hidden: the flag flips to a dummy (exact).
     crate::entity::set_is_in_game(&mut w, u, false);
-    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&(u, false)));
     assert_eq!(w.combat.vision.dummy_swaps, (1, 0));
     assert_eq!(w.combat.vision.dummy.get(&u), Some(&Some(true)));
     // Back while awake: the real view again (exact).
     crate::entity::set_is_in_game(&mut w, u, true);
-    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&(u, false)));
     assert_eq!(w.combat.vision.dummy_swaps, (2, 0));
     // Hidden, then back while asleep: the dummy may be kept (death-revealed unknown).
     crate::entity::set_is_in_game(&mut w, u, false);
     w.combat.awake.clear();
     std::mem::take(&mut w.combat.vision.views_replaced);
     crate::entity::set_is_in_game(&mut w, u, true);
-    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&(u, false)));
     assert_eq!(w.combat.vision.dummy_swaps, (3, 1));
     assert_eq!(w.combat.vision.dummy.get(&u), Some(&None));
     // Unknown and still unknown: not counted again.

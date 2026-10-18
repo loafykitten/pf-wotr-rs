@@ -451,11 +451,9 @@ impl Driver<'_> {
         // A `Physics.SyncTransforms()` since the last phase may have given PhysX transforms a
         // step wouldn't have (this frame's, or the next's when it came after this phase):
         // unknown until a step known to run.
-        let mut replaced: Vec<EntityIdx> = w.combat.vision.views_replaced.drain().collect();
-        replaced.sort();
-        for u in replaced {
+        for (u, polymorph) in std::mem::take(&mut w.combat.vision.views_replaced) {
             w.combat.vision.bounds.replace_unit(u);
-            self.vis.counts.range_views_replaced += 1;
+            self.vis.counts.range_views_replaced += usize::from(polymorph);
         }
         if std::mem::take(&mut w.combat.vision.explicit_sync) {
             w.combat.vision.bounds.forget_positions();
