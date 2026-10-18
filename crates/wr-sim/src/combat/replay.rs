@@ -446,13 +446,21 @@ fn oracle_stream(
             continue;
         }
         // The tutorial system (`Kingmaker.Tutorial`) is UI-driven; its facts are not ported.
-        if r["k"] == "mut" && r["class"] == "Tutorial" {
+        if r["k"] == "mut" && stream_drops_fact(r["class"].as_str()) {
             *out.excluded.entry("fact_attach Tutorial".into()).or_default() += 1;
             continue;
         }
         v.push(r);
     }
     v
+}
+
+/// Whether the compared stream leaves out a fact's mutation of this class: the tutorial's facts
+/// (`Kingmaker.Tutorial`, UI-driven, not ported). Their unique ids are checked outside root spans
+/// (`Some("mut") if r["what"] == "fact_attach"` in `record_entry`), which never sees a record a root
+/// consumes, so a span holds none (`spans::projected`).
+pub(super) fn stream_drops_fact(class: Option<&str>) -> bool {
+    class == Some("Tutorial")
 }
 
 /// The phases of a frame the replay places events in or runs, in the registration order of

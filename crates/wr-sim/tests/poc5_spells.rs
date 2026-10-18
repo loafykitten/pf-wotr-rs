@@ -455,7 +455,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             }
         }
     }
-    let cases: [(&str, Change); 27] = [
+    let cases: [(&str, Change); 28] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
         // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
         ("events queued, the sim queued", |recs| {
@@ -624,6 +624,18 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
         ("rule record inside a root rule's span: a root whose stack fields", |recs| {
             let root = initiative(recs);
             recs[root]["handler"] = json!(999_999_999);
+        }),
+        // A tutorial fact's attach: dropped from the compared stream, and its id checker never sees
+        // a record a root consumes.
+        ("driven replay: a fact_attach mutation inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let (t, id) = (recs[root]["t"].clone(), recs[root]["id"].clone());
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "mut", "t": t, "what": "fact_attach", "class": "Tutorial",
+                    "rule": id, "h": 0, "owner": "x", "fact": {"$fact": "1", "blueprint": "b"}}),
+            );
+            renumber(recs);
         }),
         // A mutation the T0 projection drops (stat values, modifiers) compares nowhere.
         ("driven replay: a stat_value mutation inside a root rule's span", |recs| {

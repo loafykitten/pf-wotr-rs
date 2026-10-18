@@ -69,12 +69,14 @@ pub struct SpanCounts {
     pub reported: usize,
 }
 
-/// Whether the T0 projection keeps a mutation (`project::project_records`): damage, experience,
-/// facts attached and detached, and a bonus added to a rule it tracks, which it buffers and emits
-/// at that rule's `rule_end`: so the rule must be open (on `open`'s stack) at the mutation.
+/// Whether the compared T0 stream keeps a mutation: what `project::project_records` projects (damage,
+/// experience, facts attached and detached, and a bonus added to a rule it tracks, which it buffers
+/// and emits at that rule's `rule_end`: so the rule must be open on `open`'s stack at the mutation),
+/// less what `oracle_stream` then drops (the tutorial's facts: [`super::stream_drops_fact`]).
 pub(super) fn projected(open: &Open, r: &Rv) -> bool {
     match r["what"].as_str() {
-        Some("damage" | "xp" | "fact_attach" | "fact_detach") => true,
+        Some("damage" | "xp") => true,
+        Some("fact_attach" | "fact_detach") => !super::stream_drops_fact(r["class"].as_str()),
         Some("rule_bonus") => {
             r["target_rule"].as_i64().is_some_and(|t| t > 0 && open.life.is_open(t))
         }
@@ -92,6 +94,8 @@ pub(super) struct Open {
     pub(super) rules: HashMap<i64, (String, Rv)>,
     /// The rules that made their provoke.
     pub(super) provoked: HashSet<i64>,
+    /// The environment records each open rule has written.
+    pub(super) envs: HashMap<i64, usize>,
 }
 
 impl Open {
@@ -102,6 +106,7 @@ impl Open {
             life: Life::new(root["id"].as_i64().unwrap_or(0)),
             rules: HashMap::new(),
             provoked: HashSet::new(),
+            envs: HashMap::new(),
         };
         open.note(root);
         open
@@ -203,6 +208,19 @@ impl Open {
             }
     }
 
+    /// A rule's end: an attack roll's and a resolve's environment was written once (`span_ok`'s
+    /// count), so a nested resolve (a weapon without a projectile resolves at once) with its
+    /// environment removed is not skipped, whatever the sim reuses.
+    pub(super) fn envs_ok(&self, rule_end: &Rv) -> bool {
+        let Some(id) = rule_end["id"].as_i64() else { return false };
+        match self.rules.get(&id).map(|(class, _)| class.as_str()) {
+            Some("RuleAttackRoll" | "RuleAttackWithWeaponResolve") => {
+                self.envs.get(&id).copied().unwrap_or(0) == 1
+            }
+            _ => true,
+        }
+    }
+
     /// An environment: of the innermost rule (by its class), in its `OnTrigger` outside its handlers.
     pub(super) fn env_placed(&self, r: &Rv) -> bool {
         self.rules.get(&self.life.rule()).is_some_and(|(class, _)| r["rule"] == class.as_str())
@@ -261,6 +279,13 @@ impl Driver<'_> {
                 Some(
                     "rule" | "h" | "h_end" | "rule_end" | "about" | "trig" | "trig_end" | "did",
                 ) => {
+                    if r["k"] == "rule_end" && !open.envs_ok(r) {
+                        self.span_reported(
+                            w,
+                            "a rule_end record".into(),
+                            "an attack roll or resolve without exactly one environment",
+                        );
+                    }
                     if !open.feed(r) {
                         self.span_reported(
                             w,
@@ -298,6 +323,9 @@ impl Driver<'_> {
                     let read = self.env_reads.iter().any(|(rule, a, t)| {
                         super::find_env(trace, start, end, rule, a, t) == Some(k)
                     });
+                    if open.env_placed(r) {
+                        *open.envs.entry(open.life.rule()).or_default() += 1;
+                    }
                     if !read || !open.env_placed(r) {
                         self.span_reported(
                             w,
@@ -309,7 +337,7 @@ impl Driver<'_> {
                 Some("mut") => self.span_reported(
                     w,
                     format!("a {} mutation", r["what"].as_str().unwrap_or("?")),
-                    "a mutation the T0 projection drops, so nothing compares it",
+                    "a mutation the compared T0 stream drops (or a tutorial fact), so nothing compares it",
                 ),
                 Some("obs") => self.span_obs(w, start, r, &mut open),
                 // (The oracle writes no raw `result` or `bonuses`: the projection derives them.)

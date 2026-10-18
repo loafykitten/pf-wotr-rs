@@ -923,6 +923,13 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   streams agree on its rule records). Its positions must equal the roll's, both recorded
   (`positions_agree`; a null coordinate is no position): its damage reads the distance then
   (`DistanceDamageBonus`), and the sim reuses the roll's positions, so the equality is the check that makes the reuse right.
+- Count: an attack roll and a resolve close with exactly one `env` (`span_ok`'s count; `Open::envs_ok`), including a
+  resolve nested in a phase-driven attack: one removed would leave the sim reusing the roll's positions unchecked.
+  A ranged attack's resolve that comes later is its own root and has its own.
+- Tutorial facts: `oracle_stream` drops the tutorial's `fact_attach`/`fact_detach` from the compared stream, and their
+  unique-id check (`record_entry`) never sees a record a root consumes. `spans::projected` mirrors that filter
+  (`stream_drops_fact`, shared), so a Tutorial mutation inside a span is reported. [M] None of the 111 runs (nor
+  `-137` to `-140`) has one inside a span (they are all outside: 123 attaches).
 - Attribution, as `span_ok` does it: a draw and a mutation the projection keeps are the innermost rule's, in the open
   handler (`rule` and `h`, `Life::attributed`); a simulation draw is in the rule's `OnTrigger` or one of its handlers,
   damage after `did` outside its handlers, a bonus in `OnTrigger` or a handler. A root's own stack fields are a root's
@@ -976,14 +983,15 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
 **Tests** (`poc5_spells.rs`, `records_inside_driven_root_spans_are_checked_or_reported`, `poc5-tb-123/tb-chain`; the
 unit tests `a_root_attacks_launch_is_placed_like_a_commands`, `a_root_spans_provoke_is_placed_like_a_commands` and
 `a_root_spans_structure_follows_span_oks`, `a_root_spans_records_are_attributed_like_span_oks` and
-`a_nested_resolves_positions_must_agree_with_the_rolls` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
+`a_nested_resolves_positions_must_agree_with_the_rolls` and `a_nested_resolve_needs_its_one_environment` in
+`replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
 the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
 `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
 `proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
 the initiative roll's span, a root's `rule_end` of another frame, a `stat_value` mutation, a `did` before
 `trig_end`, an `h_end` of another id, a `mod_after` handler after a `did` one, a `rule_bonus` to a rule never
 allocated and one to a rule already closed, a draw and a damage mutation of no rule the span has, a draw in no open
-handler, and an initiative root with its `parent` or `handler` changed; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
+handler, an initiative root with its `parent` or `handler` changed, and a tutorial fact attached; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
 accepted and counted (the run stays valid, `oracle_invalid` equal to the notes added). The phase-driven placing of a
 launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
 and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is

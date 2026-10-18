@@ -1695,3 +1695,48 @@ fn a_root_spans_records_are_attributed_like_span_oks() {
     assert!(open.mut_placed(&m("fact_attach", 2, 0)));
     assert!(!open.mut_placed(&m("fact_attach", 3, 0)), "a fact attached by no open rule");
 }
+
+/// An attack roll or a resolve (a weapon without a projectile resolves at once, nested in the
+/// attack) closes with exactly one environment record, as `span_ok` requires: one removed (so the
+/// sim reuses the roll's positions unchecked) or doubled is reported. The tutorial's facts are
+/// dropped from the compared stream, so a span holds none.
+#[test]
+fn a_nested_resolve_needs_its_one_environment() {
+    use super::spans::{Open, projected};
+    let class = |c: &str| format!("Kingmaker.RuleSystem.Rules.{c}");
+    let r = |v: J| rvs(&[v]).remove(0);
+    let root = r(
+        json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "parent": 0, "context_parent": 0, "handler": 0,
+        "reason_at_push": null, "class": class("RuleAttackWithWeapon"), "initiator": {"$unit": "a"}}),
+    );
+    let step = |k: &str, id: i64| r(json!({"k": k, "t": 5, "id": id}));
+    let nested = r(
+        json!({"k": "rule", "t": 5, "id": 2, "parent": 1, "depth": 1, "handler": 0, "context_parent": 1,
+        "class": class("RuleAttackWithWeaponResolve"), "initiator": {"$unit": "a"}}),
+    );
+    let env = r(json!({"k": "env", "t": 5, "rule": "RuleAttackWithWeaponResolve"}));
+    let ends = |envs: usize| {
+        let mut open = Open::new(&root);
+        for rec in
+            [step("about", 1), step("trig", 1), nested.clone(), step("about", 2), step("trig", 2)]
+        {
+            assert!(open.feed(&rec));
+        }
+        for _ in 0..envs {
+            assert!(open.env_placed(&env));
+            *open.envs.entry(open.life.rule()).or_default() += 1;
+        }
+        open.envs_ok(&step("rule_end", 2))
+    };
+    assert!(ends(1), "its environment");
+    assert!(!ends(0), "the environment removed");
+    assert!(!ends(2), "the environment doubled");
+    // Facts attached or detached are projected, a tutorial's are not.
+    let open = Open::new(&root);
+    let fact =
+        |what: &str, class: &str| r(json!({"k": "mut", "t": 5, "what": what, "class": class}));
+    assert!(projected(&open, &fact("fact_attach", "Buff")));
+    assert!(projected(&open, &fact("fact_detach", "Buff")));
+    assert!(!projected(&open, &fact("fact_attach", "Tutorial")));
+    assert!(!projected(&open, &fact("fact_detach", "Tutorial")));
+}
