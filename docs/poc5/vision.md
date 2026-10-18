@@ -156,6 +156,9 @@ Round 10 (without the driven agent a row gives a position only at its own frame 
 awake): all runs as valid, 0 differences. The record runs decide 4,923,510 pairs and leave 14,705,393 for the
 corpulence, 1,705 for the position and 14,268 for the scale band; all 111 runs decide 15,442,732 and leave 45,876,635,
 5,115 and 45,560 (the 27 runs without the agent: 2,570,208 decided before, 2,560,314 now).
+Round 11 (a unit the sim moves after `Phase::Visibility` is unknown for that frame's queries and collider; every vision
+record must be consumed exactly once): the same counts, all runs as valid, 0 differences; units moved by the sim after
+the phase 0 and vision records unconsumed 0 (checked on `-129`/tb-lizard and `-111`/tb-focus).
 
 Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, `tests/poc5.rs`, three captures
 valid on all runs; 14 damaged cases on `-111`/tb-nearest, each reported): an engagement leaf and a memory leaf flipped; a
