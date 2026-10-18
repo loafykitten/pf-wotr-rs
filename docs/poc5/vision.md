@@ -150,6 +150,8 @@ known; a unit that joins hidden has a lost collider of unknown `enabled`; no buf
 111 runs as valid as before, 0 differences. The record runs decide 4,926,808 pairs and leave 14,702,936 for the
 corpulence (the reads made stale by a buff now make the radius unknown until the unit's next update), 864 for the
 position and 14,268 for the scale band; all 111 runs decide 15,452,626 and leave 45,869,264, 2,592 and 45,560.
+Round 9 (a set of fewer than 512 must hold every pair decided as in; a collider first met after an unfollowed frame is
+lost): the same counts, all runs as valid, 0 differences.
 
 Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, `tests/poc5.rs`, three captures
 valid on all runs; 14 damaged cases on `-111`/tb-nearest, each reported): an engagement leaf and a memory leaf flipped; a
@@ -240,7 +242,8 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   by the rule from an unknown radius: the band around the corpulence then, unbounded without one) and, for PhysX, the next
   step known to run. A frame the sim didn't follow (a skipped Unity frame, a mode it doesn't model; counted as `frames not
   followed`) loses every collider, and the next tick can't tell which units it updates: a radius is re-established only
-  by a later move, size write or return to the game. A unit in the game has its collider's transform at its position
+  by a later move, size write or return to the game. A collider first met right after such a frame may have been made,
+  and synced, in it: it is lost too, at an unknown place in the order. A unit in the game has its collider's transform at its position
   after every tick (a change of it in the game puts it on the update list); only the radius depends on whether a tick
   updated it.
 - **Enabled.** `IsInGame` (suppression exists only in areas with parts, which the vision run refuses); a unit hidden with a
@@ -263,8 +266,9 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   queued, which makes its collider while it is hidden, enabled (`UpdateViewActive` ran before it existed) and appended at
   that moment: such a unit has a lost collider of unknown `enabled` and place in the order until it is back in the game.
 - **Result buffer.** `OverlapCapsule` fills a buffer of 512: with more colliders possibly in reach every such pair is the
-  recording's (which ones PhysX keeps is its order), and a recorded set of more than 512, or of fewer than 512 when more
-  than 512 surely overlap, is reported.
+  recording's (which ones PhysX keeps is its order). A recorded set of more than 512 is reported; one of fewer than 512
+  wasn't truncated, so it must hold every pair the sim decided as in (a missing one is reported); only a set of exactly
+  512 may leave such pairs out.
 - **Vision radius.** A unit with an `OverrideVisionRange` fact refuses the run at the start; one that gets it later is
   reported, its set left to the recording.
 

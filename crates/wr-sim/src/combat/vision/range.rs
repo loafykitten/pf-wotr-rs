@@ -280,6 +280,8 @@ pub struct Tick {
 pub struct Bounds {
     colliders: Vec<Collider>,
     started: bool,
+    /// [`Bounds::lose_track`] ran since the last tick: the next one doesn't follow the previous.
+    gap: bool,
     /// Colliders made after the first tick (units that joined later).
     pub made_later: usize,
 }
@@ -352,6 +354,9 @@ impl Bounds {
     pub fn tick(&mut self, units: &[BoundsUnit], step: Step) -> Tick {
         let first = !self.started;
         self.started = true;
+        // A collider first met after a gap may have been made, and synced, in a frame the sim
+        // didn't follow.
+        let gap = std::mem::take(&mut self.gap);
         for c in &mut self.colliders {
             match (step, c.transform) {
                 (Step::NotRan, _) => {}
@@ -393,6 +398,8 @@ impl Bounds {
                 // cancel it), which makes its collider enabled (`UpdateViewActive` ran before the
                 // collider existed) at an unknown place in the order: unknown, not none.
                 let made_hidden = !first && !u.in_game;
+                // Made in an unseen frame (after a gap): its place, radius, order unknown.
+                let unseen = !first && gap;
                 self.made_later += usize::from(!first && u.in_game);
                 let mut c = Collider {
                     unit: u.unit,
@@ -406,12 +413,15 @@ impl Bounds {
                     radius_corp: u.corpulence,
                     centre: u.corpulence.map(|x| x.max(0.05)),
                     enabled: if made_hidden { Enabled::Unknown } else { u.enabled },
-                    history_unknown: !u.in_game,
+                    history_unknown: !u.in_game || unseen,
                     made_hidden,
                     seen: u.pos_known.then_some(seen),
                 };
-                if !u.in_game || !u.pos_known {
+                if !u.in_game || !u.pos_known || unseen {
                     c.lose();
+                    if unseen {
+                        c.seen = None;
+                    }
                 }
                 self.colliders.push(c);
                 continue;
@@ -468,6 +478,7 @@ impl Bounds {
             c.lose();
             c.seen = None;
         }
+        self.gap = true;
     }
 
     /// `OverlapCapsule` for a unit at `pos` with vision radius `r`: every collider that is or may
@@ -588,11 +599,16 @@ pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
     let mut rest: Vec<EntityIdx> = recorded.iter().copied().filter(|u| !seen.contains(u)).collect();
     rest.sort();
     out.diffs.extend(rest.into_iter().map(Difference::Extra));
-    // The buffer holds 512 hits: never more, and full when more than that surely overlap (below
-    // the capacity a missing sure hit is a `Missing` already).
-    let sure = hits.iter().filter(|h| h.capped == Some(Tri::In)).count();
-    if recorded.len() > RESULT_BUFFER || recorded.len() < sure.min(RESULT_BUFFER) {
+    // The buffer holds 512 hits: never more. A result of fewer than 512 wasn't truncated, so it
+    // holds every hit that surely overlaps; only a full buffer may leave some out.
+    if recorded.len() > RESULT_BUFFER {
         out.diffs.push(Difference::Count(recorded.len()));
+    } else if recorded.len() < RESULT_BUFFER {
+        out.diffs.extend(
+            hits.iter()
+                .filter(|h| h.capped == Some(Tri::In) && !recorded.contains(&h.unit))
+                .map(|h| Difference::Missing(h.unit)),
+        );
     }
     out
 }
@@ -834,6 +850,13 @@ mod tests {
             vec![(Tri::In, None), (Tri::In, None)]
         );
         assert_eq!(b.overlap([0.0; 3], 9.0)[0].cause, Some(Cause::Corpulence));
+        // A collider first met after a gap may have been made and synced unseen: lost.
+        let mut b2 = settled(&[k(A, [0.0; 3])]);
+        b2.lose_track();
+        b2.tick(&[k(A, [0.0; 3]), k(C, [40.0, 0.0, 0.0])], Step::Unknown);
+        let hits = b2.overlap([0.0; 3], 1.0);
+        assert_eq!((hits[1].tri, hits[1].order_known), (Tri::Maybe, false));
+        assert_eq!(b2.made_later, 1);
         // A move is an update the sim sees: the radius is the band again.
         b.tick(&[k(A, [10.6, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
         b.tick(&[k(A, [10.6, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
@@ -853,13 +876,33 @@ mod tests {
         let d = differences(&hits, &set(512));
         assert!(d.diffs.is_empty() && d.open[Cause::Capacity.index()] == 600, "{d:?}");
         assert_eq!(differences(&hits, &set(600)).diffs, vec![Difference::Count(600)]);
-        assert_eq!(differences(&hits, &set(511)).diffs, vec![Difference::Count(511)]);
+        // Fewer than 512 means no truncation: every sure hit is in it.
+        let d = differences(&hits, &set(511));
+        assert_eq!(
+            d.diffs,
+            (511..600).map(|i| Difference::Missing(EntityIdx(i))).collect::<Vec<_>>()
+        );
         // At 512 in reach the buffer holds them all.
         let mut b = Bounds::default();
         b.tick(&units[..512], RAN);
         let hits = b.overlap([0.0; 3], 5.0);
         assert!(hits.iter().all(|h| h.tri == Tri::In));
         assert!(differences(&hits, &set(512)).diffs.is_empty());
+        // Sol's round 8: 500 sure and 20 uncertain colliders in reach; a set of 480 sure ones and
+        // the 20 uncertain ones leaves out sure hits without being full.
+        let mut mixed: Vec<BoundsUnit> = units[..500].to_vec();
+        mixed.extend((500..520).map(|i| unit(EntityIdx(i), [0.0; 3], None)));
+        mixed.iter_mut().skip(500).for_each(|u| u.pos = [9.0, 0.0, 0.0]);
+        mixed.iter_mut().skip(500).for_each(|u| u.prefix = Some([9.0, 0.0, 0.0]));
+        let mut b = Bounds::default();
+        b.tick(&mixed, RAN);
+        let hits = b.overlap([0.0; 3], 5.0);
+        assert!(hits.iter().all(|h| h.cause == Some(Cause::Capacity)));
+        let rec: HashSet<EntityIdx> = (20..520).map(EntityIdx).collect();
+        assert_eq!(differences(&hits, &rec).diffs.len(), 20);
+        // A full buffer may leave sure hits out.
+        let full: HashSet<EntityIdx> = (8..520).map(EntityIdx).collect();
+        assert!(differences(&hits, &full).diffs.is_empty());
         // A recorded set of more than 512 is impossible whatever the sim decided.
         let mut b = Bounds::default();
         b.tick(&units[..2], RAN);
