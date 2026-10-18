@@ -1,5 +1,12 @@
 # POC-5: line of sight (stream "vision")
 
+Status (2026-10-18, stream "xform"): **the geometry is compared with the game's own** (`poc5-tb-140`'s `los_geom` and
+`los_probe`, all five runs): the 8 caves blockers' 88 segments and the grid are equal bit for bit, and so are the
+1,280 `HasObstacle` probes. The blockers' points are Unity's `Transform.TransformPoint` (its hierarchy walk, ported from the
+player), no longer the product with the `f32` world matrix, which had put 13 of the 88 segments one ulp off ("Observer
+changes requested"). Every run of the 25 captures is valid but `-122`'s tb-nearest runs and `-135`'s perturbed one, as before,
+and no count of the vision range changed.
+
 Status (2026-10-17, stream "visrange"): the sets of units in vision range (`CanBeInVisionRange`) are computed too and
 checked against the recording's `vis` records, on every pair the sim can decide (a pair that an unknown corpulence or view
 scale could change is left to the recording, counted): see "The sets in vision range" below. Before that (stream "vision"):
@@ -525,20 +532,31 @@ overlap too) and a change with no record (a `vis` record deleted), a unit of kno
 
 ## Observer changes requested
 
-**The blockers can't be checked against these captures.** The caves' 8 `FogOfWarBlocker`s are thin walls (cubes scaled
-10 x 4 x 0.001) between x 120 and 145, z 58 and 94, away from the fights: the 4,805 recorded cache misses of
+**The blockers could not be checked against the captures before `poc5-tb-140`.** The caves' 8 `FogOfWarBlocker`s are thin walls
+(cubes scaled 10 x 4 x 0.001) between x 120 and 145, z 58 and 94, away from the fights: the 4,805 recorded cache misses of
 `-111`, `-114`, `-123`, `-129` and `-136` (record runs; a miss is the segment from the owner's sample to the target) stay at
 least 38.9 m from every wall [M], so no recorded read has a blocker near its segment, and every recorded `HasLOS` that is
 false is false for the vision radius or the range set. What the 800,000 reads establish for the geometry is that the imported one never blocks a segment the
 game found clear; its DDA, intersection test and rounding are checked by unit tests against a brute-force test, not
-against the game. Two things stay open for the blockers themselves, and one recording closes both:
+against the game. Two things stayed open for the blockers themselves, and one recording closes both:
 
-1. `Transform.TransformPoint`'s rounding (the importer sums `m0 x + m4 y + m8 z + m12` in `f32`, left to right; 30 of the
-   192 transformed cube vertices round differently when summed in double; the native routine's order isn't established);
-2. the grid's bounds and the registration (the importer derives them; nothing has been compared).
+1. `Transform.TransformPoint`'s rounding. **Settled** (stream xform, with `-140`): the importer first multiplied the point by
+   the `f32` world matrix glam built (`m0 x + m4 y + m8 z + m12`), which is not what Unity does; 13 of the 88 recorded
+   segments differed, by one ulp in one coordinate (x 125.559845 against 125.559853). Unity's `Transform.TransformPoint`
+   is a walk up the hierarchy (the player's `0x6744c0`: per level `v = p * s`, then `t + ((v + c0 vx) + (c1 vy + c2 vz))`
+   with `c0..c2` the rotation matrix less the identity), ported as `wr_phys::boxes::transform_point` for the boxes and
+   checked bit for bit against the player on a million generated hierarchies (`docs/poc5/physics.md`, "Boxes");
+   both `FogOfWarBlockerPolygon.TransformedPoints` and `FogOfWarBlocker.BuildPointFromMesh` call it, so `wr-import
+   los-pack` now uses the same function over the GameObject's local transforms (`SceneData::transform_chain`). The
+   product with the matrix of the levels' `f32` matrices differs from the walk in about four of five generated
+   three-level hierarchies (`wr-phys`'s `transform_point_gives_the_players_values` holds three of the player's values),
+   so neither the matrix nor a double-precision sum was a candidate: the importer's hedge (`ambiguous_points`) is gone and
+   the line-of-sight file's format is 2. Checked against the game: **all 88 segments of `-140`'s `los_geom` equal**
+   on its five runs, bit for bit, and its 1,280 `HasObstacle` probes;
+2. the grid's bounds and the registration: **compared by the same record** (the grid equals the game's on all five runs).
 
 **Added 2026-10-17 in the main session** (`LosProbe.cs`, observer `los_geom`, written right after the begin record
-next to `phys_probe`; gpt-6.1-sol: two rounds, no findings left; not yet recorded): `los_geom` and `los_probe` as
+next to `phys_probe`; gpt-6.1-sol: two rounds, no findings left; recorded in `poc5-tb-140`): `los_geom` and `los_probe` as
 specified below, 40 probes per distinct segment (`System.Random`, seed 20261017; Unity's RNG untouched). Left for the
 sim: when `los_geom` is declared, require both records (today it checks whichever arrive).
 
@@ -607,7 +625,8 @@ can also be absorbed:
 - **Neither (the pairs are the recording's, counted):** the result buffer (more than 512 colliders possibly in reach; an
   impossible set size is reported); the bounds queue and fades (a collider of a unit out of the game, or after a frame
   the sim didn't follow, is unknown until a modelled update reaches PhysX); the last frame without the driven agent.
-- The TransformPoint rounding of the blockers and the grid's bounds are derived, not compared (above).
+- The blockers' points and the grid's bounds are compared with the game's own (`-140`'s `los_geom`) on the caves' 8 blockers only; the
+  polygon blockers of other areas use the same `TransformPoint` but have no recording.
 - Without the driven agent (`-95`, `-96`, `-109`, `-111`, `-112`) a unit's position is the recording's rows, and in the
   recording's last frame the last prefix's (counted in `last_frame_reads`; checked against the leaves like any other).
 

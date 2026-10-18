@@ -584,6 +584,20 @@ impl SceneData {
         out
     }
 
+    /// [`Self::local_chain`] as the physics crate's levels, for `wr_phys::boxes::transform_point`
+    /// (Unity's `Transform.TransformPoint`).
+    #[must_use]
+    pub fn transform_chain(&self, go: i64) -> Vec<wr_phys::boxes::LocalTrs> {
+        self.local_chain(go)
+            .iter()
+            .map(|t| wr_phys::boxes::LocalTrs {
+                position: t.position.to_array(),
+                rotation: t.rotation.to_array(),
+                scale: t.scale.to_array(),
+            })
+            .collect()
+    }
+
     /// Whether `go` or one of its ancestors has a component of class `class`.
     #[must_use]
     pub fn in_parents(&self, go: i64, class: &str) -> bool {

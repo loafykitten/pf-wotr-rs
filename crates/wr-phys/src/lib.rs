@@ -150,8 +150,9 @@ pub struct RecordedCollider {
 pub enum RecordedKind {
     /// `MeshCollider.convex` and `.cookingOptions`.
     Mesh { convex: bool, cooking: i64 },
-    /// `BoxCollider.center` and `.size` (a GameObject can have several boxes).
-    Box { center: [f32; 3], size: [f32; 3] },
+    /// `BoxCollider.center` and `.size` (a GameObject can have several boxes), and the game's
+    /// `transform.TransformPoint(center)` where the recording has it (`wcenter`).
+    Box { center: [f32; 3], size: [f32; 3], world_center: Option<[f32; 3]> },
 }
 
 /// Bit-equal, zeros of either sign equal (the recording doesn't keep a zero's sign).
@@ -169,7 +170,7 @@ impl Shape {
                 (ShapeKind::Mesh { .. }, RecordedKind::Mesh { .. }) => true,
                 (
                     ShapeKind::Box { center, size, .. },
-                    RecordedKind::Box { center: rc, size: rs },
+                    RecordedKind::Box { center: rc, size: rs, .. },
                 ) => same_bits(center, rc) && same_bits(size, rs),
                 _ => false,
             }
@@ -177,6 +178,21 @@ impl Shape {
 }
 
 impl World {
+    /// The recorded boxes in the world with a recorded `wcenter` ([`Self::check_recorded_colliders`]
+    /// compares each with the shape's `TransformPoint(center)`).
+    #[must_use]
+    pub fn recorded_centres(&self, recorded: &[RecordedCollider]) -> usize {
+        recorded
+            .iter()
+            .filter(|c| matches!(c.kind, RecordedKind::Box { world_center: Some(_), .. }))
+            .filter(|c| {
+                self.shapes
+                    .iter()
+                    .any(|s| matches!(s.kind, ShapeKind::Box { .. }) && s.is_recorded(c))
+            })
+            .count()
+    }
+
     /// The recording's mesh and box colliders against the shapes' recorded transforms: each
     /// shape with one is recorded exactly once, present, on its layer, with its transform
     /// (zeros' signs aside, which the recording doesn't keep) and trigger flag (a mesh
@@ -200,6 +216,21 @@ impl World {
             self.shapes.iter().map(|s| scene(&s.name)).chain(self.scenes.iter().cloned()).collect();
         for c in recorded.iter().filter(|c| scenes.contains(&scene(&c.name))) {
             let shape = self.shapes.iter().find(|s| s.is_recorded(c));
+            // The box's centre as Unity's `TransformPoint` puts it, bit for bit (zeros' signs
+            // aside), whether or not its mapping is established.
+            if let (
+                Some(ShapeKind::Box { chain, center, .. }),
+                RecordedKind::Box { world_center: Some(w), .. },
+            ) = (shape.map(|s| &s.kind), &c.kind)
+            {
+                let ours = boxes::transform_point(chain, *center);
+                if !same_bits(&ours, w) {
+                    return Err(format!(
+                        "{} {:?}: its centre's TransformPoint is {ours:?}, the recording's wcenter {w:?}",
+                        c.name, c.sibling_path
+                    ));
+                }
+            }
             let differs = |layer: u32, position: &[f32], rotation: &[f32], lossy: &[f32]| {
                 !c.present
                     || c.layer != layer
