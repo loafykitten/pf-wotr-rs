@@ -1205,7 +1205,7 @@ impl Driver<'_> {
 
 /// The rule whose engagement handler made a provoke (its subscribers list's type argument, as the
 /// recorded caller has it): `RuleAttackRoll` or `RuleAttackWithWeapon`.
-fn provoke_rule(r: &Rv) -> Option<&'static str> {
+pub(super) fn provoke_rule(r: &Rv) -> Option<&'static str> {
     let o = r["origin"].as_str()?;
     ["RuleAttackRoll", "RuleAttackWithWeapon"].into_iter().find(|c| {
         o.contains(&format!(
@@ -2117,13 +2117,7 @@ impl Inputs for Driver<'_> {
         }
         // The projectiles the weapon launches (`LaunchProjectiles`: one per blueprint), for the
         // projectile pin's launch records.
-        let projectiles: Vec<String> = wp
-            .projectile_refs()
-            .into_iter()
-            .flatten()
-            .filter(|g| w.content.get(*g).is_some())
-            .map(|g| g.to_string())
-            .collect();
+        let projectiles = projectile_blueprints(w, &wp);
         let mut rule = crate::combat::attack::RuleAttackWithWeapon::new(a, t, wp, spec.penalty);
         rule.is_first_attack = spec.is_first_attack;
         rule.is_full_attack = spec.is_full_attack;
@@ -2140,43 +2134,7 @@ impl Inputs for Driver<'_> {
         for p in w.combat.pending_resolves.iter_mut().skip(before) {
             p.source_id = rid;
         }
-        // With the projectile pin's observer (`proj_arrival`), its launches in the span (placed by
-        // `span_ok`) are the sim's, in order (`LaunchProjectile`: one per blueprint, its resolve
-        // the on-hit trigger, no callback): its blueprint and its attack roll's exact
-        // `AttackResult`.
-        if self.trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
-            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
-        }) {
-            let launches: Vec<&Rv> = trace.records[at..=end]
-                .iter()
-                .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
-                .collect();
-            let made: Vec<Option<&str>> = w
-                .combat
-                .pending_resolves
-                .iter()
-                .skip(before)
-                .map(|p| {
-                    usize::try_from(p.attack_result)
-                        .ok()
-                        .and_then(|i| crate::combat::attack::ATTACK_RESULTS.get(i).copied())
-                })
-                .collect();
-            let ok = launches.len() == made.len()
-                && made.len() == projectiles.len()
-                && launches.iter().zip(&made).zip(&projectiles).all(|((l, res), bp)| {
-                    res.is_some()
-                        && l["res"].as_str() == *res
-                        && l["bp"].as_str() == Some(bp.as_str())
-                        && l["trig"] == "RuleAttackWithWeaponResolve"
-                        && l["cb"] == false
-                });
-            if !ok {
-                w.coverage.unsupported(
-                    "driven replay: commands: an attack's projectiles launched differ from the sim's",
-                );
-            }
-        }
+        self.proj_launches(w, at, end, before, &projectiles);
         // (`AllAttacks[i].Rule.AttackRoll`, for the impatience controller's damage handler.)
         if let Some(seq) = rule.attack_roll_seq
             && w.combat.impatience.on
@@ -2189,6 +2147,76 @@ impl Inputs for Driver<'_> {
             None => Err(Desync(format!("command {c}'s attack rule made no roll"))),
         }
     }
+}
+
+impl Driver<'_> {
+    /// The projectiles a rule attack launched (`before` is the length of the sim's launched
+    /// resolves before it fired), against the span's `proj_launch` records (`at..=end`). With the
+    /// projectile pin's observer (`proj_arrival`) its launches in the span (placed by `span_ok`
+    /// or `span_records`) are the sim's, in order (`LaunchProjectile`: one per blueprint, its
+    /// resolve the on-hit trigger, no callback): its blueprint and its attack roll's exact
+    /// `AttackResult`. Launch records without the observer are reported.
+    pub(super) fn proj_launches(
+        &mut self,
+        w: &mut World,
+        at: usize,
+        end: usize,
+        before: usize,
+        projectiles: &[String],
+    ) {
+        self.launches_checked = Some(at);
+        let trace = self.trace;
+        let launches: Vec<&Rv> = trace.records[at..=end]
+            .iter()
+            .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
+            .collect();
+        let declared = trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
+        });
+        if !declared {
+            if !launches.is_empty() {
+                w.coverage.unsupported(
+                    "driven replay: an attack's projectile launches without the proj_arrival observer",
+                );
+            }
+            return;
+        }
+        let made: Vec<Option<&str>> = w
+            .combat
+            .pending_resolves
+            .iter()
+            .skip(before)
+            .map(|p| {
+                usize::try_from(p.attack_result)
+                    .ok()
+                    .and_then(|i| crate::combat::attack::ATTACK_RESULTS.get(i).copied())
+            })
+            .collect();
+        let ok = launches.len() == made.len()
+            && made.len() == projectiles.len()
+            && launches.iter().zip(&made).zip(projectiles).all(|((l, res), bp)| {
+                res.is_some()
+                    && l["res"].as_str() == *res
+                    && l["bp"].as_str() == Some(bp.as_str())
+                    && l["trig"] == "RuleAttackWithWeaponResolve"
+                    && l["cb"] == false
+            });
+        if !ok {
+            w.coverage.unsupported(
+                "driven replay: commands: an attack's projectiles launched differ from the sim's",
+            );
+        }
+    }
+}
+
+/// The blueprints of the projectiles `wp` launches (`LaunchProjectiles`: one per blueprint).
+pub(super) fn projectile_blueprints(w: &World, wp: &crate::combat::weapon::Weapon) -> Vec<String> {
+    wp.projectile_refs()
+        .into_iter()
+        .flatten()
+        .filter(|g| w.content.get(*g).is_some())
+        .map(|g| g.to_string())
+        .collect()
 }
 
 /// Binds (or checks) the game's id of the item in `u`'s limb `i`: an id the sim knows is that

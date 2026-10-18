@@ -855,6 +855,73 @@ view state flipped, `view#K:flip` or `view#last:flip`, which swaps that recorded
   have the replay's window open compare its start state with the recording's (at least the units' timers) and
   invalidate on a difference, or pin the frames between the reload and the window.
 
+## Records inside root rule spans (2026-10-18, stream audit)
+
+[C] A root rule (`Rulebook.Trigger` outside any rule) is replayed as a unit: `Driver::root` runs it and the main
+loop moves on to the record after its `rule_end`, so every record in between is skipped unless something takes it.
+The rule's steps, handlers, results and environment are read by the code that fires it; its draws and mutations are
+compared in the T0 streams (`oracle_stream` against `sim_stream_without`). What was open was the observation
+records WrathOracle writes inside a span (`k` = "obs"): Sol's review of the vision range found `clog_q`, `imp_s`,
+`mem_q`, `eng_prov` and `proj_launch` in depth-0 spans, consumed explicitly in the commands' spans and nowhere said
+to be in the others.
+
+**The survey** [M] (a counting pass in the driver, not kept: for each root its kind, then its records by `k` and
+`ev`; 111 runs of the sweep's 24 captures, 30,322 records in the spans, every one counted once). The root's kind is
+how `root_inner` handles it: *command* (pulled by `attack_rule`, checked record by record by `span_ok`), *spell*
+(`spell_root`), *phase* (driven by its class: `RuleInitiativeRoll`, its tie-break `RuleRollD20`,
+`RuleAttackWithWeaponResolve`, `RuleCanApplyBuff`, `RuleAttackWithWeapon`), *placed* (computed at its call site),
+*echoed*, *skipped*:
+
+| family (inside a span) | command | spell | phase | placed | echoed | skipped | consumed by |
+|---|---|---|---|---|---|---|---|
+| `clog_q` | 11,969 | 15 | 2,313 (initiative 1,779, resolve 312, buff 222) | 0 | 0 | 0 | `game_log::check::compare` at the run's end (all of them, by place in the recorded queue); `span_ok` also checks the command's |
+| `imp_s` | 2,317 | 0 | 304 (resolve) | 0 | 0 | 0 | `imp_span` after the sim fires the rule (every root) |
+| `mem_q` | 2,286 | 0 | 0 | 0 | 0 | 0 | `imp_span`, matched with the sim's `AddToMemory` calls |
+| `eng_prov` | 190 | 0 | 0 | 0 | 0 | 0 | commands: `attack_span` queues it for the next engagement tick; others: nothing (before this stream) |
+| `proj_launch` | 124 | 0 | 0 | 0 | 0 | 0 | commands: `attack_rule` against the sim's launches; others: nothing (before this stream) |
+| `draw` | 2,629 | 3 | 2,228 (initiative 986, tie-break d20 986, resolve 256) | 0 | 0 | 0 | the T0 stream |
+| `mut` (`damage`, `rule_bonus`, `fact_attach`) | 533 + 4,749 | 0 | 152 + 509 | 0 | 0 | 0 | the T0 stream |
+| `invalid` (the game's replay left its recording) | 0 | 0 | 0 | 1 | 0 | 0 | nothing (-135 `replay-3-perturbed`, already invalid) |
+
+No run has an echoed, placed or skipped root holding an observation: the echoed set is empty on every capture, and a placed root holds none by construction
+(`origin_span_is_inert`). The one `invalid` record sits in a root whose call site isn't placed. Those three kinds
+already report (`presentation root rules echoed`, `a root … whose call site isn't placed`, `root rule …`), so a
+record in their spans never made a run valid.
+
+[C] What the game does at each point, so what the sim must do (the principle: a record is checked against what the
+sim computed, or taken as an input and counted, or reported; none is skipped):
+- `clog_q`: `GameLogController`'s did hook queues the rule's event after its subscribers. The sim queues the same
+  event whenever it fires the rule, and `compare` matches every recorded `clog_q` with the sim's queue in order
+  (type, frame, rule, class and units, enabled, override, its place right after the rule's `did`). A span the sim
+  doesn't fire leaves the sim's queue short, which `compare` reports, so no change to the check; only a recording
+  without `combat_log` skipped it silently inside spans (the outside ones are reported by `clog_record`).
+- `imp_s`, `mem_q`: handlers of the rule's did event, the same in every root. `imp_span` (after the sim fires the rule,
+  whatever the root's kind) matches them with the sim's operations and reports them without the impatience observer.
+- `eng_prov`: `UnitCombatEngagementController.OnEventDidTrigger` for an attack roll or an attack with a weapon. The
+  sim's rule handler makes the same call when it fires such a rule (a phase `RuleAttackWithWeapon`). **Gap:** in any
+  other root nothing took it. Now every `eng_prov` in a non-command span is queued like the commands' (`Driver::eng_prov`) and
+  matched with the sim's provoke calls at the next engagement tick, so a root the sim doesn't fire, or fires without
+  the provoke, reports "the attacks of opportunity provoked differ from the sim's queue"; a record that is not an
+  engagement handler's provoke is reported at once.
+- `proj_launch`: `LaunchProjectile` in `RuleAttackWithWeapon.OnTrigger`. **Gap:** a phase-driven attack (one the
+  commands didn't pull) was never checked. The command path's check is now `Driver::proj_launches`, shared with
+  `drive_root`'s attack, and a launch inside any other span, or with no `proj_arrival` observer, is reported.
+- Any other observation, or a record of another kind (`cmd`, `tb`, `time`, `input`) in a span: reported. The replay
+  doesn't take a record it can't name.
+
+**Counters** (`Outcome::spans`, one line of `wr-combat replay`: "inside root rules' spans (the commands' own apart)"):
+`clog_q`, `imp_s`, `mem_q`, `eng_prov`, `proj_launch` found in non-command spans, each checked as above, and
+`reported`. Totals of the sweep [M]: `clog_q` 2,328, `imp_s` 304, `mem_q` 0, `eng_prov` 0, `proj_launch` 0, reported 1
+(the `invalid` record above); the same four runs are invalid as before (-122 `tb-nearest`, record and both replays;
+-135 `replay-3-perturbed`), every other run valid.
+
+**Tests** (`poc5_spells.rs`, `records_inside_driven_root_spans_are_checked_or_reported`, `poc5-tb-123/tb-chain`): the
+initiative roll's event removed, renumbered to another rule, disabled and doubled ("combat log:"); a recording that
+doesn't declare `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the
+sim hasn't) and `proj_launch` record, an observation of no known family and a `cmd` record added to the initiative
+roll's span. On the code before this stream the last five are not reported (and the undeclared log only by its
+other records).
+
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
 **Everything above describes the earlier mod (`c7117fd` to `ba96d22`), whose recordings do not observe the unmodified game

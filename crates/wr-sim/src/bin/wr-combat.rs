@@ -396,6 +396,11 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         "prone: UnitProneController unit ticks {}, falls {}, get-ups {}, last-frame units taken as asleep {}",
         p.ticks, p.falls, p.get_ups, p.assumed_asleep
     );
+    let sp = &out.spans;
+    println!(
+        "inside root rules' spans (the commands' own apart): combat log events {} (compared with the sim's queue), impatience handlers {}, memory additions {} (matched), provokes {} (matched at the engagement tick), projectile launches {} (equal to the sim's); reported {}",
+        sp.clog_q, sp.imp_s, sp.mem_q, sp.eng_prov, sp.proj_launch, sp.reported
+    );
     let n = &out.nav;
     println!(
         "physics and paths: physics queries computed {} (agent {}, movement simulation {}, spans taken from the recording {}; taken {}), simulation steps {} (grid reads checked {}, taken {}); paths computed {} (line-of-sight answers taken {}), deliveries checked {}, paths the agent took from the sim {}; graph events matched {}, turn starts {}, removals {}, tag refreshes {} (navigation clock reads taken {}); place-on-ground steps computed {} (rays {})",

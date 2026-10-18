@@ -200,6 +200,8 @@ pub struct Outcome {
     pub roam: roaming::RoamCounts,
     /// The prone controller (`replay/prone.rs`).
     pub prone: prone::ProneCounts,
+    /// The observation records inside root rules' spans (`replay/spans.rs`).
+    pub spans: spans::SpanCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
     /// messages against the recording's ([`crate::game_log::check`]).
     pub clog: Option<crate::game_log::check::Summary>,
@@ -1033,6 +1035,9 @@ struct Driver<'t> {
     prone_cursor: Option<usize>,
     /// Each unit's visit this frame: 1 stopped (`EnterProneState`), 2 its `InterruptAll` came.
     prone_visit: HashMap<EntityIdx, u8>,
+    /// The root rule (its record index) whose projectile launches were last checked against the
+    /// sim's (`proj_launches`).
+    launches_checked: Option<usize>,
     out: Outcome,
 }
 
@@ -1284,6 +1289,7 @@ impl<'t> Driver<'t> {
             prone_falls: Vec::new(),
             prone_cursor: None,
             prone_visit: HashMap::new(),
+            launches_checked: None,
             out,
         };
         let mut d = d;
@@ -4002,6 +4008,7 @@ impl Driver<'_> {
         let next = self.root_inner(w, i);
         // The impatience handlers' records inside it, after the sim fired it (or didn't).
         self.imp_span(w, i, next - 1);
+        self.span_records(w, i, next - 1);
         next
     }
 
@@ -4220,6 +4227,8 @@ impl Driver<'_> {
                 match super::attack::attack_from_snapshot(w, a, t, &r["fields"]) {
                     Some(mut rule) => {
                         fire::fire(w, &cx, &mut rule, |_| None);
+                        let projectiles = commands::projectile_blueprints(w, &rule.weapon);
+                        self.proj_launches(w, start, end, before, &projectiles);
                         // The resolves this attack launched, by the recorded rule identity.
                         let id = r["id"].as_i64();
                         for p in w.combat.pending_resolves.iter_mut().skip(before) {
@@ -4764,6 +4773,7 @@ mod memory;
 mod nav;
 mod prone;
 mod roaming;
+mod spans;
 mod spells;
 mod targets;
 mod vision;

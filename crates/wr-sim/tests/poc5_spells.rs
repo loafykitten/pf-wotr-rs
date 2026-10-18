@@ -365,6 +365,127 @@ fn wrong_projectile_launches_are_reported() {
     assert!(missed.is_empty(), "{missed:#?}");
 }
 
+/// Observation records inside a driven root rule's span are checked or reported, never skipped
+/// (`docs/poc5/tb-replay.md`, "Records inside root rule spans"): a combat log event of an
+/// initiative roll damaged or lost, and a record of each family (or of none the replay knows)
+/// added to the span of a root the sim fires without it.
+#[test]
+#[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-123 capture"]
+fn records_inside_driven_root_spans_are_checked_or_reported() {
+    let Some(dir) = fixture_in(CHAIN_REVEALED.0, CHAIN_REVEALED.1) else {
+        eprintln!("{}/{} not present: skipped", CHAIN_REVEALED.0, CHAIN_REVEALED.1);
+        return;
+    };
+    /// The first root `RuleInitiativeRoll` (driven by its phase): its record's index.
+    fn initiative(recs: &[V]) -> usize {
+        recs.iter()
+            .position(|r| {
+                r["k"] == "rule"
+                    && r["depth"] == 0
+                    && r["class"].as_str().is_some_and(|c| c.ends_with("RuleInitiativeRoll"))
+            })
+            .expect("an initiative roll")
+    }
+    /// The first `clog_q` of that root (its rule event).
+    fn event(recs: &[V]) -> usize {
+        let root = initiative(recs);
+        let id = recs[root]["id"].clone();
+        recs.iter()
+            .position(|r| r["ev"] == "clog_q" && r["rule"] == id)
+            .expect("the initiative's event")
+    }
+    /// A copy of the first record of observation `ev` (it is in a command's span), added right
+    /// after the initiative root's record, in its frame.
+    fn add(recs: &mut Vec<V>, ev: &str) {
+        let mut x =
+            recs.iter().find(|r| r["k"] == "obs" && r["ev"] == ev).expect("a record").clone();
+        let root = initiative(recs);
+        x["t"] = recs[root]["t"].clone();
+        recs.insert(root + 1, x);
+        renumber(recs);
+    }
+    let cases: [(&str, Change); 12] = [
+        // The initiative's rule event, queued by the combat log's did hook: compared with the
+        // sim's queue.
+        ("combat log:", |recs| {
+            let at = event(recs);
+            recs.remove(at);
+            renumber(recs);
+        }),
+        ("combat log:", |recs| {
+            let at = event(recs);
+            recs[at]["rule"] = json!(recs[at]["rule"].as_i64().unwrap_or(0) + 1);
+        }),
+        ("combat log:", |recs| {
+            let at = event(recs);
+            recs[at]["en"] = json!(false);
+        }),
+        ("combat log:", |recs| {
+            let at = event(recs);
+            let x = recs[at].clone();
+            recs.insert(at, x);
+            renumber(recs);
+        }),
+        // The event of a recording that doesn't declare the observer.
+        ("driven replay: clog_q inside a root rule's span", |recs| {
+            if let Some(o) = recs[0]["observers"].as_array_mut() {
+                o.retain(|x| x != "combat_log");
+            }
+            // (Only the rules' events inside root spans stay.)
+            let mut open = None;
+            recs.retain(|r| {
+                if r["k"] == "rule" && r["depth"] == 0 {
+                    open = Some(r["id"].clone());
+                } else if r["k"] == "rule_end" && open.as_ref() == Some(&r["id"]) {
+                    open = None;
+                }
+                let log =
+                    r["k"] == "obs" && r["ev"].as_str().is_some_and(|e| e.starts_with("clog_"));
+                !log || (open.is_some() && r["ev"] == "clog_q")
+            });
+            renumber(recs);
+        }),
+        // Another family's record in a span of a root that has none of its handlers.
+        ("driven replay: impatience: a record out of its rule's handler", |recs| {
+            add(recs, "imp_s")
+        }),
+        ("driven replay: memory: an AddToMemory the sim didn't make", |recs| add(recs, "mem_q")),
+        ("driven replay: the attacks of opportunity provoked differ", |recs| add(recs, "eng_prov")),
+        ("driven replay: eng_prov inside a root rule's span", |recs| {
+            add(recs, "eng_prov");
+            let root = initiative(recs);
+            recs[root + 1]["u"] = json!("none");
+        }),
+        ("driven replay: proj_launch inside a root rule's span", |recs| add(recs, "proj_launch")),
+        // A record of no family the replay knows, and of no kind it takes.
+        ("driven replay: an unknown_family observation inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "obs", "t": t, "ev": "unknown_family"}));
+            renumber(recs);
+        }),
+        ("driven replay: a cmd record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "cmd", "t": t, "ev": "start"}));
+            renumber(recs);
+        }),
+    ];
+    let mut missed = Vec::new();
+    for (i, (want, change)) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let changed = trace.edited(change);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
+            missed.push(format!(
+                "case {i}: {want}: {:?}",
+                w.coverage.unsupported.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
 /// The ranged centipede's spit (`GiantCentipedeSpitAbilityAiAction`, a `BlueprintAiCastSpell`).
 const SPIT: &str = "14db26a8a9b3be448860e12a07559f46";
 
