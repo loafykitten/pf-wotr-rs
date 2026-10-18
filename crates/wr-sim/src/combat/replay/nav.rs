@@ -70,6 +70,9 @@ pub struct NavCounts {
     pub removals: usize,
     pub refreshes: usize,
     pub clock_reads: usize,
+    /// Corpulences the grid's setup took from the sim ([`crate::combat::corpulence`]) instead of
+    /// the recording's reads.
+    pub corp_computed: usize,
 }
 
 /// Where a physics query is made: in the agent's `Move` the sim runs, in a movement simulation
@@ -1902,6 +1905,7 @@ impl Driver<'_> {
         self.out.nav.turn_starts = n.turn_starts;
         self.out.nav.removals = n.removals;
         self.out.nav.refreshes = n.refreshes;
+        self.out.nav.corp_computed = n.corp_computed;
     }
 }
 

@@ -404,6 +404,8 @@ pub struct NavRun {
     /// A replay's recording's navigation timer and clock reads (read beside its trace by
     /// `replay::prepare_world`; WrathOracle replays them, its trace doesn't hold them).
     pub recording_clock: Option<std::result::Result<(f32, Vec<f32>), String>>,
+    /// Corpulences the grid's setup took from the sim.
+    pub corp_computed: usize,
     /// Turn starts, removals and tag refreshes (combat start and end, the timer) the sim ran.
     pub turn_starts: usize,
     pub removals: usize,
@@ -428,10 +430,15 @@ fn unit_id(w: &SimWorld, u: EntityIdx) -> String {
     w.entity(u).unique_id.clone()
 }
 
-/// `Unit.Corpulence` (an input).
-/// `Unit.Corpulence` (an input: the unit's last recorded read before the record being processed;
-/// every use reaches a recorded output, a box or the refresh's `erodeIterations`).
+/// `Unit.Corpulence`: the sim's ([`super::corpulence`]: the unit's prefab and size, checked
+/// against every recorded read in the driven replay); where the sim has none, the unit's last
+/// recorded read before the record being processed. Every use reaches a recorded output, a box
+/// or the refresh's `erodeIterations`, so a wrong value is reported.
 fn corpulence(w: &mut SimWorld, u: EntityIdx) -> Option<f32> {
+    if let Ok(c) = super::corpulence::corpulence(w, u) {
+        w.combat.nav.corp_computed += 1;
+        return Some(c);
+    }
     let at = w.combat.nav.at;
     let last = w
         .combat

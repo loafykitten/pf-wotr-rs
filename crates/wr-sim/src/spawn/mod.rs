@@ -656,6 +656,8 @@ pub fn update_size_modifiers(w: &mut World, e: EntityIdx) {
     {
         ops::remove_modifiers(w, e, t, D::Size);
     }
+    // `View?.ResetSizeScale()`.
+    crate::combat::corpulence::reset_size_scale(w, e);
     let size = state_size(w, e);
     // (AttackAndAC, Stealth, Reach) per size, Fine … Colossal.
     let m = match size {

@@ -300,6 +300,44 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         "memory leaves: decided by the sim and compared with the recording's {:?}, of which differing {:?}; taken from the recording {:?}",
         out.mem_leaf_checked, out.mem_leaf_differs, out.mem_leaf_taken
     );
+    if let Some(c) = &out.corpulence {
+        println!(
+            "corpulence computed: reads {} (unattributed {}), compared {} (equal {}, differing {}), unknown {} (of a unit the sim hasn't made {}, an event in the read's entry {}, by cause {:?})",
+            c.reads,
+            c.unattributed,
+            c.equal + c.differ,
+            c.equal,
+            c.differ,
+            c.unknown_total() + c.event,
+            c.no_unit,
+            c.event,
+            c.unknown
+        );
+        if c.bounds_reads > 0 {
+            println!(
+                "corpulence against the entity-bounds colliders' radii: records of units {} (equal to Max(0.05, Corpulence) {}, within 0.05 {}, outside {}, not checked {})",
+                c.bounds_reads, c.bounds_exact, c.bounds_band, c.bounds_differ, c.bounds_unchecked
+            );
+        }
+    }
+    if let Some(v) = &out.vision {
+        let causes: Vec<String> = wr_sim::combat::corpulence::Cause::ALL
+            .iter()
+            .zip(v.range_corp_cause)
+            .filter(|(_, n)| *n > 0)
+            .map(|(c, n)| format!("{} {n}", c.name()))
+            .collect();
+        println!(
+            "vision range corpulence: pairs left for the corpulence that are lost colliders' {} (of {}); unit-frames with the recording's read and the sim's value {} (differing {}), the sim's value used where the recording had no valid read {}, neither {} ({})",
+            v.range_open_lost,
+            v.range_open[0],
+            v.range_corp_both,
+            v.range_corp_disagree,
+            v.range_corp_computed,
+            v.range_corp_unknown,
+            causes.join(", ")
+        );
+    }
     match (&out.vision, &out.vision_off) {
         (Some(v), _) => println!(
             "vision computed: engagement HasLOS reads {} (of which {} on entries made before the window), memory group.HasLOS reads {} ({} on such entries), AI InLos reads {}; sight cache misses {} (each equal to its record), hits {}, hits on entries made before the window {} (fresh computation equal {}, different {}), reads beyond vision range {}, clears {} (adopted {}), misses by readers the sim doesn't run verified {}; HasObstacle answers checked {}; vis records {}; the game's geometry dump: {} segments equal, {} probes equal; vision range: sets compared {} (changes {}, differences {}); everything below is decided given the window's start hypotheses (docs/poc5/vision.md) and the physics clock; with a pair left to the recording: sets {}, changes {}; pairs decided given the hypotheses and equal to the recording's {}, left to the recording by cause: corpulence {}, position {}, enabled {}, view-scale band {} (the answer at scale 1 equal {}, differing {}), result buffer {}; {} pairs at scale 1 of known one position (within 5 cm {}, within 1 cm {}, within 1 mm {}, closest {} um, f32 against exact differing {}); unit-frames of unknown corpulence {} (stale reads {}), of a fade-hidden collider {}; colliders made after the first frame {}, frames not followed {}, units moved by the sim after the phase {}, frames of unmodelled physics settings {}, frames with a possible explicit sync {}, views replaced by a polymorph {}, dummy view swaps {} (possible {}); vision records unconsumed {}; the memory's near-unit unions equal given the creation-order hypothesis {}",
@@ -419,6 +457,12 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         n.ground_steps,
         n.phys_ground
     );
+    if n.corp_computed > 0 {
+        println!(
+            "paths: corpulences taken from the sim instead of the recording's reads {}",
+            n.corp_computed
+        );
+    }
     if let Some(c) = &out.clog {
         println!(
             "combat log [oracle, sim]: queued {:?}, ticks {:?}, messages {:?}; messages equal {}, tooltips equal {}, tooltips not made {}, inputs {:?}, differences {}",

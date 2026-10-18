@@ -1,5 +1,11 @@
 # POC-5: line of sight (stream "vision")
 
+Update (2026-10-18, stream "corp", `docs/poc5/corpulence.md`): `UnitEntityView.Corpulence` is computed from the unit's prefab and
+size and used where the recording has no valid read: 39,218,317 more pairs of the 111 runs are decided (54,661,049, 0
+differences), 6,650,019 are left for the corpulence (96% of them lost colliders, not for want of a corpulence). The numbers and
+the corpulence statements below are those of stream "visrange"; where they say the corpulence is the recording's or "not done",
+read that note.
+
 Status (2026-10-17, stream "visrange"): the sets of units in vision range (`CanBeInVisionRange`) are computed too and
 checked against the recording's `vis` records, on every pair the sim can decide (a pair that an unknown corpulence or view
 scale could change is left to the recording, counted): see "The sets in vision range" below. Before that (stream "vision"):
@@ -368,7 +374,8 @@ The hypotheses and their results (the first by a script on the party's 5,010 obs
    answer would pass (see "Limits"). The party's corpulence before the first fight read, every unit
    nobody reads, and the reads after a buff came or went, are such units: 2.2 million unit-frames in the 36 record runs
    (0.29 million of them with a read made stale). **That is most of the pairs** (below).
-   Computing `Corpulence` would close it: the unit prefab's `m_Corpulence` (a `UnitEntityView` field the importer
+   (Done in stream "corp", `docs/poc5/corpulence.md`: the formula below, ported and checked against every read; the rest of this
+   paragraph is what it replaced.) Computing `Corpulence` would close it: the unit prefab's `m_Corpulence` (a `UnitEntityView` field the importer
    already finds in `wr-import unit-prefabs`, which writes only `m_IsInGame` today) times `GetSizeScale()` (`Descriptor.State.Size`
    against `OriginalSize`, the progression's scale percent from an `AddUnitScale` fact, the master's pet coefficient, the prefab's
    `OverrideSizeScale` component, `DisableSizeScaling` of a polymorph): an importer change, a regenerated cache, the prefab

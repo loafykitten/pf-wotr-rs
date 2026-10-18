@@ -279,7 +279,8 @@ pub fn set_race(w: &mut World, u: EntityIdx, race: Guid) {
     if let Some(b) = bp(w, Some(race)) {
         crate::unit_facts::add_fact(w, u, &b);
     }
-    // `View?.ResetSizeScale()`: presentation.
+    // `View?.ResetSizeScale()`.
+    crate::combat::corpulence::reset_size_scale(w, u);
 }
 
 /// `AddClassLevels.LevelUp(c, unit, levels, fact)` for the component `c` on unit `u`.

@@ -258,6 +258,11 @@ impl Driver<'_> {
         for (k, n) in d.open.iter().enumerate() {
             c.range_open[k] += n;
         }
+        c.range_open_lost += hits
+            .iter()
+            .filter(|h| h.tri == range::Tri::Maybe && h.cause == Some(range::Cause::Corpulence))
+            .filter(|h| h.lost)
+            .count();
         c.range_decided_given_start += d.decided;
         c.range_guess_agree += d.guess_agree;
         c.range_guess_differ += d.guess_differ;
@@ -286,20 +291,24 @@ impl Driver<'_> {
         );
     }
 
-    /// A unit's `Corpulence` as the recording shows it: the last `corp` read before the record the
-    /// phase is placed at (a read in the frame's later phases comes after it) and after the last
-    /// event the sim saw that could change it ([`crate::combat::vision::note_corpulence_change`]:
-    /// a size write, a fact or buff added or removed, a view replaced; the stream index the
-    /// event was made at). `None` until the unit's first valid read (counted).
+    /// A unit's `Corpulence` for the collider's radius: the recording's where it shows one, else
+    /// the sim's ([`crate::combat::corpulence`]: the unit's prefab and size).
+    ///
+    /// The recording's is the last `corp` read before the record the phase is placed at (a read
+    /// in the frame's later phases comes after it) and after the last event the sim saw that
+    /// could change it ([`crate::combat::vision::note_corpulence_change`]: a size write, a fact or
+    /// buff added or removed, a view replaced; the stream index the event was made at).
     ///
     /// What sets it (`View.Corpulence` = the prefab's `m_Corpulence` times `GetSizeScale()`): the
     /// unit's size against its original size, the progression's scale percent (`AddUnitScale`),
     /// a polymorph (`DisableSizeScaling`), a mount's size for its rider, the view. The events
     /// are what the sim runs; for a unit that has one of the producers it can't follow (the
-    /// three named) the corpulence is unknown while it has one, and a change of what the unit has
+    /// three named) a read is not valid while it has one, and a change of what the unit has
     /// seen between two phases (sampled) counts as an event too. An event the sim doesn't run
-    /// (an unported action) isn't seen: a limit of the inference.
-    fn vis_corpulence(&mut self, w: &World, u: EntityIdx) -> Option<f32> {
+    /// (an unported action) isn't seen: a limit of the inference. Where the recording has no
+    /// valid read the sim's value is used, if it has one; where it has both they are compared
+    /// (counted, a difference reported). `None` (counted by cause) when neither has a value.
+    fn vis_corpulence(&mut self, w: &mut World, u: EntityIdx) -> Option<f32> {
         let at = w.combat.nav.at;
         let key = w.unit(u).map(|x| {
             (x.state_size.or(x.original_size).map(|s| s as i32), x.original_size.map(|s| s as i32))
@@ -317,13 +326,37 @@ impl Driver<'_> {
         let hooked = bumps.and_then(|b| b.iter().max().copied());
         let r = &mut self.vis.range;
         let (read, latest) = r.corpulence(u, &w.entity(u).unique_id, now, hooked, at);
-        if read.is_none() {
-            self.vis.counts.range_corp_unknown += 1;
-            if latest {
-                self.vis.counts.range_corp_stale += 1;
+        let computed = crate::combat::corpulence::corpulence(w, u);
+        let c = &mut self.vis.counts;
+        match (read, computed) {
+            (Some(r), Ok(s)) => {
+                c.range_corp_both += 1;
+                if r.to_bits() != s.to_bits() {
+                    c.range_corp_disagree += 1;
+                    let id = w.entity(u).unique_id.clone();
+                    Self::vis_report(
+                        w,
+                        &format!(
+                            "the corpulence of {id} is {r} in the recording and {s} in the sim"
+                        ),
+                    );
+                }
+                Some(r)
+            }
+            (Some(r), Err(_)) => Some(r),
+            (None, Ok(s)) => {
+                c.range_corp_computed += 1;
+                Some(s)
+            }
+            (None, Err(cause)) => {
+                c.range_corp_unknown += 1;
+                c.range_corp_cause[cause.index()] += 1;
+                if latest {
+                    c.range_corp_stale += 1;
+                }
+                None
             }
         }
-        read
     }
 
     /// A unit's position after the movement when the sim has it: the driven agent's, or without
