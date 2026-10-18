@@ -481,6 +481,13 @@ impl Bounds {
         self.gap = true;
     }
 
+    /// Physics settings the step and sync model isn't for: no collider's PhysX position is known.
+    pub fn forget_positions(&mut self) {
+        for c in &mut self.colliders {
+            c.phys_unknown = true;
+        }
+    }
+
     /// A unit's collider whose transform the sim set from a wrong position: lost until its next
     /// modelled update.
     pub fn lose_unit(&mut self, u: EntityIdx) {

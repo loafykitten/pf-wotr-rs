@@ -271,6 +271,9 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   moved after the phase has its queries and its collider's pairs of that frame left to the recording, and its collider
   lost (counted as `units moved by the sim after the phase`). (With the driven agent the positions are the sim's at the
   phase, its roaming included.)
+- **Physics settings.** The step and sync model is for `Physics.autoSyncTransforms` off and `autoSimulation` on, as the
+  begin record's `physics_auto_sync` and `physics_auto_simulation` say; with other values, or without them, no collider's
+  PhysX position is known (counted as `frames of unmodelled physics settings`).
 - **Every vision record is consumed.** Each `vis`, `los`, `los_clear`, `los_geometry`, `los_geom` and `los_probe` record
   must reach its handler exactly once; one that none consumed by the run's end (inside a root rule's span the replay
   drives, whose records it skips, say) is reported (`vision records unconsumed`). A position that isn't the driven agent's or a row's is never taken as
@@ -328,7 +331,9 @@ The hypotheses and their results (the first by a script on the party's 5,010 obs
    placed at (a size change applied later in the frame, in a phase after the vision controller's, stays out of the tick)
    and after the last event the sim saw that could change it (a size write, a fact or buff added or removed, a view
    replaced: the stream index it was made at; any such event invalidates the reads before it, whether or not the
-   value changed back; a change seen only by sampling (the unit's size without a size write, an `AddUnitScale` or polymorph
+   value changed back; an event made while a driven entry ran is stamped at the entry's last record, as its readers
+   consume records past the entry's own index: a read and a change in one entry count as read before change; a change
+   seen only by sampling (the unit's size without a size write, an `AddUnitScale` or polymorph
    fact without a fact event, a mount, which no hook sees) counts from the phase that saw it, and the sampler's own stamps
    never explain a later change); a
    unit with no valid read has none. **Size or view changes made by code the sim doesn't run produce no invalidation**: a

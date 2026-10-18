@@ -146,6 +146,8 @@ pub struct Vision {
     /// write, a fact added or removed, a view replaced), per unit: a `corp` read is valid only
     /// after the last of them.
     pub corp_bumps: HashMap<EntityIdx, Vec<usize>>,
+    /// Every event noted in `corp_bumps`, in order (the unit, its place in the unit's list).
+    pub bump_log: Vec<(EntityIdx, usize)>,
     /// Per unit, how many size writes (`UnitState.Size`'s setter, which raises
     /// `HandleUnitSizeChanged` and puts the entity on the bounds controller's update list) or
     /// view replacements the sim has seen.
@@ -695,7 +697,24 @@ mod tests;
 pub fn note_corpulence_change(w: &mut World, e: EntityIdx) {
     if w.unit(e).is_some() {
         let at = w.combat.nav.at;
-        w.combat.vision.corp_bumps.entry(e).or_default().push(at);
+        let v = &mut w.combat.vision;
+        let list = v.corp_bumps.entry(e).or_default();
+        v.bump_log.push((e, list.len()));
+        list.push(at);
+    }
+}
+
+impl Vision {
+    /// The events noted since `mark` (a length of [`Vision::bump_log`]) are stamped no earlier
+    /// than `stamp`: the end of the driven entry they were made in. A driven entry's readers
+    /// consume records past the entry's own index, so a read and a change in one entry are taken
+    /// as read before change (the read doesn't count).
+    pub fn restamp_bumps(&mut self, mark: usize, stamp: usize) {
+        for &(e, k) in self.bump_log.get(mark..).unwrap_or_default() {
+            if let Some(s) = self.corp_bumps.get_mut(&e).and_then(|l| l.get_mut(k)) {
+                *s = (*s).max(stamp);
+            }
+        }
     }
 }
 

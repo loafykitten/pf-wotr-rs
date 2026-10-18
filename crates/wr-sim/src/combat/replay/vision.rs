@@ -129,6 +129,9 @@ pub struct VisCounts {
     /// Without the driven agent, units whose position the sim wrote after the vision phase of a
     /// frame (their pairs of that frame left to the recording, their colliders lost).
     pub range_moved_after: usize,
+    /// Frames whose colliders' PhysX positions are unknown for the recording's physics settings
+    /// (`physics_auto_sync` not false, `physics_auto_simulation` not true, or either missing).
+    pub range_physics_unknown: usize,
     /// Vision records (`vis`, `los`, `los_clear`, `los_geometry`, `los_geom`, `los_probe`) no
     /// handler consumed (each reported).
     pub records_unconsumed: usize,

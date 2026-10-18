@@ -903,6 +903,8 @@ struct Driver<'t> {
     /// The game mode of a frame whose remaining phases run as the next frame starts (or the
     /// recording ends).
     draining: Option<i64>,
+    /// How deep `record` calls are nested (a driven entry's readers process records inside it).
+    record_depth: usize,
     /// A recorded `StartTurn` ran in this frame's `TimeController.Tick`.
     started_this_frame: bool,
     /// The recorded `ChooseNextUnit` inputs, by tick.
@@ -1203,6 +1205,7 @@ impl<'t> Driver<'t> {
             port,
             turn_go_on: true,
             draining: None,
+            record_depth: 0,
             started_this_frame: false,
             choose_by_tick,
             // Any of WrathOracle's cooldown records (a trace that lost its prefixes reports them).
@@ -3090,8 +3093,21 @@ impl Driver<'_> {
         }
     }
 
-    /// Processes the record at `i`; returns the next index.
+    /// Processes the record at `i`; returns the next index. The corpulence events made while the
+    /// outermost entry ran are stamped at its last record ([`crate::combat::vision::Vision::restamp_bumps`]).
     fn record(&mut self, w: &mut World, i: usize) -> usize {
+        let outer = self.record_depth == 0;
+        let mark = w.combat.vision.bump_log.len();
+        self.record_depth += 1;
+        let next = self.record_entry(w, i);
+        self.record_depth -= 1;
+        if outer {
+            w.combat.vision.restamp_bumps(mark, next.saturating_sub(1).max(i));
+        }
+        next
+    }
+
+    fn record_entry(&mut self, w: &mut World, i: usize) -> usize {
         let trace = self.trace;
         let recs = &trace.records;
         let r = &recs[i];

@@ -72,6 +72,8 @@ pub(super) struct RangeDriver {
     /// The sim's position writes per unit ([`crate::combat::vision::Vision::pos_writes`]) at the
     /// frame's vision phase (`None`: it didn't run in this frame).
     writes_at_phase: Option<HashMap<EntityIdx, u64>>,
+    /// The recording's physics settings aren't the ones the step and sync model is for.
+    physics_unmodelled: bool,
     /// The Unity frame of the last tick the bounds controller was followed in.
     last_frame: Option<i64>,
     /// The physics clock after the last frame it was advanced to: `Time.time - Time.fixedTime`,
@@ -128,6 +130,11 @@ impl RangeDriver {
             }
         }
         let head = &trace.records[0];
+        // The step and sync model holds for `Physics.autoSyncTransforms` off and
+        // `autoSimulation` on, as recorded; otherwise (or unrecorded) no collider's PhysX
+        // position is known.
+        self.physics_unmodelled = head["physics_auto_sync"].as_bool() != Some(false)
+            || head["physics_auto_simulation"].as_bool() != Some(true);
         if let (Some(phase), Some(step), Some(frame)) = (
             head["fixed_phase0"].as_f64(),
             head["fixed_delta_time"].as_f64(),
@@ -437,6 +444,10 @@ impl Driver<'_> {
                 ),
             );
         }
+        if self.vis.range.physics_unmodelled {
+            w.combat.vision.bounds.forget_positions();
+            self.vis.counts.range_physics_unknown += 1;
+        }
         self.vis.range.expect.clear();
         self.vis.range.writes_at_phase = Some(w.combat.vision.pos_writes.clone());
         if m == super::mode::PAUSE {
@@ -619,6 +630,21 @@ mod tests {
         let b = [(0, [5.0, 0.0, 0.0])];
         assert_eq!(r.row_at("b", &b, 0), Some([5.0, 0.0, 0.0]));
         assert_eq!(r.row_at("b", &b, 1), None);
+    }
+
+    #[test]
+    fn a_change_and_a_read_in_one_driven_entry_count_as_read_before_change() {
+        // Sol's round 11: an entry at 100 whose readers consume records up to 110; a corpulence
+        // read at 105 and a size change made while it ran (stamped 100) are in one entry.
+        let mut v = crate::combat::vision::Vision::default();
+        v.corp_bumps.insert(U, vec![100]);
+        v.bump_log.push((U, 0));
+        v.restamp_bumps(0, 110);
+        assert_eq!(v.corp_bumps[&U], vec![110]);
+        let mut r = RangeDriver::default();
+        r.corp.insert("u".into(), vec![(105, 0.5), (115, 0.6)]);
+        assert_eq!(r.corpulence(U, "u", watch(3), Some(110), 112), (None, true));
+        assert_eq!(r.corpulence(U, "u", watch(3), Some(110), 120), (Some(0.6), true));
     }
 
     #[test]
