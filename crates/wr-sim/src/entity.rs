@@ -361,6 +361,10 @@ pub fn set_is_in_game(w: &mut World, e: EntityIdx, value: bool) {
     // `IInGameHandler.HandleObjectInGameChanged(entity)` to the global subscribers, for every
     // entity; then `OnIsInGameChanged`.
     let unit = w.unit(e).is_some();
+    if unit {
+        // (`EntityBoundsController` among them: back in the game, on its update list.)
+        *w.combat.vision.in_game_gen.entry(e).or_default() += 1;
+    }
     crate::rulebook::bus::raise_global_call(
         w,
         "IInGameHandler",

@@ -18,18 +18,26 @@
 //! - **Population.** `State.EntitiesWithBounds` in the order its entities joined their states; the
 //!   first tick (`m_UpdateAll`) walks it through `EntityPoolEnumerator`, which skips entities that are
 //!   not `ShouldBeEnumeratedByEntityPoolEnumerator` (in the game and not suppressed): a unit hidden
-//!   at that tick may already own a disabled collider (made earlier: its order and position are
-//!   unknown, [`Collider::history_unknown`]) or get one when it comes into the game; either way its
-//!   position is unknown until the first physics step after it is back and its place in the order
-//!   always. A collider is destroyed with its view, which the sim doesn't know the time of:
-//!   [`Tick::removed`].
+//!   at that tick may already own a disabled collider (made earlier: its place in the order is
+//!   unknown, [`Collider::history_unknown`]) or get one when it comes into the game. A collider is
+//!   destroyed with its view, which the sim doesn't know the time of: [`Tick::removed`].
+//! - **Lost and re-established.** The update list takes an entity whose position, game state or
+//!   size changed while it was in the game, and `TickEntity` runs for it at the next tick even if
+//!   it has left the game since; the sim sees the unit's state at its ticks only. So once a unit is
+//!   out of the game, its collider's transform, radius and PhysX copy are unknown (the collider is
+//!   *lost*), and they are re-established only by a tick the sim models after it is back (its
+//!   transform the unit's position, its radius by the rule from an unknown one) and, for PhysX's
+//!   copy, the next physics step. The same holds after a frame the sim didn't follow
+//!   ([`Bounds::lose_track`]): every collider is lost until its next modelled update.
 //! - **Position.** The bounds controller sets a collider's transform to the entity's `Position` in
 //!   its tick, but `Physics.autoSyncTransforms` is off: PhysX takes the transforms at a physics
 //!   step (a fixed update, before the frame's controllers). Most frames run a step, so a query
 //!   sees where the unit stood at the previous frame's tick; a frame that runs none sees the tick
 //!   before. The capsule is at the querying unit's position of this frame. [`Bounds::tick`] takes
 //!   whether the frame ran a step ([`Step`]); when that isn't known the collider has the
-//!   candidates of both. A collider made in a tick is at the origin until the next step.
+//!   candidates of both. A collider made in a tick is at the origin until the next step. After a
+//!   tick, a unit in the game has its collider's transform at its position (any change of it while
+//!   in the game puts it on the update list).
 //! - **Radius.** A collider is made with `Max(0.05, Corpulence * view scale)` and, in the same
 //!   tick, set to `Max(0.05, Corpulence)` (its own transform has unit scale) if that is more than
 //!   0.05 away; later ticks of the entity (position, game state or size changed) do the same
@@ -164,8 +172,8 @@ pub struct BoundsUnit {
     /// `Position` now.
     pub pos: V3,
     /// `Position` at the frame's start: where the first tick of a window finds the collider (the
-    /// previous frame's tick put it there).
-    pub prefix: V3,
+    /// previous frame's tick put it there); `None` when the recording doesn't show it.
+    pub prefix: Option<V3>,
     /// `IsInGame` (the entity is added to the update list only while it is, and the first tick
     /// walks only the entities that are).
     pub in_game: bool,
@@ -176,6 +184,9 @@ pub struct BoundsUnit {
     /// How many size writes (`HandleUnitSizeChanged`) the sim has seen of the unit: the update
     /// list's reason to run `TickEntity` for it besides position and game state.
     pub size_gen: u64,
+    /// How many changes of `IsInGame` the sim has seen of the unit (a hide and a return between
+    /// two ticks is an update the states at the ticks don't show).
+    pub in_game_gen: u64,
 }
 
 /// One `SphereCollider`.
@@ -188,24 +199,40 @@ struct Collider {
     /// The position isn't known at all.
     phys_unknown: bool,
     /// The collider's transform (`transform.position`, set by the tick; PhysX takes it at the
-    /// next step); `None` until the tick of a collider of unknown history sets it.
+    /// next step); `None` while the collider is lost (its unit out of the game, or a frame the sim
+    /// didn't follow).
     transform: Option<V3>,
+    /// What the radius can be: [`RadiusIv::UNKNOWN`] while lost.
     radius: RadiusIv,
     /// The point estimate of the radius (`Max(0.05, Corpulence)`), for the margins and the guess.
     centre: Option<f32>,
     enabled: Enabled,
-    /// A position the entity took while out of the game since the collider's last tick: the
-    /// update list takes an entity that moves while in the game and `TickEntity` is run for it
-    /// without asking again, so the collider's transform may be this one (the sim sees the unit's
-    /// state at the tick only).
-    maybe_moved: Option<V3>,
     /// A unit that was hidden at the window's first tick: it may have owned a collider before
-    /// (made earlier, at an unknown place in the order and position) or get one when it comes
-    /// into the game.
+    /// (made earlier, at an unknown place in the order) or get one when it comes into the game.
     history_unknown: bool,
-    /// The unit's state at the collider's last tick: what the update list reacts to.
-    seen_in_game: bool,
-    seen_size_gen: u64,
+    /// The unit's state at the last tick the sim modelled: what the update list reacts to; `None`
+    /// after a frame the sim didn't follow (whether the next tick updates the collider isn't known).
+    seen: Option<Seen>,
+}
+
+/// A unit's state at a bounds tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Seen {
+    pos: V3,
+    in_game: bool,
+    size_gen: u64,
+    in_game_gen: u64,
+}
+
+impl Collider {
+    /// The unit is out of the game, or the sim lost track of the ticks: the transform, the radius
+    /// and (from the next step that may take the transform) PhysX's copy are unknown.
+    fn lose(&mut self) {
+        self.transform = None;
+        self.radius = RadiusIv::UNKNOWN;
+        self.centre = None;
+        self.phys_unknown = true;
+    }
 }
 
 /// One pair of a query.
@@ -225,6 +252,8 @@ pub struct Hit {
     pub guess: Option<bool>,
     /// The collider's place in the order is the pool's (not a unit of unknown history).
     pub order_known: bool,
+    /// What the pair was before the result buffer's capacity made it [`Tri::Maybe`].
+    pub capped: Option<Tri>,
 }
 
 /// What a tick found beyond updating the colliders.
@@ -313,19 +342,17 @@ impl Bounds {
         let first = !self.started;
         self.started = true;
         for c in &mut self.colliders {
-            let Some(t) = c.transform else { continue };
-            let reached = [Some(t), c.maybe_moved];
-            match step {
-                Step::Ran => {
-                    c.phys = reached.into_iter().flatten().collect();
+            match (step, c.transform) {
+                (Step::NotRan, _) => {}
+                // A step may have taken a transform the sim doesn't know.
+                (_, None) => c.phys_unknown = true,
+                (Step::Ran, Some(t)) => {
+                    c.phys = vec![t];
                     c.phys_unknown = false;
                 }
-                Step::NotRan => {}
-                Step::Unknown => {
-                    for t in reached.into_iter().flatten() {
-                        if !c.phys.iter().any(|p| p.map(f32::to_bits) == t.map(f32::to_bits)) {
-                            c.phys.push(t);
-                        }
+                (Step::Unknown, Some(t)) => {
+                    if !c.phys.iter().any(|p| p.map(f32::to_bits) == t.map(f32::to_bits)) {
+                        c.phys.push(t);
                     }
                     c.phys_unknown |= c.phys.len() > MAX_CANDIDATES;
                 }
@@ -341,51 +368,60 @@ impl Bounds {
             keep
         });
         for u in units {
+            let seen = Seen {
+                pos: u.pos,
+                in_game: u.in_game,
+                size_gen: u.size_gen,
+                in_game_gen: u.in_game_gen,
+            };
             match self.colliders.iter_mut().find(|c| c.unit == u.unit) {
                 Some(c) => {
                     c.enabled = u.enabled;
-                    let listed = u.in_game
-                        && (first
-                            || c.transform != Some(u.pos)
-                            || !c.seen_in_game
-                            || c.seen_size_gen != u.size_gen);
-                    // Only a `TickEntity` changes the collider: learning what the corpulence is
-                    // doesn't (the radius moves at an update, by the rule, from what it was).
-                    if listed {
+                    if u.in_game {
+                        // On the update list: moved, back in the game or resized since the last
+                        // tick (after a frame the sim didn't follow: not known, so the radius
+                        // stays as unknown as it was).
+                        let listed = c.seen.is_some_and(|s| {
+                            !s.in_game
+                                || s.pos != u.pos
+                                || s.size_gen != u.size_gen
+                                || s.in_game_gen != u.in_game_gen
+                        });
+                        // Whether or not this tick updates it, the transform is the unit's
+                        // position: an earlier change in the game was updated already.
                         c.transform = Some(u.pos);
-                        c.radius = next_radius(Some(c.radius), u.corpulence);
-                        c.centre = u.corpulence.map(|x| x.max(0.05));
-                        c.seen_size_gen = u.size_gen;
-                        c.maybe_moved = None;
-                    } else if !u.in_game && c.transform.is_some_and(|t| t != u.pos) {
-                        // (Queued while it was in the game, ticked without asking again?)
-                        c.maybe_moved = Some(u.pos);
+                        // Only a `TickEntity` changes the radius: learning what the corpulence is
+                        // doesn't (the radius moves at an update, by the rule, from what it was).
+                        if listed {
+                            c.radius = next_radius(Some(c.radius), u.corpulence);
+                            c.centre = u.corpulence.map(|x| x.max(0.05));
+                        }
+                    } else {
+                        // An update queued while it was in the game may still run (or have run).
+                        c.lose();
                     }
-                    c.seen_in_game = u.in_game;
+                    c.seen = Some(seen);
                 }
                 None if first => {
                     // Made before the window (the update list of the first tick is all of the
                     // entities in the game); what is hidden may have a collider from before.
-                    let known = u.in_game;
-                    self.colliders.push(Collider {
+                    let mut c = Collider {
                         unit: u.unit,
-                        phys: vec![u.prefix],
                         // The collider's position at the window's first frame is where the unit
                         // stood at the previous tick, if that frame synced it.
-                        phys_unknown: !known || step != Step::Ran,
-                        transform: known.then_some(u.pos),
-                        radius: if known {
-                            next_radius(None, u.corpulence)
-                        } else {
-                            RadiusIv::UNKNOWN
-                        },
-                        centre: u.corpulence.map(|x| x.max(0.05)).filter(|_| known),
+                        phys: u.prefix.into_iter().collect(),
+                        phys_unknown: u.prefix.is_none() || step != Step::Ran,
+                        transform: Some(u.pos),
+                        radius: next_radius(None, u.corpulence),
+                        centre: u.corpulence.map(|x| x.max(0.05)),
                         enabled: u.enabled,
-                        maybe_moved: None,
-                        history_unknown: !known,
-                        seen_in_game: known,
-                        seen_size_gen: u.size_gen,
-                    });
+                        history_unknown: !u.in_game,
+                        seen: Some(seen),
+                    };
+                    if !u.in_game {
+                        c.lose();
+                    }
+                    self.colliders.push(c);
                 }
                 None if u.in_game => {
                     self.made_later += 1;
@@ -399,16 +435,24 @@ impl Bounds {
                         radius: next_radius(None, u.corpulence),
                         centre: u.corpulence.map(|x| x.max(0.05)),
                         enabled: u.enabled,
-                        maybe_moved: None,
                         history_unknown: false,
-                        seen_in_game: true,
-                        seen_size_gen: u.size_gen,
+                        seen: Some(seen),
                     });
                 }
                 None => {}
             }
         }
         out
+    }
+
+    /// A frame the sim didn't follow (the bounds controller may have ticked, the units may have
+    /// moved or changed size, a step may have run): every collider is lost until its next
+    /// modelled update, and the next tick can't tell which units it updates.
+    pub fn lose_track(&mut self) {
+        for c in &mut self.colliders {
+            c.lose();
+            c.seen = None;
+        }
     }
 
     /// `OverlapCapsule` for a unit at `pos` with vision radius `r`: every collider that is or may
@@ -452,12 +496,14 @@ impl Bounds {
                 rounding,
                 guess,
                 order_known: !c.history_unknown,
+                capped: None,
             });
         }
         // `OverlapCapsule` fills a buffer of 512: with more colliders in reach, which ones it keeps
         // is PhysX's order.
         if out.iter().filter(|h| h.tri != Tri::Out).count() > RESULT_BUFFER {
             for h in out.iter_mut().filter(|h| h.tri != Tri::Out) {
+                h.capped = Some(h.tri);
                 (h.tri, h.cause) = (Tri::Maybe, Some(Cause::Capacity));
             }
         }
@@ -478,6 +524,9 @@ pub enum Difference {
     Missing(EntityIdx),
     /// The recorded set holds a unit the sim's overlap doesn't (or has no enabled collider).
     Extra(EntityIdx),
+    /// The recorded set has a size the overlap can't give: more than the result buffer holds
+    /// (512), or fewer than the buffer fills when more colliders than that are surely in reach.
+    Count(usize),
 }
 
 /// What [`differences`] found.
@@ -524,6 +573,12 @@ pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
     let mut rest: Vec<EntityIdx> = recorded.iter().copied().filter(|u| !seen.contains(u)).collect();
     rest.sort();
     out.diffs.extend(rest.into_iter().map(Difference::Extra));
+    // The buffer holds 512 hits: never more, and full when more than that surely overlap (below
+    // the capacity a missing sure hit is a `Missing` already).
+    let sure = hits.iter().filter(|h| h.capped == Some(Tri::In)).count();
+    if recorded.len() > RESULT_BUFFER || recorded.len() < sure.min(RESULT_BUFFER) {
+        out.diffs.push(Difference::Count(recorded.len()));
+    }
     out
 }
 
@@ -541,11 +596,12 @@ mod tests {
         BoundsUnit {
             unit: u,
             pos,
-            prefix: pos,
+            prefix: Some(pos),
             in_game: true,
             enabled: Enabled::Yes,
             corpulence,
             size_gen: 0,
+            in_game_gen: 0,
         }
     }
 
@@ -613,6 +669,14 @@ mod tests {
         grown.size_gen = 1;
         b.tick(&[grown], RAN);
         assert_eq!(b.overlap([0.0; 3], 9.0)[0].tri, Tri::Out);
+        // So is a hide and a return between two ticks (the states at the ticks are the same).
+        let mut b = settled(&[unit(A, [20.0, 0.0, 0.0], None)]);
+        let mut back = unit(A, [20.0, 0.0, 0.0], Some(0.9));
+        b.tick(&[back], RAN);
+        assert_eq!(b.overlap([0.0; 3], 9.0)[0].tri, Tri::Maybe);
+        back.in_game_gen = 2;
+        b.tick(&[back], RAN);
+        assert_eq!(b.overlap([0.0; 3], 9.0)[0].tri, Tri::Out);
     }
 
     #[test]
@@ -621,12 +685,82 @@ mod tests {
         // It moves to 9 and is hidden before the bounds tick: the game may have queued the
         // move (and ticks it without asking again); the sim sees the state at the tick only.
         b.tick(&[hidden(k(A, [9.0, 0.0, 0.0]))], RAN);
-        // Back at 9 in the next frame: PhysX had the old transform or the moved one.
+        // Back at 9 in the next frame: the tick puts the transform there, PhysX has it at the
+        // next step; until then where it is isn't known.
         b.tick(&[k(A, [9.0, 0.0, 0.0])], RAN);
         let hits = b.overlap([0.0; 3], 1.0);
         assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Position)));
         b.tick(&[k(A, [9.0, 0.0, 0.0])], RAN);
         assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::Out)]);
+    }
+
+    #[test]
+    fn a_hidden_unit_s_collider_is_lost_until_an_update_reaches_physics() {
+        // Sol's round 6: at 0, a move to 9 queued while in the game, hidden before the tick, moved
+        // to 18 while hidden, a frame hidden, then back at 18. The collider may be at 9 until the
+        // update of the return reaches PhysX: an observer at 9 can't be answered.
+        let mut b = settled(&[k(A, [0.0; 3])]);
+        b.tick(&[hidden(k(A, [9.0, 0.0, 0.0]))], RAN);
+        b.tick(&[hidden(k(A, [18.0, 0.0, 0.0]))], RAN);
+        b.tick(&[hidden(k(A, [18.0, 0.0, 0.0]))], RAN);
+        b.tick(&[k(A, [18.0, 0.0, 0.0])], RAN);
+        for at in [[0.0; 3], [9.0, 0.0, 0.0], [18.0, 0.0, 0.0]] {
+            assert_eq!(b.overlap(at, 1.0)[0].tri, Tri::Maybe, "{at:?}");
+        }
+        // The next step takes the transform the return set.
+        b.tick(&[k(A, [18.0, 0.0, 0.0])], RAN);
+        assert_eq!(tris(&b, [9.0, 0.0, 0.0], 1.0), vec![(A, Tri::Out)]);
+        assert_eq!(tris(&b, [18.0, 0.0, 0.0], 1.0), vec![(A, Tri::In)]);
+        // A step that may not have run doesn't take it.
+        let mut b = settled(&[k(A, [0.0; 3])]);
+        b.tick(&[hidden(k(A, [0.0; 3]))], RAN);
+        b.tick(&[k(A, [0.0; 3])], RAN);
+        b.tick(&[k(A, [0.0; 3])], Step::Unknown);
+        assert_eq!(b.overlap([0.0; 3], 1.0)[0].tri, Tri::Maybe);
+    }
+
+    #[test]
+    fn a_size_change_queued_before_a_fade_leaves_the_radius_unknown() {
+        // Sol's round 6: a size write queued while in the game still runs `TickEntity` after a
+        // `HideUnit` with a fade (the collider stays enabled): the radius may be the new one.
+        let mut b = settled(&[k(A, [10.4, 0.0, 0.0])]);
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::In)]);
+        let mut a = unit(A, [10.4, 0.0, 0.0], Some(0.2));
+        a.size_gen = 1;
+        a.in_game = false;
+        a.enabled = Enabled::Unknown;
+        b.tick(&[a], RAN);
+        let hits = b.overlap([0.0; 3], 10.0);
+        assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Enabled)));
+        // Back in the game, the update re-establishes the radius by the rule from an unknown one.
+        a.in_game = true;
+        a.enabled = Enabled::Yes;
+        b.tick(&[a], RAN);
+        b.tick(&[a], RAN);
+        let r = next_radius(Some(RadiusIv::UNKNOWN), Some(0.2));
+        assert!(r.hi < 0.26, "{r:?}");
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::Out)]);
+    }
+
+    #[test]
+    fn a_frame_the_sim_didn_t_follow_loses_every_collider_until_its_next_update() {
+        let mut b = settled(&[k(A, [10.4, 0.0, 0.0]), k(B, [0.0; 3])]);
+        b.lose_track();
+        // The next tick can't tell which units it updates: A stands still, so its radius stays
+        // unknown; PhysX's copy is known after a step.
+        b.tick(&[k(A, [10.4, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
+        assert!(b.overlap([0.0; 3], 10.0).iter().all(|h| h.tri == Tri::Maybe));
+        b.tick(&[k(A, [10.4, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
+        let hits = b.overlap([0.0; 3], 10.0);
+        assert_eq!(
+            hits.iter().map(|h| (h.tri, h.cause)).collect::<Vec<_>>(),
+            vec![(Tri::In, None), (Tri::In, None)]
+        );
+        assert_eq!(b.overlap([0.0; 3], 9.0)[0].cause, Some(Cause::Corpulence));
+        // A move is an update the sim sees: the radius is the band again.
+        b.tick(&[k(A, [10.6, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
+        b.tick(&[k(A, [10.6, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
+        assert_eq!(tris(&b, [0.0; 3], 9.0), vec![(A, Tri::Out), (B, Tri::In)]);
     }
 
     #[test]
@@ -637,10 +771,24 @@ mod tests {
         b.tick(&units, RAN);
         let hits = b.overlap([0.0; 3], 5.0);
         assert!(hits.iter().all(|h| h.tri == Tri::Maybe && h.cause == Some(Cause::Capacity)));
+        // Which 512 are kept is the recording's; any other size is impossible.
+        let set = |n: u32| (0..n).map(EntityIdx).collect::<HashSet<EntityIdx>>();
+        let d = differences(&hits, &set(512));
+        assert!(d.diffs.is_empty() && d.open[Cause::Capacity.index()] == 600, "{d:?}");
+        assert_eq!(differences(&hits, &set(600)).diffs, vec![Difference::Count(600)]);
+        assert_eq!(differences(&hits, &set(511)).diffs, vec![Difference::Count(511)]);
         // At 512 in reach the buffer holds them all.
         let mut b = Bounds::default();
         b.tick(&units[..512], RAN);
-        assert!(b.overlap([0.0; 3], 5.0).iter().all(|h| h.tri == Tri::In));
+        let hits = b.overlap([0.0; 3], 5.0);
+        assert!(hits.iter().all(|h| h.tri == Tri::In));
+        assert!(differences(&hits, &set(512)).diffs.is_empty());
+        // A recorded set of more than 512 is impossible whatever the sim decided.
+        let mut b = Bounds::default();
+        b.tick(&units[..2], RAN);
+        let hits = b.overlap([0.0; 3], 5.0);
+        let d = differences(&hits, &set(513));
+        assert_eq!(d.diffs.last(), Some(&Difference::Count(513)));
     }
 
     #[test]
@@ -722,7 +870,7 @@ mod tests {
         let mut b = Bounds::default();
         // The window's first tick: the unit stood at 0 and is at 5 now; PhysX has 0.
         let mut a = k(A, [5.0, 0.0, 0.0]);
-        a.prefix = [0.0; 3];
+        a.prefix = Some([0.0; 3]);
         b.tick(&[a, k(B, [0.0; 3])], RAN);
         let at = |b: &Bounds| tris(b, [0.0; 3], 1.0);
         assert_eq!(at(&b), vec![(A, Tri::In), (B, Tri::In)]);
@@ -812,16 +960,18 @@ mod tests {
     }
 
     #[test]
-    fn a_collider_of_a_fade_hidden_view_is_unknown_when_in_reach() {
+    fn a_collider_of_a_fade_hidden_view_goes_to_the_recording() {
         let mut b = settled(&[k(A, [0.0; 3]), k(B, [30.0, 0.0, 0.0])]);
         let mut a = k(A, [0.0; 3]);
         a.in_game = false;
         a.enabled = Enabled::Unknown;
         b.tick(&[a, k(B, [30.0, 0.0, 0.0])], RAN);
-        let hits = b.overlap([0.0; 3], 1.0);
-        assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Enabled)));
-        assert_eq!(hits[1].tri, Tri::Out);
-        assert_eq!(tris(&b, [5.0, 0.0, 0.0], 1.0), vec![(A, Tri::Out), (B, Tri::Out)]);
+        // Its `enabled`, and where an update queued before the hide put it, are unknown.
+        for at in [[0.0; 3], [5.0, 0.0, 0.0]] {
+            let hits = b.overlap(at, 1.0);
+            assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Enabled)));
+            assert_eq!(hits[1].tri, Tri::Out);
+        }
     }
 
     #[test]
@@ -846,6 +996,7 @@ mod tests {
             rounding: false,
             guess: None,
             order_known: true,
+            capped: None,
         };
         let hits = [
             hit(A, Tri::In, None),

@@ -150,6 +150,9 @@ pub struct Vision {
     /// `HandleUnitSizeChanged` and puts the entity on the bounds controller's update list) or
     /// view replacements the sim has seen.
     pub size_gen: HashMap<EntityIdx, u64>,
+    /// Per unit, how many changes of `IsInGame` the sim has seen (a return puts the entity on the
+    /// bounds controller's update list, even when it left and came back between two ticks).
+    pub in_game_gen: HashMap<EntityIdx, u64>,
     /// Units whose collider may be fade-hiding with its `enabled` kept: a `HideUnit` with `Fade`
     /// hid them, or they were not in the game at the window's first tick (a fade may have begun
     /// before). While the fade runs (`EntityViewBase.m_IsFadeHide`) `UpdateViewActive` returns

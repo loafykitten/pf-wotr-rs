@@ -138,6 +138,13 @@ it in 9,498 of 9,498 cases, evidence that the geometry and the radius are right,
 In `-111` and later the sim's `unit.position` is checked against every observation row only with the driven agent
 (`-113` and later); `-111` and `-112` have the agent's observer but no `agent_sync`: positions are the rows.
 
+Round 7 (colliders of units out of the game, or after a frame the sim didn't follow, lost until a modelled update; the
+last frame without the driven agent left to the recording; sampler stamps kept apart from hooked events): all 111 runs
+as valid as before (`-122`/tb-nearest's tie and `-135`'s `replay-3-perturbed` excepted), 0 differences, no frame unfollowed.
+The record runs decide 5,256,586 pairs (190 fewer) and leave 14,373,101 for the corpulence, 864 for the position (the
+last frames of `-95`, `-96`, `-109`, `-111`, `-112`: 90 to 108 a run) and 14,325 for the scale band; all 111 runs decide
+16,434,480 and leave 44,887,244, 2,592 and 45,726.
+
 Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, `tests/poc5.rs`, three captures
 valid on all runs; 14 damaged cases on `-111`/tb-nearest, each reported): an engagement leaf and a memory leaf flipped; a
 miss's result, sample or point changed, deleted or doubled; a clear (of a cache cleared before) deleted, moved or doubled;
@@ -207,7 +214,7 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
 - **Population.** `scene::units_with_bounds`: the units of `State.Units`' order, fake ones too (map objects and anchors have
   colliders on another layer and are left out, which doesn't change the units' relative order). The first tick makes
   colliders for the units in the game. A unit hidden then may already own a disabled collider from before the window or get
-  one when it comes into the game: its position is unknown until the first step after that and its place in the order
+  one when it comes into the game: its collider is *lost* (below) and its place in the order unknown
   always (sets holding it have an unknown order: the memory's `near` leaf is taken from the recording for the groups
   that use them). A unit that comes into the game later gets its collider then (at the origin until a step, appended: the
   update list's order is taken to be the pool's). A collider whose entity has left the pool is removed and **reported**
@@ -220,11 +227,31 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   update with the corpulence unknown** (a unit with no valid `corp` read at that moment: nothing bounds a corpulence, and the
   C# imposes none), until an update with a known one. So a unit that stands still keeps the radius it got at the first tick. The point estimate (scale 1, radius `c`) is kept for the margins and the
   *guess*: of the pairs the scale band alone leaves open, how many the recording answers as scale 1 would.
+- **Lost colliders.** The update list takes an entity whose position, game state or size changed while it was in the
+  game, and `TickEntity` runs for it at the next tick even if it has left the game since; the sim sees each unit at its
+  ticks only. So once a unit is out of the game its collider's transform, radius and PhysX copy are unknown (*lost*), and
+  they are re-established only by a tick the sim models after it is back (the transform at the unit's position, the radius
+  by the rule from an unknown radius: the band around the corpulence then, unbounded without one) and, for PhysX, the next
+  step known to run. A frame the sim didn't follow (a skipped Unity frame, a mode it doesn't model; counted as `frames not
+  followed`) loses every collider, and the next tick can't tell which units it updates: a radius is re-established only
+  by a later move, size write or return to the game. A unit in the game has its collider's transform at its position
+  after every tick (a change of it in the game puts it on the update list); only the radius depends on whether a tick
+  updated it.
 - **Enabled.** `IsInGame` (suppression exists only in areas with parts, which the vision run refuses); a unit hidden with a
-  fade (`HideUnit` with `Fade`, noted by `scene_spawn::hide_unit`) has an unknown `enabled` until it is in the game again.
+  fade (`HideUnit` with `Fade`, noted by `scene_spawn::hide_unit`), or not in the game at the first tick, has an unknown
+  `enabled` whenever it is out of the game from then on (when the fade ends isn't modelled, and a fade can outlast a return
+  to the game), so its pairs are the recording's (its collider is lost as well).
 - **Physics step.** From the clock `fixed_phase0` + each tick's scaled `delta` (below); when the header's fields or the
   tick's frame are missing the step is unknown, and a moving unit's collider has both candidates (more than six: unknown);
-  a first tick without a known step doesn't know the colliders' positions either.
+  a first tick without a known step, or a unit without an observation row then, doesn't know the colliders' positions
+  either.
+- **Positions.** Without the driven agent a unit's position after the movement is the next frame's row; the recording's
+  last frame has none, so its pairs are the recording's (cause position).
+- **Result buffer.** `OverlapCapsule` fills a buffer of 512: with more colliders possibly in reach every such pair is the
+  recording's (which ones PhysX keeps is its order), and a recorded set of more than 512, or of fewer than 512 when more
+  than 512 surely overlap, is reported.
+- **Vision radius.** A unit with an `OverrideVisionRange` fact refuses the run at the start; one that gets it later is
+  reported, its set left to the recording.
 
 The replay's inputs the sim doesn't have are the recording's: each unit's corpulence, the physics clock, the awake units.
 The unit positions are `Vw::pos` after the movement (the driven agent's, else the observation rows). Each frame's phase
@@ -264,7 +291,9 @@ The hypotheses and their results (the first by a script on the party's 5,010 obs
    placed at (a size change applied later in the frame, in a phase after the vision controller's, stays out of the tick)
    and after the last event the sim saw that could change it (a size write, a fact or buff added or removed, a view
    replaced: the stream index it was made at; any such event invalidates the reads before it, whether or not the
-   value changed back; a change seen only by sampling a unit's sizes and producers counts from the phase that saw it); a
+   value changed back; a change seen only by sampling (the unit's size without a size write, an `AddUnitScale` or polymorph
+   fact without a fact event, a mount, which no hook sees) counts from the phase that saw it, and the sampler's own stamps
+   never explain a later change); a
    unit with no valid read has none. **Size or view changes made by code the sim doesn't run produce no invalidation**: a
    corpulence known before one, and the radius computed from it, can stay wrong, and a recording that shows the same wrong
    answer would pass (see "Limits"). The party's corpulence before the first fight read, every unit
@@ -316,7 +345,7 @@ answer alike) passes unnoticed. `bounds_init` and `vis_order` (below) are the re
 - **The physics clock** `Time.time - Time.fixedTime` is `fixed_phase0` of the begin record advanced by each tick's scaled
   `delta` (the begin record's phase is measured after the begin frame's steps): an inference checked by the decided pairs
   (109 runs equal; a step in every frame, or the fixed frame time instead, don't), not recorded.
-- **Units hidden at the first tick** may already own a disabled collider: handled as unknown (position, order), not
+- **Units hidden at the first tick** may already own a disabled collider: handled as unknown (lost, order unknown), not
   hypothesized. **Pool order for colliders made later** (the update list's insertion order): 0 such colliders.
 
 What WrathOracle will record to replace them (poc `0fe4003`, in no capture yet) and what the sim would read:
@@ -349,8 +378,9 @@ pairs (given the hypotheses; each equal to the recording's) and left 14,388,100 
   are not used.
 - **View scale** (the band +-0.05): 14,325 pairs, all equal to the scale-1 answer.
 - **Position, enabled (a unit not in the game at the start, or fade-hidden), history of hidden units, destruction**: 0
-  pairs (no run has the case: all 21 units are in the game at the first tick). A missing or discontinuous
-  physics clock makes every later step unknown, for good.
+  pairs for lost colliders (no run has the case: all 21 units are in the game at the first tick, and no frame goes
+  unfollowed); the position pairs counted are those of the recording's last frame in the runs without the driven agent. A
+  missing or discontinuous physics clock makes every later step unknown, for good.
 
 ### Results [M]
 
@@ -494,8 +524,16 @@ can also be absorbed:
   it, can stay wrong while the recording (whose sets follow the true radius) disagrees only where a pair crosses the
   boundary; the physics clock (an inference that the decided pairs confirm only where a pair crosses). A wrong radius shows
   as a reported difference when a pair near the boundary disagrees, and is silent otherwise.
-- **Only a false report:** the memory and line-of-sight items above; the result buffer (more than 512 colliders in reach go
-  to the recording); the bounds queue (a collider moved while its unit was hidden: both positions are candidates).
+- **Can be absorbed, besides:** an update the sim can't see: a unit that moves and comes back to the same position
+  between two ticks is updated by the game (`TickEntity` runs the radius rule with the corpulence then) while the sim,
+  seeing the same position at both ticks, keeps the radius it had (a hide and a return between two ticks is counted by
+  `set_is_in_game` and is an update). The radius
+  differs only if the corpulence changed since the unit's last update without a size write (a producer the sim marks
+  unknown, an event it doesn't run); a pair that the old radius decides is then decided on a radius that may be stale.
+- **Only a false report:** the memory and line-of-sight items above.
+- **Neither (the pairs are the recording's, counted):** the result buffer (more than 512 colliders possibly in reach; an
+  impossible set size is reported); the bounds queue and fades (a collider of a unit out of the game, or after a frame
+  the sim didn't follow, is unknown until a modelled update reaches PhysX); the last frame without the driven agent.
 - The TransformPoint rounding of the blockers and the grid's bounds are derived, not compared (above).
 - Without the driven agent (`-95`, `-96`, `-109`, `-111`, `-112`) a unit's position is the recording's rows, and in the
   recording's last frame the last prefix's (counted in `last_frame_reads`; checked against the leaves like any other).

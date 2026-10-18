@@ -47,10 +47,10 @@ pub(super) struct VisDriver {
     /// Without the driven agent the units' positions are the recording's rows (a unit's position
     /// at a frame's prefix; after `UnitMoveController` it is the next prefix's).
     pub(super) rows: HashMap<String, Vec<(i64, V3)>>,
-    last_tick: i64,
+    pub(super) last_tick: i64,
     /// The owners whose `vis` record the frame has had.
     vis_seen: (i64, Vec<EntityIdx>),
-    ag: bool,
+    pub(super) ag: bool,
     /// The frame whose cache phase ran.
     phase_frame: Option<i64>,
     pub(super) range: super::vision_range::RangeDriver,
@@ -118,6 +118,9 @@ pub struct VisCounts {
     pub range_within_5cm: usize,
     /// Colliders made after the window's first frame (units that joined later).
     pub range_made_later: usize,
+    /// Frames the bounds controller wasn't followed in (skipped, or a mode the sim doesn't
+    /// model): every collider lost until its next update.
+    pub range_frames_lost: usize,
     /// The group memory's near units (`ExtractNearUnits`, the members' sets in the overlap's
     /// order) the sim computed and found equal to the recording's.
     pub near_unions_given_order: usize,

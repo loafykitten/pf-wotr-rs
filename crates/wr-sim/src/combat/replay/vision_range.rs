@@ -20,14 +20,22 @@ use crate::world::{EntityIdx, World};
 use super::vision::vision_radius;
 use super::{Driver, Phase};
 
-/// A unit's size and original size, and whether a producer of its corpulence the sim can't follow
-/// is on it.
-#[derive(Debug, Clone, Copy)]
-struct SizeWatch {
-    key: Option<(Option<i32>, Option<i32>)>,
-    producer: bool,
-    /// How many hooked events the sim had seen of the unit at the sample.
-    hooks: usize,
+/// What sets a unit's corpulence as the sim samples it at a phase, and how many of the hooked
+/// events that explain a change of it the sim had seen by then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SizeWatch {
+    /// The unit's size and original size.
+    pub key: Option<(Option<i32>, Option<i32>)>,
+    /// An `AddUnitScale` or `Polymorph` fact is on it (a producer the sim can't follow).
+    pub fact_producer: bool,
+    /// It rides (`UnitPartRider`, a part: no hook sees it come or go).
+    pub rider: bool,
+    /// Size writes and view replacements seen ([`crate::combat::vision::Vision::size_gen`]): what
+    /// explains a change of `key`.
+    pub size_hooks: u64,
+    /// Hooked events of any kind seen (`corp_bumps`: facts added or removed among them): what
+    /// explains a change of `fact_producer`.
+    pub fact_hooks: usize,
 }
 
 /// The vision controller's side: the sets the sim computes, checked against the `vis` records.
@@ -48,8 +56,13 @@ pub(super) struct RangeDriver {
     /// The bounds controller has ticked in this run.
     started: bool,
     /// What sets each unit's corpulence as of the last phase (sizes, a producer the sim can't
-    /// follow), sampled: a change is an event too.
+    /// follow), sampled: a change no hooked event explains is an event too.
     size_watch: HashMap<EntityIdx, SizeWatch>,
+    /// Per unit, the phase (stream index) of the last change only the sampling saw: a read
+    /// counts only after it. Kept apart from the hooked events, so it never explains a change.
+    sampled: HashMap<EntityIdx, usize>,
+    /// The Unity frame of the last tick the bounds controller was followed in.
+    last_frame: Option<i64>,
     /// The physics clock after the last frame it was advanced to: `Time.time - Time.fixedTime`,
     /// the frame, and the fixed step; `None` without the begin record's `fixed_phase0` (every
     /// frame is then assumed to run a step).
@@ -99,6 +112,42 @@ impl RangeDriver {
             self.clock = Some((phase, frame, step));
         }
         self.on = true;
+    }
+
+    /// A unit's `Corpulence` at the phase placed at stream index `at` (see
+    /// [`Driver::vis_corpulence`]), from what sets it now (`now`) and the last hooked event
+    /// (`hooked`, its stream index): the last `corp` read before `at` that comes after the last
+    /// event, unless a producer the sim can't follow is on the unit. Also whether there was a read
+    /// before `at` at all.
+    ///
+    /// A change of `now` since the last sample that no hooked event of its kind explains (a size
+    /// change without a size write, a producer fact without a fact event, a mount) could have
+    /// happened anywhere since that sample: it is stamped at `at`, which no earlier read passes.
+    pub(super) fn corpulence(
+        &mut self,
+        u: EntityIdx,
+        id: &str,
+        now: SizeWatch,
+        hooked: Option<usize>,
+        at: usize,
+    ) -> (Option<f32>, bool) {
+        if let Some(was) = self.size_watch.insert(u, now) {
+            let unexplained = (was.key != now.key && was.size_hooks == now.size_hooks)
+                || (was.fact_producer != now.fact_producer && was.fact_hooks == now.fact_hooks)
+                || was.rider != now.rider;
+            if unexplained {
+                self.sampled.insert(u, at);
+            }
+        }
+        let from = hooked.max(self.sampled.get(&u).copied());
+        let latest = self.corp.get(id).and_then(|series| {
+            let i = series.partition_point(|(i, _)| *i < at);
+            (i > 0).then(|| series[i - 1])
+        });
+        // A read at the stream index of an event may be from before it: it doesn't count.
+        let producer = now.fact_producer || now.rider;
+        let read = latest.filter(|(i, _)| from.is_none_or(|f| *i > f) && !producer).map(|(_, c)| c);
+        (read, latest.is_some())
     }
 }
 
@@ -152,6 +201,9 @@ impl Driver<'_> {
             .map(|d| match d {
                 range::Difference::Missing(x) => format!("+{}", name(x)),
                 range::Difference::Extra(x) => format!("-{}", name(x)),
+                range::Difference::Count(n) => {
+                    format!("(a set of {n}: not a size the overlap's result buffer of 512 gives)")
+                }
             })
             .collect();
         Self::vis_report(
@@ -177,35 +229,27 @@ impl Driver<'_> {
     /// three named) the corpulence is unknown while it has one, and a change of what the unit has
     /// seen between two phases (sampled) counts as an event too. An event the sim doesn't run
     /// (an unported action) isn't seen: a limit of the inference.
-    fn vis_corpulence(&mut self, w: &mut World, u: EntityIdx) -> Option<f32> {
+    fn vis_corpulence(&mut self, w: &World, u: EntityIdx) -> Option<f32> {
         let at = w.combat.nav.at;
         let key = w.unit(u).map(|x| {
             (x.state_size.or(x.original_size).map(|s| s as i32), x.original_size.map(|s| s as i32))
         });
-        let producer = ["AddUnitScale", "Polymorph"].iter().any(|c| super::has_component(w, u, c))
-            || w.entity(u).parts.iter().any(|p| p.clr == "UnitPartRider");
-        // The sampled change is an event only when no hooked one explains it: then it could have
-        // happened anywhere since the last sample, and the reads since then don't count (the stamp
-        // is the phase's index; an earlier one would accept a read from before the change).
-        let hooks = w.combat.vision.corp_bumps.get(&u).map_or(0, Vec::len)
-            + usize::try_from(w.combat.vision.size_gen.get(&u).copied().unwrap_or(0)).unwrap_or(0);
-        let was = self.vis.range.size_watch.insert(u, SizeWatch { key, producer, hooks });
-        if let Some(was) = was
-            && (was.key != key || was.producer != producer)
-            && was.hooks == hooks
-        {
-            w.combat.vision.corp_bumps.entry(u).or_default().push(at);
-        }
-        let from = w.combat.vision.corp_bumps.get(&u).and_then(|b| b.iter().max().copied());
-        let latest = self.vis.range.corp.get(&w.entity(u).unique_id).and_then(|series| {
-            let i = series.partition_point(|(i, _)| *i < at);
-            (i > 0).then(|| series[i - 1])
-        });
-        // A read at the stream index of an event may be from before it: it doesn't count.
-        let read = latest.filter(|(i, _)| from.is_none_or(|f| *i > f) && !producer).map(|(_, c)| c);
+        let bumps = w.combat.vision.corp_bumps.get(&u);
+        let now = SizeWatch {
+            key,
+            fact_producer: ["AddUnitScale", "Polymorph"]
+                .iter()
+                .any(|c| super::has_component(w, u, c)),
+            rider: w.entity(u).parts.iter().any(|p| p.clr == "UnitPartRider"),
+            size_hooks: w.combat.vision.size_gen.get(&u).copied().unwrap_or(0),
+            fact_hooks: bumps.map_or(0, Vec::len),
+        };
+        let hooked = bumps.and_then(|b| b.iter().max().copied());
+        let r = &mut self.vis.range;
+        let (read, latest) = r.corpulence(u, &w.entity(u).unique_id, now, hooked, at);
         if read.is_none() {
             self.vis.counts.range_corp_unknown += 1;
-            if latest.is_some() {
+            if latest {
                 self.vis.counts.range_corp_stale += 1;
             }
         }
@@ -213,15 +257,11 @@ impl Driver<'_> {
     }
 
     /// A unit's position at the frame's start, from the observation rows (the previous frame's
-    /// end), else the sim's.
-    fn vis_prefix_pos(&self, w: &World, u: EntityIdx) -> V3 {
-        if let Some(rows) = self.vis.rows.get(&w.entity(u).unique_id) {
-            let i = rows.partition_point(|(t, _)| *t <= self.tick);
-            if i > 0 {
-                return rows[i - 1].1;
-            }
-        }
-        w.unit(u).map_or([0.0; 3], |x| x.position)
+    /// end); `None` without a row.
+    fn vis_prefix_pos(&self, w: &World, u: EntityIdx) -> Option<V3> {
+        let rows = self.vis.rows.get(&w.entity(u).unique_id)?;
+        let i = rows.partition_point(|(t, _)| *t <= self.tick);
+        (i > 0).then(|| rows[i - 1].1)
     }
 
     /// Whether a physics step ran since the last tick (a fixed update before this frame's
@@ -266,11 +306,23 @@ impl Driver<'_> {
         }
         let first = !self.vis.range.started;
         self.vis.range.started = true;
+        // A frame the bounds controller ran in that the sim didn't follow (a skipped frame, a
+        // mode it doesn't model) leaves every collider unknown until its next update.
+        let frame = self.vis.range.frames.get(&self.tick).map(|x| x.0);
+        let followed = frame.zip(self.vis.range.last_frame).is_some_and(|(f, l)| f == l + 1);
+        self.vis.range.last_frame = frame;
+        if !first && !followed {
+            w.combat.vision.bounds.lose_track();
+            self.vis.counts.range_frames_lost += 1;
+        }
+        // Without the driven agent the positions after the movement are the next frame's rows:
+        // the recording's last frame has none (its units' positions are guesses).
+        let positions_known = self.vis.ag || self.tick < self.vis.last_tick;
         let pool = crate::scene::units_with_bounds(w);
         let mut list = Vec::with_capacity(pool.len());
         for &u in &pool {
             let pos = self.vis_pos(w, u, true);
-            let prefix = if first { self.vis_prefix_pos(w, u) } else { pos };
+            let prefix = if first { self.vis_prefix_pos(w, u) } else { Some(pos) };
             // `ShouldBeEnumeratedByEntityPoolEnumerator` is `IsInGame && !Suppressed`; `m_Suppressed`
             // only exists in an area with parts, which the vision run refuses.
             let in_game = w.entity(u).is_in_game;
@@ -279,10 +331,8 @@ impl Driver<'_> {
             if first && !in_game {
                 w.combat.vision.fade_hidden.insert(u);
             }
-            if in_game {
-                w.combat.vision.fade_hidden.remove(&u);
-            }
-            // A view that fade-hides keeps its collider's `enabled` until the fade ends.
+            // A view that fade-hides keeps its collider's `enabled` until the fade ends, which
+            // isn't modelled (a fade may outlast a return to the game: the mark stays).
             let enabled = match (in_game, w.combat.vision.fade_hidden.contains(&u)) {
                 (true, _) => Enabled::Yes,
                 (false, true) => Enabled::Unknown,
@@ -291,7 +341,17 @@ impl Driver<'_> {
             self.vis.counts.range_fade_unit_frames += usize::from(enabled == Enabled::Unknown);
             let corpulence = self.vis_corpulence(w, u);
             let size_gen = w.combat.vision.size_gen.get(&u).copied().unwrap_or(0);
-            list.push(BoundsUnit { unit: u, pos, prefix, in_game, enabled, corpulence, size_gen });
+            let in_game_gen = w.combat.vision.in_game_gen.get(&u).copied().unwrap_or(0);
+            list.push(BoundsUnit {
+                unit: u,
+                pos,
+                prefix,
+                in_game,
+                enabled,
+                corpulence,
+                size_gen,
+                in_game_gen,
+            });
         }
         for gone in w.combat.vision.bounds.tick(&list, step).removed {
             let id = w.entity(gone).unique_id.clone();
@@ -310,9 +370,24 @@ impl Driver<'_> {
             let hits = if w.unit(u).is_some_and(|x| x.is_extra) {
                 Vec::new()
             } else {
-                let r = vision_radius(w, u).unwrap_or(0.0);
+                let r = match vision_radius(w, u) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // (Refused at the start; a fact added since.)
+                        let id = w.entity(u).unique_id.clone();
+                        Self::vis_report(w, &format!("the vision range: {e} ({id})"));
+                        continue;
+                    }
+                };
                 let pos = self.vis_pos(w, u, true);
-                w.combat.vision.bounds.overlap(pos, r)
+                let mut hits = w.combat.vision.bounds.overlap(pos, r);
+                if !positions_known {
+                    for h in &mut hits {
+                        (h.tri, h.cause, h.margin, h.guess) =
+                            (range::Tri::Maybe, Some(range::Cause::Position), None, None);
+                    }
+                }
+                hits
             };
             self.vis_tally(&hits);
             self.vis.range.expect.insert(u, hits);
@@ -391,5 +466,57 @@ impl Driver<'_> {
         w.combat.vision.near.retain(|u, _| awake.contains(u));
         w.combat.vision.near_order.retain(|u, _| awake.contains(u));
         w.combat.vision.near_inexact.retain(|u| awake.contains(u));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const U: EntityIdx = EntityIdx(1);
+
+    fn watch(size: i32) -> SizeWatch {
+        SizeWatch {
+            key: Some((Some(size), Some(size))),
+            fact_producer: false,
+            rider: false,
+            size_hooks: 0,
+            fact_hooks: 0,
+        }
+    }
+
+    #[test]
+    fn two_unexplained_size_changes_each_invalidate_the_reads_before_them() {
+        // Sol's round 6: an unexplained change sampled at phase 20 must not make the next one,
+        // at phase 30, look explained (a sampler's stamp is not a hooked event): the read at 25
+        // predates the second change.
+        let mut r = RangeDriver::default();
+        r.corp.insert("u".into(), vec![(5, 0.5), (25, 0.6)]);
+        assert_eq!(r.corpulence(U, "u", watch(3), None, 10), (Some(0.5), true));
+        assert_eq!(r.corpulence(U, "u", watch(4), None, 20), (None, true));
+        assert_eq!(r.corpulence(U, "u", watch(4), None, 26), (Some(0.6), true));
+        assert_eq!(r.corpulence(U, "u", watch(5), None, 30), (None, true));
+        assert_eq!(r.corpulence(U, "u", watch(5), None, 40), (None, true));
+    }
+
+    #[test]
+    fn a_change_explained_by_its_hooked_event_counts_from_that_event() {
+        let mut r = RangeDriver::default();
+        r.corp.insert("u".into(), vec![(5, 0.5), (25, 0.6)]);
+        assert_eq!(r.corpulence(U, "u", watch(3), None, 10), (Some(0.5), true));
+        // A size write at 22 changed the size: reads after it count.
+        let w = SizeWatch { size_hooks: 1, fact_hooks: 1, ..watch(4) };
+        assert_eq!(r.corpulence(U, "u", w, Some(22), 30), (Some(0.6), true));
+        // A size change without a size write, after a fact event, is not explained by it.
+        let w2 = SizeWatch { fact_hooks: 2, ..SizeWatch { key: watch(5).key, ..w } };
+        assert_eq!(r.corpulence(U, "u", w2, Some(28), 32), (None, true));
+        // A mount is never explained by a hooked event.
+        let mut r = RangeDriver::default();
+        r.corp.insert("u".into(), vec![(25, 0.6)]);
+        r.corpulence(U, "u", watch(3), None, 10);
+        let rider = SizeWatch { rider: true, fact_hooks: 1, ..watch(3) };
+        assert_eq!(r.corpulence(U, "u", rider, Some(22), 30), (None, true));
+        let off = SizeWatch { rider: false, fact_hooks: 2, ..watch(3) };
+        assert_eq!(r.corpulence(U, "u", off, Some(23), 40), (None, true));
     }
 }
