@@ -43,6 +43,7 @@ internal static class Observe
 
     private static float _losStamp = float.MinValue;
     private static readonly Dictionary<string, HashSet<string>> VisionLast = new Dictionary<string, HashSet<string>>();
+    private static readonly Dictionary<string, List<string>> VisionOrderLast = new Dictionary<string, List<string>>();
 
     // Fixture.Begin: the units that exist when the window opens (sleeping ones too: a unit that wakes later has
     // the same id in every run; units created in the window have run-specific ids and get no rows).
@@ -50,6 +51,7 @@ internal static class Observe
     {
         _losStamp = float.MinValue;
         VisionLast.Clear();
+        VisionOrderLast.Clear();
         _known = new HashSet<string>();
         _rowsOpened = false;
         try { var g = Game.Instance; if (g?.State != null) foreach (var u in StateDump.AllUnits(g)) if (u != null) _known.Add(u.UniqueId); }
@@ -273,7 +275,17 @@ internal static class Observe
             {
                 if (u == null || u.IsDisposed) continue;
                 var now = new HashSet<string>();
-                foreach (var o in u.CanBeInVisionRange) if (o != null) now.Add(o.UniqueId);
+                var order = new List<string>();
+                foreach (var o in u.CanBeInVisionRange) if (o != null) { now.Add(o.UniqueId); order.Add(o.UniqueId); }
+                // vis_order: the set's enumeration order (insertion order after Clear: the overlap's result
+                // order), whenever it differs from the unit's last one.
+                VisionOrderLast.TryGetValue(u.UniqueId, out var oldOrder);
+                if (oldOrder == null || !oldOrder.SequenceEqual(order))
+                {
+                    VisionOrderLast[u.UniqueId] = order;
+                    var oid = u.UniqueId;
+                    Sched.Obs("vis_order", j => { j.Prop("u", oid); j.Arr("v"); foreach (var x in order) j.W.WriteValue(x); j.EndArr(); });
+                }
                 VisionLast.TryGetValue(u.UniqueId, out var old);
                 if (old != null && old.SetEquals(now)) continue;
                 var add = now.Where(x => old == null || !old.Contains(x)).OrderBy(x => x, StringComparer.Ordinal).ToList();

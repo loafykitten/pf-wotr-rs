@@ -316,6 +316,7 @@ internal static partial class CommandObs
             if (ImpOn) ImpInit();
             if (AgOn) { AgInit(); RoamInit(); }
             if (MemOn) MemInit();
+            if (MemOn && BoundsOn) BoundsInit();
         }
         catch (Exception e) { Trace.HookFailed("observe uc_snap", e); }
     }
@@ -1689,6 +1690,9 @@ internal static partial class CommandObs
 
         // Group memory (observer "memory", CommandObsMemory.cs).
         InstallMemory(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+
+        // The entity-bounds colliders (observers "bounds_init", "bounds_tick", CommandObsBounds.cs).
+        InstallBounds((m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
 
         // What turn-based paths are computed on and with (observer "paths", CommandObsPaths.cs).
         InstallPaths(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
