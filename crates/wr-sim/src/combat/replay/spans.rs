@@ -25,14 +25,16 @@
 //!   places a command's (the root's frame and rule, at its `OnTrigger` outside any handler, right
 //!   after its attack roll's end, its fields, its target), then equal to the sim's.
 //! - `env`: only the environment the code that fires the root looked up (the attack roll's, the
-//!   resolve's, the flat-footed check's: [`Driver::env_reads`]); any other is reported.
+//!   resolve's, the flat-footed check's: [`Driver::env_reads`]); any other is reported. A resolve
+//!   nested in a phase-driven attack has its own, whose positions must equal the attack roll's.
 //! - `invalid`: the oracle's own statement that the game's replay left its recording. The sim is
 //!   checked against the game's actual trace, so it is not the sim's matter: accepted everywhere
 //!   (counted in [`SpanCounts::oracle_invalid`] inside spans).
 //!
 //! The rest of a span is the rule's own: its steps (`about`, `trig`, `trig_end`, `did`), handlers
-//! (`h`, `h_end`) and nested rules, which the code that fires it reads, and its draws and
-//! mutations, compared in the T0 streams. The oracle never writes raw `result` or `bonuses`
+//! (`h`, `h_end`) and nested rules, whose structure is `Life`'s (shared with `span_ok`), and its
+//! draws and mutations, compared in the T0 streams (a `mut` the projection drops is reported; a
+//! `rule_bonus` is projected only to a rule open at the mutation). The oracle never writes raw `result` or `bonuses`
 //! records (the projection derives them from `rule` and `rule_end`), so a stray one is reported,
 //! like any other observation or record of another kind: the replay doesn't take what it can't
 //! name. A span the commands pull (`attack_rule`) is checked record by record by `span_ok` instead.

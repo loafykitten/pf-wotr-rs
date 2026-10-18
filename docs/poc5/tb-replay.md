@@ -915,7 +915,9 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   observer, is reported.
 - `env`: read by the code that fires the root: the attack roll's (`RuleAttackWithWeapon`'s attack), the resolve's
   and the flat-footed check's, each the first record for its rule and units (`find_env`; `Driver::env_reads`). Any
-  other `env` in a span (a second one, one of a root that reads none) is reported.
+  other `env` in a span (a second one, one of a root that reads none) is reported. A resolve nested in a phase-driven
+  attack (a weapon without a projectile resolves at once; `poc5-tb-55` and the older captures without the commands'
+  records) has its own `env`: its positions must equal the roll's, which its damage reads (reported otherwise).
 - `result`, `bonuses`: the oracle never writes them (the projection derives them from `rule` and `rule_end`, and a
   raw one in a trace is ignored as input), so a stray one is reported.
 - `invalid`: the oracle's own statement that the game's replay left its recording (`Sched.Invalidate`). The sim is

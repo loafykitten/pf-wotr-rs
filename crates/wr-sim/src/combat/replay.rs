@@ -4238,7 +4238,22 @@ impl Driver<'_> {
                     w.entity(a).unique_id.clone(),
                     w.entity(t).unique_id.clone(),
                 ));
-                if let Some(env) = env_in(trace, start, end, a, t, w) {
+                let rolled = env_in(trace, start, end, a, t, w);
+                // A resolve nested in the attack (a weapon without a projectile resolves at once)
+                // has its own environment record: the positions its damage reads are the roll's,
+                // so the two must agree.
+                let (ai, ti) = (w.entity(a).unique_id.clone(), w.entity(t).unique_id.clone());
+                self.env_reads.push(("RuleAttackWithWeaponResolve", ai.clone(), ti.clone()));
+                if let Some(k) =
+                    find_env(trace, start, end, "RuleAttackWithWeaponResolve", &ai, &ti)
+                    && pos_pair(&trace.records[k]["at"])
+                        != rolled.as_ref().and_then(|e| e.positions)
+                {
+                    w.coverage.unsupported(
+                        "driven replay: a resolve nested in an attack with positions other than the roll's",
+                    );
+                }
+                if let Some(env) = rolled {
                     w.combat.env.push(((a, t), env));
                 }
                 let before = w.combat.pending_resolves.len();
