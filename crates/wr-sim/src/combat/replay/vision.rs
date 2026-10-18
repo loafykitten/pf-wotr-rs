@@ -138,6 +138,10 @@ pub struct VisCounts {
     /// Views a polymorph may have replaced (its start or end): those units' pairs the
     /// recording's from then on (cause `enabled`: which collider exists).
     pub range_views_replaced: usize,
+    /// Optimization dummy swaps (`UpdateHasDummyView`): those the sim knows happened, and those
+    /// that may have (an input it doesn't have); each replaces the unit's view.
+    pub range_dummy_swaps: usize,
+    pub range_dummy_swaps_possible: usize,
     /// Vision records (`vis`, `los`, `los_clear`, `los_geometry`, `los_geom`, `los_probe`) no
     /// handler consumed (each reported).
     pub records_unconsumed: usize,
@@ -598,6 +602,7 @@ impl Driver<'_> {
         k.unmodelled_fills = c.unmodelled_fills;
         k.obstacle_reads = c.obstacle_reads;
         k.range_made_later = w.combat.vision.bounds.made_later;
+        (k.range_dummy_swaps, k.range_dummy_swaps_possible) = w.combat.vision.dummy_swaps;
         // Records no handler took (inside a span another reader skipped, say): their content
         // was never checked.
         let mut left: Vec<(i64, String)> = self.vis.unconsumed.drain().collect();

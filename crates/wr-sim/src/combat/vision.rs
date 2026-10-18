@@ -168,6 +168,11 @@ pub struct Vision {
     /// `TryReplaceView`, or its end, `RestoreView`, attach a new view): a new collider is made at
     /// the next update, the old one lives until its view is destroyed.
     pub views_replaced: HashSet<EntityIdx>,
+    /// `UnitEntityData.HasDummyView` as far as the sim knows it (`Some(false)` for a unit not
+    /// here; `None`: unknown). Hydrated from the save.
+    pub dummy: HashMap<EntityIdx, Option<bool>>,
+    /// Units whose view the optimization dummy swap replaced (`exact`) or may have (`possible`).
+    pub dummy_swaps: (usize, usize),
     /// Units whose collider may be fade-hiding with its `enabled` kept: a `HideUnit` with `Fade`
     /// hid them, or they were not in the game at the window's first tick (a fade may have begun
     /// before). While the fade runs (`EntityViewBase.m_IsFadeHide`) `UpdateViewActive` returns
@@ -773,4 +778,49 @@ pub fn note_fact_starting(w: &mut World, f: crate::world::FactIdx) {
     {
         w.combat.vision.views_replaced.insert(e);
     }
+}
+
+/// `UnitEntityData.UpdateHasDummyView` as far as the sim knows its inputs: the flag is
+/// `HoldingState != CrossSceneState && (Suppressed || (UnitPartOptimizeWhenHidden && !IsInGame))`
+/// (suppression exists only in areas with parts, which the vision run refuses; the build mode's
+/// `DisableUnitOptimization` is taken to be off); it keeps a dummy view while
+/// `!flag && IsSleeping && HasDummyView && !IsDeathRevealed` (`IsDeathRevealed` isn't modelled).
+/// A flip attaches a new view ([`Vision::views_replaced`]). `sleeping`: `IsSleeping`, `None`
+/// unknown. `called`: whether the game surely calls it (`false`: it may, as the sleeping
+/// controller does for a sleeping unit only when it's death-revealed).
+pub fn update_has_dummy_view(w: &mut World, u: EntityIdx, sleeping: Option<bool>, called: bool) {
+    if w.unit(u).is_none() {
+        return;
+    }
+    let cross = w.player.cross_scene_units.contains(&u);
+    if !cross && !w.player.area_units.contains(&u) {
+        // (`HoldingState == null`: returns.)
+        return;
+    }
+    let part = w.entity(u).parts.iter().any(|p| p.clr == "UnitPartOptimizeWhenHidden");
+    let flag = !cross && part && !w.entity(u).is_in_game;
+    let has = w.combat.vision.dummy.get(&u).copied().unwrap_or(Some(false));
+    // What the call makes of it: `Some(Some(x))` a known result, `Some(None)` unknown.
+    let after = match has {
+        Some(h) if h == flag => return,
+        // Kept while sleeping and not death-revealed (the latter unknown).
+        Some(true) if sleeping == Some(false) => Some(false),
+        Some(true) => None,
+        Some(false) => Some(true),
+        None if flag => Some(true),
+        None if sleeping == Some(false) => Some(false),
+        None => None,
+    };
+    if has.is_none() && after.is_none() {
+        // (Unknown before and after: already counted, the view already taken as replaced.)
+        return;
+    }
+    let exact = called && after.is_some() && has.is_some();
+    w.combat.vision.dummy.insert(u, if called { after } else { None });
+    if exact {
+        w.combat.vision.dummy_swaps.0 += 1;
+    } else {
+        w.combat.vision.dummy_swaps.1 += 1;
+    }
+    w.combat.vision.views_replaced.insert(u);
 }

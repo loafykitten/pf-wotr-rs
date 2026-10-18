@@ -280,6 +280,9 @@ pub struct Hit {
     pub order_known: bool,
     /// What the pair was before the result buffer's capacity made it [`Tri::Maybe`].
     pub capped: Option<Tri>,
+    /// The collider's view was replaced: its old collider may still take a slot of the result
+    /// buffer (dropped after, its entity link gone, or a duplicate of the unit).
+    pub extra_slot: bool,
 }
 
 /// What a tick found beyond updating the colliders.
@@ -586,7 +589,9 @@ impl Bounds {
                 (tri, cause) = (Tri::Maybe, Some(Cause::Enabled));
             }
             let (mut margin, mut rounding, mut guess) = (None, false, None);
-            if let (Some(centre), [p], false) = (c.centre, c.phys.as_slice(), c.phys_unknown) {
+            if let (Some(centre), [p], false, false) =
+                (c.centre, c.phys.as_slice(), c.phys_unknown, c.replaced)
+            {
                 let (hit, m, rd) = capsule_sphere(pos, r, *p, centre);
                 (margin, rounding, guess) = (Some(m), rd, Some(hit));
             }
@@ -599,11 +604,15 @@ impl Bounds {
                 guess,
                 order_known: !c.history_unknown,
                 capped: None,
+                extra_slot: c.replaced,
             });
         }
         // `OverlapCapsule` fills a buffer of 512: with more colliders in reach, which ones it keeps
         // is PhysX's order.
-        if out.iter().filter(|h| h.tri != Tri::Out).count() > RESULT_BUFFER {
+        // (A replaced view's old collider may take a slot too.)
+        let possible = out.iter().filter(|h| h.tri != Tri::Out).count()
+            + out.iter().filter(|h| h.extra_slot).count();
+        if possible > RESULT_BUFFER {
             for h in out.iter_mut().filter(|h| h.tri != Tri::Out) {
                 h.capped = Some(h.tri);
                 (h.tri, h.cause) = (Tri::Maybe, Some(Cause::Capacity));
@@ -679,7 +688,8 @@ pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
     // holds every hit that surely overlaps; only a full buffer may leave some out.
     if recorded.len() > RESULT_BUFFER {
         out.diffs.push(Difference::Count(recorded.len()));
-    } else if recorded.len() < RESULT_BUFFER {
+    } else if recorded.len() + hits.iter().filter(|h| h.extra_slot).count() < RESULT_BUFFER {
+        // (Old colliders of replaced views may have taken slots and been dropped after.)
         out.diffs.extend(
             hits.iter()
                 .filter(|h| h.capped == Some(Tri::In) && !recorded.contains(&h.unit))
@@ -915,6 +925,38 @@ mod tests {
         // Hidden, the old collider may still be enabled.
         b.tick(&[hidden(k(A, [5.0, 0.0, 0.0])), k(B, [0.0; 3])], RAN);
         assert_eq!(b.overlap([0.0; 3], 1.0)[0].tri, Tri::Maybe);
+    }
+
+    #[test]
+    fn a_replaced_view_s_old_collider_may_take_a_buffer_slot() {
+        // Sol's round 16: 512 sure colliders and a replaced one: its old collider may take a slot
+        // (dropped after), so the capacity is in doubt and a set of 511 may be a truncated one.
+        let units: Vec<BoundsUnit> =
+            (0..513).map(|i| k(EntityIdx(i), [f32::from(i as u16) * 0.001, 0.0, 0.0])).collect();
+        let mut b = Bounds::default();
+        b.tick(&units, RAN);
+        b.replace_unit(EntityIdx(512));
+        let mut far = units.clone();
+        far[512].pos = [300.0, 0.0, 0.0];
+        b.tick(&far, RAN);
+        b.tick(&far, RAN);
+        let hits = b.overlap([0.0; 3], 5.0);
+        assert!(hits.iter().all(|h| h.tri == Tri::Maybe), "the buffer may overflow");
+        let set: HashSet<EntityIdx> = (1..512).map(EntityIdx).collect();
+        assert!(differences(&hits, &set).diffs.is_empty());
+        // Without the replaced view, 512 sure ones fit and all must be there.
+        let mut b = Bounds::default();
+        b.tick(&units[..512], RAN);
+        let hits = b.overlap([0.0; 3], 5.0);
+        assert!(hits.iter().all(|h| h.tri == Tri::In));
+        assert_eq!(differences(&hits, &set).diffs, vec![Difference::Missing(EntityIdx(0))]);
+        // A replaced collider is left out of the margins.
+        let mut b = settled(&[k(A, [1.0, 0.0, 0.0])]);
+        b.replace_unit(A);
+        b.tick(&[k(A, [2.0, 0.0, 0.0])], RAN);
+        b.tick(&[k(A, [2.0, 0.0, 0.0])], RAN);
+        let h = b.overlap([0.0; 3], 1.0)[0];
+        assert_eq!((h.margin, h.guess, h.extra_slot), (None, None, true));
     }
 
     #[test]
@@ -1274,6 +1316,7 @@ mod tests {
             guess: None,
             order_known: true,
             capped: None,
+            extra_slot: false,
         };
         let hits = [
             hit(A, Tri::In, None),

@@ -363,6 +363,9 @@ impl Loader<'_> {
         let force_kill = state.is_some_and(|s| s.bool_or("ForceKill", false));
         let no_xp_on_death = !o.bool_or("GiveExperienceOnDeath", true);
         let is_extra = o.bool_or("IsExtra", false);
+        if o.bool_or("HasDummyView", false) {
+            self.w.combat.vision.dummy.insert(e, Some(true));
+        }
         let custom_prefab =
             d.and_then(|d| d.str("CustomPrefabGuid")).filter(|s| !s.is_empty()).map(str::to_owned);
         if let Some(u) = self.w.unit_mut(e) {

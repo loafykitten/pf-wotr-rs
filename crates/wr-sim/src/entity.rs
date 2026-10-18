@@ -364,6 +364,15 @@ pub fn set_is_in_game(w: &mut World, e: EntityIdx, value: bool) {
     if unit {
         // (`EntityBoundsController` among them: back in the game, on its update list.)
         *w.combat.vision.in_game_gen.entry(e).or_default() += 1;
+        // `UnitEntityData.OnIsInGameChanged` → `UpdateHasDummyView`.
+        let sleeping = if w.combat.awake.contains(&e) {
+            Some(false)
+        } else if w.combat.awake_unknown.contains(&e) {
+            None
+        } else {
+            Some(true)
+        };
+        crate::combat::vision::update_has_dummy_view(w, e, sleeping, true);
     }
     crate::rulebook::bus::raise_global_call(
         w,

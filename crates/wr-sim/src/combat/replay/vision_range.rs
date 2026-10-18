@@ -600,6 +600,18 @@ impl Driver<'_> {
         }
         let awake: HashSet<EntityIdx> =
             w.combat.awake.iter().chain(&w.combat.awake_unknown).copied().collect();
+        // `SleepingUnitsController`: `UpdateHasDummyView` for the awake units, and for the
+        // sleeping ones that are death-revealed (not modelled: it may).
+        for u in crate::scene::units_with_bounds(w) {
+            let (sleeping, called) = if w.combat.awake.contains(&u) {
+                (Some(false), true)
+            } else if w.combat.awake_unknown.contains(&u) {
+                (None, false)
+            } else {
+                (Some(true), false)
+            };
+            crate::combat::vision::update_has_dummy_view(w, u, sleeping, called);
+        }
         w.combat.vision.near.retain(|u, _| awake.contains(u));
         w.combat.vision.near_order.retain(|u, _| awake.contains(u));
         w.combat.vision.near_inexact.retain(|u| awake.contains(u));

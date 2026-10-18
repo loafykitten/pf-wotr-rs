@@ -290,7 +290,15 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   until the old view is destroyed (now, or after a visual transition the sim doesn't follow). When the sim activates,
   deactivates or removes a fact with a `Polymorph` component, the owner's collider is lost, its place in the order
   unknown, and its pairs are the recording's for the rest of the run (cause `enabled`: which collider exists; counted
-  as `views replaced by a polymorph`).
+  as `views replaced by a polymorph`). The optimization dummy swap does the same (`UnitEntityData.UpdateHasDummyView`,
+  from `OnIsInGameChanged` and from the sleeping controller for awake or death-revealed units): when its flag
+  (`HoldingState != CrossSceneState && (Suppressed || (UnitPartOptimizeWhenHidden && !IsInGame))`; suppression is
+  refused with the areas with parts, the build mode's `DisableUnitOptimization` taken to be off) differs from
+  `HasDummyView` (hydrated from the save, then followed), the view is replaced; a dummy kept while sleeping depends on
+  `IsDeathRevealed`, which isn't modelled, so such a swap is possible, and possible swaps count apart (`dummy view
+  swaps`, `possible`). A replaced view's old collider may also take one of the result buffer's 512 slots (dropped
+  after, its link gone): each counts as one more possible hit for the capacity and for the short-set check. Replaced
+  colliders are left out of the margin statistics.
 - **Every vision record is consumed.** Each `vis`, `los`, `los_clear`, `los_geometry`, `los_geom` and `los_probe` record
   must reach its handler exactly once; one that none consumed by the run's end (inside a root rule's span the replay
   drives, whose records it skips, say) is reported (`vision records unconsumed`). A position that isn't the driven agent's or a row's is never taken as

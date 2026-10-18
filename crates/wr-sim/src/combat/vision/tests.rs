@@ -416,3 +416,48 @@ fn a_recorded_clear_is_refused_when_the_caches_sample_and_radius_say_it_doesnt_c
     assert_eq!(v.clear_if_needed(&wv, O), None);
     assert!(v.adopt_clear(&wv, O, [0.0; 3]).is_err());
 }
+
+/// `UpdateHasDummyView` from `OnIsInGameChanged` and the sleeping controller: a flip of the
+/// flag replaces the view; a call the sim isn't sure of, or a kept dummy it can't rule out,
+/// makes the swap possible (counted apart).
+#[test]
+fn the_optimization_dummy_swap_replaces_the_view() {
+    let (mut w, u) = crate::stats::tests::world_with_unit();
+    w.player.area_units.push(u);
+    // Without the part nothing flips.
+    crate::entity::set_is_in_game(&mut w, u, false);
+    assert!(w.combat.vision.views_replaced.is_empty());
+    crate::entity::set_is_in_game(&mut w, u, true);
+    w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartOptimizeWhenHidden" });
+    w.combat.awake.push(u);
+    // Hidden: the flag flips to a dummy (exact).
+    crate::entity::set_is_in_game(&mut w, u, false);
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert_eq!(w.combat.vision.dummy_swaps, (1, 0));
+    assert_eq!(w.combat.vision.dummy.get(&u), Some(&Some(true)));
+    // Back while awake: the real view again (exact).
+    crate::entity::set_is_in_game(&mut w, u, true);
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert_eq!(w.combat.vision.dummy_swaps, (2, 0));
+    // Hidden, then back while asleep: the dummy may be kept (death-revealed unknown).
+    crate::entity::set_is_in_game(&mut w, u, false);
+    w.combat.awake.clear();
+    std::mem::take(&mut w.combat.vision.views_replaced);
+    crate::entity::set_is_in_game(&mut w, u, true);
+    assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&u));
+    assert_eq!(w.combat.vision.dummy_swaps, (3, 1));
+    assert_eq!(w.combat.vision.dummy.get(&u), Some(&None));
+    // Unknown and still unknown: not counted again.
+    super::update_has_dummy_view(&mut w, u, Some(true), false);
+    assert_eq!(w.combat.vision.dummy_swaps, (3, 1));
+    // Awake, the sleeping controller calls it: the real view (a possible swap).
+    super::update_has_dummy_view(&mut w, u, Some(false), true);
+    assert_eq!(w.combat.vision.dummy_swaps, (3, 2));
+    assert_eq!(w.combat.vision.dummy.get(&u), Some(&Some(false)));
+    // A cross-scene unit never has a dummy.
+    let (mut w, u) = crate::stats::tests::world_with_unit();
+    w.player.cross_scene_units.push(u);
+    w.entity_mut(u).parts.push(crate::world::Part { clr: "UnitPartOptimizeWhenHidden" });
+    crate::entity::set_is_in_game(&mut w, u, false);
+    assert!(w.combat.vision.views_replaced.is_empty());
+}
