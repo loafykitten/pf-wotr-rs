@@ -152,6 +152,10 @@ corpulence (the reads made stale by a buff now make the radius unknown until the
 position and 14,268 for the scale band; all 111 runs decide 15,452,626 and leave 45,869,264, 2,592 and 45,560.
 Round 9 (a set of fewer than 512 must hold every pair decided as in; a collider first met after an unfollowed frame is
 lost): the same counts, all runs as valid, 0 differences.
+Round 10 (without the driven agent a row gives a position only at its own frame or while the observer saw the unit
+awake): all runs as valid, 0 differences. The record runs decide 4,923,510 pairs and leave 14,705,393 for the
+corpulence, 1,705 for the position and 14,268 for the scale band; all 111 runs decide 15,442,732 and leave 45,876,635,
+5,115 and 45,560 (the 27 runs without the agent: 2,570,208 decided before, 2,560,314 now).
 
 Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, `tests/poc5.rs`, three captures
 valid on all runs; 14 damaged cases on `-111`/tb-nearest, each reported): an engagement leaf and a memory leaf flipped; a
@@ -255,7 +259,10 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   a first tick without a known step, or a unit without an observation row then, doesn't know the colliders' positions
   either.
 - **Positions.** Without the driven agent a unit's position after the movement is the next frame's row; the recording's
-  last frame has none, nor does a unit without rows. A position that isn't the driven agent's or a row's is never taken as
+  last frame has none, nor does a unit without rows. WrathOracle writes a unit's `u` row (when it changed) only while the
+  unit is awake, and `UnitRoamingController` moves sleeping units, so the last row gives the position at a frame only when
+  it is of that frame or the observer saw the unit awake then (its `awake_set`/`awake` records); a sleeping unit's position
+  is unknown. (With the driven agent the positions are the sim's, its roaming included.) A position that isn't the driven agent's or a row's is never taken as
   known: a capsule there decides nothing (cause position, and no evidence about the result buffer), and a collider there
   is lost until its position is known and an update the sim models has run.
 - **Radius against corpulence.** A radius stays known only while the unit's corpulence is known and equal to the one it

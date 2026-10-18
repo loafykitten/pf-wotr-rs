@@ -61,6 +61,11 @@ pub(super) struct RangeDriver {
     /// Per unit, the phase (stream index) of the last change only the sampling saw: a read
     /// counts only after it. Kept apart from the hooked events, so it never explains a change.
     sampled: HashMap<EntityIdx, usize>,
+    /// WrathOracle's awake units at its observation of each frame (`awake_set` once, then
+    /// `awake` changes): it writes a unit's `u` row, when it changed, only while the unit is
+    /// awake, so a row carries to a later frame only through frames the unit was awake in.
+    awake_set: Option<(i64, HashSet<String>)>,
+    awake_ev: HashMap<String, Vec<(i64, bool)>>,
     /// The Unity frame of the last tick the bounds controller was followed in.
     last_frame: Option<i64>,
     /// The physics clock after the last frame it was advanced to: `Time.time - Time.fixedTime`,
@@ -92,6 +97,19 @@ impl RangeDriver {
                         self.recs.insert((t, u.to_owned()));
                     }
                 }
+                (Some("obs"), Some("awake_set")) if self.awake_set.is_none() => {
+                    if let (Some(t), Some(us)) = (r["t"].as_i64(), r["units"].as_array()) {
+                        let us = us.iter().filter_map(|x| x.as_str().map(str::to_owned));
+                        self.awake_set = Some((t, us.collect()));
+                    }
+                }
+                (Some("obs"), Some("awake")) => {
+                    if let (Some(t), Some(u), Some(on)) =
+                        (r["t"].as_i64(), r["u"].as_str(), r["on"].as_bool())
+                    {
+                        self.awake_ev.entry(u.to_owned()).or_default().push((t, on));
+                    }
+                }
                 (Some("tick"), _) => {
                     if let (Some(t), Some(f), Some(d)) =
                         (r["t"].as_i64(), r["frame"].as_i64(), r["delta"].as_f64())
@@ -112,6 +130,27 @@ impl RangeDriver {
             self.clock = Some((phase, frame, step));
         }
         self.on = true;
+    }
+
+    /// Whether the observer saw unit `id` awake at its observation of frame `t` (`false` before
+    /// the first `awake_set`).
+    fn observed_awake(&self, id: &str, t: i64) -> bool {
+        let Some((t0, set)) = &self.awake_set else { return false };
+        if t < *t0 {
+            return false;
+        }
+        let ev = self.awake_ev.get(id).map_or(&[][..], Vec::as_slice);
+        ev.iter().rev().find(|(e, _)| *e <= t).map_or(set.contains(id), |(_, on)| *on)
+    }
+
+    /// Unit `id`'s position at frame `want` from its observation rows: a row of that frame, or
+    /// the last one before it when the observer saw the unit awake at `want` (it compares the
+    /// unit's row with the last it wrote and writes it when it differs). A sleeping unit can be
+    /// moved (roaming) with no row: the last row doesn't tell where it is.
+    pub(super) fn row_at(&self, id: &str, rows: &[(i64, V3)], want: i64) -> Option<V3> {
+        let i = rows.partition_point(|(t, _)| *t <= want);
+        let (t, p) = *rows.get(i.checked_sub(1)?)?;
+        (t == want || self.observed_awake(id, want)).then_some(p)
     }
 
     /// A unit's `Corpulence` at the phase placed at stream index `at` (see
@@ -257,8 +296,8 @@ impl Driver<'_> {
     }
 
     /// A unit's position after the movement when the sim has it: the driven agent's, or without
-    /// it the next frame's observation row (none in the recording's last frame, or for a unit
-    /// without rows). `None`: [`Driver::vis_pos`]'s answer is a guess.
+    /// it the next frame's observation row ([`RangeDriver::row_at`]: none in the recording's last
+    /// frame, for a unit without rows, or for one that slept since its last row). `None`: [`Driver::vis_pos`]'s answer is a guess.
     fn vis_pos_known(&self, w: &World, u: EntityIdx) -> Option<V3> {
         if self.vis.ag {
             return Some(self.vis_pos(w, u, true));
@@ -266,17 +305,15 @@ impl Driver<'_> {
         if self.tick >= self.vis.last_tick {
             return None;
         }
-        let rows = self.vis.rows.get(&w.entity(u).unique_id)?;
-        let i = rows.partition_point(|(t, _)| *t <= self.tick + 1);
-        (i > 0).then(|| rows[i - 1].1)
+        let id = &w.entity(u).unique_id;
+        self.vis.range.row_at(id, self.vis.rows.get(id)?, self.tick + 1)
     }
 
     /// A unit's position at the frame's start, from the observation rows (the previous frame's
     /// end); `None` without a row.
     fn vis_prefix_pos(&self, w: &World, u: EntityIdx) -> Option<V3> {
-        let rows = self.vis.rows.get(&w.entity(u).unique_id)?;
-        let i = rows.partition_point(|(t, _)| *t <= self.tick);
-        (i > 0).then(|| rows[i - 1].1)
+        let id = &w.entity(u).unique_id;
+        self.vis.range.row_at(id, self.vis.rows.get(id)?, self.tick)
     }
 
     /// Whether a physics step ran since the last tick (a fixed update before this frame's
@@ -500,6 +537,29 @@ mod tests {
             size_hooks: 0,
             fact_hooks: 0,
         }
+    }
+
+    #[test]
+    fn a_row_carries_only_through_frames_the_unit_was_awake_in() {
+        let mut r = RangeDriver {
+            awake_set: Some((0, ["a".to_owned()].into_iter().collect())),
+            ..Default::default()
+        };
+        r.awake_ev.insert("a".into(), vec![(10, false), (20, true)]);
+        let rows = [(0, [1.0, 0.0, 0.0]), (25, [2.0, 0.0, 0.0])];
+        assert_eq!(r.row_at("a", &rows, 0), Some([1.0, 0.0, 0.0]));
+        assert_eq!(r.row_at("a", &rows, 9), Some([1.0, 0.0, 0.0]));
+        // Asleep from 10: a roamer may have moved without a row.
+        assert_eq!(r.row_at("a", &rows, 10), None);
+        assert_eq!(r.row_at("a", &rows, 19), None);
+        // Awake again at 20 with no row: the observer found the row unchanged.
+        assert_eq!(r.row_at("a", &rows, 22), Some([1.0, 0.0, 0.0]));
+        assert_eq!(r.row_at("a", &rows, 25), Some([2.0, 0.0, 0.0]));
+        assert_eq!(r.row_at("a", &rows, 30), Some([2.0, 0.0, 0.0]));
+        // A unit never awake has only the rows of their own frames.
+        let b = [(0, [5.0, 0.0, 0.0])];
+        assert_eq!(r.row_at("b", &b, 0), Some([5.0, 0.0, 0.0]));
+        assert_eq!(r.row_at("b", &b, 1), None);
     }
 
     #[test]
