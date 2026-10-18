@@ -50,11 +50,18 @@ decompiled code, [I] inferred.
   itself); the `UnitEntityView` on its game object gives `m_Corpulence` 0.5 for both. The unit's doll gender and whether it has a
   race preset are hydrated from `UnitPartDollData.Default` (`Unit::doll_gender_female`).
 - **The unit's prefab**: the one it was spawned with in this run (`Unit::view_prefab`); after its view was made again (a
-  polymorph started or ended, the dummy swapped: `corpulence::view_replaced`) or for a loaded unit, `CreateView`'s order above. `HasDummyView`
+  polymorph started or ended, the dummy swapped: `corpulence::view_replaced`) or for a loaded unit, `CreateView`'s order above.
+  The spawning data's prefab id becomes `CustomPrefabGuid` (`UnitDescriptor` constructor, `!Body.IsPolymorphed`, which a unit
+  being built satisfies), so a view made again is the spawn's prefab, not the blueprint's. A placeholder saved with a doll
+  (`Unit::spawned_with_doll`) has an unknown view origin, whichever prefab it names. `HasDummyView`
   is the vision module's (`Vision::dummy`: saved, flipped by `update_has_dummy_view`).
-- **The size**: `OriginalSize` read from the content (the race's size, else the blueprint's: `set_race` after construction
-  moves it, which the stored field doesn't follow) and `State.Size` (`Unit::state_size`, written by `set_state_size`, the
-  size-change facts' `UnitPartSizeModifier`).
+- **The size**: `OriginalSize` (`Unit::original_size`, the race's size, else the blueprint's; `levelup::set_race` moves it, as
+  the game's property follows `Progression.Race`) and `State.Size` (`Unit::state_size`, written by `set_state_size` and the
+  size-change facts' `UnitPartSizeModifier`). The `State.Size` getter keeps `OriginalSize` as first read (`m_Size`), and the view's
+  per-frame `Update` reads it, so the evaluator latches it through the same `spawn::state_size` the rules code uses: a race set
+  later moves `OriginalSize` and not `State.Size` (the scale then follows the difference, as in the game). The latch happens at
+  the first evaluation or other read in the sim, not at the game's first frame: a race set between the two is a window the sim
+  cannot see.
 - **The scale percent**: `AddUnitScale` is ported (`components/state.rs`: `UpdateScalePercent` with its 0.005 dead band,
   `ResetScalePercent`, then `UpdateSizeModifiers`); `UnitHelper.CreateUnitCopy` copies it.
 - **The cache**: filled when first asked, reset where the game resets (`spawn::update_size_modifiers`, `levelup::set_race`,
@@ -91,16 +98,19 @@ Results (sweep of 2026-10-18 on the 24 captures, 111 runs, and `-140`): **8,663,
 0 differing, 0 unknown** (no read of a unit the sim hasn't made, none in an entry with an event for its unit; the 1,428,207
 reads of units with a doll were unknown before the doll prefabs were extracted). The values: 0.5 (the minimum) for most units,
 0.7 and 0.9 for others by prefab, and 0.75757575 for Seelah after Enlarge Person (`-120`). `-140` (tb-lizard, with WrathOracle's
-`bounds_init`/`bounds_tick`): 782,800 more reads equal on its five runs. Validity is the baseline's: only `-122`/tb-nearest
+`bounds_tick`): 782,800 more reads equal on its five runs. Validity is the baseline's: only `-122`/tb-nearest
 (record, replay-1, replay-2: the initiative tie) and `-135`'s `replay-3-perturbed` are invalid; `-140`'s five runs fail on the
 line-of-sight geometry item another stream is fixing.
 
-**The entity-bounds colliders' radii as a second check** (`-140`, each run: 7,853 records of units, `bounds_init` and every
-`bounds_tick`): `TickEntity` leaves a radius within 0.05 of `Max(0.05, Corpulence)` whatever the view's scale, so the sim's value
-must put it there. 268 are exactly `Max(0.05, Corpulence)`, 7,585 within the band (a view whose scale isn't exactly 1: the
-radius made from `c * scale` is kept by the hysteresis, e.g. 0.49999997 for 0.5), 0 outside, 0 not checked. This covers the
-units the fights never read. It doesn't pin the corpulence more finely than the band; where a collider's scale is exactly 1 the
-two agree bit for bit (the exact ones).
+**The entity-bounds colliders' radii as a second check** (`-140`, each run: 7,832 `bounds_tick` records of units): `TickEntity`
+leaves a radius within 0.05 of `Max(0.05, Corpulence)` whatever the view's scale, so the sim's value must put it there.
+259 are exactly `Max(0.05, Corpulence)`, 7,573 within the band (a view whose scale isn't exactly 1: the radius made from
+`c * scale` is kept by the hysteresis, e.g. 0.49999997 for 0.5), 0 outside, 0 not checked. This covers the units the fights
+never read. It doesn't pin the corpulence more finely than the band; where a collider's scale is exactly 1 the two agree bit
+for bit (the exact ones). **A `bounds_init` radius is not compared**: the band holds only after a tick of that collider, and the
+controller ticks only the entities on its update list (a move, a game-state change, `HandleUnitSizeChanged`). A corpulence that
+changed without one of those (`AddUnitScale` resets the size scale but raises no size event) leaves the old radius until
+something queues the entity, so a capture starting then would be falsely invalidated.
 
 Damaged records (`tests/poc5_corpulence.rs`, `-120`/tb-cast, 4 cases, each reported): the enlarged unit's reads left at the old
 size, the same one bit up, one read of an unchanged unit one bit off, an agent request's read changed. `tests/poc5_agent.rs`'s
