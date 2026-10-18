@@ -425,12 +425,15 @@ impl Bounds {
                     phys_unknown: first && (u.prefix.is_none() || step != Step::Ran),
                     // The first tick's update sets the transform only when it isn't already
                     // `==` the position (the collider is taken to be at the prefix, as PhysX's
-                    // copy is); a collider made now is set to the position.
+                    // copy is); a collider made now starts at the view's transform, which the
+                    // sim doesn't hold (`UnitMoveController` writes the view directly and the
+                    // entity through the tolerant setter), and keeps it when it is `==` the
+                    // position: only known to the tolerance around the position.
                     transform: Some(match (first, u.prefix) {
                         (true, Some(p)) => orientation::set_position(p, u.pos),
                         _ => u.pos,
                     }),
-                    fuzzy: first && u.prefix.is_none(),
+                    fuzzy: !first || u.prefix.is_none(),
                     phys_fuzzy: false,
                     radius: next_radius(None, u.corpulence),
                     radius_corp: u.corpulence,
@@ -848,6 +851,24 @@ mod tests {
         assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Position)));
         assert_eq!(tris(&b, [0.0; 3], 10.1), vec![(A, Tri::In)]);
         assert_eq!(tris(&b, [0.0; 3], 9.9), vec![(A, Tri::Out)]);
+    }
+
+    #[test]
+    fn a_collider_made_later_is_only_known_to_the_tolerance() {
+        // Sol's round 13: a collider made after the first tick starts at the view's transform,
+        // which may differ from the entity's position within `Vector3 ==`, and keeps it.
+        let mut b = settled(&[k(A, [0.0; 3])]);
+        b.tick(&[k(A, [0.0; 3]), k(B, [10.5, 0.0, 0.0])], RAN);
+        b.tick(&[k(A, [0.0; 3]), k(B, [10.5, 0.0, 0.0])], RAN);
+        let at = |b: &Bounds, r: f32| {
+            b.overlap([20.0, 0.0, 0.0], r)
+                .into_iter()
+                .find(|h| h.unit == B)
+                .map(|h| (h.tri, h.cause))
+        };
+        // Radius 0.5 +- 0.05, 9.5 away: a capsule of 9.050005 reaches within the tolerance.
+        assert_eq!(at(&b, 9.050_005), Some((Tri::Maybe, Some(Cause::Position))));
+        assert_eq!(at(&b, 9.1), Some((Tri::In, None)));
     }
 
     #[test]
