@@ -135,6 +135,9 @@ pub struct VisCounts {
     /// Frames with a possible explicit `Physics.SyncTransforms()` (a polymorph ended, a mode
     /// with the place-on-ground controller started): every collider's PhysX copy unknown.
     pub range_sync_frames: usize,
+    /// Views a polymorph may have replaced (its start or end): those units' pairs the
+    /// recording's from then on (cause `enabled`: which collider exists).
+    pub range_views_replaced: usize,
     /// Vision records (`vis`, `los`, `los_clear`, `los_geometry`, `los_geom`, `los_probe`) no
     /// handler consumed (each reported).
     pub records_unconsumed: usize,

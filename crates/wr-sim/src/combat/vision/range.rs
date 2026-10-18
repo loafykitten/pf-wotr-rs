@@ -226,6 +226,11 @@ struct Collider {
     /// A unit that was hidden at the window's first tick: it may have owned a collider before
     /// (made earlier, at an unknown place in the order) or get one when it comes into the game.
     history_unknown: bool,
+    /// Its unit's view was (possibly) replaced: the new view's collider is made at an update, at
+    /// an unknown place in the order, and the old one, with its last transform, lives until the
+    /// old view is destroyed (now or after a transition the sim doesn't follow). Whether either
+    /// overlaps is the recording's for the rest of the run.
+    replaced: bool,
     /// Made (possibly) while its unit was out of the game: enabled until `UpdateViewActive` runs
     /// at its return, so its `enabled` is unknown until then.
     made_hidden: bool,
@@ -441,6 +446,7 @@ impl Bounds {
                     enabled: if made_hidden { Enabled::Unknown } else { u.enabled },
                     history_unknown: !u.in_game || unseen,
                     made_hidden,
+                    replaced: false,
                     seen: u.pos_known.then_some(seen),
                 };
                 if !u.in_game || !u.pos_known || unseen {
@@ -522,6 +528,17 @@ impl Bounds {
         }
     }
 
+    /// A unit's view replaced (a polymorph's start or end): its collider is lost, its place in
+    /// the order unknown, and its pairs the recording's from now on ([`Collider::replaced`]).
+    pub fn replace_unit(&mut self, u: EntityIdx) {
+        for c in self.colliders.iter_mut().filter(|c| c.unit == u) {
+            c.lose();
+            c.seen = None;
+            c.history_unknown = true;
+            c.replaced = true;
+        }
+    }
+
     /// A unit's collider whose transform the sim set from a wrong position: lost until its next
     /// modelled update.
     pub fn lose_unit(&mut self, u: EntityIdx) {
@@ -536,7 +553,7 @@ impl Bounds {
     #[must_use]
     pub fn overlap(&self, pos: V3, r: f32) -> Vec<Hit> {
         let mut out = Vec::new();
-        for c in self.colliders.iter().filter(|c| c.enabled != Enabled::No) {
+        for c in self.colliders.iter().filter(|c| c.enabled != Enabled::No || c.replaced) {
             let (mut tri, mut cause) = (Tri::Maybe, Some(Cause::Position));
             if !c.phys_unknown {
                 // A copy known to the tolerance only: the sphere's centre within it.
@@ -562,6 +579,10 @@ impl Bounds {
                 cause = Some(Cause::Corpulence);
             }
             if c.enabled == Enabled::Unknown && tri != Tri::Out {
+                (tri, cause) = (Tri::Maybe, Some(Cause::Enabled));
+            }
+            if c.replaced {
+                // Which collider exists, where, and enabled or not.
                 (tri, cause) = (Tri::Maybe, Some(Cause::Enabled));
             }
             let (mut margin, mut rounding, mut guess) = (None, false, None);
@@ -869,6 +890,31 @@ mod tests {
         // Radius 0.5 +- 0.05, 9.5 away: a capsule of 9.050005 reaches within the tolerance.
         assert_eq!(at(&b, 9.050_005), Some((Tri::Maybe, Some(Cause::Position))));
         assert_eq!(at(&b, 9.1), Some((Tri::In, None)));
+    }
+
+    #[test]
+    fn a_replaced_view_leaves_its_unit_s_pairs_to_the_recording() {
+        // Sol's round 15: a polymorph's view swap makes a new collider (at the view's position
+        // within `==`, a radius from its scale, a new place in the order) and keeps the old one
+        // until its view is destroyed.
+        let mut b = settled(&[k(A, [0.0; 3]), k(B, [0.0; 3])]);
+        b.replace_unit(A);
+        for _ in 0..3 {
+            b.tick(&[k(A, [0.0; 3]), k(B, [0.0; 3])], RAN);
+        }
+        b.tick(&[k(A, [5.0, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
+        b.tick(&[k(A, [5.0, 0.0, 0.0]), k(B, [0.0; 3])], RAN);
+        for at in [[0.0; 3], [-12.0, 0.0, 0.0], [300.0, 0.0, 0.0]] {
+            let hits = b.overlap(at, 11.7);
+            assert_eq!(
+                (hits[0].unit, hits[0].tri, hits[0].cause, hits[0].order_known),
+                (A, Tri::Maybe, Some(Cause::Enabled), false),
+                "{at:?}"
+            );
+        }
+        // Hidden, the old collider may still be enabled.
+        b.tick(&[hidden(k(A, [5.0, 0.0, 0.0])), k(B, [0.0; 3])], RAN);
+        assert_eq!(b.overlap([0.0; 3], 1.0)[0].tri, Tri::Maybe);
     }
 
     #[test]

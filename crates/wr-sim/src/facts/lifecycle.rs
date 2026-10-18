@@ -200,6 +200,7 @@ pub fn activate(w: &mut World, f: FactIdx) {
     }
     w.fact_mut(f).is_active = true;
     w.fact_mut(f).activating = true;
+    crate::combat::vision::note_fact_starting(w, f);
     w.trace("Fact.Activate", |w| label(w, f));
     on_activate(w, f);
     crate::context::recalculate(w, f);

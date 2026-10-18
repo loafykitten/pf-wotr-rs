@@ -283,6 +283,14 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   `IsleStateControllerView`. In a frame where one may have run since the last vision phase (the sim deactivated or
   removed a fact with a `Polymorph` component, or a mode with the controller started after one without it) every
   collider's PhysX copy is unknown until a step known to run (counted as `frames with a possible explicit sync`).
+- **Replaced views.** A polymorph's start (`Polymorph.TryReplaceView`) and end (`RestoreView`) attach a new view to the
+  unit (`AttachToViewOnLoad`), positioned by copying the old one's transform: the next update of the unit makes a new
+  collider (at the view's position, `==` but not necessarily equal to the unit's; a radius from the new view's scale; a
+  new place in the creation and result order), and the old collider, with its last transform and `enabled`, lives
+  until the old view is destroyed (now, or after a visual transition the sim doesn't follow). When the sim activates,
+  deactivates or removes a fact with a `Polymorph` component, the owner's collider is lost, its place in the order
+  unknown, and its pairs are the recording's for the rest of the run (cause `enabled`: which collider exists; counted
+  as `views replaced by a polymorph`).
 - **Every vision record is consumed.** Each `vis`, `los`, `los_clear`, `los_geometry`, `los_geom` and `los_probe` record
   must reach its handler exactly once; one that none consumed by the run's end (inside a root rule's span the replay
   drives, whose records it skips, say) is reported (`vision records unconsumed`). A position that isn't the driven agent's or a row's is never taken as

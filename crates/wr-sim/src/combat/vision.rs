@@ -164,6 +164,10 @@ pub struct Vision {
     /// a mode with `UnitPlaceOnGroundController` started after one without it (its `Start` forces
     /// a place-on-ground tick, which syncs first).
     pub explicit_sync: bool,
+    /// Units whose view a polymorph may have replaced since the last vision phase (its start,
+    /// `TryReplaceView`, or its end, `RestoreView`, attach a new view): a new collider is made at
+    /// the next update, the old one lives until its view is destroyed.
+    pub views_replaced: HashSet<EntityIdx>,
     /// Units whose collider may be fade-hiding with its `enabled` kept: a `HideUnit` with `Fade`
     /// hid them, or they were not in the game at the window's first tick (a fade may have begun
     /// before). While the fade runs (`EntityViewBase.m_IsFadeHide`) `UpdateViewActive` returns
@@ -742,13 +746,31 @@ pub fn note_explicit_sync(w: &mut World) {
     w.combat.vision.explicit_sync = true;
 }
 
-/// A fact that may end a polymorph (`Polymorph.OnDeactivate` restores the view and syncs the
-/// transforms) is deactivated or removed.
-pub fn note_fact_ending(w: &mut World, f: crate::world::FactIdx) {
-    let polymorph = w.fact(f).bp.as_ref().is_some_and(|b| {
+fn is_polymorph(w: &World, f: crate::world::FactIdx) -> bool {
+    w.fact(f).bp.as_ref().is_some_and(|b| {
         b.components_array().iter().any(|o| wr_content::schema::ty(o.ty).short == "Polymorph")
-    });
-    if polymorph {
+    })
+}
+
+/// A fact that may end a polymorph is deactivated or removed: `Polymorph.RestoreView` attaches
+/// a new view to its owner (a new collider, the old one kept until its view is destroyed) and
+/// syncs the transforms.
+pub fn note_fact_ending(w: &mut World, f: crate::world::FactIdx) {
+    if is_polymorph(w, f) {
         note_explicit_sync(w);
+        if let Some(e) = w.fact(f).owner {
+            w.combat.vision.views_replaced.insert(e);
+        }
+    }
+}
+
+/// A fact that may start a polymorph is activated: `Polymorph.TryReplaceView` attaches the
+/// polymorph's view to its owner (a new collider; the old view destroyed now or after its
+/// transition).
+pub fn note_fact_starting(w: &mut World, f: crate::world::FactIdx) {
+    if is_polymorph(w, f)
+        && let Some(e) = w.fact(f).owner
+    {
+        w.combat.vision.views_replaced.insert(e);
     }
 }
