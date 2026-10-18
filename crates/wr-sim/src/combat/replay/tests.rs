@@ -899,6 +899,10 @@ fn a_clear_after_its_turn_end_comes_before_the_buffs_controller() {
         tb(1, "turn_end", Some("u"), 5 * S),
         tb(1, "turn_clear", Some("u"), 5 * S),
         root,
+        json!({"k": "about", "t": 1, "id": 1}),
+        json!({"k": "trig", "t": 1, "id": 1}),
+        json!({"k": "trig_end", "t": 1, "id": 1}),
+        json!({"k": "did", "t": 1, "id": 1}),
         json!({"k": "rule_end", "t": 1, "id": 1}),
     ];
     let _ = run(&mut w, &trace(recs));
@@ -1429,6 +1433,7 @@ fn a_root_spans_provoke_is_placed_like_a_commands() {
     let placed = |order: &str, handler: &str, phase: &str, prov: &J, rule: Option<&str>| {
         let mut v = vec![
             json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+            json!({"k": "about", "t": 5, "id": 1}),
         ];
         v.extend(order.chars().map(|c| piece(c, handler, phase, prov)));
         let recs = rvs(&v);
@@ -1437,10 +1442,31 @@ fn a_root_spans_provoke_is_placed_like_a_commands() {
             if r["ev"] == "eng_prov" {
                 return provoke_placed(&mut open, r, rule);
             }
-            open.feed(r);
+            // (A step out of its order is reported by the span's walk: `fed` below.)
+            let _ = open.feed(r);
         }
         false
     };
+    // Every step in its order is fed without a report; a rewind or a repeat is reported.
+    let fed = |order: &str| {
+        let mut v = vec![
+            json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+            json!({"k": "about", "t": 5, "id": 1}),
+        ];
+        v.extend(order.chars().map(|c| piece(c, engagement, "did", &prov)));
+        v.push(json!({"k": "rule_end", "t": 5, "id": 1}));
+        let recs = rvs(&v);
+        let mut open = Open::new(&recs[0]);
+        recs[1..].iter().all(|r| open.feed(r))
+    };
+    assert!(fed("TED"), "about, trig, trig_end, did, rule_end");
+    assert!(fed("TEhHD"), "a did handler between trig_end and did");
+    assert!(!fed("TDE"), "a did before trig_end (and its rewind)");
+    assert!(!fed("TEDD"), "a did twice");
+    assert!(!fed("ET"), "trig_end before trig");
+    assert!(!fed("TTED"), "trig twice");
+    assert!(!fed("TE"), "a rule closed before its did");
+    assert!(!fed("ThHED"), "a did handler in OnTrigger");
     assert!(placed("TEhPHD", engagement, "did", &prov, rule), "as the game raises it");
     // The rule still in `OnTrigger` (`trig_end` after the handler), or past `did`.
     assert!(!placed("ThPHE", engagement, "did", &prov, rule), "before trig_end");
@@ -1463,6 +1489,7 @@ fn a_root_spans_provoke_is_placed_like_a_commands() {
     // Once per rule: a second provoke of the same handler's rule.
     let recs = rvs(&[
         json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+        json!({"k": "about", "t": 5, "id": 1}),
         piece('T', "", "", &prov),
         piece('E', "", "", &prov),
         piece('h', engagement, "did", &prov),
@@ -1470,9 +1497,9 @@ fn a_root_spans_provoke_is_placed_like_a_commands() {
         prov.clone(),
     ]);
     let mut open = Open::new(&recs[0]);
-    for r in &recs[1..4] {
-        open.feed(r);
+    for r in &recs[1..5] {
+        assert!(open.feed(r));
     }
-    assert!(provoke_placed(&mut open, &recs[4], rule));
-    assert!(!provoke_placed(&mut open, &recs[5], rule), "a second provoke of a rule");
+    assert!(provoke_placed(&mut open, &recs[5], rule));
+    assert!(!provoke_placed(&mut open, &recs[6], rule), "a second provoke of a rule");
 }

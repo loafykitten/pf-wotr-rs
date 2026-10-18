@@ -66,6 +66,16 @@ pub struct SpanCounts {
     pub reported: usize,
 }
 
+/// Whether the T0 projection keeps a mutation (`project::project_records`): damage, experience,
+/// facts attached and detached, and a bonus added to a rule it tracks.
+fn projected(r: &Rv) -> bool {
+    match r["what"].as_str() {
+        Some("damage" | "xp" | "fact_attach" | "fact_detach") => true,
+        Some("rule_bonus") => r["target_rule"].as_i64().is_some_and(|t| t > 0),
+        _ => false,
+    }
+}
+
 /// What `span_records` knows of the span so far: the rules and handlers open and where each
 /// rule is in its life (`span_ok`'s frames), fed the span's records in order.
 pub(super) struct Open {
@@ -92,46 +102,70 @@ impl Open {
             handlers: Vec::new(),
             provoked: HashSet::new(),
         };
-        open.feed(root);
+        let _ = open.feed(root);
         open
     }
 
     /// The next record of the span: a rule pushed or ended, one of its steps, a handler opened or
-    /// closed.
-    pub(super) fn feed(&mut self, r: &Rv) {
+    /// closed. False for one out of its place, as `span_ok` places them: a nested rule pushed
+    /// in its parent's `OnTrigger` or one of its handlers, a step of the innermost rule (not
+    /// while its own handler is open) in the order `about`, `trig`, `trig_end`, `did`, `rule_end`,
+    /// a handler of the innermost rule in the phase its stage allows.
+    pub(super) fn feed(&mut self, r: &Rv) -> bool {
         let id = r["id"].as_i64();
-        let step = |stack: &mut Vec<(i64, u8)>, stage: u8| {
-            if let Some(top) = stack.last_mut().filter(|t| Some(t.0) == id) {
-                top.1 = stage;
+        let own =
+            self.stack.last().is_some_and(|t| self.handlers.last().is_some_and(|h| h.1 == t.0));
+        let mut step = |want: u8, next: u8| match self.stack.last_mut() {
+            Some(top) if Some(top.0) == id && top.1 == want && !own => {
+                top.1 = next;
+                true
             }
+            _ => false,
         };
         match r["k"].as_str() {
             Some("rule") => {
+                let ok = self
+                    .stack
+                    .last()
+                    .is_none_or(|t| Some(t.0) == r["parent"].as_i64() && (t.1 == 2 || own));
                 let class =
                     r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
                 if let Some(id) = id {
                     self.rules.insert(id, (class.to_owned(), r["initiator"].clone()));
                     self.stack.push((id, 0));
                 }
+                ok
             }
-            Some("about") => step(&mut self.stack, 1),
-            Some("trig") => step(&mut self.stack, 2),
-            Some("trig_end") => step(&mut self.stack, 3),
-            Some("did") => step(&mut self.stack, 4),
+            Some("about") => step(0, 1),
+            Some("trig") => step(1, 2),
+            Some("trig_end") => step(2, 3),
+            Some("did") => step(3, 4),
             Some("rule_end") => {
+                let ok = step(4, 5);
                 if self.stack.last().is_some_and(|t| Some(t.0) == id) {
                     self.stack.pop();
                 }
+                ok
             }
-            Some("h") => self.handlers.push((
-                r["class"].as_str().unwrap_or("").to_owned(),
-                r["rule"].as_i64().unwrap_or(0),
-                r["phase"].as_str().unwrap_or("").to_owned(),
-            )),
-            Some("h_end") => {
-                self.handlers.pop();
+            Some("h") => {
+                let phase = r["phase"].as_str().unwrap_or("");
+                let ok = self.stack.last().is_some_and(|t| {
+                    Some(t.0) == r["rule"].as_i64()
+                        && !own
+                        && matches!(
+                            (phase, t.1),
+                            ("mod_before", 0) | ("about", 1) | ("mod_after" | "did", 3)
+                        )
+                });
+                self.handlers.push((
+                    r["class"].as_str().unwrap_or("").to_owned(),
+                    r["rule"].as_i64().unwrap_or(0),
+                    phase.to_owned(),
+                ));
+                ok
             }
-            _ => {}
+            Some("h_end") => self.handlers.pop().is_some(),
+            _ => true,
         }
     }
 }
@@ -175,9 +209,18 @@ impl Driver<'_> {
                 Some(
                     "rule" | "h" | "h_end" | "rule_end" | "about" | "trig" | "trig_end" | "did",
                 ) => {
-                    open.feed(r);
+                    if !open.feed(r) {
+                        self.span_reported(
+                            w,
+                            format!("a {} record", r["k"].as_str().unwrap_or("?")),
+                            "a record out of its place in the rule's life",
+                        );
+                    }
                 }
-                Some("draw" | "mut") => {}
+                // A draw is compared in the T0 stream (a presentation draw is none).
+                Some("draw") => {}
+                // So is a mutation of the kinds the projection keeps; the others it drops.
+                Some("mut") if projected(r) => {}
                 // The environment the root's code looked up.
                 Some("env") => {
                     let read = self.env_reads.iter().any(|(rule, a, t)| {
@@ -191,6 +234,11 @@ impl Driver<'_> {
                         );
                     }
                 }
+                Some("mut") => self.span_reported(
+                    w,
+                    format!("a {} mutation", r["what"].as_str().unwrap_or("?")),
+                    "a mutation the T0 projection drops, so nothing compares it",
+                ),
                 Some("obs") => self.span_obs(w, start, r, &mut open),
                 // (The oracle writes no raw `result` or `bonuses`: the projection derives them.)
                 other => self.span_reported(

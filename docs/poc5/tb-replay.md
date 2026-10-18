@@ -920,7 +920,8 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   raw one in a trace is ignored as input), so a stray one is reported.
 - `invalid`: the oracle's own statement that the game's replay left its recording (`Sched.Invalidate`). The sim is
   checked against the game's actual trace, so it is not the sim's matter: accepted everywhere, inside spans too
-  (counted as `oracle_invalid`): in a phase-driven root's span, in a presentation root's (`origin_span_is_inert`
+  (counted as `oracle_invalid`): in a phase-driven root's span (`span_records`), in a command's (`attack_span`, which
+  also takes the attack counts' roots that never enter `Driver::root`), in a presentation root's (`origin_span_is_inert`
   takes it, so the root keeps its call site), and in a command's (`span_ok`). The runs that hold one (`-134`
   tb-lizard replay-2, `-135` replay-2-perturbed and replay-3-perturbed) are judged by what the sim computes.
   **`-135` replay-3-perturbed is valid now** (it was invalid only because its `invalid` note, written inside the root
@@ -930,6 +931,18 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   tick 443 (111,442 records). The trace is the game's actual run, and the sim reproduces it: 20 roots driven, T0
   equal, no report. "Valid" says the sim agrees with the game's trace; whether the game's replay stayed on its
   recording is the oracle's own verdict, the note.
+- `mut`: compared only if `project::project_records` keeps it: `damage`, `xp`, `fact_attach`, `fact_detach` and a
+  `rule_bonus` to a tracked rule (`target_rule` > 0); it drops every other `what` (`stat_value`, `stat_mod_add`,
+  `stat_mod_remove`, `rule_temp_mod`, ...), and no other checker of the replay reads those kinds. [M] Surveyed on
+  the sweep's 111 runs and `-137` to `-140`: inside root spans there are only `damage` (685), `fact_attach` (509)
+  and `rule_bonus` (4,749, every one tracked); the unprojected kinds are all outside spans (`stat_value` 2,406,
+  `stat_mod_add` 2,370, `stat_mod_remove` 6 in the sweep's captures). So a span now reports any other `mut`
+  (`spans::projected`). **Open, not the spans':** the mutations outside spans that nothing compares (the sim doesn't emit
+  them, T0 doesn't project them); the fix is for the sim to emit them and T0 to compare them, a piece of work of its own.
+- Order: the span's rules follow `span_ok`'s transitions (`Open::feed`): `about`, `trig`, `trig_end`, `did`,
+  `rule_end` in turn, each by the innermost rule and not while its own handler is open; a nested rule pushed in its
+  parent's `OnTrigger` or one of its handlers; a handler in the phase its rule's stage allows. A step out of its place
+  is reported (a `did` before `trig_end`, a repeated step, a rule closed before its `did`).
 - Frame: a root rule fires within one frame, so every record of its span (its `rule_end` too) carries the root's `t`;
   one that doesn't is reported. It holds on all 111 runs (no exception).
 - Any other observation, or a record of another kind (`cmd`, `tb`, `time`, `input`) in a span: reported. The replay
@@ -946,8 +959,9 @@ in `replay/tests.rs`): the initiative roll's event removed and doubled (the even
 the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
 `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
 `proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
-the initiative roll's span, and a root's `rule_end` of another frame; an `invalid` note added to a phase-driven root, a
-presentation root and a command's attack is accepted and counted (the run stays valid). The phase-driven placing of a
+the initiative roll's span, a root's `rule_end` of another frame, a `stat_value` mutation and a `did` before
+`trig_end`; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
+accepted and counted (the run stays valid, `oracle_invalid` equal to the notes added). The phase-driven placing of a
 launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
 and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is
 tested on spans fed record by record, since no capture has a phase-driven attack with

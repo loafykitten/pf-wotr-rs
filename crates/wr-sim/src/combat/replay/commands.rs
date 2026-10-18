@@ -2142,10 +2142,6 @@ impl Inputs for Driver<'_> {
             w.combat.impatience.rolls.entry(c).or_default().push(seq);
         }
         self.imp_span(w, at, end);
-        self.out.spans.oracle_invalid += trace.records[at..=end]
-            .iter()
-            .filter(|x| x["k"] == "obs" && x["ev"] == "invalid")
-            .count();
         match rule.attack_hit {
             Some(hit) => Ok(hit),
             None => Err(Desync(format!("command {c}'s attack rule made no roll"))),
@@ -4231,6 +4227,9 @@ impl Driver<'_> {
                 "a UnitAttack rule's span with records of another frame, kind or rule",
             );
         }
+        // The oracle's own notes that the game's replay left its recording (`span_ok` took them).
+        self.out.spans.oracle_invalid +=
+            recs[at..=end].iter().filter(|x| x["k"] == "obs" && x["ev"] == "invalid").count();
         // Its provokes (accepted in the engagement controller's handler).
         for i in at..=end {
             let r = &self.trace.records[i];
