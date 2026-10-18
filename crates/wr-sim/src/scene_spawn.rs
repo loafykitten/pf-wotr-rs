@@ -208,6 +208,7 @@ fn spawn(w: &mut World, id: &str, view: &ViewInfo) -> Option<EntityIdx> {
         u.position = view.position;
         u.orientation = yaw;
     }
+    crate::combat::vision::note_position_write(w, e);
     // `EntityCreator.SpawnUnit`: `unitEntityData.IsInGame = !current.SpawnHidden` (the
     // setter: a change raises `IInGameHandler` and `OnIsInGameChanged`).
     crate::entity::set_is_in_game(w, e, true);

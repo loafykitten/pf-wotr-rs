@@ -262,7 +262,15 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
   last frame has none, nor does a unit without rows. WrathOracle writes a unit's `u` row (when it changed) only while the
   unit is awake, and `UnitRoamingController` moves sleeping units, so the last row gives the position at a frame only when
   it is of that frame or the observer saw the unit awake then (its `awake_set`/`awake` records); a sleeping unit's position
-  is unknown. (With the driven agent the positions are the sim's, its roaming included.) A position that isn't the driven agent's or a row's is never taken as
+  is unknown. The next prefix's row is where the unit stood at the vision phase only if nothing moved it later in the
+  frame: the sim counts its own position writes (`note_position_write`: spawns, view replacement, companions placed,
+  roaming, the movement controller), and without the driven agent a frame's comparisons wait for its end; a unit the sim
+  moved after the phase has its queries and its collider's pairs of that frame left to the recording, and its collider
+  lost (counted as `units moved by the sim after the phase`). (With the driven agent the positions are the sim's at the
+  phase, its roaming included.)
+- **Every vision record is consumed.** Each `vis`, `los`, `los_clear`, `los_geometry`, `los_geom` and `los_probe` record
+  must reach its handler exactly once; one that none consumed by the run's end (inside a root rule's span the replay
+  drives, whose records it skips, say) is reported (`vision records unconsumed`). A position that isn't the driven agent's or a row's is never taken as
   known: a capsule there decides nothing (cause position, and no evidence about the result buffer), and a collider there
   is lost until its position is known and an update the sim models has run.
 - **Radius against corpulence.** A radius stays known only while the unit's corpulence is known and equal to the one it
@@ -464,9 +472,9 @@ change on the decided pairs. 1,218,083 `near` leaves equal given the creation-or
 assuming more: the unknown corpulences as 0.5 to 4.0 and the scale as exactly 1 (18.9 million pairs decided, 147,756
 left), then the corpulence valid until a size sample changed (19.9 million decided, 41.2 million left).
 
-Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, now 16 cases on `-111`/tb-nearest,
+Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reported`, now 17 cases on `-111`/tb-nearest,
 each reported): the 14 above (a `vis` record missing a unit or removing one that wasn't there are now reported by the
-overlap too) and a change with no record (a `vis` record deleted), a unit of known corpulence more than 14 m away added to a set.
+overlap too) and a change with no record (a `vis` record deleted), a unit of known corpulence more than 14 m away added to a set, a `vis` record inside a driven root span (unconsumed).
 
 ### What stays recorded
 
@@ -554,6 +562,9 @@ can also be absorbed:
   can't see (a move away and back between two ticks): the sim keeps the radius because the corpulence it knows didn't
   change. Any change it knows of (a value, or the corpulence becoming unknown) makes the radius unknown until a modelled
   update (a hide and a return between two ticks is counted by `set_is_in_game` and is one).
+- **Can be absorbed, besides (without the driven agent):** a position write after the vision phase that the sim doesn't
+  run (an unported ability or action, a cutscene's move): the next prefix's row then stands for the unit's position at
+  the phase although it isn't. The sim's own writes are counted and fail closed (above); the others are assumed absent.
 - **Only a false report:** the memory and line-of-sight items above.
 - **Neither (the pairs are the recording's, counted):** the result buffer (more than 512 colliders possibly in reach; an
   impossible set size is reported); the bounds queue and fades (a collider of a unit out of the game, or after a frame

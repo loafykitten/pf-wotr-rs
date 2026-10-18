@@ -471,6 +471,7 @@ fn set_position(w: &mut World, u: EntityIdx, p: [f32; 3]) {
     if let Some(x) = w.unit_mut(u) {
         x.position = p;
     }
+    crate::combat::vision::note_position_write(w, u);
     if !w.woken_at_load.contains(&u) {
         w.woken_at_load.push(u);
     }

@@ -216,6 +216,7 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
         u.position = p.position;
         u.orientation = p.orientation;
     }
+    crate::combat::vision::note_position_write(w, e);
     // `SetStealthData(m_Stealth)` replaces the unit's fresh `UnitStealth`: a saved state
     // that differs from it is reported with the placeholder's unmodelled members.
     // `MarkExtra()`: `IsExtra` (an extra sleeps out of the camera's frustum: its awake state is
@@ -732,6 +733,7 @@ pub fn change_unit_blueprint(
         u.position = position;
         u.orientation = orientation;
     }
+    crate::combat::vision::note_position_write(w, e);
     w.player.creation_queue.push((e, to_cross_state));
     w.coverage.context = None;
     Some(e)

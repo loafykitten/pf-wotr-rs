@@ -37,6 +37,9 @@ pub(super) fn vision_radius(w: &World, u: EntityIdx) -> Result<f32, String> {
     Ok(if 11.7f32 > num { 11.7 } else { num })
 }
 
+/// The vision records `vis_record` consumes.
+const VIS_RECORDS: [&str; 6] = ["vis", "los", "los_clear", "los_geometry", "los_geom", "los_probe"];
+
 /// The driver's line-of-sight state.
 #[derive(Debug, Default)]
 pub(super) struct VisDriver {
@@ -54,6 +57,8 @@ pub(super) struct VisDriver {
     /// The frame whose cache phase ran.
     phase_frame: Option<i64>,
     pub(super) range: super::vision_range::RangeDriver,
+    /// The vision records (by `seq`) not consumed yet; each must reach `vis_record` once.
+    unconsumed: HashMap<i64, String>,
     pub counts: VisCounts,
 }
 
@@ -121,6 +126,12 @@ pub struct VisCounts {
     /// Frames the bounds controller wasn't followed in (skipped, or a mode the sim doesn't
     /// model): every collider lost until its next update.
     pub range_frames_lost: usize,
+    /// Without the driven agent, units whose position the sim wrote after the vision phase of a
+    /// frame (their pairs of that frame left to the recording, their colliders lost).
+    pub range_moved_after: usize,
+    /// Vision records (`vis`, `los`, `los_clear`, `los_geometry`, `los_geom`, `los_probe`) no
+    /// handler consumed (each reported).
+    pub records_unconsumed: usize,
     /// The group memory's near units (`ExtractNearUnits`, the members' sets in the overlap's
     /// order) the sim computed and found equal to the recording's.
     pub near_unions_given_order: usize,
@@ -244,6 +255,14 @@ impl Driver<'_> {
         }
         self.vis.last_tick = last;
         self.vis.counts.range_closest_um = u64::MAX;
+        for r in &trace.records {
+            if r["k"] == "obs"
+                && let (Some(ev), Some(seq)) = (r["ev"].as_str(), r["seq"].as_i64())
+                && VIS_RECORDS.contains(&ev)
+            {
+                self.vis.unconsumed.insert(seq, ev.to_owned());
+            }
+        }
         self.vis.range.start(trace);
     }
 
@@ -294,6 +313,11 @@ impl Driver<'_> {
 
     /// A `vis`, `los`, `los_clear` or `los_geometry` record.
     pub(super) fn vis_record(&mut self, w: &mut World, r: &Rv) {
+        // Each is consumed once.
+        if r["seq"].as_i64().and_then(|s| self.vis.unconsumed.remove(&s)).is_none() {
+            Self::vis_report(w, "a vision record handled twice, or without a seq");
+            return;
+        }
         // Each is of the frame it's made in.
         if r["t"].as_i64() != Some(self.tick) {
             Self::vis_report(w, "a record of another frame");
@@ -529,6 +553,7 @@ impl Driver<'_> {
             return;
         }
         self.vis.range.expect.clear();
+        self.vis_range_frame_end(w);
         if !w.combat.vision.clears.is_empty() {
             w.combat.vision.clears.clear();
             Self::vis_report(w, "the sim cleared a sight cache the game didn't");
@@ -564,6 +589,14 @@ impl Driver<'_> {
         k.unmodelled_fills = c.unmodelled_fills;
         k.obstacle_reads = c.obstacle_reads;
         k.range_made_later = w.combat.vision.bounds.made_later;
+        // Records no handler took (inside a span another reader skipped, say): their content
+        // was never checked.
+        let mut left: Vec<(i64, String)> = self.vis.unconsumed.drain().collect();
+        left.sort();
+        k.records_unconsumed = left.len();
+        for (seq, ev) in left {
+            Self::vis_report(w, &format!("a {ev} record (seq {seq}) no handler consumed"));
+        }
         self.out.vision = Some(self.vis.counts.clone());
         self.out.vision_off = None;
     }

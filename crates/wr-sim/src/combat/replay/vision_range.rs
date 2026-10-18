@@ -66,6 +66,12 @@ pub(super) struct RangeDriver {
     /// awake, so a row carries to a later frame only through frames the unit was awake in.
     awake_set: Option<(i64, HashSet<String>)>,
     awake_ev: HashMap<String, Vec<(i64, bool)>>,
+    /// Without the driven agent, the frame's comparisons, made at its end (the unit, its overlap,
+    /// the recording's set, whether a record gave it).
+    pending: Vec<(EntityIdx, Vec<Hit>, HashSet<EntityIdx>, bool)>,
+    /// The sim's position writes per unit ([`crate::combat::vision::Vision::pos_writes`]) at the
+    /// frame's vision phase (`None`: it didn't run in this frame).
+    writes_at_phase: Option<HashMap<EntityIdx, u64>>,
     /// The Unity frame of the last tick the bounds controller was followed in.
     last_frame: Option<i64>,
     /// The physics clock after the last frame it was advanced to: `Time.time - Time.fixedTime`,
@@ -210,14 +216,32 @@ impl Driver<'_> {
         rest.sort();
         order.extend(rest);
         w.combat.vision.near_order.insert(u, order);
-        let d = range::differences(&hits, set);
-        let diffs = d.diffs;
         // A set holding a collider of unknown place in the order has an unknown order.
         if hits.iter().filter(|h| set.contains(&h.unit)).all(|h| h.order_known) {
             w.combat.vision.near_inexact.remove(&u);
         } else {
             w.combat.vision.near_inexact.insert(u);
         }
+        if self.vis.ag {
+            self.vis_range_judge(w, u, &hits, set, rec);
+        } else {
+            // Without the driven agent the positions are the next prefix's rows: whether a
+            // position write after this phase moved a unit is known at the frame's end.
+            self.vis.range.pending.push((u, hits, set.clone(), rec));
+        }
+    }
+
+    /// The comparison of a unit's overlap with the recording's set, counted and reported.
+    fn vis_range_judge(
+        &mut self,
+        w: &mut World,
+        u: EntityIdx,
+        hits: &[Hit],
+        set: &HashSet<EntityIdx>,
+        rec: bool,
+    ) {
+        let d = range::differences(hits, set);
+        let diffs = d.diffs;
         let c = &mut self.vis.counts;
         c.range_sets_compared += 1;
         c.range_changes += usize::from(rec);
@@ -414,6 +438,7 @@ impl Driver<'_> {
             );
         }
         self.vis.range.expect.clear();
+        self.vis.range.writes_at_phase = Some(w.combat.vision.pos_writes.clone());
         if m == super::mode::PAUSE {
             return;
         }
@@ -491,6 +516,40 @@ impl Driver<'_> {
             }
         }
         Some(out)
+    }
+
+    /// A frame's end, without the driven agent: a unit whose position the sim wrote after the
+    /// vision phase (an ability, a command, a spawn, roaming) stood elsewhere at the phase than the
+    /// next prefix's row says, so its queries and its collider's pairs of the frame are the
+    /// recording's, and its collider is lost (the transform the tick set from the row is wrong).
+    /// Then the frame's comparisons are made.
+    pub(super) fn vis_range_frame_end(&mut self, w: &mut World) {
+        // (Only a frame whose vision phase ran has comparisons and colliders set from rows.)
+        let Some(at_phase) = self.vis.range.writes_at_phase.take() else { return };
+        if self.vis.ag {
+            return;
+        }
+        let moved: HashSet<EntityIdx> = w
+            .combat
+            .vision
+            .pos_writes
+            .iter()
+            .filter(|(u, n)| at_phase.get(u).copied().unwrap_or(0) != **n)
+            .map(|(u, _)| *u)
+            .collect();
+        for u in &moved {
+            w.combat.vision.bounds.lose_unit(*u);
+        }
+        self.vis.counts.range_moved_after += moved.len();
+        for (u, mut hits, set, rec) in std::mem::take(&mut self.vis.range.pending) {
+            for h in &mut hits {
+                if moved.contains(&u) || moved.contains(&h.unit) {
+                    (h.tri, h.cause, h.margin, h.guess, h.capped) =
+                        (range::Tri::Maybe, Some(range::Cause::Position), None, None, None);
+                }
+            }
+            self.vis_range_judge(w, u, &hits, &set, rec);
+        }
     }
 
     /// The margins of a query's pairs.

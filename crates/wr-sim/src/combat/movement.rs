@@ -81,6 +81,7 @@ pub fn tick_unit(w: &mut World, u: EntityIdx, inp: &mut dyn MoveInputs) -> R<()>
         let move_dir = unit.combat.agent.move_dir;
         let mut o =
             Orientation { value: unit.orientation, desired: unit.combat.desired_orientation };
+        crate::combat::vision::note_position_write(w, u);
         // `!TacticalCombatHelper.IsActive || IsReallyMoving`: tactical combat isn't modelled
         // (and is never active in these fights), so the gate holds.
         orientation::tick_unit_write(
@@ -104,6 +105,7 @@ pub fn tick_unit(w: &mut World, u: EntityIdx, inp: &mut dyn MoveInputs) -> R<()>
             let unit = w.unit_mut(u).ok_or_else(|| Desync("no unit".into()))?;
             unit.position = after;
             unit.combat.agent.pos = view;
+            crate::combat::vision::note_position_write(w, u);
         }
     }
     if inp.saddled_unit(w, u)? {

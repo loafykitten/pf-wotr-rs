@@ -153,6 +153,10 @@ pub struct Vision {
     /// Per unit, how many changes of `IsInGame` the sim has seen (a return puts the entity on the
     /// bounds controller's update list, even when it left and came back between two ticks).
     pub in_game_gen: HashMap<EntityIdx, u64>,
+    /// Per unit, how many writes of its position the sim made (its own movers: the agent,
+    /// roaming, spawns, view replacement, companions placed); without the driven agent a write
+    /// after the vision phase means the next prefix's row isn't where the unit stood at it.
+    pub pos_writes: HashMap<EntityIdx, u64>,
     /// Units whose collider may be fade-hiding with its `enabled` kept: a `HideUnit` with `Fade`
     /// hid them, or they were not in the game at the window's first tick (a fade may have begun
     /// before). While the fade runs (`EntityViewBase.m_IsFadeHide`) `UpdateViewActive` returns
@@ -702,4 +706,9 @@ pub fn note_size_change(w: &mut World, e: EntityIdx) {
     if w.unit(e).is_some() {
         *w.combat.vision.size_gen.entry(e).or_default() += 1;
     }
+}
+
+/// The sim wrote a unit's position ([`Vision::pos_writes`]).
+pub fn note_position_write(w: &mut World, e: EntityIdx) {
+    *w.combat.vision.pos_writes.entry(e).or_default() += 1;
 }

@@ -6479,7 +6479,7 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
         r[k][i] = json!(f64::from(f32::from_bits((x as f32).to_bits() + 1)));
     }
     const X: &str = "driven replay: vision:";
-    let cases: [Change; 16] = [
+    let cases: [Change; 17] = [
         // The leaves the sim answers.
         |recs| {
             let at = pos(recs, |r| leaf(r, "uc_v") && r["u"].is_string());
@@ -6605,6 +6605,20 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
                 })
                 .expect("a far unit");
             recs[at]["add"].as_array_mut().unwrap().push(json!(far));
+        },
+        // A `vis` record inside a root rule's span (the span is driven, its records skipped):
+        // no handler consumes it, and that is reported.
+        |recs| {
+            let at = pos(recs, |r| {
+                r["k"] == "rule"
+                    && r["depth"] == 0
+                    && r["class"] == "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll"
+            });
+            let u = recs[at]["initiator"]["$unit"].clone();
+            let g = json!({"seq": 0, "k": "obs", "t": recs[at]["t"], "ev": "vis", "u": u,
+                "add": ["5052"], "rem": []});
+            recs.insert(at + 1, g);
+            renumber(recs);
         },
         // The geometry changed at run time (not modelled).
         |recs| {

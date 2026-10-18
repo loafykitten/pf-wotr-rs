@@ -481,6 +481,15 @@ impl Bounds {
         self.gap = true;
     }
 
+    /// A unit's collider whose transform the sim set from a wrong position: lost until its next
+    /// modelled update.
+    pub fn lose_unit(&mut self, u: EntityIdx) {
+        for c in self.colliders.iter_mut().filter(|c| c.unit == u) {
+            c.lose();
+            c.seen = None;
+        }
+    }
+
     /// `OverlapCapsule` for a unit at `pos` with vision radius `r`: every collider that is or may
     /// be enabled, in the order they were made.
     #[must_use]
