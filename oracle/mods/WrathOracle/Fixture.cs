@@ -375,6 +375,8 @@ internal static class Fidelity
         if (CommandObs.BoundsOn) Observers.Add("bounds_set");
         // EntityBoundsController's scene made anew (bounds_scene).
         if (CommandObs.BoundsOn) Observers.Add("bounds_scene");
+        // Each Physics.SyncTransforms the game calls, by caller (phys_sync).
+        if (CommandObs.BoundsOn) Observers.Add("phys_sync");
         // Each awake unit's CanBeInVisionRange in enumeration order when it changes (vis_order; Observe.cs).
         Observers.Add("vis_order");
         if (PhysProbe.Installed) Observers.Add("phys_probe");

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Reflection.Emit;
 using System.Reflection;
 using HarmonyLib;
 using Kingmaker.Controllers.Optimization;
@@ -52,6 +54,13 @@ namespace WrathOracle;
 // (at its first tick, or after the scene was unloaded: the main menu's cleanup does that after resetting the game, and
 // a debug cheat does it in play, destroying every collider without a record): a replay must refuse a run with one
 // after the window's start.
+// Observer "phys_sync" (with bounds_tick): each Physics.SyncTransforms() the game calls (which flushes every changed
+// transform to PhysX, the bounds scene's included, outside the fixed steps): src names the caller
+// (Polymorph.RestoreView, UnitPlaceOnGroundController.Tick's forced place, GameActionSetIsleState.RunAction,
+// IsleStateControllerView.ResetAllIslands), and "DollRoom.Update" for DollRoom's PhysicsScene.Simulate (made only when
+// Physics.autoSimulation is off: the player's simulate flushes every pending transform the same way, the bounds
+// scene's included). A transpiler replaces each call with a tap that writes the record and then makes the call, so a
+// record is exactly a sync (the callers' conditions included).
 internal static partial class CommandObs
 {
     private static readonly AccessTools.FieldRef<EntityDataLink, EntityDataBase> LinkEntityField =
@@ -99,7 +108,7 @@ internal static partial class CommandObs
 
     private struct BoundsBefore { public bool Had; public float R; }
 
-    private static void InstallBounds(Action<MethodBase, string, string, string> patch)
+    private static void InstallBounds(Harmony h, Action<MethodBase, string, string, string> patch)
     {
         var failed = Health.FailedCount;
         var m = AccessTools.Method(typeof(EntityBoundsController), "TickEntity");
@@ -117,6 +126,7 @@ internal static partial class CommandObs
         var tick = AccessTools.Method(typeof(EntityBoundsController), nameof(EntityBoundsController.Tick));
         if (tick == null) Health.Failed("bounds observe: EntityBoundsController.Tick missing", new Exception("Tick"));
         else patch(tick, nameof(BoundsSceneTickPrefix), null, null);
+        InstallSyncTaps(h);
         BoundsOn = Health.FailedCount == failed;
     }
 
@@ -261,5 +271,77 @@ internal static partial class CommandObs
             if (!__instance.Scene.IsValid()) Sched.Obs("bounds_scene");
         }
         catch (Exception e) { Trace.HookFailed("observe bounds_scene", e); }
+    }
+    private static readonly MethodInfo SyncTransformsMethod = AccessTools.Method(typeof(Physics), nameof(Physics.SyncTransforms));
+
+    private static void SyncTap(string src)
+    {
+        if (On && BoundsOn)
+        {
+            try { Sched.Obs("phys_sync", j => j.Prop("src", src)); }
+            catch (Exception e) { Trace.HookFailed("observe phys_sync", e); }
+        }
+        Physics.SyncTransforms();
+    }
+
+    public static void SyncTapPolymorph() => SyncTap("Polymorph.RestoreView");
+    public static void SyncTapPlace() => SyncTap("UnitPlaceOnGroundController.Tick");
+    public static void SyncTapIsleAction() => SyncTap("GameActionSetIsleState.RunAction");
+    public static void SyncTapIsleReset() => SyncTap("IsleStateControllerView.ResetAllIslands");
+
+    private static readonly MethodInfo SimulateMethod =
+        AccessTools.Method(typeof(PhysicsScene), nameof(PhysicsScene.Simulate), new[] { typeof(float) });
+
+    // DollRoom's m_PhysicsScene.Simulate(dt): the call's receiver is the field's address.
+    public static void SyncTapDoll(ref PhysicsScene scene, float step)
+    {
+        if (On && BoundsOn)
+        {
+            try { Sched.Obs("phys_sync", j => j.Prop("src", "DollRoom.Update")); }
+            catch (Exception e) { Trace.HookFailed("observe phys_sync", e); }
+        }
+        scene.Simulate(step);
+    }
+
+    private static readonly Dictionary<IntPtr, string> SyncTaps = new Dictionary<IntPtr, string>();
+
+    public static IEnumerable<CodeInstruction> SyncTapTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
+    {
+        SyncTaps.TryGetValue(original.MethodHandle.Value, out var tap);
+        foreach (var i in instructions)
+        {
+            var target = tap == nameof(SyncTapDoll) ? SimulateMethod : SyncTransformsMethod;
+            if (tap != null && i.opcode == OpCodes.Call && i.operand is MethodInfo mi && mi == target)
+            {
+                i.operand = AccessTools.Method(typeof(CommandObs), tap);
+                var k = "sync:" + tap;
+                Tapped[k] = Tapped.TryGetValue(k, out var n) ? n + 1 : 1;
+            }
+            yield return i;
+        }
+    }
+
+    private static void InstallSyncTaps(Harmony h)
+    {
+        var targets = new (MethodBase m, string tap)[]
+        {
+            (AccessTools.Method(typeof(Kingmaker.UnitLogic.Buffs.Polymorph), "RestoreView"), nameof(SyncTapPolymorph)),
+            (AccessTools.Method(typeof(Kingmaker.Controllers.Units.UnitPlaceOnGroundController), "Tick"), nameof(SyncTapPlace)),
+            (AccessTools.Method(typeof(Kingmaker.ElementsSystem.GameActionSetIsleState), "RunAction"), nameof(SyncTapIsleAction)),
+            (AccessTools.Method(typeof(Locations.Alushenyrra.IsleStateControllerView), "ResetAllIslands"), nameof(SyncTapIsleReset)),
+            (AccessTools.Method(typeof(Kingmaker.UI.ServiceWindow.DollRoom), "Update", new[] { typeof(bool) }), nameof(SyncTapDoll)),
+        };
+        if (SimulateMethod == null || SimulateMethod.ReturnType != typeof(void))
+            Health.Failed("bounds observe: PhysicsScene.Simulate(float) isn't the void method the doll tap replaces", new Exception("Simulate"));
+        foreach (var (m, tap) in targets)
+        {
+            if (m == null) { Health.Failed("bounds observe: a SyncTransforms caller is missing", new Exception(tap)); continue; }
+            SyncTaps[m.MethodHandle.Value] = tap;
+            try { h.Patch(m, transpiler: new HarmonyMethod(typeof(CommandObs), nameof(SyncTapTranspiler))); }
+            catch (Exception e) { Health.Failed("patch " + m.DeclaringType?.Name + "." + m.Name + " (sync tap)", e); continue; }
+            var k = "sync:" + tap;
+            if (!Tapped.TryGetValue(k, out var n) || n != 1)
+                Health.Failed("bounds observe: tap " + k + " replaced " + (Tapped.TryGetValue(k, out var x) ? x : 0) + " calls, not 1", new Exception(k));
+        }
     }
 }

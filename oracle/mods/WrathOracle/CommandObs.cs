@@ -1692,7 +1692,7 @@ internal static partial class CommandObs
         InstallMemory(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
 
         // The entity-bounds colliders (observers "bounds_init", "bounds_tick", CommandObsBounds.cs).
-        InstallBounds((m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
+        InstallBounds(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
 
         // What turn-based paths are computed on and with (observer "paths", CommandObsPaths.cs).
         InstallPaths(h, (m, prefix, postfix, finalizer) => P(m, prefix, postfix, finalizer));
