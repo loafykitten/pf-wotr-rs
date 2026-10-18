@@ -272,6 +272,9 @@ pub struct Unit {
     /// builds such a unit's view from the doll prefab: `true` female), for a unit hydrated from
     /// a save without one; `None` for a unit without the part or not hydrated.
     pub doll_gender_female: Option<bool>,
+    /// The unit was spawned from a placeholder saved with a doll (`UnitSpawningData.Doll`): its
+    /// view was made from the doll, which one isn't known.
+    pub spawned_with_doll: bool,
     /// The save had a `UnitPartDollData` (read: [`Self::doll_gender_female`], or no `RacePreset`).
     pub doll_hydrated: bool,
     /// `UnitState.Prone.Active` (saved).

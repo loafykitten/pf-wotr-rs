@@ -235,6 +235,11 @@ fn view_source(w: &World, u: EntityIdx) -> Result<Source, Cause> {
     if has_part(w, u, "UnitPartRider") {
         return Err(Cause::Rider);
     }
+    // A placeholder saved with a doll: the view was made from the doll (`EntityCreator.
+    // SpawnUnit`), whichever prefab the spawning data names.
+    if x.spawned_with_doll {
+        return Err(Cause::Doll);
+    }
     if polymorph_active(w, u) {
         return Err(Cause::Polymorph);
     }
@@ -273,16 +278,6 @@ fn view_source(w: &World, u: EntityIdx) -> Result<Source, Cause> {
         .ok_or(Cause::NoPrefab)
 }
 
-/// `Descriptor.OriginalSize`: the race's size, else the blueprint's (read from the content, as
-/// a race set after the unit was built moves it; the unit's stored size when the content has
-/// neither).
-fn original_size(w: &World, u: EntityIdx) -> Option<Size> {
-    let x = w.unit(u)?;
-    let race = x.progression.race.and_then(|g| w.content.get(g)).map(|b| b.view().int("Size"));
-    let bp = x.blueprint.and_then(|g| w.content.get(g)).map(|b| b.view().int("Size"));
-    race.or(bp).map_or(x.original_size, Size::from_i64)
-}
-
 /// `m_RacialPetScaleCoeff`: 1 without a master; with one, `MountModelSizing.GetCoeff` of the
 /// master's race, known only when no entry of the table differs from 1 (the field is set once,
 /// in `Start`).
@@ -303,6 +298,12 @@ fn pet_coefficient(w: &World, u: EntityIdx) -> Result<f32, Cause> {
 ///
 /// The [`Cause`] the sim can't establish it by.
 pub fn corpulence(w: &mut World, u: EntityIdx) -> Result<f32, Cause> {
+    // The view's `Update` reads `State.Size` every frame, and the getter keeps what it first
+    // read (`m_Size = Owner.OriginalSize`): a race set later moves `OriginalSize` and not it.
+    // The sim's other readers do the same (`spawn::state_size`).
+    if w.unit(u).is_some_and(|x| !x.size_part_from_save) {
+        crate::spawn::state_size(w, u);
+    }
     let prefab = match view_source(w, u)? {
         Source::Prefab(guid) => {
             let table = w.scene.unit_prefabs.as_ref().ok_or(Cause::NoTable)?;
@@ -329,8 +330,9 @@ pub fn corpulence(w: &mut World, u: EntityIdx) -> Result<f32, Cause> {
     if x.size_part_from_save {
         return Err(Cause::Size);
     }
-    let original = original_size(w, u).ok_or(Cause::Size)?;
-    let size = x.state_size.unwrap_or(original);
+    // (`Descriptor.OriginalSize` is the race's size, else the blueprint's: `set_race` keeps it.)
+    let original = x.original_size.ok_or(Cause::Size)?;
+    let size = x.state_size.ok_or(Cause::Size)?;
     let inputs = ScaleInputs {
         original,
         size,

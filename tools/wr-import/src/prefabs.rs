@@ -105,29 +105,44 @@ pub fn summarize(views: &[ViewFound]) -> UnitPrefab {
 ///
 /// An object that can't be read, or a view without `m_IsInGame`.
 pub fn views_in(f: &SerializedFile) -> Result<Vec<(i64, ViewFound)>> {
-    // (game object path id, value) of this file's views and size-scale overrides.
-    let mut views: Vec<(i64, Value)> = Vec::new();
-    let mut overrides: Vec<(i64, Value)> = Vec::new();
+    let mut monos = Vec::new();
     for o in f.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR) {
-        let v = f.read(o)?;
-        let go = v.get("m_GameObject").and_then(Value::as_pptr).map_or(0, |p| p.path_id);
+        monos.push(f.read(o)?);
+    }
+    views_among(&monos)
+}
+
+/// The `UnitEntityView`s among a file's `MonoBehaviour`s, each with its game object's path id
+/// and the `OverrideSizeScale`s on that same game object (`GetComponentNonAlloc` looks at the
+/// view's own game object only).
+///
+/// # Errors
+///
+/// A view without `m_IsInGame`.
+pub fn views_among(monos: &[Value]) -> Result<Vec<(i64, ViewFound)>> {
+    let game_object =
+        |v: &Value| v.get("m_GameObject").and_then(Value::as_pptr).map_or(0, |p| p.path_id);
+    let overrides: Vec<(i64, &Value)> = monos
+        .iter()
+        .filter(|v| v.get("m_ScaleStepCoefficient").is_some() && v.get("m_MaxScale").is_some())
+        .map(|v| (game_object(v), v))
+        .collect();
+    let mut out = Vec::new();
+    for v in monos {
         let is_view = v.get("UniqueId").is_some()
             && v.get("m_Corpulence").is_some()
             && v.get("m_SoftColliderRadius").is_some();
-        if is_view {
-            if v.get("m_IsInGame").and_then(Value::as_bool).is_none() {
-                anyhow::bail!("UnitEntityView without m_IsInGame");
-            }
-            views.push((go, v));
-        } else if v.get("m_ScaleStepCoefficient").is_some() && v.get("m_MaxScale").is_some() {
-            overrides.push((go, v));
+        if !is_view {
+            continue;
         }
-    }
-    Ok(views
-        .into_iter()
-        .map(|(go, v)| {
-            let found = ViewFound {
-                in_game: v.get("m_IsInGame").and_then(Value::as_bool),
+        let Some(in_game) = v.get("m_IsInGame").and_then(Value::as_bool) else {
+            anyhow::bail!("UnitEntityView without m_IsInGame");
+        };
+        let go = game_object(v);
+        out.push((
+            go,
+            ViewFound {
+                in_game: Some(in_game),
                 corpulence: v.get("m_Corpulence").and_then(Value::as_f32),
                 overrides: overrides
                     .iter()
@@ -139,10 +154,10 @@ pub fn views_in(f: &SerializedFile) -> Result<Vec<(i64, ViewFound)>> {
                         )
                     })
                     .collect(),
-            };
-            (go, found)
-        })
-        .collect())
+            },
+        ));
+    }
+    Ok(out)
 }
 
 /// The `UnitEntityView`s of one bundle.
@@ -199,6 +214,65 @@ mod tests {
             corpulence: Some(corp),
             overrides: over.iter().map(|(a, b)| (Some(*a), Some(*b))).collect(),
         }
+    }
+
+    fn pptr(path_id: i64) -> Value {
+        Value::Object(vec![
+            ("m_FileID".into(), Value::Int(0)),
+            ("m_PathID".into(), Value::Int(path_id)),
+        ])
+    }
+
+    /// A `UnitEntityView` `MonoBehaviour` on game object `go`.
+    fn view_mono(go: i64, corp: f32) -> Value {
+        Value::Object(vec![
+            ("m_GameObject".into(), pptr(go)),
+            ("UniqueId".into(), Value::Str(String::new())),
+            ("m_Corpulence".into(), Value::Float(corp)),
+            ("m_SoftColliderRadius".into(), Value::Float(0.3)),
+            ("m_IsInGame".into(), Value::Bool(true)),
+        ])
+    }
+
+    /// An `OverrideSizeScale` `MonoBehaviour` on game object `go`.
+    fn override_mono(go: i64, step: f32, max: f32) -> Value {
+        Value::Object(vec![
+            ("m_GameObject".into(), pptr(go)),
+            ("m_ScaleStepCoefficient".into(), Value::Float(step)),
+            ("m_MaxScale".into(), Value::Float(max)),
+        ])
+    }
+
+    #[test]
+    fn an_override_belongs_to_the_view_on_its_own_game_object() {
+        let monos = [
+            view_mono(1, 0.9),
+            override_mono(2, 0.1, 2.0),
+            view_mono(2, 0.5),
+            override_mono(2, 0.5, 4.0),
+            override_mono(3, 0.3, 3.0),
+        ];
+        let found = views_among(&monos).unwrap();
+        assert_eq!(found.len(), 2);
+        let (go, first) = &found[0];
+        assert_eq!((*go, first.corpulence), (1, Some(0.9)));
+        assert!(first.overrides.is_empty(), "another object's override isn't the view's");
+        let (go, second) = &found[1];
+        assert_eq!((*go, second.corpulence), (2, Some(0.5)));
+        assert_eq!(second.overrides, vec![(Some(0.1), Some(2.0)), (Some(0.5), Some(4.0))]);
+        // Two on one game object: the summary leaves the override unknown.
+        assert_eq!(summarize(std::slice::from_ref(second)).override_present, None);
+        assert_eq!(summarize(std::slice::from_ref(first)).override_present, Some(false));
+    }
+
+    #[test]
+    fn an_override_alone_or_a_view_without_in_game_is_not_a_view() {
+        assert!(views_among(&[override_mono(1, 0.5, 4.0)]).unwrap().is_empty());
+        let mut v = view_mono(1, 0.5);
+        if let Value::Object(f) = &mut v {
+            f.retain(|(k, _)| k != "m_IsInGame");
+        }
+        assert!(views_among(&[v]).is_err());
     }
 
     #[test]

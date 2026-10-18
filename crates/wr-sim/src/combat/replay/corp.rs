@@ -9,11 +9,15 @@
 //! side of it: it is counted, not compared. A value the sim can't establish is counted by its
 //! cause. Equal means the same bits; a difference is reported (the run is invalid).
 //!
-//! WrathOracle's `bounds_init` and `bounds_tick` records (the entity-bounds colliders) are a second
-//! check where a recording has them: `EntityBoundsController.TickEntity` leaves a collider's radius
+//! WrathOracle's `bounds_tick` records (the entity-bounds colliders) are a second check where a
+//! recording has them: `EntityBoundsController.TickEntity` leaves a collider's radius
 //! within 0.05 of `Max(0.05, Corpulence)` (the hysteresis; exactly it for a view of scale 1 at its
 //! first tick), whatever the view's scale, so the sim's corpulence must put every recorded radius
-//! inside that band. Counted apart: exact, in the band, outside it (reported).
+//! inside that band. Counted apart: exact, in the band, outside it (reported). A `bounds_init`
+//! radius is not compared: the controller only ticks the entities on its update list (a move, a
+//! game-state change, `HandleUnitSizeChanged`), and a corpulence that changed without one of those
+//! (`AddUnitScale` resets the size scale but raises no size event) leaves the old radius until
+//! something queues the entity, so the band holds only after a tick of that collider.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -39,7 +43,7 @@ pub struct CorpCounts {
     pub differ: usize,
     /// Reads of a value the sim can't establish, by cause.
     pub unknown: BTreeMap<&'static str, usize>,
-    /// The colliders' radii of `bounds_init` and `bounds_tick` of units: with a sim corpulence, the
+    /// The colliders' radii of `bounds_tick` of units: with a sim corpulence, the
     /// radius equal to `Max(0.05, Corpulence)`, within the 0.05 band around it, outside it (each
     /// reported); without one (an event in the entry, or no value).
     pub bounds_reads: usize,
@@ -63,7 +67,7 @@ struct Read {
     at: usize,
     unit: String,
     value: f32,
-    /// A collider's radius (`bounds_init`, `bounds_tick`) rather than a `Corpulence` read.
+    /// A collider's radius (`bounds_tick`) rather than a `Corpulence` read.
     radius: bool,
 }
 
@@ -92,6 +96,10 @@ impl CorpDriver {
                 continue;
             }
             if matches!(r["ev"].as_str(), Some("bounds_init" | "bounds_tick")) {
+                if r["ev"] != "bounds_tick" {
+                    // (An init radius is unrelated to the corpulence: see above.)
+                    continue;
+                }
                 if let (Some(u), Some(v)) = (r["e"].as_str(), value(&r["r"]))
                     && r["x"].is_null()
                     && v.is_finite()
@@ -126,24 +134,43 @@ impl CorpDriver {
     }
 }
 
+/// Where a collider's radius after `TickEntity` stands against the corpulence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RadiusClass {
+    /// `ScaleRadius(Corpulence, 1)` itself.
+    Exact,
+    /// Within the hysteresis (a little more, for rounding).
+    Band,
+    Outside,
+}
+
+fn radius_class(read: f32, corpulence: f32) -> RadiusClass {
+    let t = corpulence.max(0.05);
+    if read.to_bits() == t.to_bits() {
+        RadiusClass::Exact
+    } else if (read - t).abs() <= 0.05 + 1e-6 {
+        RadiusClass::Band
+    } else {
+        RadiusClass::Outside
+    }
+}
+
 impl Driver<'_> {
-    /// A recorded collider radius against the sim's corpulence (see the module comment).
+    /// A recorded collider radius (after a `TickEntity` of it) against the sim's corpulence (see the module comment).
     fn corp_radius(&mut self, w: &mut World, u: EntityIdx, id: &str, at: usize, read: f32) {
         let Ok(c) = corpulence::corpulence(w, u) else {
             self.corp.counts.bounds_unchecked += 1;
             return;
         };
-        // `ScaleRadius(Corpulence, 1)`, the band of the hysteresis (a little more, for rounding).
-        let t = c.max(0.05);
-        if read.to_bits() == t.to_bits() {
-            self.corp.counts.bounds_exact += 1;
-        } else if (read - t).abs() <= 0.05 + 1e-6 {
-            self.corp.counts.bounds_band += 1;
-        } else {
-            self.corp.counts.bounds_differ += 1;
-            w.coverage.unsupported(format!(
-                "driven replay: corpulence: {id}'s collider radius is {read} in the recording (record {at}), outside 0.05 of the sim's corpulence {c}"
-            ));
+        match radius_class(read, c) {
+            RadiusClass::Exact => self.corp.counts.bounds_exact += 1,
+            RadiusClass::Band => self.corp.counts.bounds_band += 1,
+            RadiusClass::Outside => {
+                self.corp.counts.bounds_differ += 1;
+                w.coverage.unsupported(format!(
+                    "driven replay: corpulence: {id}'s collider radius is {read} in the recording (record {at}), outside 0.05 of the sim's corpulence {c}"
+                ));
+            }
         }
     }
 
@@ -224,5 +251,45 @@ impl Driver<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn trace(records: &[serde_json::Value]) -> Trace {
+        Trace {
+            records: records.iter().map(Rv::from_json).collect(),
+            sites: std::collections::HashMap::default(),
+        }
+    }
+
+    #[test]
+    fn only_a_tick_of_a_collider_relates_its_radius_to_the_corpulence() {
+        let t = trace(&[
+            json!({"k": "obs", "ev": "bounds_init", "e": "u", "r": 0.5}),
+            json!({"k": "obs", "ev": "bounds_tick", "e": "u", "r": 0.75, "x": null}),
+            json!({"k": "obs", "ev": "bounds_tick", "e": "u", "r": 0.8, "x": "Exception"}),
+            json!({"k": "obs", "ev": "uc_v", "f": "corp", "u": "u", "v": "0.5"}),
+        ]);
+        let mut d = CorpDriver::default();
+        d.start(&t);
+        let radii: Vec<(usize, bool)> = d.reads.iter().map(|r| (r.at, r.radius)).collect();
+        // (The init radius, and the tick that threw, are no reads.)
+        assert_eq!(radii, vec![(1, true), (3, false)]);
+        assert_eq!(d.counts.reads, 1);
+    }
+
+    #[test]
+    fn a_radius_is_exact_in_the_band_or_outside_it() {
+        assert_eq!(radius_class(0.5, 0.5), RadiusClass::Exact);
+        assert_eq!(radius_class(0.49999997, 0.5), RadiusClass::Band);
+        assert_eq!(radius_class(0.55, 0.5), RadiusClass::Band);
+        assert_eq!(radius_class(0.56, 0.5), RadiusClass::Outside);
+        // A corpulence below the collider's minimum radius.
+        assert_eq!(radius_class(0.05, 0.01), RadiusClass::Exact);
     }
 }

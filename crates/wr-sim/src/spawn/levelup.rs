@@ -23,7 +23,7 @@ use wr_content::Guid;
 use crate::content::{Blueprint, View, is_a};
 use crate::feature_param::{self, FeatureParam};
 use crate::stats::ops;
-use crate::stats::types::StatType;
+use crate::stats::types::{Size, StatType};
 use crate::world::{CompRef, EntityIdx, FactIdx, FactKind, World};
 
 /// `LevelUpActionPriority`.
@@ -276,6 +276,12 @@ pub fn set_race(w: &mut World, u: EntityIdx, race: Guid) {
         }
     }
     w.unit_mut(u).expect("unit").progression.race = Some(race);
+    // `Descriptor.OriginalSize` is `Progression.Race?.Size ?? Blueprint.Size`: it follows the
+    // race (`State.Size` keeps what it was set to or first read).
+    let race_size = bp(w, Some(race)).and_then(|r| Size::from_i64(r.view().int("Size")));
+    if let Some(size) = race_size {
+        w.unit_mut(u).expect("unit").original_size = Some(size);
+    }
     if let Some(b) = bp(w, Some(race)) {
         crate::unit_facts::add_fact(w, u, &b);
     }

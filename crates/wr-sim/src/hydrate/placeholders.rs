@@ -81,6 +81,7 @@ impl Loader<'_> {
             vendor_table: o.guid("m_VendorTable"),
             has_prefab_id: o.str("m_PrefabId").is_some_and(|s| !s.is_empty()),
             prefab_id: o.str("m_PrefabId").filter(|s| !s.is_empty()).map(str::to_owned),
+            doll: o.get("m_DollData").is_some_and(|v| !matches!(v, wr_save::value::Value::Null)),
             optimized_hide: o.bool_or("m_IsOptimizedHide", false),
             pools: match o.get("m_Pools") {
                 Some(wr_save::value::Value::Seq(v)) => v.iter().filter_map(guid_of).collect(),

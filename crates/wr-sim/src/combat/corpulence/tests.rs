@@ -226,3 +226,30 @@ fn a_dummy_view_has_the_dummys_corpulence_until_the_real_view_is_made_again() {
     view_replaced(&mut w, u);
     assert_eq!(corpulence(&mut w, u), Ok(0.9));
 }
+
+#[test]
+fn a_race_set_after_the_size_was_read_moves_the_original_size_and_not_the_state_size() {
+    use wr_content::Guid;
+    use wr_content::node::Node;
+    // `State.Size`'s getter keeps `OriginalSize` as first read; `SetRace` resets the cache and
+    // moves `OriginalSize` (`Race.Size`): the scale then follows the difference.
+    let (mut w, u) = world(0.9);
+    let race = Guid(0x77);
+    w.content.insert(crate::content::Blueprint {
+        guid: race,
+        name: "Small".into(),
+        obj: crate::facts::tests::obj(
+            "Kingmaker.Blueprints.Classes.BlueprintRace",
+            &[("Size", Node::Int(3))],
+        ),
+        source: crate::content::Source::Bbp,
+    });
+    assert_eq!(w.unit(u).unwrap().state_size, None);
+    assert_eq!(corpulence(&mut w, u), Ok(0.9));
+    assert_eq!(w.unit(u).unwrap().state_size, Some(Size::Medium), "latched by the first read");
+    crate::spawn::levelup::set_race(&mut w, u, race);
+    assert_eq!(w.unit(u).unwrap().original_size, Some(Size::Small));
+    assert_eq!(w.unit(u).unwrap().state_size, Some(Size::Medium));
+    // Medium against Small: one step up, 1 / 0.66.
+    assert_eq!(corpulence(&mut w, u), Ok(view_corpulence(0.9, 1.0_f32 / 0.66)));
+}

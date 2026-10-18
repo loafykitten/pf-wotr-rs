@@ -76,6 +76,9 @@ pub struct PlaceholderData {
     pub has_prefab_id: bool,
     /// `m_PrefabId`, when set: the prefab of the unit's view.
     pub prefab_id: Option<String>,
+    /// `m_DollData` is set (`UnitSpawningData.Doll`): `EntityCreator.SpawnUnit` builds the view
+    /// from the doll, and the unit gets a `UnitPartDollData` (neither is modelled: reported).
+    pub doll: bool,
     /// `m_IsOptimizedHide` (`UnitSpawningData.SimplifyWhenHidden`).
     pub optimized_hide: bool,
     pub body: Option<Body>,
@@ -456,6 +459,15 @@ fn initialize(w: &mut World, e: EntityIdx, bp: &Rc<Blueprint>, p: Option<&Placeh
     // body and inventory (owner links, `Body.PrePostLoad`).
     if let Some(race) = p.and_then(|p| p.race) {
         levelup::set_race(w, e, race);
+    }
+    // `if (!unit.Body.IsPolymorphed) unit.CustomPrefabGuid = current.PrefabGuid;` (a descriptor
+    // that is being built has no polymorph on its body): the prefab the unit's view is made
+    // from again whenever it is replaced (`UnitEntityData.CreateView`), whatever the
+    // blueprint's is. A spawn without a prefab id leaves it unset.
+    if let Some(p) = p {
+        w.unit_mut(e).expect("unit").custom_prefab_guid = p.prefab_id.clone();
+        // (A placeholder that was saved with a doll makes the view from it: not modelled.)
+        w.unit_mut(e).expect("unit").spawned_with_doll = p.doll;
     }
     if w.unit(e).is_some_and(|u| u.progression.race.is_none())
         && let Some(race) = v.guid("m_Race")
