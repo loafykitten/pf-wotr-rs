@@ -7,7 +7,7 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-17, twenty-third session): start here
+## Where things stand (2026-10-18, twenty-third session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
 until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
@@ -22,8 +22,19 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   - *Line of sight* (stream vision, `crates/wr-los`, `combat/vision.rs`, `replay/vision.rs`, `Phase::LosCache`,
     `docs/poc5/vision.md`): `LineOfSightGeometry` from the scenes' `FogOfWarBlocker`s (`wr-import los-pack`,
     `cache/sim/los/<guid>.wrlos`), the sight caches and `HasLOS`/`CheckLOS` for the engagement, the group memory and the
-    AI: every recorded read, miss and clear equal on 96 runs. `CanBeInVisionRange` stays recorded (`vis`); stream
-    visrange (running at this writing) computes it.
+    AI: every recorded read, miss and clear equal on 96 runs. `CanBeInVisionRange` is computed since stream
+    visrange (below).
+  - *The memory's other leaves* (stream memleaves, `combat/senses.rs`, `replay/memory.rs`, `docs/poc5/memory.md`):
+    `UnitMemoryController`'s apeace, pass, stealth, ready and the no-viewer part of seen computed and checked: 0
+    differences on 111 runs; spawner initializers, panic, fog of war and unported producers left to the recording,
+    counted.
+  - *The vision range* (stream visrange, `combat/vision/range.rs`, `replay/vision_range.rs`, `docs/poc5/vision.md`):
+    `UnitVisionRangeController`'s capsule overlap against `EntityBoundsController`'s sphere colliders (PhysX's sync
+    points, the radius' 0.05 hysteresis, the result order, the 512-hit buffer). 15,442,732 pairs decided and equal to
+    the recording on 111 runs, 0 differences. Left to the recording and counted by cause: the colliders' corpulence
+    (most pairs: the importer doesn't read the prefabs' `m_Corpulence` yet), positions only known to Unity's
+    tolerance, the view-scale band, polymorph and dummy-view replacements, the result buffer. Decisions are made
+    given the window's start hypotheses, which the `bounds_*` observers below will replace. Sol: 20 rounds.
   - *Loot and the prone controller* (below).
   - *The camera-view pin* (`docs/poc5/tb-replay.md`, plans `poc5-tb10`/`-tb11`, captures `-136` to `-138`): extra and
     dead units' `IsInCameraFrustum` pinned to the recording each tick; `-136` valid on all five runs, the flips of
@@ -37,8 +48,15 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     `-139`): `ph_col`'s `wcenter` (a box's `TransformPoint(center)`, for the importer), `roam_init` (each
     `UnitPartRoaming` at the window's first tick, for roaming's start state), `los_geom`/`los_probe` (the game's line of
     sight grid and `HasObstacle` on seeded segments; the replay's reader exists, and should require both records when
-    the observer is declared). The sim reads none of them yet from a recording.
-  - Open: a replay's window can start one frame apart (523B's `TimeToNextRoundTick`; `docs/poc5/tb-replay.md`, end);
+    the observer is declared); for the vision range: `bounds_init` (the entity-bounds colliders at the window's first
+    tick), `bounds_tick` (each `EntityBoundsController.TickEntity`: radius, position, enabled, collider id),
+    `bounds_set` (the collider writes outside it), `bounds_scene`, `vis_order` (each awake unit's
+    `CanBeInVisionRange` in enumeration order) and `phys_sync` (each `Physics.SyncTransforms` by caller, and
+    `DollRoom`'s `PhysicsScene.Simulate`). The sim reads none of them yet from a recording: next, readers that
+    replace the vision range's corpulence and start hypotheses with the records.
+  - Open: the driven replay skips the game's observation records inside root rule spans it doesn't drive
+    (`root_inner`; found in the vision range's review: `clog_q`, `imp_s`, `mem_q`, `eng_prov`, `proj_launch` inside
+    depth-0 rule spans), a consumption audit to do. A replay's window can start one frame apart (523B's `TimeToNextRoundTick`; `docs/poc5/tb-replay.md`, end);
     loot's proposed observers (`loot_drop`, `ent_created`, `prone_step`, `tt_prep` Duration, `awake_set`,
     `docs/poc5/loot-and-prone.md`).
 - **Parallel streams (twenty-second session, Opus 5.5 (high) agents in git worktrees, `scripts/worktree-setup.sh`;
@@ -359,7 +377,7 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
    in parallel): A2's hardened agent (running); then the memory tick as `Phase::Memory` (`docs/poc5/memory.md`, "H1:
    result"); then `wr-phys` behind `AgentInputs::raycast`/`disc_cast` and the turn-based paths (`combat/paths.rs`)
    behind the agent's `PathTo`/`FindPath` (the player's `FindPath` results are recorded since `poc5-tb-114`). Still
-   inputs with no port: visibility, animation, the Unity clock, the UI's requests and its path visualizer. The
+   inputs with no port: visibility's fog of war (`IsInFogOfWar`; the vision range is computed), animation, the Unity clock, the UI's requests and its path visualizer. The
    impatience draws need a fight that reaches a hard target; a fixture whose enemies start out of reach would exercise
    the AI's movement simulation (`ScorePath`, `combat/ai_sim.rs`). More fights recorded on the current mod (a
    critical, a spell, iterative attacks, an ally dying, a loot drop, a five-foot step, a full attack), with call sites
