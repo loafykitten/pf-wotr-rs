@@ -1027,9 +1027,9 @@ fn the_difficulty_condition_compares_the_presets_stats_adjustments() {
     assert!(!run(4, false, 6).1, "an index the rules data doesn't resolve");
 }
 
-/// A polymorph's end (`Polymorph.RestoreView`) calls `Physics.SyncTransforms()`: removing or
-/// deactivating a fact with a `Polymorph` component marks a possible explicit sync for the
-/// vision range; other facts don't.
+/// A polymorph's end (`Polymorph.RestoreView`) calls `Physics.SyncTransforms()`: deactivating a
+/// fact with a `Polymorph` component (removing an active one deactivates it, once) marks a
+/// possible explicit sync for the vision range and a replaced view; other facts don't.
 #[test]
 fn a_polymorph_ending_marks_a_possible_transform_sync() {
     let (mut w, u) = registry_world();
@@ -1051,7 +1051,16 @@ fn a_polymorph_ending_marks_a_possible_transform_sync() {
     crate::combat::vision::note_fact_ending(&mut w, f);
     assert!(std::mem::take(&mut w.combat.vision.explicit_sync));
     assert!(std::mem::take(&mut w.combat.vision.views_replaced).contains(&(u, true)));
+    // Removing it while inactive restores no view (`RestoreView` runs from `Deactivate`).
+    fl::manager_remove_with(&mut w, u, f, false, |_, _| {});
+    assert!(!w.combat.vision.explicit_sync);
+    assert!(w.combat.vision.views_replaced.is_empty());
+    // Removing an active one deactivates it once: one replacement, one sync.
+    let f = loaded_fact(&mut w, u, &bp, false);
+    fl::manager_restore_owner_link(&mut w, u);
+    fl::activate(&mut w, f);
+    assert_eq!(std::mem::take(&mut w.combat.vision.views_replaced), vec![(u, true)]);
     fl::manager_remove_with(&mut w, u, f, false, |_, _| {});
     assert!(w.combat.vision.explicit_sync);
-    assert!(w.combat.vision.views_replaced.contains(&(u, true)));
+    assert_eq!(w.combat.vision.views_replaced, vec![(u, true)]);
 }

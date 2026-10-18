@@ -707,7 +707,6 @@ pub fn manager_remove_with(
     if let Some(p) = list.iter().position(|x| *x == f) {
         list.remove(p);
         crate::combat::vision::note_corpulence_change(w, e);
-        crate::combat::vision::note_fact_ending(w, f);
         let rank = crate::components::fact_rank(w, f);
         w.events.mutation(
             "fact_detach",
