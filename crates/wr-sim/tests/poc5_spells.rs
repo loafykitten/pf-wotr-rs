@@ -455,7 +455,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             }
         }
     }
-    let cases: [(&str, Change); 28] = [
+    let cases: [(&str, Change); 30] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
         // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
         ("events queued, the sim queued", |recs| {
@@ -635,6 +635,22 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
                 json!({"seq": 0, "k": "mut", "t": t, "what": "fact_attach", "class": "Tutorial",
                     "rule": id, "h": 0, "owner": "x", "fact": {"$fact": "1", "blueprint": "b"}}),
             );
+            renumber(recs);
+        }),
+        // A handler of a class the rule has no such handler of (T0 drops handler records), and a
+        // presentation draw at a site of the simulation's.
+        ("driven replay: a h record inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleAttackWithWeaponResolve", |r| {
+                r["k"] == "h" && r.get("fact").is_none() && r.get("component").is_none()
+            });
+            recs[at]["class"] = json!("Kingmaker.Controllers.NoSuchHandler");
+        }),
+        ("driven replay: a draw record inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| r["k"] == "draw" && r["c"] == "sim");
+            let mut x = recs[at].clone();
+            x["c"] = json!("pres");
+            x.as_object_mut().expect("an object").remove("ctx");
+            recs.insert(at + 1, x);
             renumber(recs);
         }),
         // A mutation the T0 projection drops (stat values, modifiers) compares nowhere.

@@ -4021,6 +4021,9 @@ impl Driver<'_> {
 
     fn root(&mut self, w: &mut World, i: usize) -> usize {
         self.env_reads.clear();
+        // The handlers' identities against the sim's facts as the rule starts.
+        let end = root_end(&self.trace.records, i);
+        self.span_handlers(w, i, end);
         let next = self.root_inner(w, i);
         // The impatience handlers' records inside it, after the sim fired it (or didn't).
         self.imp_span(w, i, next - 1);
@@ -4828,6 +4831,7 @@ mod agent;
 mod ai;
 mod commands;
 mod engage;
+mod handler_table;
 mod impatience;
 mod life;
 mod look;

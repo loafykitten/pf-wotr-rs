@@ -96,6 +96,9 @@ pub(super) struct Open {
     pub(super) provoked: HashSet<i64>,
     /// The environment records each open rule has written.
     pub(super) envs: HashMap<i64, usize>,
+    /// Each rule's full class, initiator and target, and the simulation draws it has made.
+    pub(super) shapes: HashMap<i64, (String, Rv, Rv)>,
+    pub(super) draws: HashMap<i64, i64>,
 }
 
 impl Open {
@@ -107,6 +110,8 @@ impl Open {
             rules: HashMap::new(),
             provoked: HashSet::new(),
             envs: HashMap::new(),
+            shapes: HashMap::new(),
+            draws: HashMap::new(),
         };
         open.note(root);
         open
@@ -116,6 +121,14 @@ impl Open {
         let class = r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
         if let Some(id) = r["id"].as_i64() {
             self.rules.insert(id, (class.to_owned(), r["initiator"].clone()));
+            self.shapes.insert(
+                id,
+                (
+                    r["class"].as_str().unwrap_or("").to_owned(),
+                    r["initiator"].clone(),
+                    r["target"].clone(),
+                ),
+            );
         }
     }
 
@@ -197,6 +210,26 @@ impl Open {
         self.attributed(r) && (r["c"] != "sim" || self.life.stage() == 2 || self.life.own_handler())
     }
 
+    /// A draw's context: a simulation draw carries its rule's class, units (stable ids) and
+    /// ordinal, which advances; a presentation draw carries none (`Rng`, `span_ok`'s check).
+    pub(super) fn draw_ctx_ok(&mut self, w: &World, r: &Rv) -> bool {
+        let rule = self.life.rule();
+        if r["c"] != "sim" {
+            return r.get("ctx").is_none();
+        }
+        let n = self.draws.entry(rule).or_default();
+        let ordinal = *n;
+        *n += 1;
+        let want = self.shapes.get(&rule).and_then(|(class, initiator, target)| {
+            Some(format!(
+                "{class}|{}|{}|{ordinal}",
+                super::commands::stable_id(w, &initiator.to_json())?,
+                super::commands::stable_id(w, &target.to_json())?,
+            ))
+        });
+        want.is_some() && r["ctx"].as_str() == want.as_deref()
+    }
+
     /// A mutation: attributed; damage after `did` (`OnDidTrigger`) outside its handlers, a rule
     /// bonus in the rule's `OnTrigger` or one of its handlers.
     pub(super) fn mut_placed(&self, r: &Rv) -> bool {
@@ -248,6 +281,47 @@ pub(super) fn provoke_placed(open: &mut Open, r: &Rv, rule: Option<&str>) -> boo
 }
 
 impl Driver<'_> {
+    /// The handlers of the root rule at `start` (to its `rule_end` at `end`), before the sim fires
+    /// it: each is of a kind the rule's subscribers have (`span_ok`'s `handler_identity_ok`: a
+    /// global handler of the rule's class, or a fact's component of the sim's, subscribed to the
+    /// rule's initiator or target), against the sim's facts as they stand when the rule starts.
+    pub(super) fn span_handlers(&mut self, w: &mut World, start: usize, end: usize) {
+        let trace = self.trace;
+        let mut rules: HashMap<i64, (String, Rv, Rv)> = HashMap::new();
+        for r in &trace.records[start..=end] {
+            match r["k"].as_str() {
+                Some("rule") => {
+                    if let Some(id) = r["id"].as_i64() {
+                        let class = r["class"].as_str().unwrap_or("").to_owned();
+                        rules.insert(id, (class, r["initiator"].clone(), r["target"].clone()));
+                    }
+                }
+                Some("h") => {
+                    let ok = r["rule"].as_i64().and_then(|id| rules.get(&id)).is_some_and(
+                        |(class, initiator, target)| {
+                            super::commands::handler_identity_ok(
+                                w,
+                                &r.to_json(),
+                                class,
+                                &initiator.to_json(),
+                                &target.to_json(),
+                                &super::handler_table::handles,
+                            )
+                        },
+                    );
+                    if !ok {
+                        self.span_reported(
+                            w,
+                            "a h record".into(),
+                            "a handler the rule's subscribers don't have (class, fact, component or owner)",
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The records of the root rule at `start`, up to its `rule_end` at `end`, after the sim
     /// fired it (or didn't).
     pub(super) fn span_records(&mut self, w: &mut World, start: usize, end: usize) {
@@ -303,6 +377,25 @@ impl Driver<'_> {
                             w,
                             "a draw record".into(),
                             "a draw not of the innermost rule, its handler or its stage",
+                        );
+                    }
+                    // Its payload and site, a presentation draw's too (`span_ok`'s `draw_ok`), its
+                    // context, and the tape's status in a replay's trace (forced: simulation
+                    // draws only).
+                    if !super::commands::draw_ok(&r.to_json(), &trace.sites) {
+                        self.span_reported(
+                            w,
+                            "a draw record".into(),
+                            "a draw with a payload or site the recording's table doesn't give",
+                        );
+                    }
+                    let sim = r["c"] == "sim";
+                    if !open.draw_ctx_ok(w, r) || r.get("forced").is_some() != (self.replay_mode && sim)
+                    {
+                        self.span_reported(
+                            w,
+                            "a draw record".into(),
+                            "a draw whose context or tape status isn't its rule's",
                         );
                     }
                 }

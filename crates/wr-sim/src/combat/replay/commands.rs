@@ -2421,6 +2421,23 @@ fn base_fields() -> serde_json::Map<String, J> {
     m
 }
 
+/// `Rules.StableId`: the id, or for an id longer than 8 (a unit created in the window, or a GUID
+/// id) `new:` and its blueprint; `-` for none.
+pub(super) fn stable_id(w: &World, v: &J) -> Option<String> {
+    match v {
+        J::Null => Some("-".into()),
+        J::Object(o) => {
+            let id = o.get("$unit")?.as_str()?;
+            if id.len() <= 8 {
+                return Some(id.to_owned());
+            }
+            let e = *w.by_id.get(id)?;
+            Some(format!("new:{}", w.unit(e)?.blueprint?))
+        }
+        _ => None,
+    }
+}
+
 /// A root rule's span (`span[0]` the root), as WrathOracle's `Rules.cs` writes it: every record of
 /// frame `tick`, in each rule's order (its push with its snapshot, `mod_before` handlers, `about`,
 /// `about` handlers, `trig`, its own computation with nested rules, `trig_end`, `mod_after` then `did`
@@ -2474,22 +2491,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         /// Its game log event queued (`clog_q`, once at most).
         clog: bool,
     }
-    // `Rules.StableId`: the id, or for an id longer than 8 (a unit created in the window, or a GUID
-    // id) `new:` and its blueprint; `-` for none.
-    let stable = |v: &J| -> Option<String> {
-        match v {
-            J::Null => Some("-".into()),
-            J::Object(o) => {
-                let id = o.get("$unit")?.as_str()?;
-                if id.len() <= 8 {
-                    return Some(id.to_owned());
-                }
-                let e = *w.by_id.get(id)?;
-                Some(format!("new:{}", w.unit(e)?.blueprint?))
-            }
-            _ => None,
-        }
-    };
+    let stable = |v: &J| stable_id(w, v);
     let frame = |r: &J| -> Option<Frame> {
         let reason = match r.get("reason_at_push") {
             Some(J::Null) => true,
@@ -2686,7 +2688,14 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 // Its phase is the rule's stage's (`Life`).
                 let phase = x["phase"].as_str().unwrap_or("");
                 let ok = life.can_open(id, x["rule"].as_i64(), phase)
-                    && handler_identity_ok(w, x, &top.class, &top.initiator, &top.target);
+                    && handler_identity_ok(
+                        w,
+                        x,
+                        &top.class,
+                        &top.initiator,
+                        &top.target,
+                        &counted_singleton,
+                    );
                 if ok && let Some(f) = frames.last_mut() {
                     f.before_handlers |= x["phase"] == "mod_before";
                     let did = usize::from(x["phase"] == "did");
@@ -3380,7 +3389,7 @@ fn mutation_ok(x: &J, rule: i64, w: &World) -> bool {
 /// with the rules each handles (its `IRulebookHandler<T>`s: `ShadowSpellController`'s
 /// `RulebookTargetEvent` as the target events seen inside attacks); another class or rule is reported
 /// (the sim models none of them: an unknown one may act).
-const GLOBAL_HANDLERS: &[(&str, Option<&[&str]>)] = &[
+pub(super) const GLOBAL_HANDLERS: &[(&str, Option<&[&str]>)] = &[
     ("Kingmaker.Controllers.ShadowSpellController", Some(TARGET_EVENTS)),
     (
         "Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbility",
@@ -3794,6 +3803,13 @@ fn is_achievement(class: &str) -> bool {
     class.starts_with("Kingmaker.Achievements.")
 }
 
+/// Whether `GLOBAL_HANDLERS` lists the singleton `handler` for the rule (`span_ok`'s).
+fn counted_singleton(handler: &str, rule: &str) -> bool {
+    GLOBAL_HANDLERS
+        .iter()
+        .any(|(h, rules)| *h == handler && rules.is_none_or(|r| r.contains(&rule)))
+}
+
 /// The global singleton handlers (`GLOBAL_HANDLERS` but `ActivatableAbility`, a fact, and the
 /// achievements, subscribed or not by state outside the save) that handle the rule, each once.
 fn singleton_handlers(rule_class: &str) -> HashMap<String, usize> {
@@ -3834,7 +3850,17 @@ fn activatable_subscribers(w: &World, initiator: &J, rule_class: &str) -> usize 
 
 /// A handler's identity (`Rules.Identity`): its class, and for a fact's component the component,
 /// blueprint, fact and owner: the sim's fact of that id, blueprint and owner (a unit or an item).
-fn handler_identity_ok(w: &World, x: &J, rule_class: &str, initiator: &J, target: &J) -> bool {
+/// A handler without a fact is a singleton, known by `singleton` (its class and the rule's short
+/// class): `span_ok`'s `GLOBAL_HANDLERS` (the handlers it counts), the audit of the other root
+/// spans' table generated from the game's code (`handler_table.rs`).
+pub(super) fn handler_identity_ok(
+    w: &World,
+    x: &J,
+    rule_class: &str,
+    initiator: &J,
+    target: &J,
+    singleton: &dyn Fn(&str, &str) -> bool,
+) -> bool {
     let Some(o) = x.as_object() else { return false };
     let class_ok = o
         .get("class")
@@ -3843,11 +3869,9 @@ fn handler_identity_ok(w: &World, x: &J, rule_class: &str, initiator: &J, target
     let base = ["k", "t", "seq", "id", "rule", "phase", "class"];
     if o.keys().all(|k| base.contains(&k.as_str())) {
         return class_ok
-            && o.get("class").and_then(J::as_str).is_some_and(|c| {
-                GLOBAL_HANDLERS.iter().any(|(h, rules)| {
-                    *h == c && rules.is_none_or(|r| r.contains(&short_class(rule_class)))
-                })
-            })
+            && o.get("class")
+                .and_then(J::as_str)
+                .is_some_and(|c| singleton(c, short_class(rule_class)))
             && matches!(o.get("phase").and_then(J::as_str), Some("about" | "did"))
             && o.len() == base.iter().filter(|k| o.contains_key(**k)).count();
     }

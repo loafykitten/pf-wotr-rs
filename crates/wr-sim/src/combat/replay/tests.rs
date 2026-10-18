@@ -1740,3 +1740,34 @@ fn a_nested_resolve_needs_its_one_environment() {
     assert!(!projected(&open, &fact("fact_attach", "Tutorial")));
     assert!(!projected(&open, &fact("fact_detach", "Tutorial")));
 }
+
+/// The singleton handlers of a root's span come from the game's code (`scripts/gen-handler-table.py`
+/// from the interfaces `IGlobalRulebookHandler<T>` and the facts' `IInitiatorRulebookHandler<T>`),
+/// and the handlers `span_ok` counts (`GLOBAL_HANDLERS`) are among them, rule by rule.
+#[test]
+fn the_singleton_handler_table_agrees_with_the_commands() {
+    use super::commands::GLOBAL_HANDLERS;
+    use super::handler_table::handles;
+    for (handler, rules) in GLOBAL_HANDLERS {
+        for rule in rules.expect("a rule list") {
+            assert!(handles(handler, rule), "{handler} for {rule}");
+        }
+    }
+    // The cast's: reporting, the overtips, touch spells, the magus, the kineticist, the shadow
+    // spell controller on a spell resistance check, a fact's activatable ability.
+    for (h, r) in [
+        ("Kingmaker.Utility.ReportingUtils", "RuleCastSpell"),
+        ("Kingmaker.UI._ConsoleUI.Overtips.OvertipsVM", "RuleCastSpell"),
+        ("Kingmaker.Controllers.TouchSpellsController", "RuleCastSpell"),
+        ("Kingmaker.Controllers.MagusController", "RuleCastSpell"),
+        ("Kingmaker.UnitLogic.Class.Kineticist.KineticistController", "RuleCastSpell"),
+        ("Kingmaker.Controllers.ShadowSpellController", "RuleSpellResistanceCheck"),
+        ("Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbility", "RuleCastSpell"),
+    ] {
+        assert!(handles(h, r), "{h} for {r}");
+    }
+    assert!(!handles("Kingmaker.Controllers.NoSuchHandler", "RuleCastSpell"));
+    assert!(!handles("Kingmaker.Utility.ReportingUtils", "RuleAttackWithWeapon"), "another rule");
+    // A fact's component is no singleton.
+    assert!(!handles("Kingmaker.UnitLogic.FactLogic.Counterspell", "RuleCastSpell"));
+}
