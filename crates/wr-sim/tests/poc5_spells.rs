@@ -455,7 +455,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             }
         }
     }
-    let cases: [(&str, Change); 30] = [
+    let cases: [(&str, Change); 33] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
         // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
         ("events queued, the sim queued", |recs| {
@@ -548,27 +548,30 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             let at = handled(recs, "h_end");
             recs[at]["id"] = json!(recs[at]["id"].as_i64().unwrap_or(0) + 1000);
         }),
-        ("driven replay: a h record inside a root rule's span", |recs| {
-            // Just before the initiative roll's own `did`: a `did` handler of it, then a
-            // `mod_after` one (ids above every other).
-            let root = initiative(recs);
-            let id = recs[root]["id"].clone();
-            let did = (root..recs.len())
-                .find(|&i| recs[i]["k"] == "did" && recs[i]["id"] == id)
-                .expect("its did");
-            let top = recs.iter().filter_map(|r| r["id"].as_i64()).max().unwrap_or(0) + 1_000;
-            let t = recs[root]["t"].clone();
-            let pair = |n: i64, phase: &str| {
-                [
-                    json!({"seq": 0, "k": "h", "t": t, "id": n, "rule": id, "phase": phase,
-                        "class": "Kingmaker.Controllers.UnitImpatienceController"}),
-                    json!({"seq": 0, "k": "h_end", "t": t, "id": n, "rule": id, "changes": []}),
-                ]
-            };
-            let new: Vec<V> = [pair(top, "did"), pair(top + 1, "mod_after")].concat();
-            recs.splice(did..did, new);
-            renumber(recs);
-        }),
+        (
+            "a h record inside a root rule's span: a record out of its place in the rule's life",
+            |recs| {
+                // Just before the initiative roll's own `did`: a `did` handler of it, then a
+                // `mod_after` one (ids above every other).
+                let root = initiative(recs);
+                let id = recs[root]["id"].clone();
+                let did = (root..recs.len())
+                    .find(|&i| recs[i]["k"] == "did" && recs[i]["id"] == id)
+                    .expect("its did");
+                let top = recs.iter().filter_map(|r| r["id"].as_i64()).max().unwrap_or(0) + 1_000;
+                let t = recs[root]["t"].clone();
+                let pair = |n: i64, phase: &str| {
+                    [
+                        json!({"seq": 0, "k": "h", "t": t, "id": n, "rule": id, "phase": phase,
+                        "class": "Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbility"}),
+                        json!({"seq": 0, "k": "h_end", "t": t, "id": n, "rule": id, "changes": []}),
+                    ]
+                };
+                let new: Vec<V> = [pair(top, "did"), pair(top + 1, "mod_after")].concat();
+                recs.splice(did..did, new);
+                renumber(recs);
+            },
+        ),
         ("driven replay: a rule_bonus mutation inside a root rule's span", |recs| {
             let root = initiative(recs);
             let t = recs[root]["t"].clone();
@@ -639,18 +642,67 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
         }),
         // A handler of a class the rule has no such handler of (T0 drops handler records), and a
         // presentation draw at a site of the simulation's.
-        ("driven replay: a h record inside a root rule's span", |recs| {
-            let at = in_span(recs, "RuleAttackWithWeaponResolve", |r| {
-                r["k"] == "h" && r.get("fact").is_none() && r.get("component").is_none()
-            });
-            recs[at]["class"] = json!("Kingmaker.Controllers.NoSuchHandler");
-        }),
+        (
+            "a h record inside a root rule's span: a handler the rule's subscribers don't have",
+            |recs| {
+                let at = in_span(recs, "RuleAttackWithWeaponResolve", |r| {
+                    r["k"] == "h" && r.get("fact").is_none() && r.get("component").is_none()
+                });
+                recs[at]["class"] = json!("Kingmaker.Controllers.NoSuchHandler");
+            },
+        ),
         ("driven replay: a draw record inside a root rule's span", |recs| {
             let at = in_span(recs, "RuleInitiativeRoll", |r| r["k"] == "draw" && r["c"] == "sim");
             let mut x = recs[at].clone();
             x["c"] = json!("pres");
             x.as_object_mut().expect("an object").remove("ctx");
             recs.insert(at + 1, x);
+            renumber(recs);
+        }),
+        // The handlers the recording dispatched to a fact's component are the sim's deliveries, one to
+        // one and in order: one lost, another fact's, one more.
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            let id = recs[at]["id"].clone();
+            let end = (at..recs.len())
+                .find(|&i| recs[i]["k"] == "h_end" && recs[i]["id"] == id)
+                .expect("its end");
+            recs.drain(end..=end);
+            recs.drain(at..=at);
+            renumber(recs);
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            recs[at]["fact"]["$fact"] = json!("FFFF");
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            let id = recs[at]["id"].clone();
+            let end = (at..recs.len())
+                .find(|&i| recs[i]["k"] == "h_end" && recs[i]["id"] == id)
+                .expect("its end");
+            // Swapped with the next handler: two components of one rule in the other order.
+            let next =
+                (end + 1..recs.len()).find(|&i| recs[i]["k"] == "h").expect("a later handler");
+            let nid = recs[next]["id"].clone();
+            let nend = (next..recs.len())
+                .find(|&i| recs[i]["k"] == "h_end" && recs[i]["id"] == nid)
+                .expect("its end");
+            let (a, b) = (recs[at..=end].to_vec(), recs[next..=nend].to_vec());
+            if recs[next].get("component").is_some()
+                && recs[next]["component"] != recs[at]["component"]
+            {
+                recs.splice(next..=nend, a);
+                recs.splice(at..=end, b);
+            } else {
+                recs[at]["component"] = json!("$AddBuffOnCombatStart$x");
+            }
             renumber(recs);
         }),
         // A mutation the T0 projection drops (stat values, modifiers) compares nowhere.

@@ -1771,3 +1771,34 @@ fn the_singleton_handler_table_agrees_with_the_commands() {
     // A fact's component is no singleton.
     assert!(!handles("Kingmaker.UnitLogic.FactLogic.Counterspell", "RuleCastSpell"));
 }
+
+/// An accepted environment record is typed as `span_ok` types it, and a position is three finite
+/// coordinates, no more and no fewer.
+#[test]
+fn an_environment_record_is_typed_and_a_position_has_three_coordinates() {
+    let (w, u) = world_in_area();
+    let unit = json!({"$unit": w.entity(u).unique_id});
+    let at = json!({"initiator_pos": [1.0, 2.0, 3.0], "target_pos": [4.0, 5.0, 6.0]});
+    let env = || {
+        json!({"seq": 1, "k": "env", "t": 5, "rule": "RuleAttackRoll", "initiator": unit, "target": unit,
+            "at": at, "concealment_initiator_from_target": 0, "concealment_target_from_initiator": 0,
+            "target_can_act_in_combat": true, "target_engaged_by": [], "target_flanked": false,
+            "target_is_get_up": false, "target_remembers_initiator": true})
+    };
+    let class = "Kingmaker.RuleSystem.Rules.RuleAttackRoll";
+    let ok = |x: &J| super::commands::env_record_ok(&w, x, class, &unit, &unit);
+    assert!(ok(&env()));
+    let mut x = env();
+    x["target_is_get_up"] = json!("garbage");
+    assert!(!ok(&x), "a get-up flag that isn't a boolean");
+    let mut x = env();
+    x["at"]["initiator_pos"] = json!([1.0, 2.0, 3.0, 4.0]);
+    assert!(!ok(&x), "a position of four coordinates");
+    let mut x = env();
+    x["target_engaged_by"] = json!(["no-such-unit"]);
+    assert!(!ok(&x), "an engaged-by unit the sim doesn't have");
+    let r = |v: J| rvs(&[v]).remove(0);
+    assert!(pos(&r(json!([1.0, 2.0, 3.0]))).is_some());
+    assert!(pos(&r(json!([1.0, 2.0, 3.0, 4.0]))).is_none(), "extra coordinates are not truncated");
+    assert!(pos(&r(json!([1.0, 2.0]))).is_none());
+}

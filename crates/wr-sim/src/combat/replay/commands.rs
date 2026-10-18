@@ -2905,14 +2905,9 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 // is open; inside an attack it's nested.)
                 let ok = stage == 2
                     && !own_handler
-                    && (short_class(&top.class) != "RuleCheckTargetFlatFooted" || frames.len() == 1)
-                    && env_ok(x, &top.class, &top.initiator, &top.target)
-                    // `EngagedBy`'s keys, ordinal-sorted and unique, each the sim's unit.
-                    && x.get("target_engaged_by").and_then(J::as_array).is_none_or(|a| {
-                        a.iter().all(|u| {
-                            u.as_str().and_then(|id| w.by_id.get(id)).is_some_and(|e| w.unit(*e).is_some())
-                        }) && a.windows(2).all(|p| p[0].as_str() < p[1].as_str())
-                    });
+                    && (short_class(&top.class) != "RuleCheckTargetFlatFooted"
+                        || frames.len() == 1)
+                    && env_record_ok(w, x, &top.class, &top.initiator, &top.target);
                 if let Some(f) = frames.last_mut() {
                     f.envs += 1;
                 }
@@ -3943,6 +3938,17 @@ pub(super) fn handler_identity_ok(
 
 /// An environment record (`Hooks`' `env`) of the innermost rule: a kind the replay reads, its units
 /// the rule's, every field there and typed, positions of two finite `float` triples.
+/// An environment record's fields (typed, the rule's units) and `EngagedBy`'s keys, ordinal-sorted
+/// and unique, each the sim's unit.
+pub(super) fn env_record_ok(w: &World, x: &J, class: &str, initiator: &J, target: &J) -> bool {
+    env_ok(x, class, initiator, target)
+        && x.get("target_engaged_by").and_then(J::as_array).is_none_or(|a| {
+            a.iter().all(|u| {
+                u.as_str().and_then(|id| w.by_id.get(id)).is_some_and(|e| w.unit(*e).is_some())
+            }) && a.windows(2).all(|p| p[0].as_str() < p[1].as_str())
+        })
+}
+
 fn env_ok(x: &J, class: &str, initiator: &J, target: &J) -> bool {
     let Some(o) = x.as_object() else { return false };
     let kind = short_class(class);

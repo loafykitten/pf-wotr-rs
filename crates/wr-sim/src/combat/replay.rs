@@ -1171,6 +1171,9 @@ impl<'t> Driver<'t> {
         super::life::update_turn_based(w);
         let cx = Cx { sink };
         fire::set_current(w, Some(cx.clone()));
+        // The handlers the bus delivers rules to from here on, for the one-to-one check with the
+        // recording's (`spans::handlers_finish`).
+        w.rulebook.handler_log = Some(Vec::new());
         let recs = &trace.records;
         let port = recs.iter().any(|r| r["k"] == "obs" && r["ev"] == "choose_next")
             && recs.iter().any(|r| r["k"] == "obs" && r["ev"] == "turn_tick");
@@ -1655,6 +1658,7 @@ impl<'t> Driver<'t> {
             w.events.push("draw", p);
         }
         fire::set_current(w, None);
+        self.handlers_finish(w);
         if self.clog {
             let inputs = std::mem::take(&mut self.clog_inputs);
             self.out.clog = Some(crate::game_log::check::compare(w, &self.trace.records, inputs));
@@ -4811,7 +4815,7 @@ fn flat_footed_env(
 }
 
 fn pos(v: &Rv) -> Option<[f32; 3]> {
-    let a = v.as_array()?;
+    let a = v.as_array().filter(|a| a.len() == 3)?;
     #[allow(clippy::cast_possible_truncation)]
     let f = |i: usize| a.get(i).and_then(Rv::as_f64).map(|x| x as f32);
     Some([f(0)?, f(1)?, f(2)?])

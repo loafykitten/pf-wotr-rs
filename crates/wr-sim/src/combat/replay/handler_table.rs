@@ -23,6 +23,7 @@ pub(super) const HANDLERS: &[(&str, &[&str])] = &[
         "Kingmaker.Armies.TacticalCombat.Controllers.TacticalCombatUnitLifeController",
         &["RuleHealDamage"],
     ),
+    ("Kingmaker.Cheats.CheatsCommon+CheatedDice", &["RuleRollD20"]),
     ("Kingmaker.Cheats.CheatsStats", &["RuleCachedPerceptionCheck", "RuleSkillCheck"]),
     ("Kingmaker.Controllers.AutoPauseController", &["RuleDealDamage"]),
     (
@@ -81,6 +82,10 @@ pub(super) const HANDLERS: &[(&str, &[&str])] = &[
         &["RuleCastSpell", "RuleCheckConcentration", "RuleDrainEnergy", "RuleSavingThrow"],
     ),
     (
+        "Kingmaker.UnitLogic.Abilities.Components.AbilityCustomVitalStrike+VitalStrikePart",
+        &["RuleCalculateDamage", "RuleCalculateWeaponStats"],
+    ),
+    (
         "Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbility",
         &["RuleAttackWithWeapon", "RuleAttackWithWeaponResolve", "RuleCastSpell", "RuleDealDamage"],
     ),
@@ -88,10 +93,24 @@ pub(super) const HANDLERS: &[(&str, &[&str])] = &[
         "Kingmaker.UnitLogic.Class.Kineticist.KineticistController",
         &["RuleAttackWithWeapon", "RuleCastSpell"],
     ),
+    (
+        "Kingmaker.UnitLogic.Parts.UnitPartDeathPrevention",
+        &["RuleDealDamage", "RuleDealStatDamage"],
+    ),
+    (
+        "Kingmaker.UnitLogic.Parts.UnitPartFavoredEnemy",
+        &["RuleCalculateAttackBonus", "RuleCalculateWeaponStats"],
+    ),
     ("Kingmaker.UnitLogic.Parts.UnitPartLocustSwarm", &["RuleDealDamage"]),
+    ("Kingmaker.UnitLogic.Parts.UnitPartSpellFool", &["RuleCalculateAbilityParams"]),
+    (
+        "Kingmaker.UnitLogic.Parts.UnitPartSwordlordAdaptiveTactics",
+        &["RuleCalculateAC", "RuleCalculateAttackBonus"],
+    ),
+    ("Kingmaker.UnitLogic.Parts.VolleyFirePart", &["RuleAttackRoll"]),
     ("Kingmaker.Utility.ReportingUtils", &["RuleCastSpell"]),
     (
-        "Kingmaker.Visual.Sound.SoundState",
+        "Kingmaker.Visual.Sound.IsleStateAudioSender+SoundState",
         &["RuleCachedPerceptionCheck", "RuleSavingThrow", "RuleSkillCheck", "RuleStatCheck"],
     ),
 ];

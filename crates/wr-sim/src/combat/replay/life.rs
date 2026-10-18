@@ -58,6 +58,11 @@ impl Life {
         self.stack.last().map_or(0, |t| t.stage)
     }
 
+    /// The rules open.
+    pub(super) fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
     pub(super) fn is_open(&self, rule: i64) -> bool {
         self.stack.iter().any(|t| t.id == rule)
     }

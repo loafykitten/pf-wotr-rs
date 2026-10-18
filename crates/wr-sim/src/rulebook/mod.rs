@@ -74,6 +74,32 @@ pub struct RuleTrace {
     pub step: String,
 }
 
+/// One handler the bus delivered a rule to, as the replay compares it with the recording's `h`
+/// records (`combat/replay/spans.rs`): kept only while a replay turns the log on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandlerRun {
+    /// `mod_before`, `about`, `mod_after` or `did`: the recorded `h` record's phase.
+    pub phase: &'static str,
+    /// The rule's class (short).
+    pub rule: String,
+    pub kind: HandlerKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerKind {
+    /// A fact's component: its type (short class), name (`$Type$name`), the fact's id and
+    /// blueprint, and its owner's id.
+    Component {
+        class: String,
+        name: String,
+        fact: String,
+        blueprint: Option<String>,
+        owner: Option<String>,
+    },
+    /// A fact that is its own handler (`ActivatableAbility`): its class.
+    Fact(&'static str),
+}
+
 /// `Rulebook` state: the current `RulebookEventContext`'s stack.
 #[derive(Debug, Default)]
 pub struct Rulebook {
@@ -86,6 +112,8 @@ pub struct Rulebook {
     /// A `RulesOverflowException` in flight: it unwinds through every enclosing rule
     /// (`SaveExecute` rethrows it), so each level stops at its next step.
     pub pending_overflow: Option<RulesOverflow>,
+    /// The handlers rules were delivered to, in order, while a replay keeps the log.
+    pub handler_log: Option<Vec<HandlerRun>>,
 }
 
 /// `RulesOverflowException`.

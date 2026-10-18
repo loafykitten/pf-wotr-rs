@@ -923,24 +923,30 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   streams agree on its rule records). Its positions must equal the roll's, both recorded
   (`positions_agree`; a null coordinate is no position): its damage reads the distance then
   (`DistanceDamageBonus`), and the sim reuses the roll's positions, so the equality is the check that makes the reuse right.
-- Handler identities (T0 drops handler records, so nothing else compares them): each `h` record of a span is checked
-  before the sim fires the root, against the sim's facts as the rule starts, by `span_ok`'s own `handler_identity_ok`:
-  a fact's component by its fact, blueprint, owner, component name and the subscription the component's interfaces
-  give (shared with the commands), and a singleton (no fact) by a table of which classes handle which rule.
-  `span_ok` keeps counting `GLOBAL_HANDLERS` (the singletons it expects once per attack rule); the audit's membership
-  table is `handler_table.rs`, **generated from the game's code** by `scripts/gen-handler-table.py` (class
-  declarations' names and bases in `decompiled/`): every non-component class implementing
-  `IGlobalRulebookHandler<T>`, and every fact class implementing `IInitiatorRulebookHandler<T>` or
-  `ITargetRulebookHandler<T>` (`ActivatableAbility`), for each rule that is T or derives from T (the interfaces are
-  contravariant, so `ShadowSpellController`'s `RulebookTargetEvent` covers `RuleSpellResistanceCheck` and the other
-  target events). 24 classes, 66 pairs over 62 rules; it adds the spell rules' handlers (`ReportingUtils`,
-  `OvertipsVM`, `TouchSpellsController`, `MagusController`, `KineticistController`, `ActivatableAbility`,
-  `AchievementLogicTacticalCombatDemonVsDemon` for `RuleCastSpell`; `ShadowSpellController` for
-  `RuleSpellResistanceCheck`, ...). `span_ok`'s rules gain nothing (it keeps its table; a unit test asserts every
-  `GLOBAL_HANDLERS` pair is in the generated one). Rerun the script when the game's code changes.
+- Handlers (T0 drops handler records, so nothing else compares them). The recording's handlers that the sim's bus
+  dispatches, a fact's component and an `ActivatableAbility`, are compared **one to one, in order, with the sim's
+  deliveries** over the whole window (`spans::handlers_finish`): `Rulebook::handler_log` is kept by a replay and
+  filled in `rulebook/bus.rs` as `RulebookEventBus` delivers (the rule's type chain, which is the contravariant
+  matching, and the real subscription lists, which is the subscribed state): phase, rule, the component's class and
+  name, the fact's id and blueprint, the owner. [M] On the 111 runs 53,294 recorded handlers equal the sim's
+  deliveries, in order, with no difference (the 74 deliveries the load made before the window aren't in the log:
+  it is turned on when the driver starts). No snapshot of the sim's facts is consulted, so there is no stale-state
+  rejection (a buff attached by an earlier handler) or acceptance (a component detached earlier), and an attached
+  but turned-off component is exact. A singleton (no fact: the sim has no controllers) is a class the game's code
+  has handle the rule: `span_ok`'s `handler_identity_ok` with a table **generated from the game's code** by
+  `scripts/gen-handler-table.py` (`handler_table.rs`: class declarations' names and bases in `decompiled/`):
+  every non-component class implementing `IGlobalRulebookHandler<T>`, and every fact or part class
+  (`ActivatableAbility`, `UnitPartFavoredEnemy`) implementing `IInitiatorRulebookHandler<T>` or
+  `ITargetRulebookHandler<T>`, nested classes included (`CheatsCommon+CheatedDice`), for each rule that is T or
+  derives from T (the interfaces are contravariant). 31 classes, 77 pairs over 62 rules; `span_ok` keeps counting
+  `GLOBAL_HANDLERS` and gains nothing (a unit test asserts its pairs are in the generated table). Rerun the script
+  when the game's code changes. A component record's shape is checked world-free (`$<type>$<name>` of its class).
 - Draws: `draw_ok` for every draw (a presentation draw's payload and site too: a site of the simulation's is not a
   presentation draw's), the context (a simulation draw's rule class, stable unit ids and ordinal) and, in a replay's
   trace, `forced` on simulation draws only: `span_ok`'s checks.
+- `env` fields: an accepted `env` is typed as `span_ok` types it (`env_record_ok`: the rule's units, every field of
+  its kind, `EngagedBy` the sim's units in order, a flat-footed check's only at the root), and a position is three
+  finite coordinates (`pos` no longer truncates extras).
 - Count: an attack roll and a resolve close with exactly one `env` (`span_ok`'s count; `Open::envs_ok`), including a
   resolve nested in a phase-driven attack: one removed would leave the sim reusing the roll's positions unchecked.
   A ranged attack's resolve that comes later is its own root and has its own.
@@ -1001,16 +1007,16 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
 **Tests** (`poc5_spells.rs`, `records_inside_driven_root_spans_are_checked_or_reported`, `poc5-tb-123/tb-chain`; the
 unit tests `a_root_attacks_launch_is_placed_like_a_commands`, `a_root_spans_provoke_is_placed_like_a_commands` and
 `a_root_spans_structure_follows_span_oks`, `a_root_spans_records_are_attributed_like_span_oks` and
-`a_nested_resolves_positions_must_agree_with_the_rolls` and `a_nested_resolve_needs_its_one_environment` and `the_singleton_handler_table_agrees_with_the_commands` in
-`replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
+`a_nested_resolves_positions_must_agree_with_the_rolls` and `a_nested_resolve_needs_its_one_environment` and `the_singleton_handler_table_agrees_with_the_commands` and
+`an_environment_record_is_typed_and_a_position_has_three_coordinates` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
 the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
 `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
 `proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
 the initiative roll's span, a root's `rule_end` of another frame, a `stat_value` mutation, a `did` before
 `trig_end`, an `h_end` of another id, a `mod_after` handler after a `did` one, a `rule_bonus` to a rule never
 allocated and one to a rule already closed, a draw and a damage mutation of no rule the span has, a draw in no open
-handler, an initiative root with its `parent` or `handler` changed, and a tutorial fact attached, a handler renamed to a class that doesn't exist, and a presentation draw at a
-simulation site; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
+handler, an initiative root with its `parent` or `handler` changed, and a tutorial fact attached, a handler renamed to a class that doesn't exist, a presentation draw at a
+simulation site, and a component handler lost, with another fact's id, or in another order; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
 accepted and counted (the run stays valid, `oracle_invalid` equal to the notes added). The phase-driven placing of a
 launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
 and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is

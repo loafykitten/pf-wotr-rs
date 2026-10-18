@@ -44,6 +44,7 @@ use std::collections::{HashMap, HashSet};
 use super::commands::provoke_rule;
 use super::life::Life;
 use super::{Driver, Rv};
+use crate::rulebook::{HandlerKind, HandlerRun};
 use crate::world::World;
 
 /// `UnitCombatEngagementController`, whose did handler of an attack roll or an attack with a
@@ -65,6 +66,8 @@ pub struct SpanCounts {
     pub proj_launch: usize,
     /// The oracle's own `invalid` records (the game's replay left its recording): accepted.
     pub oracle_invalid: usize,
+    /// The recorded handlers compared one to one with the sim's deliveries.
+    pub handlers: usize,
     /// Records reported: of another family or kind, or one its checker rejects.
     pub reported: usize,
 }
@@ -82,6 +85,31 @@ pub(super) fn projected(open: &Open, r: &Rv) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether the recording's `h` record is of a handler the sim's bus dispatches: a fact's
+/// component, or an `ActivatableAbility` (a fact that is its own handler).
+fn dispatched(r: &Rv) -> bool {
+    r.get("component").is_some()
+        || r["class"].as_str().is_some_and(|c| c.rsplit('.').next() == Some("ActivatableAbility"))
+}
+
+/// A component handler's record shape, world-free: its component, blueprint, fact and owner, the
+/// component named `$<type>$<name>` of the handler's class, the about and did phases.
+fn component_shape_ok(r: &Rv) -> bool {
+    if r.get("component").is_none() {
+        return true;
+    }
+    let class = r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
+    r["component"]
+        .as_str()
+        .and_then(|c| c.strip_prefix('$'))
+        .and_then(|c| c.split_once('$'))
+        .is_some_and(|(t, _)| t == class)
+        && r["blueprint"].is_string()
+        && r["fact"]["$fact"].is_string()
+        && (r["owner"]["$unit"].is_string() || r["owner"]["$item"].is_string())
+        && matches!(r["phase"].as_str(), Some("about" | "did" | "mod_before" | "mod_after"))
 }
 
 /// What `span_records` knows of the span so far: the structure of its rules and handlers
@@ -254,6 +282,24 @@ impl Open {
         }
     }
 
+    /// An environment record's fields as `span_ok` types them (`env_record_ok`: the rule's units,
+    /// every field of its kind, `EngagedBy` the sim's units in order), and a flat-footed check's
+    /// only at the root (inside an attack it's nested: `FlatFootedPrefix` writes it when one
+    /// rule is open).
+    pub(super) fn env_valid(&self, w: &World, r: &Rv) -> bool {
+        let rule = self.life.rule();
+        self.shapes.get(&rule).is_some_and(|(class, initiator, target)| {
+            (r["rule"] != "RuleCheckTargetFlatFooted" || self.life.depth() == 1)
+                && super::commands::env_record_ok(
+                    w,
+                    &r.to_json(),
+                    class,
+                    &initiator.to_json(),
+                    &target.to_json(),
+                )
+        })
+    }
+
     /// An environment: of the innermost rule (by its class), in its `OnTrigger` outside its handlers.
     pub(super) fn env_placed(&self, r: &Rv) -> bool {
         self.rules.get(&self.life.rule()).is_some_and(|(class, _)| r["rule"] == class.as_str())
@@ -281,10 +327,11 @@ pub(super) fn provoke_placed(open: &mut Open, r: &Rv, rule: Option<&str>) -> boo
 }
 
 impl Driver<'_> {
-    /// The handlers of the root rule at `start` (to its `rule_end` at `end`), before the sim fires
-    /// it: each is of a kind the rule's subscribers have (`span_ok`'s `handler_identity_ok`: a
-    /// global handler of the rule's class, or a fact's component of the sim's, subscribed to the
-    /// rule's initiator or target), against the sim's facts as they stand when the rule starts.
+    /// The handlers of the root rule at `start` (to its `rule_end` at `end`). A fact's component
+    /// and `ActivatableAbility`, which the sim's bus dispatches, are compared one to one with its
+    /// deliveries at the run's end ([`Driver::handlers_finish`]); here only their shape. Any
+    /// other (a global singleton: the sim has none) is a class the game's code has handle the
+    /// rule ([`super::handler_table`], via `span_ok`'s `handler_identity_ok`).
     pub(super) fn span_handlers(&mut self, w: &mut World, start: usize, end: usize) {
         let trace = self.trace;
         let mut rules: HashMap<i64, (String, Rv, Rv)> = HashMap::new();
@@ -297,18 +344,22 @@ impl Driver<'_> {
                     }
                 }
                 Some("h") => {
-                    let ok = r["rule"].as_i64().and_then(|id| rules.get(&id)).is_some_and(
-                        |(class, initiator, target)| {
-                            super::commands::handler_identity_ok(
-                                w,
-                                &r.to_json(),
-                                class,
-                                &initiator.to_json(),
-                                &target.to_json(),
-                                &super::handler_table::handles,
-                            )
-                        },
-                    );
+                    let ok = if dispatched(r) {
+                        component_shape_ok(r)
+                    } else {
+                        r["rule"].as_i64().and_then(|id| rules.get(&id)).is_some_and(
+                            |(class, initiator, target)| {
+                                super::commands::handler_identity_ok(
+                                    w,
+                                    &r.to_json(),
+                                    class,
+                                    &initiator.to_json(),
+                                    &target.to_json(),
+                                    &super::handler_table::handles,
+                                )
+                            },
+                        )
+                    };
                     if !ok {
                         self.span_reported(
                             w,
@@ -319,6 +370,69 @@ impl Driver<'_> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// The run's end: the handlers the recording dispatched to a fact's component or an
+    /// `ActivatableAbility` are the sim's deliveries (`Rulebook::handler_log`, from the bus's
+    /// subscription lists and the rule's type chain), one to one, in order: class, component,
+    /// fact, blueprint and owner, phase and rule.
+    pub(super) fn handlers_finish(&mut self, w: &mut World) {
+        let Some(sim) = w.rulebook.handler_log.take() else { return };
+        let trace = self.trace;
+        let mut rules: HashMap<i64, String> = HashMap::new();
+        let mut recorded: Vec<HandlerRun> = Vec::new();
+        for r in &trace.records {
+            match r["k"].as_str() {
+                Some("rule") => {
+                    if let Some(id) = r["id"].as_i64() {
+                        let class = r["class"].as_str().unwrap_or("");
+                        rules.insert(id, class.rsplit(['.', '+']).next().unwrap_or("").to_owned());
+                    }
+                }
+                Some("h") if dispatched(r) => {
+                    let phase = match r["phase"].as_str() {
+                        Some("mod_before") => "mod_before",
+                        Some("about") => "about",
+                        Some("mod_after") => "mod_after",
+                        Some("did") => "did",
+                        _ => continue,
+                    };
+                    let class = r["class"].as_str().unwrap_or("");
+                    let short = class.rsplit(['.', '+']).next().unwrap_or("");
+                    let kind = if r.get("component").is_some() {
+                        let owner = &r["owner"];
+                        HandlerKind::Component {
+                            class: short.to_owned(),
+                            name: r["component"].as_str().unwrap_or("").to_owned(),
+                            fact: r["fact"]["$fact"].as_str().unwrap_or("").to_owned(),
+                            blueprint: r["blueprint"].as_str().map(str::to_owned),
+                            owner: owner["$unit"]
+                                .as_str()
+                                .or_else(|| owner["$item"].as_str())
+                                .map(str::to_owned),
+                        }
+                    } else {
+                        HandlerKind::Fact("ActivatableAbility")
+                    };
+                    let rule = r["rule"].as_i64().and_then(|id| rules.get(&id)).cloned();
+                    recorded.push(HandlerRun { phase, rule: rule.unwrap_or_default(), kind });
+                }
+                _ => {}
+            }
+        }
+        self.out.spans.handlers = recorded.len();
+        if recorded != sim {
+            let at = recorded.iter().zip(&sim).position(|(a, b)| a != b);
+            let at = at.unwrap_or(recorded.len().min(sim.len()));
+            self.out.spans.reported += 1;
+            w.coverage.unsupported(format!(
+                "driven replay: handlers: the dispatched handlers differ from the sim's at #{at} (recorded {:?}, sim {:?}; {} recorded, {} sim)",
+                recorded.get(at),
+                sim.get(at),
+                recorded.len(),
+                sim.len()
+            ));
         }
     }
 
@@ -419,7 +533,7 @@ impl Driver<'_> {
                     if open.env_placed(r) {
                         *open.envs.entry(open.life.rule()).or_default() += 1;
                     }
-                    if !read || !open.env_placed(r) {
+                    if !read || !open.env_placed(r) || !open.env_valid(w, r) {
                         self.span_reported(
                             w,
                             "an env record".into(),
