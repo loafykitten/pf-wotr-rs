@@ -4796,6 +4796,7 @@ mod ai;
 mod commands;
 mod engage;
 mod impatience;
+mod life;
 mod look;
 mod memory;
 mod nav;

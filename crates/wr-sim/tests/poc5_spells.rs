@@ -386,6 +386,21 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             })
             .expect("an initiative roll")
     }
+    /// The first record of kind `k` inside a phase-driven root's span (an initiative roll's or a
+    /// resolve's): its index.
+    fn handled(recs: &[V], k: &str) -> usize {
+        let mut open = false;
+        for (i, r) in recs.iter().enumerate() {
+            if r["k"] == "rule" && r["depth"] == 0 {
+                open = r["class"].as_str().is_some_and(|c| {
+                    c.ends_with("RuleInitiativeRoll") || c.ends_with("RuleAttackWithWeaponResolve")
+                });
+            } else if open && r["k"] == k {
+                return i;
+            }
+        }
+        panic!("no {k} in a phase-driven root")
+    }
     /// The first `clog_q` of that root (its rule event).
     fn event(recs: &[V]) -> usize {
         let root = initiative(recs);
@@ -428,7 +443,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             }
         }
     }
-    let cases: [(&str, Change); 18] = [
+    let cases: [(&str, Change); 22] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
         // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
         ("events queued, the sim queued", |recs| {
@@ -513,6 +528,66 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
                 .find(|&i| recs[i]["k"] == "rule_end" && recs[i]["id"] == id)
                 .expect("its end");
             recs[end]["t"] = json!(recs[end]["t"].as_i64().unwrap_or(0) + 1);
+        }),
+        // The structure of the span (`life.rs`, shared with the commands' `span_ok`): a handler
+        // closed with another id, a `mod_after` handler after a `did` one, a bonus to a rule that
+        // was never allocated, and one to a rule already closed (T0 emits a bonus at its rule's end).
+        ("driven replay: a h_end record inside a root rule's span", |recs| {
+            let at = handled(recs, "h_end");
+            recs[at]["id"] = json!(recs[at]["id"].as_i64().unwrap_or(0) + 1000);
+        }),
+        ("driven replay: a h record inside a root rule's span", |recs| {
+            // Just before the initiative roll's own `did`: a `did` handler of it, then a
+            // `mod_after` one (ids above every other).
+            let root = initiative(recs);
+            let id = recs[root]["id"].clone();
+            let did = (root..recs.len())
+                .find(|&i| recs[i]["k"] == "did" && recs[i]["id"] == id)
+                .expect("its did");
+            let top = recs.iter().filter_map(|r| r["id"].as_i64()).max().unwrap_or(0) + 1_000;
+            let t = recs[root]["t"].clone();
+            let pair = |n: i64, phase: &str| {
+                [
+                    json!({"seq": 0, "k": "h", "t": t, "id": n, "rule": id, "phase": phase,
+                        "class": "Kingmaker.Controllers.UnitImpatienceController"}),
+                    json!({"seq": 0, "k": "h_end", "t": t, "id": n, "rule": id, "changes": []}),
+                ]
+            };
+            let new: Vec<V> = [pair(top, "did"), pair(top + 1, "mod_after")].concat();
+            recs.splice(did..did, new);
+            renumber(recs);
+        }),
+        ("driven replay: a rule_bonus mutation inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "mut", "t": t, "what": "rule_bonus", "target_rule": 1_000_000_000}),
+            );
+            renumber(recs);
+        }),
+        ("driven replay: a rule_bonus mutation inside a root rule's span", |recs| {
+            // To a rule that is already closed: the root before the last initiative roll.
+            let root = recs
+                .iter()
+                .rposition(|r| {
+                    r["k"] == "rule"
+                        && r["depth"] == 0
+                        && r["class"].as_str().is_some_and(|c| c.ends_with("RuleInitiativeRoll"))
+                })
+                .expect("an initiative roll");
+            let before = recs[..root]
+                .iter()
+                .rev()
+                .find(|r| r["k"] == "rule" && r["depth"] == 0)
+                .expect("an earlier root")["id"]
+                .clone();
+            let t = recs[root]["t"].clone();
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "mut", "t": t, "what": "rule_bonus", "target_rule": before}),
+            );
+            renumber(recs);
         }),
         // A mutation the T0 projection drops (stat values, modifiers) compares nowhere.
         ("driven replay: a stat_value mutation inside a root rule's span", |recs| {

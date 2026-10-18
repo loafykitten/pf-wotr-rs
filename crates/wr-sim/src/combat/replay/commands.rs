@@ -14,6 +14,7 @@ use serde_json::{Value as J, json};
 
 use crate::combat::oracle::{Rv, rv};
 
+use super::life::Life;
 use super::{Driver, Phase};
 use crate::combat::commands::{self as uc, Cmd, Desync, Fx, Inputs, Of, R, Set, State};
 use crate::world::{EntityIdx, World};
@@ -2450,8 +2451,6 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         initiator: J,
         target: J,
         fields: serde_json::Map<String, J>,
-        /// 0 pushed, 1 about, 2 trig, 3 trig_end, 4 did.
-        stage: u8,
         /// Its environment records.
         envs: usize,
         /// The bonuses its `rule_bonus` mutations added (value, descriptor, type, stat, fact).
@@ -2462,7 +2461,6 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         before_handlers: bool,
         /// Its reason at `about`.
         reason: J,
-        did_handlers: bool,
         draws: i64,
         /// Its `ActivatableAbility` handlers at about and did (identity-free records: counted).
         activatable: [usize; 2],
@@ -2520,13 +2518,11 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                         && f.values().all(observed)
                 })?
                 .clone(),
-            stage: 0,
             envs: 0,
             bonuses: Vec::new(),
             push_reason: r.get("reason_at_push").cloned().unwrap_or(J::Null),
             before_handlers: false,
             reason: J::Null,
-            did_handlers: false,
             draws: 0,
             activatable: [0, 0],
             components: [Vec::new(), Vec::new()],
@@ -2539,12 +2535,8 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
     };
     let Some(root) = frame(&span[0]).filter(|_| envelope_ok(&span[0])) else { return false };
     // Ids are allocated in order through the window: each new rule's and handler's is above the last.
-    let (mut last_rule, mut last_handler) = (root.id, 0_i64);
+    let mut life = Life::new(root.id);
     let mut frames = vec![root];
-    // The global handler stack: (handler, its rule).
-    let mut handlers: Vec<(i64, i64)> = Vec::new();
-    // The open handlers' classes (with `handlers`).
-    let mut handler_classes: Vec<String> = Vec::new();
     let mut seq = span[0]["seq"].as_i64();
     for (n, x) in span.iter().enumerate().skip(1) {
         // Every record carries its trace sequence number, in order.
@@ -2554,39 +2546,42 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         }
         seq = s;
         let Some(top) = frames.last() else { return false };
-        let (rule, stage) = (top.id, top.stage);
-        let handler = handlers.last().map_or(0, |h| h.0);
-        let own_handler = handlers.last().is_some_and(|h| h.1 == rule);
+        // (The rules' and handlers' structure is `Life`'s, shared with the audit of the other
+        // root spans.)
+        let (rule, stage) = (life.rule(), life.stage());
+        let own_handler = life.own_handler();
         let id = x["id"].as_i64();
-        let attributed = x["rule"].as_i64() == Some(rule) && x["h"].as_i64() == Some(handler);
+        let attributed = life.attributed(x["rule"].as_i64(), x["h"].as_i64());
         // A step's diff, applied to the innermost rule's fields.
-        let step = |frames: &mut Vec<Frame>, want: u8, next: u8| -> bool {
-            let ok = id == Some(rule) && stage == want && !own_handler;
-            ok && frames.last_mut().is_some_and(|f| {
-                f.stage = next;
-                apply_diff(&mut f.fields, &x["changes"])
-                    && bonus_state_ok(&f.fields, w)
-                    && added_agree(&f.fields, &f.bonuses)
-                    && (next == 5 || untriggered(&f.fields))
-                    && f.fields.get("Target").is_none_or(|t| *t == f.target)
-            })
+        let step = |frames: &mut Vec<Frame>, life: &mut Life, want: u8, next: u8| -> bool {
+            let ok = life.can_step(id, want);
+            ok && {
+                life.advance(next);
+                frames.last_mut().is_some_and(|f| {
+                    apply_diff(&mut f.fields, &x["changes"])
+                        && bonus_state_ok(&f.fields, w)
+                        && added_agree(&f.fields, &f.bonuses)
+                        && (next == 5 || untriggered(&f.fields))
+                        && f.fields.get("Target").is_none_or(|t| *t == f.target)
+                })
+            }
         };
         if !envelope_ok(x) {
             return false;
         }
         let ok = match x["k"].as_str() {
             Some("rule") => {
-                let ok = x["parent"].as_i64() == Some(rule)
-                    && x["depth"].as_u64().and_then(|d| usize::try_from(d).ok())
-                        == Some(frames.len())
-                    && x["handler"].as_i64() == Some(handler)
-                    // Pushed by an ordinary `Trigger`: its context is its parent (`PreviousEvent`).
-                    && x["context_parent"] == x["parent"]
-                    && (stage == 2 || own_handler)
-                    && id.is_some_and(|i| i > last_rule);
+                // (Pushed by an ordinary `Trigger`: its context is its parent, `PreviousEvent`.)
+                let ok = life.can_push(
+                    id,
+                    x["parent"].as_i64(),
+                    x["depth"].as_u64(),
+                    x["handler"].as_i64(),
+                    x["context_parent"] == x["parent"],
+                );
                 match frame(x) {
                     Some(f) if ok => {
-                        last_rule = f.id;
+                        life.push(f.id);
                         frames.push(f);
                         true
                     }
@@ -2617,12 +2612,12 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     if let Some(f) = frames.last_mut() {
                         f.reason = x["reason"].clone();
                     }
-                    step(&mut frames, 0, 1)
+                    step(&mut frames, &mut life, 0, 1)
                 }
             }
-            Some("trig") => step(&mut frames, 1, 2),
-            Some("trig_end") => step(&mut frames, 2, 3),
-            Some("did") => step(&mut frames, 3, 4),
+            Some("trig") => step(&mut frames, &mut life, 1, 2),
+            Some("trig_end") => step(&mut frames, &mut life, 2, 3),
+            Some("did") => step(&mut frames, &mut life, 3, 4),
             Some("rule_end") => {
                 // An attack roll's and a resolve's environment once, a flat-footed check's at most once.
                 let envs = match short_class(&top.class) {
@@ -2663,7 +2658,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     && top.components.iter().all(|c| sorted(c) == components)
                     && envs
                     && x["bonuses"].as_array().is_some_and(|b| b.iter().all(|b| bonus_ok(b, w)))
-                    && step(&mut frames, 4, 5)
+                    && step(&mut frames, &mut life, 4, 5)
                     && frames.last().is_some_and(|f| {
                         f.fields.get("m_Triggered") == Some(&J::Bool(true))
                             && f.fields.get("IsTriggered") == Some(&J::Bool(true))
@@ -2684,24 +2679,15 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                             })
                     });
                 frames.pop();
+                life.end_rule();
                 ok && (frames.is_empty() == (n == span.len() - 1))
             }
             Some("h") => {
-                // Its phase is the rule's stage's: before `about`, after it, or after `trig_end`
-                // (`mod_after` handlers before `did` ones).
-                let phase_ok = match (x["phase"].as_str(), stage) {
-                    (Some("mod_before"), 0) | (Some("about"), 1) => true,
-                    (Some("mod_after"), 3) => !top.did_handlers,
-                    (Some("did"), 3) => true,
-                    _ => false,
-                };
-                let ok = x["rule"].as_i64() == Some(rule)
-                    && !own_handler
-                    && phase_ok
-                    && handler_identity_ok(w, x, &top.class, &top.initiator, &top.target)
-                    && id.is_some_and(|i| i > last_handler);
+                // Its phase is the rule's stage's (`Life`).
+                let phase = x["phase"].as_str().unwrap_or("");
+                let ok = life.can_open(id, x["rule"].as_i64(), phase)
+                    && handler_identity_ok(w, x, &top.class, &top.initiator, &top.target);
                 if ok && let Some(f) = frames.last_mut() {
-                    f.did_handlers |= x["phase"] == "did";
                     f.before_handlers |= x["phase"] == "mod_before";
                     let did = usize::from(x["phase"] == "did");
                     if x["class"] == ACTIVATABLE {
@@ -2722,16 +2708,12 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     }
                 }
                 if let Some(i) = id.filter(|_| ok) {
-                    handlers.push((i, rule));
-                    handler_classes.push(x["class"].as_str().unwrap_or("").to_owned());
-                    last_handler = i;
+                    life.open(i, x["class"].as_str().unwrap_or(""), phase);
                 }
                 ok
             }
             Some("h_end") => {
-                let ok = own_handler
-                    && id == Some(handler)
-                    && x["rule"].as_i64() == Some(rule)
+                let ok = life.can_close(id, x["rule"].as_i64())
                     && frames.last_mut().is_some_and(|f| {
                         apply_diff(&mut f.fields, &x["changes"])
                             && bonus_state_ok(&f.fields, w)
@@ -2740,8 +2722,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                             // `RulebookTargetEvent.Target` is readonly.
                             && f.fields.get("Target").is_none_or(|t| *t == f.target)
                     });
-                handlers.pop();
-                handler_classes.pop();
+                life.close();
                 ok
             }
             Some("draw") => {
@@ -2804,7 +2785,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 // `RuleDealDamage` (its bother unit, then its end), `OffensiveActionsController`'s
                 // for a `RuleAttackRoll` (the target's bother unit). Matched with the sim's
                 // operations after the sim fires the rule (`imp_span`).
-                let handler = handler_classes.last().map(String::as_str);
+                let handler = life.handler().map(|h| h.class.as_str());
                 // Its units: the bother unit is the rule's target, bothered by its initiator; the
                 // damage handler's end is the initiator's, with the rule's id.
                 let units_ok = match x["at"].as_str() {
@@ -2844,7 +2825,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     && own_handler
                     && stage == 3
                     && short_class(&top.class) == "RuleAttackRoll"
-                    && handler_classes.last().map(String::as_str)
+                    && life.handler().map(|h| h.class.as_str())
                         == Some("Kingmaker.Controllers.OffensiveActionsController")
                     && a.is_some()
                     && t.is_some()
@@ -2895,7 +2876,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 let ok = own_handler
                     && stage == 3
                     && top.provokes == 0
-                    && handler_classes.last().map(String::as_str)
+                    && life.handler().map(|h| h.class.as_str())
                         == Some("Kingmaker.Controllers.Combat.UnitCombatEngagementController")
                     && x["fn"] == "ProvokeAttackOfOpportunity"
                     && x["u"].as_str().is_some()
@@ -2940,7 +2921,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
             return false;
         }
     }
-    frames.is_empty() && handlers.is_empty()
+    frames.is_empty() && life.no_handlers()
 }
 
 /// A draw's payload (`Rng`): its class, member with its arguments and value (finite numbers), its

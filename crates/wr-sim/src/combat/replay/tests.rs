@@ -1367,7 +1367,7 @@ fn a_root_attacks_launch_is_placed_like_a_commands() {
             }
             ']' => json!({"k": "rule_end", "t": 5, "id": 2}),
             'h' => json!({"k": "h", "t": 5, "id": 3, "rule": 1, "phase": "did"}),
-            'H' => json!({"k": "h_end", "t": 5, "id": 3}),
+            'H' => json!({"k": "h_end", "t": 5, "id": 3, "rule": 1}),
             _ => launch.clone(),
         };
         let mut v = vec![
@@ -1425,7 +1425,7 @@ fn a_root_spans_provoke_is_placed_like_a_commands() {
         'E' => json!({"k": "trig_end", "t": 5, "id": 1}),
         'D' => json!({"k": "did", "t": 5, "id": 1}),
         'h' => json!({"k": "h", "t": 5, "id": 3, "class": handler, "rule": 1, "phase": phase}),
-        'H' => json!({"k": "h_end", "t": 5, "id": 3}),
+        'H' => json!({"k": "h_end", "t": 5, "id": 3, "rule": 1}),
         _ => prov.clone(),
     };
     let prov = json!({"k": "obs", "t": 5, "ev": "eng_prov", "u": "a"});
@@ -1502,4 +1502,89 @@ fn a_root_spans_provoke_is_placed_like_a_commands() {
     }
     assert!(provoke_placed(&mut open, &recs[5], rule));
     assert!(!provoke_placed(&mut open, &recs[6], rule), "a second provoke of a rule");
+}
+
+/// The structure of a root's span (`life.rs`, shared with `span_ok`): nested rules pushed in the
+/// parent's `OnTrigger`, steps in turn, handlers of the innermost rule in the phase its stage
+/// allows with ascending ids, closed with their id and rule, a `mod_after` before the first `did`
+/// handler; and a `rule_bonus` only to a rule still open.
+#[test]
+fn a_root_spans_structure_follows_span_oks() {
+    use super::spans::{Open, projected};
+    let class = "Kingmaker.RuleSystem.Rules.RuleAttackRoll";
+    let rule = |id: i64, parent: i64, depth: u64, handler: i64| {
+        json!({"k": "rule", "t": 5, "id": id, "parent": parent, "depth": depth, "handler": handler,
+            "context_parent": parent, "class": class, "initiator": {"$unit": "a"}})
+    };
+    let step = |k: &str, id: i64| json!({"k": k, "t": 5, "id": id});
+    let h = |id: i64, rule: i64, phase: &str| json!({"k": "h", "t": 5, "id": id, "rule": rule, "phase": phase, "class": "C"});
+    let h_end = |id: i64, rule: i64| json!({"k": "h_end", "t": 5, "id": id, "rule": rule});
+    let root = json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}});
+    // Whether every record is in its place (the root first).
+    let fed = |records: Vec<J>| {
+        let recs = rvs(&records);
+        let mut open = Open::new(&recs[0]);
+        recs[1..].iter().all(|r| open.feed(r))
+    };
+    let with = |tail: Vec<J>| {
+        let mut v = vec![root.clone(), step("about", 1), step("trig", 1)];
+        v.extend(tail);
+        v
+    };
+    // A nested rule in `OnTrigger`, with its own steps, then the rest of the root.
+    let nested = |depth: u64, handler: i64| {
+        vec![
+            rule(2, 1, depth, handler),
+            step("about", 2),
+            step("trig", 2),
+            step("trig_end", 2),
+            step("did", 2),
+            step("rule_end", 2),
+        ]
+    };
+    let finish = || vec![step("trig_end", 1), step("did", 1), step("rule_end", 1)];
+    let all = |a: Vec<J>, b: Vec<J>| with([a, b].concat());
+    assert!(fed(all(nested(1, 0), finish())), "a nested rule in OnTrigger");
+    assert!(!fed(all(nested(2, 0), finish())), "another depth");
+    assert!(!fed(all(nested(1, 9), finish())), "another handler");
+    let mut early = vec![root.clone(), step("about", 1)];
+    early.extend(nested(1, 0));
+    assert!(!fed(early), "a nested rule before trig");
+    // Handlers: ids ascend, closed with their id and rule.
+    let after = |hh: Vec<J>| {
+        let mut v = vec![root.clone(), step("about", 1), step("trig", 1), step("trig_end", 1)];
+        v.extend(hh);
+        v.extend([step("did", 1), step("rule_end", 1)]);
+        v
+    };
+    assert!(fed(after(vec![h(3, 1, "mod_after"), h_end(3, 1), h(4, 1, "did"), h_end(4, 1)])));
+    assert!(
+        !fed(after(vec![h(3, 1, "did"), h_end(3, 1), h(4, 1, "mod_after"), h_end(4, 1)])),
+        "a mod_after after a did handler"
+    );
+    assert!(!fed(after(vec![h(3, 1, "did"), h_end(9, 1)])), "an h_end of another id");
+    assert!(!fed(after(vec![h(3, 1, "did"), h_end(3, 2)])), "an h_end of another rule");
+    assert!(
+        !fed(after(vec![h(3, 1, "did"), h_end(3, 1), h(3, 1, "did"), h_end(3, 1)])),
+        "a handler id not above the last"
+    );
+    assert!(!fed(after(vec![h(3, 2, "did"), h_end(3, 2)])), "a handler of another rule");
+    assert!(!fed(after(vec![h(3, 1, "about"), h_end(3, 1)])), "a handler of another stage");
+    assert!(!fed(after(vec![h_end(3, 1)])), "an h_end without its handler");
+    // A rule bonus is projected only to a rule open at the mutation.
+    let bonus = |t: i64| json!({"k": "mut", "t": 5, "what": "rule_bonus", "target_rule": t});
+    let recs = rvs(&[root.clone(), step("about", 1), step("trig", 1), rule(2, 1, 1, 0)]);
+    let mut open = Open::new(&recs[0]);
+    assert!(recs[1..].iter().all(|r| open.feed(r)));
+    let r = |v: J| rvs(&[v]).remove(0);
+    assert!(projected(&open, &r(bonus(2))), "an open nested rule");
+    assert!(projected(&open, &r(bonus(1))), "the open root");
+    assert!(!projected(&open, &r(bonus(99))), "a rule never allocated");
+    assert!(!projected(&open, &r(bonus(0))), "an untracked rule");
+    assert!(projected(&open, &r(json!({"k": "mut", "t": 5, "what": "damage"}))));
+    assert!(!projected(&open, &r(json!({"k": "mut", "t": 5, "what": "stat_value"}))));
+    for k in ["about", "trig", "trig_end", "did", "rule_end"] {
+        assert!(open.feed(&r(step(k, 2))));
+    }
+    assert!(!projected(&open, &r(bonus(2))), "a rule already closed");
 }

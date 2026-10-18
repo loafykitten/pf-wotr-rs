@@ -40,6 +40,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::commands::provoke_rule;
+use super::life::Life;
 use super::{Driver, Rv};
 use crate::world::World;
 
@@ -67,27 +68,26 @@ pub struct SpanCounts {
 }
 
 /// Whether the T0 projection keeps a mutation (`project::project_records`): damage, experience,
-/// facts attached and detached, and a bonus added to a rule it tracks.
-fn projected(r: &Rv) -> bool {
+/// facts attached and detached, and a bonus added to a rule it tracks, which it buffers and emits
+/// at that rule's `rule_end`: so the rule must be open (on `open`'s stack) at the mutation.
+pub(super) fn projected(open: &Open, r: &Rv) -> bool {
     match r["what"].as_str() {
         Some("damage" | "xp" | "fact_attach" | "fact_detach") => true,
-        Some("rule_bonus") => r["target_rule"].as_i64().is_some_and(|t| t > 0),
+        Some("rule_bonus") => {
+            r["target_rule"].as_i64().is_some_and(|t| t > 0 && open.life.is_open(t))
+        }
         _ => false,
     }
 }
 
-/// What `span_records` knows of the span so far: the rules and handlers open and where each
-/// rule is in its life (`span_ok`'s frames), fed the span's records in order.
+/// What `span_records` knows of the span so far: the structure of its rules and handlers
+/// (`Life`, shared with `span_ok`), the rules' classes and initiators, the provokes made.
 pub(super) struct Open {
     /// The root's frame.
     pub(super) t: i64,
+    pub(super) life: Life,
     /// Its rules by id: short class and initiator.
     pub(super) rules: HashMap<i64, (String, Rv)>,
-    /// The open rules, outermost first, with their stage: 0 pushed, 1 `about`, 2 `trig`, 3
-    /// `trig_end`, 4 `did`.
-    pub(super) stack: Vec<(i64, u8)>,
-    /// The open handlers: class, rule, phase.
-    pub(super) handlers: Vec<(String, i64, String)>,
     /// The rules that made their provoke.
     pub(super) provoked: HashSet<i64>,
 }
@@ -97,74 +97,71 @@ impl Open {
     pub(super) fn new(root: &Rv) -> Self {
         let mut open = Self {
             t: root["t"].as_i64().unwrap_or(-1),
+            life: Life::new(root["id"].as_i64().unwrap_or(0)),
             rules: HashMap::new(),
-            stack: Vec::new(),
-            handlers: Vec::new(),
             provoked: HashSet::new(),
         };
-        let _ = open.feed(root);
+        open.note(root);
         open
     }
 
-    /// The next record of the span: a rule pushed or ended, one of its steps, a handler opened or
-    /// closed. False for one out of its place, as `span_ok` places them: a nested rule pushed
-    /// in its parent's `OnTrigger` or one of its handlers, a step of the innermost rule (not
-    /// while its own handler is open) in the order `about`, `trig`, `trig_end`, `did`, `rule_end`,
-    /// a handler of the innermost rule in the phase its stage allows.
+    fn note(&mut self, r: &Rv) {
+        let class = r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
+        if let Some(id) = r["id"].as_i64() {
+            self.rules.insert(id, (class.to_owned(), r["initiator"].clone()));
+        }
+    }
+
+    /// The next record of the span (a rule's push, step or end, a handler's open or close);
+    /// false for one out of its place in the structure `Life` describes.
     pub(super) fn feed(&mut self, r: &Rv) -> bool {
         let id = r["id"].as_i64();
-        let own =
-            self.stack.last().is_some_and(|t| self.handlers.last().is_some_and(|h| h.1 == t.0));
-        let mut step = |want: u8, next: u8| match self.stack.last_mut() {
-            Some(top) if Some(top.0) == id && top.1 == want && !own => {
-                top.1 = next;
-                true
+        let step = |life: &mut Life, want: u8, next: u8| {
+            let ok = life.can_step(id, want);
+            if ok {
+                life.advance(next);
             }
-            _ => false,
+            ok
         };
         match r["k"].as_str() {
             Some("rule") => {
-                let ok = self
-                    .stack
-                    .last()
-                    .is_none_or(|t| Some(t.0) == r["parent"].as_i64() && (t.1 == 2 || own));
-                let class =
-                    r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
+                let ok = self.life.can_push(
+                    id,
+                    r["parent"].as_i64(),
+                    r["depth"].as_u64(),
+                    r["handler"].as_i64(),
+                    r["context_parent"] == r["parent"],
+                );
                 if let Some(id) = id {
-                    self.rules.insert(id, (class.to_owned(), r["initiator"].clone()));
-                    self.stack.push((id, 0));
+                    self.note(r);
+                    self.life.push(id);
                 }
                 ok
             }
-            Some("about") => step(0, 1),
-            Some("trig") => step(1, 2),
-            Some("trig_end") => step(2, 3),
-            Some("did") => step(3, 4),
+            Some("about") => step(&mut self.life, 0, 1),
+            Some("trig") => step(&mut self.life, 1, 2),
+            Some("trig_end") => step(&mut self.life, 2, 3),
+            Some("did") => step(&mut self.life, 3, 4),
             Some("rule_end") => {
-                let ok = step(4, 5);
-                if self.stack.last().is_some_and(|t| Some(t.0) == id) {
-                    self.stack.pop();
+                let ok = step(&mut self.life, 4, 5);
+                if id == Some(self.life.rule()) {
+                    self.life.end_rule();
                 }
                 ok
             }
             Some("h") => {
                 let phase = r["phase"].as_str().unwrap_or("");
-                let ok = self.stack.last().is_some_and(|t| {
-                    Some(t.0) == r["rule"].as_i64()
-                        && !own
-                        && matches!(
-                            (phase, t.1),
-                            ("mod_before", 0) | ("about", 1) | ("mod_after" | "did", 3)
-                        )
-                });
-                self.handlers.push((
-                    r["class"].as_str().unwrap_or("").to_owned(),
-                    r["rule"].as_i64().unwrap_or(0),
-                    phase.to_owned(),
-                ));
+                let ok = self.life.can_open(id, r["rule"].as_i64(), phase);
+                if let (true, Some(id)) = (ok, id) {
+                    self.life.open(id, r["class"].as_str().unwrap_or(""), phase);
+                }
                 ok
             }
-            Some("h_end") => self.handlers.pop().is_some(),
+            Some("h_end") => {
+                let ok = self.life.can_close(id, r["rule"].as_i64());
+                self.life.close();
+                ok
+            }
             _ => true,
         }
     }
@@ -175,15 +172,16 @@ impl Open {
 /// initiator, once per rule, while the rule is the innermost open one and between `trig_end` and
 /// `did`.
 pub(super) fn provoke_placed(open: &mut Open, r: &Rv, rule: Option<&str>) -> bool {
-    let Some((class, id, phase)) = open.handlers.last() else { return false };
+    let Some(h) = open.life.handler() else { return false };
+    let id = h.rule;
     let placed = r["t"].as_i64() == Some(open.t)
-        && class == ENGAGEMENT
-        && phase == "did"
-        && open.stack.last() == Some(&(*id, 3))
-        && open.rules.get(id).is_some_and(|(rc, initiator)| {
+        && h.class == ENGAGEMENT
+        && h.phase == "did"
+        && open.life.rule() == id
+        && open.life.stage() == 3
+        && open.rules.get(&id).is_some_and(|(rc, initiator)| {
             Some(rc.as_str()) == rule && r["u"] == initiator["$unit"]
         });
-    let id = *id;
     placed && open.provoked.insert(id)
 }
 
@@ -220,7 +218,7 @@ impl Driver<'_> {
                 // A draw is compared in the T0 stream (a presentation draw is none).
                 Some("draw") => {}
                 // So is a mutation of the kinds the projection keeps; the others it drops.
-                Some("mut") if projected(r) => {}
+                Some("mut") if projected(&open, r) => {}
                 // The environment the root's code looked up.
                 Some("env") => {
                     let read = self.env_reads.iter().any(|(rule, a, t)| {

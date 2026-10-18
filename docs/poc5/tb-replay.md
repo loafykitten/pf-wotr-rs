@@ -939,10 +939,18 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   `stat_mod_add` 2,370, `stat_mod_remove` 6 in the sweep's captures). So a span now reports any other `mut`
   (`spans::projected`). **Open, not the spans':** the mutations outside spans that nothing compares (the sim doesn't emit
   them, T0 doesn't project them); the fix is for the sim to emit them and T0 to compare them, a piece of work of its own.
-- Order: the span's rules follow `span_ok`'s transitions (`Open::feed`): `about`, `trig`, `trig_end`, `did`,
-  `rule_end` in turn, each by the innermost rule and not while its own handler is open; a nested rule pushed in its
-  parent's `OnTrigger` or one of its handlers; a handler in the phase its rule's stage allows. A step out of its place
-  is reported (a `did` before `trig_end`, a repeated step, a rule closed before its `did`).
+- Structure: one state machine, `replay/life.rs` (`Life`), shared by `span_ok` (the commands' attack spans, which check
+  every field besides) and the audit of the other root spans (`spans::Open`), so the two cannot drift. A nested rule is
+  pushed by the innermost rule in its `OnTrigger` or one of its handlers (its `parent`, `depth`, open `handler` and
+  `context_parent`, its id above the last rule's). The steps `about`, `trig`, `trig_end`, `did`, `rule_end` come in
+  turn from the innermost rule and not while its own handler is open. A handler of the innermost rule opens in the
+  phase its stage allows (`mod_before` before `about`, `about` after it, `mod_after` then `did` after `trig_end`, no
+  `mod_after` once a `did` handler has opened), with an id above the last handler's, and closes with its id and rule
+  as the innermost. A record out of its place is reported. The extraction changed nothing in `span_ok`'s behaviour
+  (every check moved with its inputs; the sweep and the suites agree).
+- `rule_bonus`: the projection buffers a bonus to a tracked rule and emits it at that rule's `rule_end`, so the audit
+  accepts one only if its target is a rule open on the stack at the mutation; a target never allocated, or already
+  closed, is dropped by T0 and reported here.
 - Frame: a root rule fires within one frame, so every record of its span (its `rule_end` too) carries the root's `t`;
   one that doesn't is reported. It holds on all 111 runs (no exception).
 - Any other observation, or a record of another kind (`cmd`, `tb`, `time`, `input`) in a span: reported. The replay
@@ -954,13 +962,14 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
 (`-135` replay-3-perturbed turned valid, above).
 
 **Tests** (`poc5_spells.rs`, `records_inside_driven_root_spans_are_checked_or_reported`, `poc5-tb-123/tb-chain`; the
-unit tests `a_root_attacks_launch_is_placed_like_a_commands` and `a_root_spans_provoke_is_placed_like_a_commands`
-in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
+unit tests `a_root_attacks_launch_is_placed_like_a_commands`, `a_root_spans_provoke_is_placed_like_a_commands` and
+`a_root_spans_structure_follows_span_oks` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
 the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
 `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
 `proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
-the initiative roll's span, a root's `rule_end` of another frame, a `stat_value` mutation and a `did` before
-`trig_end`; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
+the initiative roll's span, a root's `rule_end` of another frame, a `stat_value` mutation, a `did` before
+`trig_end`, an `h_end` of another id, a `mod_after` handler after a `did` one, a `rule_bonus` to a rule never
+allocated and one to a rule already closed; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
 accepted and counted (the run stays valid, `oracle_invalid` equal to the notes added). The phase-driven placing of a
 launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
 and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is
