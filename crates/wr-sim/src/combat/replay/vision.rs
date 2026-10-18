@@ -132,6 +132,9 @@ pub struct VisCounts {
     /// Frames whose colliders' PhysX positions are unknown for the recording's physics settings
     /// (`physics_auto_sync` not false, `physics_auto_simulation` not true, or either missing).
     pub range_physics_unknown: usize,
+    /// Frames with a possible explicit `Physics.SyncTransforms()` (a polymorph ended, a mode
+    /// with the place-on-ground controller started): every collider's PhysX copy unknown.
+    pub range_sync_frames: usize,
     /// Vision records (`vis`, `los`, `los_clear`, `los_geometry`, `los_geom`, `los_probe`) no
     /// handler consumed (each reported).
     pub records_unconsumed: usize,

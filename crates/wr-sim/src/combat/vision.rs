@@ -159,6 +159,11 @@ pub struct Vision {
     /// roaming, spawns, view replacement, companions placed); without the driven agent a write
     /// after the vision phase means the next prefix's row isn't where the unit stood at it.
     pub pos_writes: HashMap<EntityIdx, u64>,
+    /// A `Physics.SyncTransforms()` may have run since the last vision phase (it flushes every
+    /// transform to PhysX outside the fixed steps): a polymorph ended (`Polymorph.RestoreView`),
+    /// a mode with `UnitPlaceOnGroundController` started after one without it (its `Start` forces
+    /// a place-on-ground tick, which syncs first).
+    pub explicit_sync: bool,
     /// Units whose collider may be fade-hiding with its `enabled` kept: a `HideUnit` with `Fade`
     /// hid them, or they were not in the game at the window's first tick (a fade may have begun
     /// before). While the fade runs (`EntityViewBase.m_IsFadeHide`) `UpdateViewActive` returns
@@ -730,4 +735,20 @@ pub fn note_size_change(w: &mut World, e: EntityIdx) {
 /// The sim wrote a unit's position ([`Vision::pos_writes`]).
 pub fn note_position_write(w: &mut World, e: EntityIdx) {
     *w.combat.vision.pos_writes.entry(e).or_default() += 1;
+}
+
+/// A `Physics.SyncTransforms()` may run ([`Vision::explicit_sync`]).
+pub fn note_explicit_sync(w: &mut World) {
+    w.combat.vision.explicit_sync = true;
+}
+
+/// A fact that may end a polymorph (`Polymorph.OnDeactivate` restores the view and syncs the
+/// transforms) is deactivated or removed.
+pub fn note_fact_ending(w: &mut World, f: crate::world::FactIdx) {
+    let polymorph = w.fact(f).bp.as_ref().is_some_and(|b| {
+        b.components_array().iter().any(|o| wr_content::schema::ty(o.ty).short == "Polymorph")
+    });
+    if polymorph {
+        note_explicit_sync(w);
+    }
 }

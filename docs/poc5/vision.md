@@ -276,6 +276,13 @@ and its `enabled`; `Bounds::overlap` answers the query in the colliders' order.
 - **Physics settings.** The step and sync model is for `Physics.autoSyncTransforms` off and `autoSimulation` on, as the
   begin record's `physics_auto_sync` and `physics_auto_simulation` say; with other values, or without them, no collider's
   PhysX position is known (counted as `frames of unmodelled physics settings`).
+- **Explicit syncs.** `Physics.SyncTransforms()` flushes every transform to PhysX (all physics scenes) outside the fixed
+  steps. Its callers: `Polymorph.RestoreView` (a polymorph ending), `UnitPlaceOnGroundController.Tick` when a forced place
+  is pending (`Start`, which `GameMode.OnStart` calls when a mode with the controller, Default or Pause, starts after
+  one without it; `RequestTick`, from scene loading and Alushinyrra's isle view), `GameActionSetIsleState` and
+  `IsleStateControllerView`. In a frame where one may have run since the last vision phase (the sim deactivated or
+  removed a fact with a `Polymorph` component, or a mode with the controller started after one without it) every
+  collider's PhysX copy is unknown until a step known to run (counted as `frames with a possible explicit sync`).
 - **Every vision record is consumed.** Each `vis`, `los`, `los_clear`, `los_geometry`, `los_geom` and `los_probe` record
   must reach its handler exactly once; one that none consumed by the run's end (inside a root rule's span the replay
   drives, whose records it skips, say) is reported (`vision records unconsumed`). A position that isn't the driven agent's or a row's is never taken as
@@ -575,6 +582,9 @@ can also be absorbed:
 - **Can be absorbed, besides (without the driven agent):** a position write after the vision phase that the sim doesn't
   run (an unported ability or action, a cutscene's move): the next prefix's row then stands for the unit's position at
   the phase although it isn't. The sim's own writes are counted and fail closed (above); the others are assumed absent.
+- **Can be absorbed, besides:** a `Physics.SyncTransforms()` the sim can't see: a polymorph ended by code it doesn't
+  run, the isle actions and view (Alushinyrra only; the action isn't ported), a place-on-ground request from a scene
+  load (outside the window). They are assumed absent.
 - **Only a false report:** the memory and line-of-sight items above.
 - **Neither (the pairs are the recording's, counted):** the result buffer (more than 512 colliders possibly in reach; an
   impossible set size is reported); the bounds queue and fades (a collider of a unit out of the game, or after a frame

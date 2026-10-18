@@ -235,6 +235,7 @@ pub fn deactivate(w: &mut World, f: FactIdx) {
         w.log("error", "EntityFact.Deactivate: invoked from Activate");
     }
     w.fact_mut(f).deactivating = true;
+    crate::combat::vision::note_fact_ending(w, f);
     w.trace("Fact.Deactivate", |w| label(w, f));
     if w.fact(f).is_turned_on {
         turn_off(w, f);
@@ -705,6 +706,7 @@ pub fn manager_remove_with(
     if let Some(p) = list.iter().position(|x| *x == f) {
         list.remove(p);
         crate::combat::vision::note_corpulence_change(w, e);
+        crate::combat::vision::note_fact_ending(w, f);
         let rank = crate::components::fact_rank(w, f);
         w.events.mutation(
             "fact_detach",

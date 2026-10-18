@@ -1026,3 +1026,25 @@ fn the_difficulty_condition_compares_the_presets_stats_adjustments() {
     assert_eq!(run(3, true, 5), (true, true), "a player-faction caster");
     assert!(!run(4, false, 6).1, "an index the rules data doesn't resolve");
 }
+
+/// A polymorph's end (`Polymorph.RestoreView`) calls `Physics.SyncTransforms()`: removing or
+/// deactivating a fact with a `Polymorph` component marks a possible explicit sync for the
+/// vision range; other facts don't.
+#[test]
+fn a_polymorph_ending_marks_a_possible_transform_sync() {
+    let (mut w, u) = registry_world();
+    let plain = feature(&w, 7001, vec![stat_bonus("$AddStatBonus$p", S::Strength, 2)]);
+    let f = loaded_fact(&mut w, u, &plain, false);
+    fl::manager_remove_with(&mut w, u, f, false, |_, _| {});
+    assert!(!w.combat.vision.explicit_sync);
+    let poly = Node::Object(Box::new(obj(
+        "Kingmaker.UnitLogic.Buffs.Polymorph",
+        &[("name", Node::Str("$Polymorph$x".into()))],
+    )));
+    let bp = feature(&w, 7002, vec![poly]);
+    let f = loaded_fact(&mut w, u, &bp, false);
+    crate::combat::vision::note_fact_ending(&mut w, f);
+    assert!(std::mem::take(&mut w.combat.vision.explicit_sync));
+    fl::manager_remove_with(&mut w, u, f, false, |_, _| {});
+    assert!(w.combat.vision.explicit_sync);
+}

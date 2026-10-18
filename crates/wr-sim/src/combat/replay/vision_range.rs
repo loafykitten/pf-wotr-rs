@@ -448,6 +448,13 @@ impl Driver<'_> {
             w.combat.vision.bounds.forget_positions();
             self.vis.counts.range_physics_unknown += 1;
         }
+        // A `Physics.SyncTransforms()` since the last phase may have given PhysX transforms a
+        // step wouldn't have (this frame's, or the next's when it came after this phase):
+        // unknown until a step known to run.
+        if std::mem::take(&mut w.combat.vision.explicit_sync) {
+            w.combat.vision.bounds.forget_positions();
+            self.vis.counts.range_sync_frames += 1;
+        }
         self.vis.range.expect.clear();
         self.vis.range.writes_at_phase = Some(w.combat.vision.pos_writes.clone());
         if m == super::mode::PAUSE {

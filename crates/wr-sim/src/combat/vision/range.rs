@@ -872,6 +872,20 @@ mod tests {
     }
 
     #[test]
+    fn forgotten_positions_stay_unknown_until_a_step_known_to_run() {
+        // A possible `Physics.SyncTransforms()`: PhysX's copies are unknown until a step.
+        let mut b = settled(&[k(A, [0.0; 3])]);
+        b.forget_positions();
+        assert_eq!(b.overlap([0.0; 3], 1.0)[0].tri, Tri::Maybe);
+        b.tick(&[k(A, [0.0; 3])], Step::NotRan);
+        assert_eq!(b.overlap([0.0; 3], 1.0)[0].tri, Tri::Maybe);
+        b.tick(&[k(A, [0.0; 3])], Step::Unknown);
+        assert_eq!(b.overlap([0.0; 3], 1.0)[0].tri, Tri::Maybe);
+        b.tick(&[k(A, [0.0; 3])], RAN);
+        assert_eq!(b.overlap([0.0; 3], 1.0)[0].tri, Tri::In);
+    }
+
+    #[test]
     fn a_radius_is_known_only_while_its_corpulence_is() {
         // Sol's round 7: a known radius, then a producer the sim can't follow makes the
         // corpulence unknown, and a move away and back between two ticks (which the sim can't

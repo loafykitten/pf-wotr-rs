@@ -3133,6 +3133,12 @@ impl Driver<'_> {
                 let m = r["mode"].as_i64().unwrap_or(-1);
                 // A new game mode activates its controllers (`GameMode.OnActivate`: e.g.
                 // `UnitBuffsController.Activate`), which the replay doesn't run.
+                // `GameMode.OnStart` starts the controllers the previous mode didn't have:
+                // `UnitPlaceOnGroundController.Start` forces a tick, which syncs the transforms.
+                let place = |x: i64| x == mode::DEFAULT || x == mode::PAUSE;
+                if self.mode.is_some_and(|prev| prev != m && place(m) && !place(prev)) {
+                    crate::combat::vision::note_explicit_sync(w);
+                }
                 if self.mode.is_some_and(|prev| prev != m) {
                     w.coverage.unsupported(
                         "driven replay: a game mode change (its controllers' Activate/Deactivate)",
