@@ -16,18 +16,36 @@
 //!   rule's did event, matched with the sim's operations by [`Driver::imp_span`] (after the sim
 //!   fired the rule), which reports them without the impatience observer.
 //! - `eng_prov`: `UnitCombatEngagementController`'s provoke in its did handler of an attack roll
-//!   or an attack with a weapon, matched with the sim's provoke calls at the next engagement tick
-//!   like the commands' ([`Driver::eng_prov`]); a provoke the sim didn't make is reported there.
+//!   or an attack with a weapon. Placed like a command's (`span_ok`): in the root's frame, inside
+//!   that handler of the rule its caller names, once per rule, of the rule's initiator; then
+//!   matched with the sim's provoke calls at the next engagement tick like the commands'
+//!   ([`Driver::eng_prov`]), which reports a provoke the sim didn't make.
 //! - `proj_launch`: the projectiles a rule attack launched, checked against the sim's by
-//!   [`Driver::proj_launches`] where the sim fires an attack.
+//!   [`Driver::proj_launches`] where the sim fires an attack: each launch placed as `span_ok`
+//!   places a command's (the root's frame and rule, at its `OnTrigger` outside any handler, right
+//!   after its attack roll's end, its fields, its target), then equal to the sim's.
+//! - `env`: only the environment the code that fires the root looked up (the attack roll's, the
+//!   resolve's, the flat-footed check's: [`Driver::env_reads`]); any other is reported.
+//! - `invalid`: the oracle's own statement that the game's replay left its recording. The sim is
+//!   checked against the game's actual trace, so it is not the sim's matter: accepted everywhere
+//!   (counted in [`SpanCounts::oracle_invalid`] inside spans).
 //!
-//! Any other record of a span (an observation of another family, a record of another kind) is
-//! reported: the replay doesn't take what it can't name. A span the commands pull
-//! (`attack_rule`) is checked record by record by `span_ok` instead.
+//! The rest of a span is the rule's own: its steps (`about`, `trig`, `trig_end`, `did`), handlers
+//! (`h`, `h_end`) and nested rules, which the code that fires it reads, and its draws and
+//! mutations, compared in the T0 streams. The oracle never writes raw `result` or `bonuses`
+//! records (the projection derives them from `rule` and `rule_end`), so a stray one is reported,
+//! like any other observation or record of another kind: the replay doesn't take what it can't
+//! name. A span the commands pull (`attack_rule`) is checked record by record by `span_ok` instead.
+
+use std::collections::{HashMap, HashSet};
 
 use super::commands::provoke_rule;
 use super::{Driver, Rv};
 use crate::world::World;
+
+/// `UnitCombatEngagementController`, whose did handler of an attack roll or an attack with a
+/// weapon makes the provoke.
+const ENGAGEMENT: &str = "Kingmaker.Controllers.Combat.UnitCombatEngagementController";
 
 /// The observation records found inside root rules' spans (the commands' own spans apart), each
 /// checked or taken as described in the module's documentation.
@@ -38,12 +56,45 @@ pub struct SpanCounts {
     /// Impatience (`imp_s`) and memory (`mem_q`) handlers' records, matched with the sim's.
     pub imp_s: usize,
     pub mem_q: usize,
-    /// Provokes (`eng_prov`) queued to be matched with the sim's calls.
+    /// Provokes (`eng_prov`) placed and queued to be matched with the sim's calls.
     pub eng_prov: usize,
-    /// Projectile launches (`proj_launch`) equal to the sim's.
+    /// Projectile launches (`proj_launch`) placed and equal to the sim's.
     pub proj_launch: usize,
+    /// The oracle's own `invalid` records (the game's replay left its recording): accepted.
+    pub oracle_invalid: usize,
     /// Records reported: of another family or kind, or one its checker rejects.
     pub reported: usize,
+}
+
+/// What `span_records` knows of the span so far.
+pub(super) struct Open {
+    /// The root's frame.
+    pub(super) t: i64,
+    /// Its rules by id: short class and initiator.
+    pub(super) rules: HashMap<i64, (String, Rv)>,
+    /// The open handlers: class, rule, phase.
+    pub(super) handlers: Vec<(String, i64, String)>,
+    /// The rules that made their provoke.
+    pub(super) provoked: HashSet<i64>,
+}
+
+/// A provoke (`r`, whose caller names `rule`) placed like `span_ok` places a command's: in the
+/// root's frame, in the engagement controller's did handler of that rule, of the rule's
+/// initiator, once per rule.
+pub(super) fn provoke_placed(open: &mut Open, r: &Rv, rule: Option<&str>) -> bool {
+    r["t"].as_i64() == Some(open.t)
+        && open.handlers.last().is_some_and(|(class, id, phase)| {
+            class == ENGAGEMENT
+                && phase == "did"
+                && open.rules.get(id).is_some_and(|(rc, initiator)| {
+                    Some(rc.as_str()) == rule && r["u"] == initiator["$unit"]
+                })
+                && !open.provoked.contains(id)
+        })
+        && {
+            let id = open.handlers.last().map_or(0, |h| h.1);
+            open.provoked.insert(id)
+        }
 }
 
 impl Driver<'_> {
@@ -51,15 +102,49 @@ impl Driver<'_> {
     /// fired it (or didn't).
     pub(super) fn span_records(&mut self, w: &mut World, start: usize, end: usize) {
         let trace = self.trace;
-        for r in &trace.records[start + 1..end] {
+        let mut open = Open {
+            t: trace.records[start]["t"].as_i64().unwrap_or(-1),
+            rules: HashMap::new(),
+            handlers: Vec::new(),
+            provoked: HashSet::new(),
+        };
+        let note = |open: &mut Open, r: &Rv| {
+            let class = r["class"].as_str().unwrap_or("").rsplit(['.', '+']).next().unwrap_or("");
+            if let Some(id) = r["id"].as_i64() {
+                open.rules.insert(id, (class.to_owned(), r["initiator"].clone()));
+            }
+        };
+        note(&mut open, &trace.records[start]);
+        for k in start + 1..end {
+            let r = &trace.records[k];
             match r["k"].as_str() {
-                // The rule's own: its steps, handlers, results and environment (read by the code
-                // that fires it) and the draws and mutations (compared in the T0 streams).
-                Some(
-                    "rule" | "rule_end" | "about" | "trig" | "trig_end" | "did" | "h" | "h_end"
-                    | "result" | "bonuses" | "env" | "draw" | "mut",
-                ) => {}
-                Some("obs") => self.span_obs(w, start, r),
+                // The rule's own: its steps and nested rules, and its handlers (read by the code
+                // that fires it), and the draws and mutations (compared in the T0 streams).
+                Some("rule") => note(&mut open, r),
+                Some("h") => open.handlers.push((
+                    r["class"].as_str().unwrap_or("").to_owned(),
+                    r["rule"].as_i64().unwrap_or(0),
+                    r["phase"].as_str().unwrap_or("").to_owned(),
+                )),
+                Some("h_end") => {
+                    open.handlers.pop();
+                }
+                Some("rule_end" | "about" | "trig" | "trig_end" | "did" | "draw" | "mut") => {}
+                // The environment the root's code looked up.
+                Some("env") => {
+                    let read = self.env_reads.iter().any(|(rule, a, t)| {
+                        super::find_env(trace, start, end, rule, a, t) == Some(k)
+                    });
+                    if !read {
+                        self.span_reported(
+                            w,
+                            "an env record".into(),
+                            "an environment the root's code didn't read",
+                        );
+                    }
+                }
+                Some("obs") => self.span_obs(w, start, r, &mut open),
+                // (The oracle writes no raw `result` or `bonuses`: the projection derives them.)
                 other => self.span_reported(
                     w,
                     format!("a {} record", other.unwrap_or("?")),
@@ -69,7 +154,7 @@ impl Driver<'_> {
         }
     }
 
-    fn span_obs(&mut self, w: &mut World, root: usize, r: &Rv) {
+    fn span_obs(&mut self, w: &mut World, root: usize, r: &Rv, open: &mut Open) {
         match r["ev"].as_str() {
             Some("clog_q") if self.clog => self.out.spans.clog_q += 1,
             Some("clog_q") => self.span_reported(
@@ -81,7 +166,11 @@ impl Driver<'_> {
             Some("imp_s") => self.out.spans.imp_s += usize::from(self.imp),
             Some("mem_q") => self.out.spans.mem_q += usize::from(self.imp),
             Some("eng_prov") => {
-                if self.eng_prov(w, r, provoke_rule(r)) {
+                // In the engagement controller's did handler of the rule its caller names, of the
+                // rule's initiator, the root's frame, once per rule (`span_ok`'s placing).
+                let rule = provoke_rule(r);
+                let placed = provoke_placed(open, r, rule);
+                if placed && self.eng_prov(w, r, rule) {
                     self.out.spans.eng_prov += 1;
                 } else {
                     self.span_reported(
@@ -91,17 +180,14 @@ impl Driver<'_> {
                     );
                 }
             }
-            Some("proj_launch") => {
-                if self.launches_checked == Some(root) {
-                    self.out.spans.proj_launch += 1;
-                } else {
-                    self.span_reported(
-                        w,
-                        "proj_launch".into(),
-                        "a projectile launched by a rule the sim didn't fire as an attack",
-                    );
-                }
-            }
+            // Counted where `proj_launches` checked it (the attack the sim fired).
+            Some("proj_launch") if self.launches_checked == Some(root) => {}
+            Some("proj_launch") => self.span_reported(
+                w,
+                "proj_launch".into(),
+                "a projectile launched by a rule the sim didn't fire as an attack",
+            ),
+            Some("invalid") => self.out.spans.oracle_invalid += 1,
             other => self.span_reported(
                 w,
                 format!("an {} observation", other.unwrap_or("?")),

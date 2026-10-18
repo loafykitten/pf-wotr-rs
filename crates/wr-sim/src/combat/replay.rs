@@ -1038,6 +1038,9 @@ struct Driver<'t> {
     /// The root rule (its record index) whose projectile launches were last checked against the
     /// sim's (`proj_launches`).
     launches_checked: Option<usize>,
+    /// The `env` records the current root's code looked up (rule class, initiator, target): the
+    /// ones `span_records` accepts.
+    env_reads: Vec<(&'static str, String, String)>,
     out: Outcome,
 }
 
@@ -1290,6 +1293,7 @@ impl<'t> Driver<'t> {
             prone_cursor: None,
             prone_visit: HashMap::new(),
             launches_checked: None,
+            env_reads: Vec::new(),
             out,
         };
         let mut d = d;
@@ -4005,6 +4009,7 @@ impl Driver<'_> {
     }
 
     fn root(&mut self, w: &mut World, i: usize) -> usize {
+        self.env_reads.clear();
         let next = self.root_inner(w, i);
         // The impatience handlers' records inside it, after the sim fired it (or didn't).
         self.imp_span(w, i, next - 1);
@@ -4169,6 +4174,11 @@ impl Driver<'_> {
                         "RuleCheckTargetFlatFooted: IgnoreVisibility or IgnoreConcealment set",
                     );
                 }
+                self.env_reads.push((
+                    "RuleCheckTargetFlatFooted",
+                    w.entity(a).unique_id.clone(),
+                    w.entity(t).unique_id.clone(),
+                ));
                 let Some(env) = flat_footed_env(trace, start, end, a, t, w) else {
                     w.coverage.unsupported(
                         "driven replay: a root flat-footed check without its recorded environment",
@@ -4220,6 +4230,11 @@ impl Driver<'_> {
                         "driven replay: a root attack without a running attack command (its controller is not established)",
                     );
                 }
+                self.env_reads.push((
+                    "RuleAttackRoll",
+                    w.entity(a).unique_id.clone(),
+                    w.entity(t).unique_id.clone(),
+                ));
                 if let Some(env) = env_in(trace, start, end, a, t, w) {
                     w.combat.env.push(((a, t), env));
                 }
@@ -4228,7 +4243,12 @@ impl Driver<'_> {
                     Some(mut rule) => {
                         fire::fire(w, &cx, &mut rule, |_| None);
                         let projectiles = commands::projectile_blueprints(w, &rule.weapon);
-                        self.proj_launches(w, start, end, before, &projectiles);
+                        if self.proj_launches(w, start, end, before, &projectiles) {
+                            self.out.spans.proj_launch += self.trace.records[start..=end]
+                                .iter()
+                                .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
+                                .count();
+                        }
                         // The resolves this attack launched, by the recorded rule identity.
                         let id = r["id"].as_i64();
                         for p in w.combat.pending_resolves.iter_mut().skip(before) {
@@ -4265,6 +4285,7 @@ impl Driver<'_> {
                     w.entity(rule.initiator).unique_id.clone(),
                     w.entity(rule.target).unique_id.clone(),
                 );
+                self.env_reads.push(("RuleAttackWithWeaponResolve", ids.0.clone(), ids.1.clone()));
                 let at_impact = resolve_env(trace, start, end, &ids.0, &ids.1);
                 // The positions at impact (the resolve's damage reads the distance then): the
                 // resolve's `env` record, or else the roll's, only where the observations
@@ -4487,6 +4508,25 @@ fn apply_recorded_awake(w: &mut World, set: &std::collections::BTreeSet<String>)
 
 /// The positions at impact: the `env` record WrathOracle writes as a weapon attack's resolve
 /// triggers (`RuleAttackWithWeaponResolve.OnTrigger` prefix), inside the resolve's span.
+/// The first `env` record of the span `start..=end` for `rule` between the units `a` and `t`
+/// (its index): the one the root's code reads.
+fn find_env(
+    trace: &Trace,
+    start: usize,
+    end: usize,
+    rule: &str,
+    a: &str,
+    t: &str,
+) -> Option<usize> {
+    (start..=end).find(|&k| {
+        let e = &trace.records[k];
+        e["k"] == "env"
+            && e["rule"] == rule
+            && unit_id(&e["initiator"]) == Some(a)
+            && unit_id(&e["target"]) == Some(t)
+    })
+}
+
 fn resolve_env(
     trace: &Trace,
     start: usize,
@@ -4494,12 +4534,7 @@ fn resolve_env(
     a: &str,
     t: &str,
 ) -> Option<([f32; 3], [f32; 3])> {
-    let e = trace.records[start..=end].iter().find(|e| {
-        e["k"] == "env"
-            && e["rule"] == "RuleAttackWithWeaponResolve"
-            && unit_id(&e["initiator"]) == Some(a)
-            && unit_id(&e["target"]) == Some(t)
-    })?;
+    let e = &trace.records[find_env(trace, start, end, "RuleAttackWithWeaponResolve", a, t)?];
     pos_pair(&e["at"])
 }
 
@@ -4658,12 +4693,7 @@ fn env_in(
     w: &mut World,
 ) -> Option<AttackEnv> {
     let (ai, ti) = (w.entity(a).unique_id.clone(), w.entity(t).unique_id.clone());
-    let e = trace.records[start..=end].iter().find(|e| {
-        e["k"] == "env"
-            && e["rule"] == "RuleAttackRoll"
-            && unit_id(&e["initiator"]) == Some(ai.as_str())
-            && unit_id(&e["target"]) == Some(ti.as_str())
-    })?;
+    let e = &trace.records[find_env(trace, start, end, "RuleAttackRoll", &ai, &ti)?];
     let int = |k: &str| e[k].as_i64().and_then(|v| i32::try_from(v).ok());
     let (
         Some(target_flanked),
@@ -4737,12 +4767,7 @@ fn flat_footed_env(
     w: &World,
 ) -> Option<AttackEnv> {
     let (ai, ti) = (w.entity(a).unique_id.as_str(), w.entity(t).unique_id.as_str());
-    let e = trace.records[start..=end].iter().find(|e| {
-        e["k"] == "env"
-            && e["rule"] == "RuleCheckTargetFlatFooted"
-            && unit_id(&e["initiator"]) == Some(ai)
-            && unit_id(&e["target"]) == Some(ti)
-    })?;
+    let e = &trace.records[find_env(trace, start, end, "RuleCheckTargetFlatFooted", ai, ti)?];
     let mut env = AttackEnv::neutral();
     env.target_remembers_initiator = e["target_remembers_initiator"].as_bool()?;
     env.target_can_act_in_combat = e["target_can_act_in_combat"].as_bool()?;

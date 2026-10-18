@@ -404,26 +404,61 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
         recs.insert(root + 1, x);
         renumber(recs);
     }
-    let cases: [(&str, Change); 12] = [
+    /// The events after id `from` renumbered by `delta` in every record that names one (the events,
+    /// the ticks' queues, the messages' sources), the numbering staying valid: an event removed
+    /// (`delta` -1) leaves no gap, one added (+1) no duplicate.
+    fn shift_ids(recs: &mut [V], from: i64, delta: i64) {
+        let shift = |v: &mut V| {
+            if let Some(i) = v.as_i64().filter(|i| *i > from) {
+                *v = json!(i + delta);
+            }
+        };
+        for r in recs.iter_mut() {
+            match r["ev"].as_str() {
+                Some("clog_q") => shift(&mut r["id"]),
+                Some("clog_msg") => shift(&mut r["src"]),
+                Some("clog_tick") => {
+                    if let Some(q) = r["q"].as_array_mut() {
+                        for e in q {
+                            shift(&mut e[0]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let cases: [(&str, Change); 15] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
-        // sim's queue.
-        ("combat log:", |recs| {
+        // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
+        ("events queued, the sim queued", |recs| {
             let at = event(recs);
+            let id = recs[at]["id"].as_i64().expect("an id");
+            // (A tick's queue holding it loses the entry.)
+            for r in recs.iter_mut().filter(|r| r["ev"] == "clog_tick") {
+                if let Some(q) = r["q"].as_array_mut() {
+                    q.retain(|e| e[0].as_i64() != Some(id));
+                }
+            }
             recs.remove(at);
+            shift_ids(recs, id, -1);
             renumber(recs);
         }),
-        ("combat log:", |recs| {
+        ("combat log: queued event #", |recs| {
             let at = event(recs);
             recs[at]["rule"] = json!(recs[at]["rule"].as_i64().unwrap_or(0) + 1);
         }),
-        ("combat log:", |recs| {
+        ("combat log: queued event #", |recs| {
             let at = event(recs);
             recs[at]["en"] = json!(false);
         }),
-        ("combat log:", |recs| {
+        ("events queued, the sim queued", |recs| {
             let at = event(recs);
-            let x = recs[at].clone();
-            recs.insert(at, x);
+            let id = recs[at]["id"].as_i64().expect("an id");
+            shift_ids(recs, id, 1);
+            let mut x = recs[at].clone();
+            x["id"] = json!(id + 1);
+            recs.insert(at + 1, x);
             renumber(recs);
         }),
         // The event of a recording that doesn't declare the observer.
@@ -450,7 +485,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             add(recs, "imp_s")
         }),
         ("driven replay: memory: an AddToMemory the sim didn't make", |recs| add(recs, "mem_q")),
-        ("driven replay: the attacks of opportunity provoked differ", |recs| add(recs, "eng_prov")),
+        ("driven replay: eng_prov inside a root rule's span", |recs| add(recs, "eng_prov")),
         ("driven replay: eng_prov inside a root rule's span", |recs| {
             add(recs, "eng_prov");
             let root = initiative(recs);
@@ -470,20 +505,51 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             recs.insert(root + 1, json!({"seq": 0, "k": "cmd", "t": t, "ev": "start"}));
             renumber(recs);
         }),
+        // The oracle writes no raw `result` or `bonuses` records, and an environment is only the
+        // one the root's code reads (the initiative roll reads none).
+        ("driven replay: a result record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "result", "t": t, "id": 1}));
+            renumber(recs);
+        }),
+        ("driven replay: a bonuses record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "bonuses", "t": t, "id": 1}));
+            renumber(recs);
+        }),
+        ("driven replay: an env record inside a root rule's span", |recs| {
+            let mut x = recs.iter().find(|r| r["k"] == "env").expect("an environment").clone();
+            let root = initiative(recs);
+            x["t"] = recs[root]["t"].clone();
+            recs.insert(root + 1, x);
+            renumber(recs);
+        }),
     ];
     let mut missed = Vec::new();
     for (i, (want, change)) in cases.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
         let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
-        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(want)) {
-            missed.push(format!(
-                "case {i}: {want}: {:?}",
-                w.coverage.unsupported.keys().collect::<Vec<_>>()
-            ));
+        let reports: Vec<_> = w.coverage.unsupported.keys().collect();
+        let numbering = reports.iter().any(|k| k.contains("malformed or unknown log"));
+        if w.valid() || numbering || !reports.iter().any(|k| k.contains(want)) {
+            missed.push(format!("case {i}: {want}: {reports:?}"));
         }
     }
     assert!(missed.is_empty(), "{missed:#?}");
+    // The oracle's own `invalid` note is accepted inside a span, counted.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let root = initiative(recs);
+        let t = recs[root]["t"].clone();
+        recs.insert(root + 1, json!({"seq": 0, "k": "obs", "t": t, "ev": "invalid", "why": "x"}));
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+    assert_eq!((out.spans.oracle_invalid, out.spans.reported), (1, 0));
 }
 
 /// The ranged centipede's spit (`GiantCentipedeSpitAbilityAiAction`, a `BlueprintAiCastSpell`).

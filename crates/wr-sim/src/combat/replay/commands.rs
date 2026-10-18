@@ -2163,12 +2163,11 @@ impl Driver<'_> {
         end: usize,
         before: usize,
         projectiles: &[String],
-    ) {
+    ) -> bool {
         self.launches_checked = Some(at);
         let trace = self.trace;
-        let launches: Vec<&Rv> = trace.records[at..=end]
-            .iter()
-            .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
+        let launches: Vec<usize> = (at..=end)
+            .filter(|&k| trace.records[k]["k"] == "obs" && trace.records[k]["ev"] == "proj_launch")
             .collect();
         let declared = trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
             b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
@@ -2179,8 +2178,9 @@ impl Driver<'_> {
                     "driven replay: an attack's projectile launches without the proj_arrival observer",
                 );
             }
-            return;
+            return false;
         }
+        let placed = launches.iter().all(|&k| launch_placed(&trace.records, at, k));
         let made: Vec<Option<&str>> = w
             .combat
             .pending_resolves
@@ -2192,9 +2192,11 @@ impl Driver<'_> {
                     .and_then(|i| crate::combat::attack::ATTACK_RESULTS.get(i).copied())
             })
             .collect();
-        let ok = launches.len() == made.len()
+        let ok = placed
+            && launches.len() == made.len()
             && made.len() == projectiles.len()
-            && launches.iter().zip(&made).zip(projectiles).all(|((l, res), bp)| {
+            && launches.iter().zip(&made).zip(projectiles).all(|((&k, res), bp)| {
+                let l = &trace.records[k];
                 res.is_some()
                     && l["res"].as_str() == *res
                     && l["bp"].as_str() == Some(bp.as_str())
@@ -2206,6 +2208,7 @@ impl Driver<'_> {
                 "driven replay: commands: an attack's projectiles launched differ from the sim's",
             );
         }
+        ok
     }
 }
 
@@ -2879,35 +2882,9 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
             // attack roll's end; its rule, roll and target this attack's, nothing else. Its flight
             // and arrival (`proj_hit`) are the pin's, outside rule spans.
             Some("obs") if x["ev"] == "proj_launch" => {
-                let shape = x.as_object().is_some_and(|o| {
-                    let mut k: Vec<&str> = o.keys().map(String::as_str).collect();
-                    k.sort_unstable();
-                    k == [
-                        "bp", "cb", "ev", "k", "p", "res", "roll", "rule", "seq", "t", "tgt",
-                        "trig",
-                    ]
-                });
-                let roll = x["roll"].as_i64();
-                let roll_ended = roll.is_some()
-                    && span[n - 1]["k"] == "rule_end"
-                    && span[n - 1]["id"].as_i64() == roll
-                    && span[..n].iter().any(|r| {
-                        r["k"] == "rule"
-                            && r["id"].as_i64() == roll
-                            && r["parent"].as_i64() == Some(rule)
-                            && r["class"]
-                                .as_str()
-                                .is_some_and(|c| short_class(c) == "RuleAttackRoll")
-                    });
-                shape
-                    && !own_handler
+                !own_handler
                     && stage == 2
-                    && short_class(&top.class) == "RuleAttackWithWeapon"
-                    && x["rule"].as_i64() == Some(rule)
-                    && roll_ended
-                    && x["p"].as_str().is_some_and(|p| !p.is_empty())
-                    && x["tgt"].as_str().is_some()
-                    && x["tgt"].as_str() == top.target["$unit"].as_str()
+                    && launch_ok(x, &span[..=n], rule, &top.class, &top.target)
             }
             Some("obs") if x["ev"] == "eng_prov" => {
                 // Called by the handler of this very rule (its subscribers list's type argument).
@@ -3070,6 +3047,66 @@ pub(super) fn draw_ok(x: &J, sites: &HashMap<i64, (String, String)>) -> bool {
             st.split(':').count() == 4
                 && st.split(':').all(|p| p.len() == 8 && p.chars().all(|c| c.is_ascii_hexdigit()))
         })
+}
+
+/// The `proj_launch` at `k` of the root rule at `at`, placed as `span_ok` places a command's: in
+/// the root's frame, at its `OnTrigger` (after `trig`, before `trig_end`) outside any handler,
+/// with the fields, rule, roll and target [`launch_ok`] requires.
+pub(super) fn launch_placed(recs: &[Rv], at: usize, k: usize) -> bool {
+    let root = &recs[at];
+    let id = root["id"].as_i64().unwrap_or(0);
+    let (mut trig, mut trig_end, mut open) = (false, false, 0_i64);
+    for x in &recs[at + 1..k] {
+        match x["k"].as_str() {
+            Some("trig") if x["id"].as_i64() == Some(id) => trig = true,
+            Some("trig_end") if x["id"].as_i64() == Some(id) => trig_end = true,
+            Some("h") => open += 1,
+            Some("h_end") => open -= 1,
+            _ => {}
+        }
+    }
+    let span: Vec<J> = recs[at..=k].iter().map(Rv::to_json).collect();
+    recs[k]["t"] == root["t"]
+        && trig
+        && !trig_end
+        && open == 0
+        && launch_ok(
+            &span[k - at],
+            &span,
+            id,
+            root["class"].as_str().unwrap_or(""),
+            &span[0]["target"],
+        )
+}
+
+/// A `proj_launch` record (the last of `span`, the root's span from its record): in
+/// `RuleAttackWithWeapon`'s `OnTrigger` (`rule`, `class`, `target`: the innermost rule), right
+/// after its own attack roll's end; its rule, roll and target this attack's, nothing else. The
+/// caller places it (outside any handler, at the rule's `OnTrigger`, in the frame).
+fn launch_ok(x: &J, span: &[J], rule: i64, class: &str, target: &J) -> bool {
+    let n = span.len() - 1;
+    let shape = x.as_object().is_some_and(|o| {
+        let mut k: Vec<&str> = o.keys().map(String::as_str).collect();
+        k.sort_unstable();
+        k == ["bp", "cb", "ev", "k", "p", "res", "roll", "rule", "seq", "t", "tgt", "trig"]
+    });
+    let roll = x["roll"].as_i64();
+    let roll_ended = roll.is_some()
+        && span[n - 1]["k"] == "rule_end"
+        && span[n - 1]["id"].as_i64() == roll
+        && span[..n].iter().any(|r| {
+            r["k"] == "rule"
+                && r["id"].as_i64() == roll
+                && r["parent"].as_i64() == Some(rule)
+                && r["class"].as_str().is_some_and(|c| short_class(c) == "RuleAttackRoll")
+        });
+    shape
+        && short_class(class) == "RuleAttackWithWeapon"
+        && x["rule"].as_i64() == Some(rule)
+        && roll_ended
+        && x["p"].as_str().is_some_and(|p| !p.is_empty())
+        && x["tgt"].as_str().is_some()
+        && x["tgt"].as_str() == target["$unit"].as_str()
 }
 
 /// Whether a type's handler interfaces (`TypeDef::handlers`) handle `rule_class` in `phase`:

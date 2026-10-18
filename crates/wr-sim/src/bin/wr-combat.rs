@@ -398,8 +398,8 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
     );
     let sp = &out.spans;
     println!(
-        "inside root rules' spans (the commands' own apart): combat log events {} (compared with the sim's queue), impatience handlers {}, memory additions {} (matched), provokes {} (matched at the engagement tick), projectile launches {} (equal to the sim's); reported {}",
-        sp.clog_q, sp.imp_s, sp.mem_q, sp.eng_prov, sp.proj_launch, sp.reported
+        "inside root rules' spans (the commands' own apart): combat log events {} (compared with the sim's queue), impatience handlers {}, memory additions {} (matched), provokes {} (matched at the engagement tick), projectile launches {} (equal to the sim's); the oracle's own invalid notes {}; reported {}",
+        sp.clog_q, sp.imp_s, sp.mem_q, sp.eng_prov, sp.proj_launch, sp.oracle_invalid, sp.reported
     );
     let n = &out.nav;
     println!(
