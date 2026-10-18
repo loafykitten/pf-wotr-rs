@@ -264,7 +264,10 @@ The hypotheses and their results (the first by a script on the party's 5,010 obs
    placed at (a size change applied later in the frame, in a phase after the vision controller's, stays out of the tick)
    and after the last event the sim saw that could change it (a size write, a fact or buff added or removed, a view
    replaced: the stream index it was made at; any such event invalidates the reads before it, whether or not the
-   value changed back); a unit with no valid read has none. The party's corpulence before the first fight read, every unit
+   value changed back; a change seen only by sampling a unit's sizes and producers counts from the phase that saw it); a
+   unit with no valid read has none. **Size or view changes made by code the sim doesn't run produce no invalidation**: a
+   corpulence known before one, and the radius computed from it, can stay wrong, and a recording that shows the same wrong
+   answer would pass (see "Limits"). The party's corpulence before the first fight read, every unit
    nobody reads, and the reads after a buff came or went, are such units: 2.2 million unit-frames in the 36 record runs
    (0.29 million of them with a read made stale). **That is most of the pairs** (below).
    Computing `Corpulence` would close it: the unit prefab's `m_Corpulence` (a `UnitEntityView` field the importer
@@ -468,7 +471,10 @@ Two small additions would remove the sim's remaining inferences about the caches
   does, bypasses that range gate), and a deferred miss may have been made at the frame's starting radius or the current one;
 - the caller of each miss (`callers`, as `mem_add` has), so a reader the sim doesn't run is named.
 
-## Limits of the model (accepted, each at worst a false report)
+## Limits of the model
+
+Each of the following can only produce a false report (the sim and the recording disagree), except where the item says it
+can also be absorbed:
 
 - A group read over several entries from before the window leaves them unresolved when the aggregate is true; a later
   contradictory aggregate isn't caught (9,336 of 1.49 million group reads touch such entries; every one agrees with a
@@ -482,6 +488,14 @@ Two small additions would remove the sim's remaining inferences about the caches
   agrees with (385,005 of them) but PhysX's pruner is not ported (a scene with more colliders than 21 could order
   differently). The capsule test is PhysX's `f32` distance, which agrees with the same test in `f64` on all 10.5 million
   pairs here.
+- **Can be absorbed (an equally wrong recording would pass):** the start-state hypotheses (above); the corpulence
+  inference: a size or view change made by code the sim doesn't run (an unported action, a mount change outside the sampled
+  check, a polymorph it doesn't see) produces no invalidation, so a corpulence read before it, and a radius computed from
+  it, can stay wrong while the recording (whose sets follow the true radius) disagrees only where a pair crosses the
+  boundary; the physics clock (an inference that the decided pairs confirm only where a pair crosses). A wrong radius shows
+  as a reported difference when a pair near the boundary disagrees, and is silent otherwise.
+- **Only a false report:** the memory and line-of-sight items above; the result buffer (more than 512 colliders in reach go
+  to the recording); the bounds queue (a collider moved while its unit was hidden: both positions are candidates).
 - The TransformPoint rounding of the blockers and the grid's bounds are derived, not compared (above).
 - Without the driven agent (`-95`, `-96`, `-109`, `-111`, `-112`) a unit's position is the recording's rows, and in the
   recording's last frame the last prefix's (counted in `last_frame_reads`; checked against the leaves like any other).

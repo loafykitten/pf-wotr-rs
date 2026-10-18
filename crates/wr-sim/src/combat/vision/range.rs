@@ -143,10 +143,14 @@ pub enum Cause {
     Enabled,
     /// Its radius is known to within the view-scale band only.
     Scale,
+    /// More colliders are in reach than the controller's result buffer holds (512): which ones
+    /// the game keeps depends on PhysX's order.
+    Capacity,
 }
 
 impl Cause {
-    pub const ALL: [Self; 4] = [Self::Corpulence, Self::Position, Self::Enabled, Self::Scale];
+    pub const ALL: [Self; 5] =
+        [Self::Corpulence, Self::Position, Self::Enabled, Self::Scale, Self::Capacity];
 
     fn index(self) -> usize {
         Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
@@ -190,6 +194,11 @@ struct Collider {
     /// The point estimate of the radius (`Max(0.05, Corpulence)`), for the margins and the guess.
     centre: Option<f32>,
     enabled: Enabled,
+    /// A position the entity took while out of the game since the collider's last tick: the
+    /// update list takes an entity that moves while in the game and `TickEntity` is run for it
+    /// without asking again, so the collider's transform may be this one (the sim sees the unit's
+    /// state at the tick only).
+    maybe_moved: Option<V3>,
     /// A unit that was hidden at the window's first tick: it may have owned a collider before
     /// (made earlier, at an unknown place in the order and position) or get one when it comes
     /// into the game.
@@ -285,6 +294,9 @@ pub fn capsule_sphere(pos: V3, r: f32, centre: V3, rs: f32) -> (bool, f64, bool)
     (hit, margin, hit != (margin <= 0.0))
 }
 
+/// `UnitVisionRangeController.OverlapResults.Length`.
+const RESULT_BUFFER: usize = 512;
+
 /// More candidate positions than this make a collider's position unknown.
 const MAX_CANDIDATES: usize = 6;
 
@@ -302,15 +314,18 @@ impl Bounds {
         self.started = true;
         for c in &mut self.colliders {
             let Some(t) = c.transform else { continue };
+            let reached = [Some(t), c.maybe_moved];
             match step {
                 Step::Ran => {
-                    c.phys = vec![t];
+                    c.phys = reached.into_iter().flatten().collect();
                     c.phys_unknown = false;
                 }
                 Step::NotRan => {}
                 Step::Unknown => {
-                    if !c.phys.iter().any(|p| p.map(f32::to_bits) == t.map(f32::to_bits)) {
-                        c.phys.push(t);
+                    for t in reached.into_iter().flatten() {
+                        if !c.phys.iter().any(|p| p.map(f32::to_bits) == t.map(f32::to_bits)) {
+                            c.phys.push(t);
+                        }
                     }
                     c.phys_unknown |= c.phys.len() > MAX_CANDIDATES;
                 }
@@ -341,6 +356,10 @@ impl Bounds {
                         c.radius = next_radius(Some(c.radius), u.corpulence);
                         c.centre = u.corpulence.map(|x| x.max(0.05));
                         c.seen_size_gen = u.size_gen;
+                        c.maybe_moved = None;
+                    } else if !u.in_game && c.transform.is_some_and(|t| t != u.pos) {
+                        // (Queued while it was in the game, ticked without asking again?)
+                        c.maybe_moved = Some(u.pos);
                     }
                     c.seen_in_game = u.in_game;
                 }
@@ -362,6 +381,7 @@ impl Bounds {
                         },
                         centre: u.corpulence.map(|x| x.max(0.05)).filter(|_| known),
                         enabled: u.enabled,
+                        maybe_moved: None,
                         history_unknown: !known,
                         seen_in_game: known,
                         seen_size_gen: u.size_gen,
@@ -379,6 +399,7 @@ impl Bounds {
                         radius: next_radius(None, u.corpulence),
                         centre: u.corpulence.map(|x| x.max(0.05)),
                         enabled: u.enabled,
+                        maybe_moved: None,
                         history_unknown: false,
                         seen_in_game: true,
                         seen_size_gen: u.size_gen,
@@ -433,6 +454,13 @@ impl Bounds {
                 order_known: !c.history_unknown,
             });
         }
+        // `OverlapCapsule` fills a buffer of 512: with more colliders in reach, which ones it keeps
+        // is PhysX's order.
+        if out.iter().filter(|h| h.tri != Tri::Out).count() > RESULT_BUFFER {
+            for h in out.iter_mut().filter(|h| h.tri != Tri::Out) {
+                (h.tri, h.cause) = (Tri::Maybe, Some(Cause::Capacity));
+            }
+        }
         out
     }
 
@@ -457,7 +485,7 @@ pub enum Difference {
 pub struct Differences {
     pub diffs: Vec<Difference>,
     /// Pairs the sim left to the recording, by [`Cause`] (in [`Cause::ALL`]'s order).
-    pub open: [usize; 4],
+    pub open: [usize; 5],
     /// Pairs the sim decided that equal the recording's.
     pub decided: usize,
     /// Of the pairs left open only by the view-scale band, those whose answer with scale 1 and the
@@ -588,6 +616,34 @@ mod tests {
     }
 
     #[test]
+    fn an_update_queued_while_in_the_game_still_moves_the_collider_of_a_unit_hidden_since() {
+        let mut b = settled(&[k(A, [0.0; 3])]);
+        // It moves to 9 and is hidden before the bounds tick: the game may have queued the
+        // move (and ticks it without asking again); the sim sees the state at the tick only.
+        b.tick(&[hidden(k(A, [9.0, 0.0, 0.0]))], RAN);
+        // Back at 9 in the next frame: PhysX had the old transform or the moved one.
+        b.tick(&[k(A, [9.0, 0.0, 0.0])], RAN);
+        let hits = b.overlap([0.0; 3], 1.0);
+        assert_eq!((hits[0].tri, hits[0].cause), (Tri::Maybe, Some(Cause::Position)));
+        b.tick(&[k(A, [9.0, 0.0, 0.0])], RAN);
+        assert_eq!(tris(&b, [0.0; 3], 1.0), vec![(A, Tri::Out)]);
+    }
+
+    #[test]
+    fn more_colliders_in_reach_than_the_result_buffer_holds_go_to_the_recording() {
+        let units: Vec<BoundsUnit> =
+            (0..600).map(|i| k(EntityIdx(i), [f32::from(i as u16) * 0.001, 0.0, 0.0])).collect();
+        let mut b = Bounds::default();
+        b.tick(&units, RAN);
+        let hits = b.overlap([0.0; 3], 5.0);
+        assert!(hits.iter().all(|h| h.tri == Tri::Maybe && h.cause == Some(Cause::Capacity)));
+        // At 512 in reach the buffer holds them all.
+        let mut b = Bounds::default();
+        b.tick(&units[..512], RAN);
+        assert!(b.overlap([0.0; 3], 5.0).iter().all(|h| h.tri == Tri::In));
+    }
+
+    #[test]
     fn the_exact_margin_sums_the_radii_in_f64() {
         // Sol's reproducer: the f32 sum 12.4 rounds, the exact one is 11.7f32 + 0.7f32.
         let (hit, margin, rounding) =
@@ -634,7 +690,7 @@ mod tests {
         let yes: HashSet<EntityIdx> = [A, B].into_iter().collect();
         let d = differences(&hits, &yes);
         assert!(d.diffs.is_empty());
-        assert_eq!((d.open, d.guess_agree, d.guess_differ), ([0, 0, 0, 1], 1, 0));
+        assert_eq!((d.open, d.guess_agree, d.guess_differ), ([0, 0, 0, 1, 0], 1, 0));
         let no: HashSet<EntityIdx> = [A].into_iter().collect();
         let d = differences(&hits, &no);
         assert!(d.diffs.is_empty());
@@ -798,7 +854,7 @@ mod tests {
         ];
         let rec: HashSet<EntityIdx> = [A, C].into_iter().collect();
         let d = differences(&hits, &rec);
-        assert_eq!((d.diffs.len(), d.open), (0, [1, 0, 0, 0]));
+        assert_eq!((d.diffs.len(), d.open), (0, [1, 0, 0, 0, 0]));
         let rec: HashSet<EntityIdx> = [B, EntityIdx(9)].into_iter().collect();
         assert_eq!(
             differences(&hits, &rec).diffs,

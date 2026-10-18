@@ -22,7 +22,13 @@ use super::{Driver, Phase};
 
 /// A unit's size and original size, and whether a producer of its corpulence the sim can't follow
 /// is on it.
-type SizeWatch = (Option<(Option<i32>, Option<i32>)>, bool);
+#[derive(Debug, Clone, Copy)]
+struct SizeWatch {
+    key: Option<(Option<i32>, Option<i32>)>,
+    producer: bool,
+    /// How many hooked events the sim had seen of the unit at the sample.
+    hooks: usize,
+}
 
 /// The vision controller's side: the sets the sim computes, checked against the `vis` records.
 #[derive(Debug, Default)]
@@ -178,8 +184,16 @@ impl Driver<'_> {
         });
         let producer = ["AddUnitScale", "Polymorph"].iter().any(|c| super::has_component(w, u, c))
             || w.entity(u).parts.iter().any(|p| p.clr == "UnitPartRider");
-        let was = self.vis.range.size_watch.insert(u, (key, producer));
-        if was.is_some_and(|(k, p)| k != key || p || producer) {
+        // The sampled change is an event only when no hooked one explains it: then it could have
+        // happened anywhere since the last sample, and the reads since then don't count (the stamp
+        // is the phase's index; an earlier one would accept a read from before the change).
+        let hooks = w.combat.vision.corp_bumps.get(&u).map_or(0, Vec::len)
+            + usize::try_from(w.combat.vision.size_gen.get(&u).copied().unwrap_or(0)).unwrap_or(0);
+        let was = self.vis.range.size_watch.insert(u, SizeWatch { key, producer, hooks });
+        if let Some(was) = was
+            && (was.key != key || was.producer != producer)
+            && was.hooks == hooks
+        {
             w.combat.vision.corp_bumps.entry(u).or_default().push(at);
         }
         let from = w.combat.vision.corp_bumps.get(&u).and_then(|b| b.iter().max().copied());

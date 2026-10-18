@@ -92,7 +92,7 @@ pub struct VisCounts {
     pub range_differences: usize,
     /// Pairs (a unit and a collider) the sim left to the recording, by cause: an unknown
     /// corpulence, an unknown position, an unknown `enabled`, the view-scale band.
-    pub range_open: [usize; 4],
+    pub range_open: [usize; 5],
     /// Pairs the sim decided, each equal to the recording's.
     pub range_decided_given_start: usize,
     /// Of the pairs left open only by the view-scale band, those where the answer with scale 1
