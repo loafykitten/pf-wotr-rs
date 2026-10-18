@@ -478,8 +478,10 @@ pub enum Phase {
     /// `UnitMoveController`: units move; the current unit's movement spends its turn's budget
     /// (`TurnController.TickMovement`, the oracle's `cd_move`).
     Move,
-    /// `FogOfWarController` and `EntityVisibilityForPlayerController`: entities revealed
-    /// (`IEntityRevealedHandler`, the oracle's `insp_reveal`).
+    /// `EntityBoundsController` and `UnitVisionRangeController` (the sets of units in vision
+    /// range are the sim's, checked against the oracle's `vis` records), then `FogOfWarController`
+    /// and `EntityVisibilityForPlayerController`: entities revealed (`IEntityRevealedHandler`,
+    /// the oracle's `insp_reveal`).
     Visibility,
     /// `SleepingUnitsController`: the frame's awake units.
     Sleeping,
@@ -538,12 +540,13 @@ pub enum Phase {
 }
 
 /// The phases that run controller code of their own.
-const WORK: [Phase; 20] = [
+const WORK: [Phase; 21] = [
     Phase::Groups,
     Phase::Turn,
     Phase::TurnChoose,
     Phase::LosCache,
     Phase::Move,
+    Phase::Visibility,
     Phase::Sleeping,
     Phase::Cooldowns,
     Phase::Buffs,
@@ -900,6 +903,8 @@ struct Driver<'t> {
     /// The game mode of a frame whose remaining phases run as the next frame starts (or the
     /// recording ends).
     draining: Option<i64>,
+    /// How deep `record` calls are nested (a driven entry's readers process records inside it).
+    record_depth: usize,
     /// A recorded `StartTurn` ran in this frame's `TimeController.Tick`.
     started_this_frame: bool,
     /// The recorded `ChooseNextUnit` inputs, by tick.
@@ -1200,6 +1205,7 @@ impl<'t> Driver<'t> {
             port,
             turn_go_on: true,
             draining: None,
+            record_depth: 0,
             started_this_frame: false,
             choose_by_tick,
             // Any of WrathOracle's cooldown records (a trace that lost its prefixes reports them).
@@ -2032,6 +2038,7 @@ impl Driver<'_> {
                     super::groups::leave_tick(w, gate);
                 }
                 Phase::LosCache => self.vis_cache_phase(w),
+                Phase::Visibility => self.vis_range_phase(w),
                 Phase::Conscious => self.mem_return_to_conscious(w),
                 Phase::Sleeping => {
                     // The prefix's rows were written for the previous snapshot's units.
@@ -2041,6 +2048,7 @@ impl Driver<'_> {
                     if let Some(set) = self.awake_sets.get(&(self.tick + 1)) {
                         self.out.awake_recorded += apply_recorded_awake(w, set);
                     }
+                    self.vis_slept(w);
                 }
                 // The prepare controller's batch ends before the cooldowns controller ticks.
                 Phase::Cooldowns => {
@@ -3085,8 +3093,21 @@ impl Driver<'_> {
         }
     }
 
-    /// Processes the record at `i`; returns the next index.
+    /// Processes the record at `i`; returns the next index. The corpulence events made while the
+    /// outermost entry ran are stamped at its last record ([`crate::combat::vision::Vision::restamp_bumps`]).
     fn record(&mut self, w: &mut World, i: usize) -> usize {
+        let outer = self.record_depth == 0;
+        let mark = w.combat.vision.bump_log.len();
+        self.record_depth += 1;
+        let next = self.record_entry(w, i);
+        self.record_depth -= 1;
+        if outer {
+            w.combat.vision.restamp_bumps(mark, next.saturating_sub(1).max(i));
+        }
+        next
+    }
+
+    fn record_entry(&mut self, w: &mut World, i: usize) -> usize {
         let trace = self.trace;
         let recs = &trace.records;
         let r = &recs[i];
@@ -3112,6 +3133,12 @@ impl Driver<'_> {
                 let m = r["mode"].as_i64().unwrap_or(-1);
                 // A new game mode activates its controllers (`GameMode.OnActivate`: e.g.
                 // `UnitBuffsController.Activate`), which the replay doesn't run.
+                // `GameMode.OnStart` starts the controllers the previous mode didn't have:
+                // `UnitPlaceOnGroundController.Start` forces a tick, which syncs the transforms.
+                let place = |x: i64| x == mode::DEFAULT || x == mode::PAUSE;
+                if self.mode.is_some_and(|prev| prev != m && place(m) && !place(prev)) {
+                    crate::combat::vision::note_explicit_sync(w);
+                }
                 if self.mode.is_some_and(|prev| prev != m) {
                     w.coverage.unsupported(
                         "driven replay: a game mode change (its controllers' Activate/Deactivate)",
@@ -4740,6 +4767,7 @@ mod roaming;
 mod spells;
 mod targets;
 mod vision;
+mod vision_range;
 
 #[cfg(test)]
 mod tests;

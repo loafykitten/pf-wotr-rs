@@ -196,6 +196,7 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
     if let Some(u) = w.unit_mut(e) {
         u.view_prefab = prefab;
     }
+    crate::combat::vision::note_size_change(w, e);
     w.build = flags;
     // `SpawnEntityWithView`: `BeforeAttachView` → `SetupUnit`.
     setup_unit(w, e, p);
@@ -215,6 +216,7 @@ pub fn become_unit(w: &mut World, p: &PlaceholderData) -> Option<EntityIdx> {
         u.position = p.position;
         u.orientation = p.orientation;
     }
+    crate::combat::vision::note_position_write(w, e);
     // `SetStealthData(m_Stealth)` replaces the unit's fresh `UnitStealth`: a saved state
     // that differs from it is reported with the placeholder's unmodelled members.
     // `MarkExtra()`: `IsExtra` (an extra sleeps out of the camera's frustum: its awake state is
@@ -571,6 +573,7 @@ pub fn set_state_size(w: &mut World, e: EntityIdx, size: Size) {
         u.size_before_death = u.state_size;
     }
     u.state_size = Some(size);
+    crate::combat::vision::note_size_change(w, e);
     update_size_modifiers(w, e);
     crate::rulebook::bus::raise_global_call(
         w,
@@ -721,6 +724,8 @@ pub fn change_unit_blueprint(
     if let Some(u) = w.unit_mut(e) {
         u.view_prefab = prefab;
     }
+    // (A replaced view brings the new prefab's `m_Corpulence` and scale.)
+    crate::combat::vision::note_size_change(w, e);
     // `unitEntityData.Position = unit.Position; Orientation = unit.Orientation`.
     let (position, orientation) =
         w.unit(old).map(|u| (u.position, u.orientation)).unwrap_or_default();
@@ -728,6 +733,7 @@ pub fn change_unit_blueprint(
         u.position = position;
         u.orientation = orientation;
     }
+    crate::combat::vision::note_position_write(w, e);
     w.player.creation_queue.push((e, to_cross_state));
     w.coverage.context = None;
     Some(e)

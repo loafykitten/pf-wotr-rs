@@ -977,7 +977,13 @@ impl MemoryWorld<EntityIdx, GroupIdx> for MemWorld<'_, '_> {
         Self::about(r, "g", &group_key(self.w, g))?;
         let us = mem_units(self.w, &r["v"])
             .ok_or_else(|| Desync("a near unit the sim doesn't have".into()))?;
-        Ok(self.input(us))
+        // The sim's: the members' sets in the overlap's order, `ExtractNearUnits`' union.
+        let members = self.w.combat.groups.get(g).units.clone();
+        if let Some(sim) = self.d.vis_near_union(self.w, &members) {
+            self.d.vis.counts.near_unions_given_order += usize::from(sim == us);
+            return Ok(self.leaf_checked("near", sim, us));
+        }
+        Ok(self.leaf_taken("near", us))
     }
 
     fn faction_peaceful(&mut self, u: EntityIdx) -> Result<bool, Desync> {

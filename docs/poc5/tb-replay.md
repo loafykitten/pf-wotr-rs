@@ -272,6 +272,11 @@ varies [M: 0.0167 vs 0.0067 in `poc5-tb-40`; in `poc5-tb-38` the step-less ticks
 recording and 0 mod 6 in the failing replay, which joined at 173 instead of 172]. [I] The overlap then sees the
 PC a tick older on different ticks, the entry tick moves, the join with it.
 
+[M, stream "visrange"] The model is now computed and verified (`docs/poc5/vision.md`, "The sets in vision range"): the
+clock advances by each tick's scaled `delta` (the oracle's time-scale-3 stretches, 0.05 s frames, shift the phase: a frame
+in six without a step by the begin record's phase alone is wrong after the first of them), and the overlap's sets equal the
+recording's in every frame of 109 runs.
+
 Pin (replay only, turn-based windows only, to the recording's value): a recording writes phi at its window's
 start and the frames from its reload's end. A replay, from its own reload's end, steers phi in pre-window
 frames (one fixed step of another length, or a frame without one, then the native step) to the value whose

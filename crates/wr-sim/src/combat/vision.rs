@@ -25,7 +25,9 @@ use std::rc::Rc;
 use wr_los::Geometry;
 use wr_nav::cs::{d, r};
 
-use crate::world::EntityIdx;
+use crate::world::{EntityIdx, World};
+
+pub mod range;
 
 pub type V3 = [f32; 3];
 
@@ -133,6 +135,52 @@ pub struct Vision {
     pub caches: HashMap<EntityIdx, SightCache>,
     /// `UnitEntityData.CanBeInVisionRange`, per unit (`UnitVisionRangeController`'s sets).
     pub near: HashMap<EntityIdx, HashSet<EntityIdx>>,
+    /// `CanBeInVisionRange`'s enumeration order (the set is refilled in the overlap's order each
+    /// tick), for the units whose set the sim computed this way.
+    pub near_order: HashMap<EntityIdx, Vec<EntityIdx>>,
+    /// Units whose set holds a collider of unknown place in the order: `near_order` isn't exact.
+    pub near_inexact: HashSet<EntityIdx>,
+    /// `EntityBoundsController`'s sphere colliders (the overlap behind `near`).
+    pub bounds: range::Bounds,
+    /// Records (stream indices) of the events that could change a unit's `Corpulence` (a size
+    /// write, a fact added or removed, a view replaced), per unit: a `corp` read is valid only
+    /// after the last of them.
+    pub corp_bumps: HashMap<EntityIdx, Vec<usize>>,
+    /// Every event noted in `corp_bumps`, in order (the unit, its place in the unit's list).
+    pub bump_log: Vec<(EntityIdx, usize)>,
+    /// Per unit, how many size writes (`UnitState.Size`'s setter, which raises
+    /// `HandleUnitSizeChanged` and puts the entity on the bounds controller's update list) or
+    /// view replacements the sim has seen.
+    pub size_gen: HashMap<EntityIdx, u64>,
+    /// Per unit, how many changes of `IsInGame` the sim has seen (a return puts the entity on the
+    /// bounds controller's update list, even when it left and came back between two ticks).
+    pub in_game_gen: HashMap<EntityIdx, u64>,
+    /// Per unit, how many writes of its position the sim made (its own movers: the agent,
+    /// roaming, spawns, view replacement, companions placed); without the driven agent a write
+    /// after the vision phase means the next prefix's row isn't where the unit stood at it.
+    pub pos_writes: HashMap<EntityIdx, u64>,
+    /// A `Physics.SyncTransforms()` may have run since the last vision phase (it flushes every
+    /// transform to PhysX outside the fixed steps): a polymorph ended (`Polymorph.RestoreView`),
+    /// a mode with `UnitPlaceOnGroundController` started after one without it (its `Start` forces
+    /// a place-on-ground tick, which syncs first).
+    pub explicit_sync: bool,
+    /// Units whose view a polymorph may have replaced since the last vision phase (its start,
+    /// `TryReplaceView`, or its end, `RestoreView`, attach a new view): a new collider is made at
+    /// the next update, the old one lives until its view is destroyed.
+    /// Each replacement in order: the unit and whether a polymorph made it (else the
+    /// optimization dummy swap, counted in `dummy_swaps`).
+    pub views_replaced: Vec<(EntityIdx, bool)>,
+    /// `UnitEntityData.HasDummyView` as far as the sim knows it (`Some(false)` for a unit not
+    /// here; `None`: unknown). Hydrated from the save.
+    pub dummy: HashMap<EntityIdx, Option<bool>>,
+    /// Units whose view the optimization dummy swap replaced (`exact`) or may have (`possible`).
+    pub dummy_swaps: (usize, usize),
+    /// Units whose collider may be fade-hiding with its `enabled` kept: a `HideUnit` with `Fade`
+    /// hid them, or they were not in the game at the window's first tick (a fade may have begun
+    /// before). While the fade runs (`EntityViewBase.m_IsFadeHide`) `UpdateViewActive` returns
+    /// early and the collider keeps its `enabled`; when the fade ends isn't modelled. Until the
+    /// sim sees them in the game again their pairs in reach are the recording's.
+    pub fade_hidden: HashSet<EntityIdx>,
     /// Each awake unit's vision radius at the frame's cache phase (a miss adopted later in the
     /// frame may have been made before a unit joined combat).
     pub frame_radius: HashMap<EntityIdx, f32>,
@@ -657,3 +705,124 @@ pub fn check_probes(g: &Geometry, probes: &[Probe]) -> Result<usize, VisError> {
 
 #[cfg(test)]
 mod tests;
+
+/// An event the sim sees that could change a unit's `Corpulence` (a fact or buff added or removed,
+/// a view replaced, a size write): a `corp` read made before it, or while it was being processed,
+/// doesn't tell the corpulence after it ([`Vision::corp_bumps`]). Events the sim doesn't run
+/// (an unported action) aren't seen: that is a limit of the inference, noted in docs/poc5/vision.md.
+pub fn note_corpulence_change(w: &mut World, e: EntityIdx) {
+    if w.unit(e).is_some() {
+        let at = w.combat.nav.at;
+        let v = &mut w.combat.vision;
+        let list = v.corp_bumps.entry(e).or_default();
+        v.bump_log.push((e, list.len()));
+        list.push(at);
+    }
+}
+
+impl Vision {
+    /// The events noted since `mark` (a length of [`Vision::bump_log`]) are stamped no earlier
+    /// than `stamp`: the end of the driven entry they were made in. A driven entry's readers
+    /// consume records past the entry's own index, so a read and a change in one entry are taken
+    /// as read before change (the read doesn't count).
+    pub fn restamp_bumps(&mut self, mark: usize, stamp: usize) {
+        for &(e, k) in self.bump_log.get(mark..).unwrap_or_default() {
+            if let Some(s) = self.corp_bumps.get_mut(&e).and_then(|l| l.get_mut(k)) {
+                *s = (*s).max(stamp);
+            }
+        }
+    }
+}
+
+/// A size write or a view replacement: [`note_corpulence_change`], and the entity goes on the
+/// bounds controller's update list (`HandleUnitSizeChanged`).
+pub fn note_size_change(w: &mut World, e: EntityIdx) {
+    note_corpulence_change(w, e);
+    if w.unit(e).is_some() {
+        *w.combat.vision.size_gen.entry(e).or_default() += 1;
+    }
+}
+
+/// The sim wrote a unit's position ([`Vision::pos_writes`]).
+pub fn note_position_write(w: &mut World, e: EntityIdx) {
+    *w.combat.vision.pos_writes.entry(e).or_default() += 1;
+}
+
+/// A `Physics.SyncTransforms()` may run ([`Vision::explicit_sync`]).
+pub fn note_explicit_sync(w: &mut World) {
+    w.combat.vision.explicit_sync = true;
+}
+
+fn is_polymorph(w: &World, f: crate::world::FactIdx) -> bool {
+    w.fact(f).bp.as_ref().is_some_and(|b| {
+        b.components_array().iter().any(|o| wr_content::schema::ty(o.ty).short == "Polymorph")
+    })
+}
+
+/// A fact that may end a polymorph is deactivated or removed: `Polymorph.RestoreView` attaches
+/// a new view to its owner (a new collider, the old one kept until its view is destroyed) and
+/// syncs the transforms.
+pub fn note_fact_ending(w: &mut World, f: crate::world::FactIdx) {
+    if is_polymorph(w, f) {
+        note_explicit_sync(w);
+        if let Some(e) = w.fact(f).owner {
+            w.combat.vision.views_replaced.push((e, true));
+        }
+    }
+}
+
+/// A fact that may start a polymorph is activated: `Polymorph.TryReplaceView` attaches the
+/// polymorph's view to its owner (a new collider; the old view destroyed now or after its
+/// transition).
+pub fn note_fact_starting(w: &mut World, f: crate::world::FactIdx) {
+    if is_polymorph(w, f)
+        && let Some(e) = w.fact(f).owner
+    {
+        w.combat.vision.views_replaced.push((e, true));
+    }
+}
+
+/// `UnitEntityData.UpdateHasDummyView` as far as the sim knows its inputs: the flag is
+/// `HoldingState != CrossSceneState && (Suppressed || (UnitPartOptimizeWhenHidden && !IsInGame))`
+/// (suppression exists only in areas with parts, which the vision run refuses; the build mode's
+/// `DisableUnitOptimization` is taken to be off); it keeps a dummy view while
+/// `!flag && IsSleeping && HasDummyView && !IsDeathRevealed` (`IsDeathRevealed` isn't modelled).
+/// A flip attaches a new view ([`Vision::views_replaced`]). `sleeping`: `IsSleeping`, `None`
+/// unknown. `called`: whether the game surely calls it (`false`: it may, as the sleeping
+/// controller does for a sleeping unit only when it's death-revealed).
+pub fn update_has_dummy_view(w: &mut World, u: EntityIdx, sleeping: Option<bool>, called: bool) {
+    if w.unit(u).is_none() {
+        return;
+    }
+    let cross = w.player.cross_scene_units.contains(&u);
+    if !cross && !w.player.area_units.contains(&u) {
+        // (`HoldingState == null`: returns.)
+        return;
+    }
+    let part = w.entity(u).parts.iter().any(|p| p.clr == "UnitPartOptimizeWhenHidden");
+    let flag = !cross && part && !w.entity(u).is_in_game;
+    let has = w.combat.vision.dummy.get(&u).copied().unwrap_or(Some(false));
+    // What the call makes of it: `Some(Some(x))` a known result, `Some(None)` unknown.
+    let after = match has {
+        Some(h) if h == flag => return,
+        // Kept while sleeping and not death-revealed (the latter unknown).
+        Some(true) if sleeping == Some(false) => Some(false),
+        Some(true) => None,
+        Some(false) => Some(true),
+        None if flag => Some(true),
+        None if sleeping == Some(false) => Some(false),
+        None => None,
+    };
+    if has.is_none() && after.is_none() {
+        // (Unknown before and after: already counted, the view already taken as replaced.)
+        return;
+    }
+    let exact = called && after.is_some() && has.is_some();
+    w.combat.vision.dummy.insert(u, if called { after } else { None });
+    if exact {
+        w.combat.vision.dummy_swaps.0 += 1;
+    } else {
+        w.combat.vision.dummy_swaps.1 += 1;
+    }
+    w.combat.vision.views_replaced.push((u, false));
+}

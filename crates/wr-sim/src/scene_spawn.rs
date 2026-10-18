@@ -202,11 +202,13 @@ fn spawn(w: &mut World, id: &str, view: &ViewInfo) -> Option<EntityIdx> {
     if let Some(u) = w.unit_mut(e) {
         u.view_prefab = prefab;
     }
+    crate::combat::vision::note_size_change(w, e);
     let yaw = quat_yaw_degrees(view.rotation);
     if let Some(u) = w.unit_mut(e) {
         u.position = view.position;
         u.orientation = yaw;
     }
+    crate::combat::vision::note_position_write(w, e);
     // `EntityCreator.SpawnUnit`: `unitEntityData.IsInGame = !current.SpawnHidden` (the
     // setter: a change raises `IInGameHandler` and `OnIsInGameChanged`).
     crate::entity::set_is_in_game(w, e, true);
@@ -312,6 +314,8 @@ pub fn hide_unit(w: &mut World, owner: &Rc<Blueprint>, a: View<'_>) -> Result<()
     if a.bool("Fade") {
         // `value.Commands.InterruptAll(); view.FadeHide();` (commands and fading are T1).
         w.coverage.stub("HideUnit: interrupt commands, fade out (T1)");
+        // (The view's `m_IsFadeHide` keeps its sphere collider as it was until the fade ends.)
+        w.combat.vision.fade_hidden.insert(u);
     }
     crate::entity::set_is_in_game(w, u, false);
     if a.bool("SetHideInSaves") && w.entity(u).parts.iter().any(|p| p.clr == "UnitPartCompanion") {

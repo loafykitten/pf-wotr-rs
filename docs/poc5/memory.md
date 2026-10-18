@@ -89,7 +89,7 @@ memory; `UnitGroup.Dispose` and `CommandEndCombat` clear; `RandomEncounterUnitSe
   `EntityBounds` physics scene, where `EntityBoundsController` keeps one sphere collider per entity (a unit's radius
   `Max(0.05, Corpulence · Max(|scale.x|, |scale.z|))`, at its `Position`). `VisionRangeMeters`: 11.7 for the
   player's faction without overrides, else the override or 8.5, and in combat `Max(11.7, that)` unless a combat
-  override. The overlap's order is PhysX's.
+  override. The overlap's order is the colliders' creation order (the pool's) [M, `docs/poc5/vision.md`].
 - `UnitEntityData.HasLOS(other)`: `(Blueprint.IsFake || CanBeInVisionRange.Contains(other)) &&
   SightCache.GetLOS(other)`.
 - `UnitSightCache` (per unit, by the other's unique id): a hit when the other is within 0.5 m (2D) of the position
@@ -144,7 +144,7 @@ Counts are `poc5-tb-103`'s record runs, `tb-nearest` / `tb-focus` (1,702 / 2,166
 | agent `ConnectToGroups` | `Group?.Memory != null` | `ag_v gmem` | 15 / 13 (all true) |
 
 Visibility records the recordings already carry (observation only, not read by the replay): `vis` (each awake
-unit's `CanBeInVisionRange` changes, ids sorted: the set's order is lost), `los` (each sight-cache miss: observer,
+unit's `CanBeInVisionRange` changes, ids sorted: the set's order is lost, computed by the sim since), `los` (each sight-cache miss: observer,
 target eye point, sample position, result; not the target's id), `los_clear` (cache clears), `mem_add` (a new key,
 with its caller chain), `mem_remove` (`Remove`, or `Cleanup`'s removals, sorted), `mem_clear`, `group_state` (the
 window's first memory: keys only), `hash` (identity hashes), `u` rows (`fog=`, positions in short format).
@@ -168,9 +168,7 @@ prepare's prefix).
    slice already raises), `Wake` (the awake timers). `Passive` is an AI leaf today (input).
 3. **Needs geometry, so stays an input until ported**: `HasLOS` (line-of-sight geometry: portable once the
    `FogOfWarBlocker`s are imported; the sight cache needs exact positions: the movement agent), `CanBeInVisionRange`
-   (a capsule-sphere overlap: membership computable with a margin, order PhysX's; the order is observable whenever
-   a tick both removes and adds keys in one group's memory, e.g. a stealthed unit removed before a new one takes
-   its slot, so it stays a recorded input), `IsInFogOfWar` (revealers
+   (a capsule-sphere overlap: done since, with its order, see "H3" and `docs/poc5/vision.md`), `IsInFogOfWar` (revealers
    and LOS are portable; an entity beyond the radius needs its renderers' bounds: input), the ready groups (fog of
    war), `ExtendedVisionArea` (script zones: portable), see-invisibility and blindsense (reported).
 
@@ -247,13 +245,17 @@ arithmetic, `csharp/arith.rs`), `UnitSightCache`, `UnitLineOfSightCacheControlle
 `los` and H1's `group.HasLOS` become the sim's. Needs exact positions (the movement agent, `docs/poc5/movement.md`)
 and `LastUpdateTime` changes (blockers updated at run time, e.g. doors: an input, `los_geom`).
 
-### H3: vision range
+### H3: vision range (done, stream "visrange", 2026-10-17)
 
-`CanBeInVisionRange` as the capsule-sphere overlap (membership computed; a pair within a small margin of the
-boundary reported, PhysX's exact test isn't ported), in `Phase::Vision` (after `Phase::Move`). Its order stays an
-input (`vis` in the set's order, or H1's `mnear`): order is observable through the dictionary's slots whenever
-removals and additions interleave in a group's tick (and through the free list in later ticks), not only when two
-keys are added, so the sim never orders the set itself.
+`CanBeInVisionRange` as the capsule-sphere overlap, in `Phase::Visibility` (after `Phase::Move`), checked against the
+`vis` records on every pair the sim can decide (an unknown corpulence, most units' since only the fights read it, and the
+unknown view scale leave pairs to the recording: `docs/poc5/vision.md`). The design said the order would stay an input (order is observable through the dictionary's slots whenever
+removals and additions interleave in a group's tick, and through the free list in later ticks), and the margin would be
+reported; the recordings let both be computed: the order is the colliders' creation order (the pool's), every
+recorded `near` leaf of the 24 captures agrees (so `near` is a check, not an input), and the margin never mattered (closest
+decided pair 70 um at scale 1, `f32` and `f64` sums agree on every pair). The collider positions lag the units by a physics step
+(`autoSyncTransforms` off) and the step schedule follows the physics clock including the oracle's time scale 3 stretches.
+`docs/poc5/vision.md`, "The sets in vision range".
 
 ### H4: fog of war
 
@@ -446,8 +448,10 @@ the sim doesn't run fills (`Passive`, the area's `Peaceful`, stealth and the res
 `LineOfSightGeometry` is ported (`crates/wr-los`, the area's blockers imported by `wr-import los-pack`), with
 `UnitSightCache` and `UnitLineOfSightCacheController` (`combat/vision.rs`, `Phase::LosCache`): the engagement's `los`, the
 memory's `los` (`group.HasLOS`), the AI's `InLos` and the `HasObstacle` answers of the movement simulation and the path
-search are computed and checked in the driven replay, every sight cache miss and clear too. `CanBeInVisionRange` stays the
-`vis` records (PhysX), so does the ready groups' fog of war. Evidence, counts and the limits: `docs/poc5/vision.md`.
+search are computed and checked in the driven replay, every sight cache miss and clear too. `CanBeInVisionRange` is computed
+too since stream "visrange" (the capsule-sphere overlap over the entity-bounds colliders, its order included: the memory's
+`near` leaf is a check); the ready groups' fog of war stays the recording's. Evidence, counts and the limits:
+`docs/poc5/vision.md`.
 
 ## The tick's other leaves: now the sim's (stream "memleaves", 2026-10-17)
 

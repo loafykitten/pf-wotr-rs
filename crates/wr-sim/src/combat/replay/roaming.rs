@@ -487,6 +487,7 @@ impl RoamInputs for Io<'_, '_> {
         if let Some(x) = w.unit_mut(u) {
             x.position = after;
         }
+        crate::combat::vision::note_position_write(w, u);
         if bits3(pos) != bits3(before) {
             return Err(Desync(format!(
                 "the sleeping step of {id}: the sim's position {before:?}, the recording's {}",
