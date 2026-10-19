@@ -669,20 +669,42 @@ struct PosedPart {
     mesh: pack_mesh::DecodedMesh,
 }
 
-/// The `SkinnedMeshRenderer` in a body part's renderer prefab (`GetComponentInChildren`).
-fn find_smr(sc: &SceneIndex, go: i64) -> Option<(i64, Value)> {
-    let t = sc.go_transform.get(&go)?;
-    let mut stack = vec![*t];
+/// `GetComponentInChildren<T>()` over transforms: depth first from `root`, the root first, never
+/// entering a GameObject that is inactive (`includeInactive` defaults to false, so an inactive object
+/// hides its whole subtree; the component's own `enabled` flag plays no part in the lookup).
+fn first_active_match(
+    root: i64,
+    children: &dyn Fn(i64) -> Vec<i64>,
+    active: &dyn Fn(i64) -> bool,
+    matches: &dyn Fn(i64) -> bool,
+) -> Option<i64> {
+    let mut stack = vec![root];
     while let Some(t) = stack.pop() {
-        let g = sc.transform_go.get(&t)?;
-        if let Some(o) = sc.components(*g, class_id::SKINNED_MESH_RENDERER).first() {
-            return sc.file.read(o).ok().map(|v| (o.path_id, v));
+        if !active(t) {
+            continue;
         }
-        if let Some(kids) = sc.children.get(&t) {
-            stack.extend(kids.iter().rev().copied());
+        if matches(t) {
+            return Some(t);
         }
+        stack.extend(children(t).into_iter().rev());
     }
     None
+}
+
+/// The `SkinnedMeshRenderer` in a body part's renderer prefab (`BodyPart.SkinnedRenderer`).
+fn find_smr(sc: &SceneIndex, go: i64) -> Option<(i64, Value)> {
+    let root = *sc.go_transform.get(&go)?;
+    let go_of = |t: i64| sc.transform_go.get(&t).copied();
+    let t = first_active_match(
+        root,
+        &|t| sc.children.get(&t).cloned().unwrap_or_default(),
+        &|t| go_of(t).and_then(|g| sc.gos.get(&g)).is_some_and(|g| g.1),
+        &|t| {
+            go_of(t).is_some_and(|g| !sc.components(g, class_id::SKINNED_MESH_RENDERER).is_empty())
+        },
+    )?;
+    let o = *sc.components(go_of(t)?, class_id::SKINNED_MESH_RENDERER).first()?;
+    sc.file.read(o).ok().map(|v| (o.path_id, v))
 }
 
 fn pose_part(
@@ -764,7 +786,9 @@ fn merge(parts: &[PosedPart], name: &str) -> Result<pack_mesh::DecodedMesh> {
             }
         }
         let isz = if m.index_u32 { 4 } else { 2 };
-        for sm in &m.submeshes {
+        // One `CombineInstance` per part with `subMeshIndex` 0: only the first submesh's triangles are
+        // kept, though every vertex of the part is copied.
+        for sm in m.submeshes.iter().take(1) {
             anyhow::ensure!(sm.topology == 0, "{}: non-triangle submesh", m.name);
             for i in sm.first_index..sm.first_index + sm.index_count {
                 let o = i as usize * isz;
@@ -845,6 +869,22 @@ fn compose_atlases(
         // The game's secondary pick reads the *primary special* list for a special index (a typo
         // in `RepaintTextures`); kept.
         let secondary = pick(&ee.special_primary, &ee.secondary_ramps, ss, s);
+        if std::env::var_os("WR_DEBUG_CHARACTERS").is_some() {
+            let name = |o: Option<ObjRef>| {
+                o.and_then(|o| o.read().ok())
+                    .and_then(|v| v.str_at("m_Name").map(str::to_owned))
+                    .unwrap_or_else(|| "-".to_owned())
+            };
+            eprintln!(
+                "character ee {} layer {} ramps {p}/{s} ({sp}/{ss}) of {}/{}: primary {} secondary {}",
+                ee.name,
+                ee.layer,
+                ee.primary_ramps.len(),
+                ee.secondary_ramps.len(),
+                name(primary),
+                name(secondary)
+            );
+        }
         for (pi, part) in ee.parts.iter().enumerate() {
             for (ti, d) in part.textures.iter().enumerate() {
                 if !(d.use_ramp1 || d.use_ramp2 || d.use_default1 || d.use_default2) {
@@ -1181,6 +1221,19 @@ pub(super) fn add(
     };
     // Atlases and the material: a copy of the first overlay part's material with the atlases.
     anyhow::ensure!(!overlay.is_empty(), "no overlay parts");
+    if std::env::var_os("WR_DEBUG_CHARACTERS").is_some() {
+        for k in &overlay {
+            let part = &eq.ees[k.ee].parts[k.part];
+            eprintln!(
+                "character {} overlay {} part {:#x} layers {} geometry {}",
+                u.name,
+                eq.ees[k.ee].name,
+                part.ty,
+                part.textures.len(),
+                geometry.iter().any(|(g, _)| g == k)
+            );
+        }
+    }
     let atlases = compose_atlases(b, cache, &eq, &overlay)?;
     for n in cache.notes.drain(..) {
         skip(&mut b.report, n);
@@ -1302,5 +1355,67 @@ mod tests {
         assert_eq!(map_rect(ty::HEAD), map_rect(ty::NOSE));
         assert_eq!(map_rect(ty::HAIR), map_rect(ty::HELMET));
         assert_eq!(map_rect(1 << 50), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn lookup_skips_inactive_objects_and_their_subtrees() {
+        // 1 -> (2 -> 4, 3); the renderer is on 4 and on 3.
+        let kids = |t: i64| match t {
+            1 => vec![2, 3],
+            2 => vec![4],
+            _ => vec![],
+        };
+        let has = |t: i64| t == 3 || t == 4;
+        // All active: depth first reaches 4 (under the first child) before 3.
+        assert_eq!(first_active_match(1, &kids, &|_| true, &has), Some(4));
+        // 2 inactive: its renderer-bearing child is not entered, so 3 is found.
+        assert_eq!(first_active_match(1, &kids, &|t| t != 2, &has), Some(3));
+        // The root inactive: nothing.
+        assert_eq!(first_active_match(1, &kids, &|t| t != 1, &has), None);
+        // The root itself can be the match.
+        assert_eq!(first_active_match(3, &kids, &|_| true, &has), Some(3));
+    }
+
+    fn triangle_part(sub: &[(u32, u32)], verts: u32) -> PosedPart {
+        let positions: Vec<u8> = (0..verts)
+            .flat_map(|i| [i as f32, 0.0, 0.0].into_iter().flat_map(f32::to_le_bytes))
+            .collect();
+        let idx: Vec<u8> = (0..verts).flat_map(|i| (i as u16).to_le_bytes()).collect();
+        let mut channels = vec![None; 14];
+        channels[0] = Some(MeshChannel { stream: 0, offset: 0, format: 0, dimension: 3 });
+        PosedPart {
+            mesh: pack_mesh::DecodedMesh {
+                name: "part".into(),
+                vertex_count: verts,
+                channels,
+                streams: vec![(positions, 12)],
+                index_u32: false,
+                indices: idx,
+                submeshes: sub
+                    .iter()
+                    .map(|&(first, n)| SubMesh {
+                        first_index: first,
+                        index_count: n,
+                        ..Default::default()
+                    })
+                    .collect(),
+                aabb: Default::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn merging_keeps_only_each_parts_first_submesh() {
+        // Part A: 6 vertices, submeshes (0..3) and (3..6); part B: 3 vertices, one submesh.
+        let a = triangle_part(&[(0, 3), (3, 3)], 6);
+        let b = triangle_part(&[(0, 3)], 3);
+        let m = merge(&[a, b], "merged").unwrap();
+        // Every vertex of both parts is copied; only A's first and B's triangles are indexed, B's offset by 6.
+        assert_eq!(m.vertex_count, 9);
+        let idx: Vec<u32> =
+            m.indices.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
+        assert_eq!(idx, vec![0, 1, 2, 6, 7, 8]);
+        assert_eq!(m.submeshes.len(), 1);
+        assert_eq!(m.submeshes[0].index_count, 6);
     }
 }

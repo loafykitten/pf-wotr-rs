@@ -26,14 +26,20 @@ fn weak_ids(v: View<'_>, field: &str) -> Vec<String> {
     v.seq(field).iter().filter_map(weak_id).collect()
 }
 
+/// The entry `race` indexes in a `KingmakerEquipmentEntity`'s race-dependent array (`IList.Get`: none
+/// out of range). Null entries keep their place, so a null at 0 doesn't shift race 1's to race 0.
+fn race_slot(slots: &[Node], race: i32) -> Option<&Node> {
+    usize::try_from(race).ok().and_then(|r| slots.get(r))
+}
+
 /// `KingmakerEquipmentEntity.GetLinks(gender, race)`.
 #[must_use]
 pub fn kee_links(kee: &Blueprint, gender: Gender, race: i32) -> Vec<String> {
     let v = kee.view();
     let (male, female) = ("m_MaleArray", "m_FemaleArray");
+    // `m_RaceDependentArrays.Get((int)race)`: the slot of the stored array, a null one included.
     if v.bool("m_RaceDependent")
-        && let Some(two) =
-            usize::try_from(race).ok().and_then(|r| v.objs("m_RaceDependentArrays").get(r).copied())
+        && let Some(two) = race_slot(v.seq("m_RaceDependentArrays"), race).and_then(Node::as_object)
     {
         let t = View(two);
         let (m, f) = (weak_ids(t, "MaleArray"), weak_ids(t, "FemaleArray"));
@@ -334,4 +340,20 @@ pub fn build(save: &str) -> Result<UnitsSpec> {
         area: report.area.unwrap_or_default(),
         units,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn race_slots_index_the_stored_array_nulls_included() {
+        let slots = [Node::Null, Node::Str("one".into()), Node::Null];
+        // Race 0 has no entry (not race 1's); race 1 has its own; past the end there is none.
+        assert!(race_slot(&slots, 0).is_some_and(|n| matches!(n, Node::Null)));
+        assert!(race_slot(&slots, 1).is_some_and(|n| matches!(n, Node::Str(_))));
+        assert!(race_slot(&slots, 3).is_none());
+        assert!(race_slot(&slots, -1).is_none());
+        assert!(race_slot(&slots, 0).and_then(Node::as_object).is_none());
+    }
 }

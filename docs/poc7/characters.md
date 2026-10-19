@@ -26,10 +26,16 @@ Seelah, Lann, Camelia, Wenduag). Every unit is in its rig's rest pose (a T-pose)
   filtering, linear normals, renderer check in body part selection, bounds after posing, index checks, panics, `ForbidRotation`,
   `--look` validation, the doc's re-import claim); three are recorded as stage-1 limits below (the doll prefab, `PriorityEquipment`,
   baked characters without an embedded renderer) and the size scale. Not done: the diffuse alpha mask is sampled without minification.
+- Second review (Sol, independent), four more fixed: the race-dependent arrays are indexed by their stored slot (a null at 0 no longer
+  shifts race 1's links to race 0), atlas blits keep the rectangle's fractional corner for the source UVs (a pixel is drawn when its centre
+  is inside, as the shader's quad covers it), `BodyPart.SkinnedRenderer` does not look into inactive objects (`GetComponentInChildren`'s
+  default; the component's `enabled` flag plays no part; Unity's lookup is native code, so this is its documented behaviour, not read
+  from the decompiled source), and `BuildMesh` keeps only each part's first submesh (`CombineInstance.subMeshIndex` is 0). Tests for all four.
+  Re-shot close-ups carry the suffix `-r2` in the screenshot folder.
 - Screenshots (gitignored, `fixtures/captures/poc7/characters-stage1/`): `route-point0.png` (the caves from route pose 0,
   with the player; Seelah and Anevia are in the frame too, see "Differences from the original"). Close-ups from
   a free camera (`wr-game --look ex,ey,ez,tx,ty,tz`): `close-seelah-anevia-player.png`, `close-lann.png`,
-  `sheet-four.png` (four characters).
+  `sheet-four.png` (four characters); the `-r2` files were rendered after the second review's fixes.
 
 How to rerun (from the repo root, with the game installed and the main caches present):
 
@@ -172,7 +178,10 @@ Missing (all needed later):
 - Atlases at **1024 px by default** (`--atlas-size 2048` for the High setting), RGBA8 not DXT5, no LOD refinement.
 - Blends are done in 8-bit with the sRGB handling of the GPU path, by the formulas of the MSL [C]; **no capture of the
   original's atlases exists**, so the composition is checked by eye and by unit tests, not by comparison (see the captures below).
-  Seelah's forearm skin looks lighter than her face: either the data says so or a ramp index is wrong; a capture settles it.
+  Seelah's forearm looks lighter than her face. It is not the skin ramp (her body and head entities both use `CR_Skin_Dark_U_HM`) nor the
+  atlas rectangle rounding: the forearm geometry comes from `EE_Paladin_F_Any`, a cloth layer painted with `CR_Armor_White1` (saved ramp
+  6) over the skin. `WR_DEBUG_CHARACTERS=1` prints each character's entities, chosen ramps and overlay parts; a capture of the original's
+  atlas would confirm it.
 - The player's skeleton is the blueprint prefab's (`MaleHuman`), not the race preset's.
 - All 21 units are drawn. The original hides units outside the party's sight (fog of war): at pose 0 Seelah and Anevia are
   not visible in the original and are in ours; the corpse lying beside the player in the original is an animated scene

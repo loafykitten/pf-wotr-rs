@@ -13,6 +13,31 @@
 
 use super::image::{Image, linear_to_srgb, srgb_to_linear};
 
+/// A blit destination: its pixel range and the fractional rectangle the UVs are measured in.
+#[derive(Debug, Clone, Copy)]
+struct Region {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+}
+
+impl Region {
+    /// UV of pixel `(x, y)`'s centre in the rectangle.
+    fn uv(&self, x: usize, y: usize) -> (f32, f32) {
+        ((x as f32 + 0.5 - self.rx) / self.rw, (y as f32 + 0.5 - self.ry) / self.rh)
+    }
+
+    /// Whole pixels across, for picking the source mip.
+    fn width(&self) -> usize {
+        self.rw.ceil().max(1.0) as usize
+    }
+}
+
 /// A rectangle of the atlas in the 2048-pixel layout, `(x, y, w, h)`, `y` from the bottom.
 pub type Rect = (f32, f32, f32, f32);
 
@@ -75,15 +100,15 @@ impl Atlas {
         Self { size, channel, px: vec![channel.clear(); size * size] }
     }
 
-    /// The destination pixels of `rect` (layout units scaled to this atlas) and each one's UV in
-    /// the rectangle.
-    fn region(&self, rect: Rect) -> (usize, usize, usize, usize) {
+    /// The destination of `rect` (layout units scaled to this atlas). The quad keeps its fractional
+    /// bounds, as the shader's `_DstRect` does: a pixel is drawn when its centre is inside, and its
+    /// source UV is measured from the fractional corner.
+    fn region(&self, rect: Rect) -> Region {
         let s = self.size as f32 / 2048.0;
-        let (x, y, w, h) = (rect.0 * s, rect.1 * s, rect.2 * s, rect.3 * s);
-        let (x0, y0) = (x.round() as usize, y.round() as usize);
-        let (x1, y1) =
-            (((x + w).round() as usize).min(self.size), ((y + h).round() as usize).min(self.size));
-        (x0, y0, x1.max(x0), y1.max(y0))
+        let (rx, ry, rw, rh) = (rect.0 * s, rect.1 * s, rect.2 * s, rect.3 * s);
+        let lo = |v: f32| (v - 0.5).ceil().max(0.0) as usize;
+        let hi = |v: f32| ((v - 0.5).ceil().max(0.0) as usize).min(self.size);
+        Region { x0: lo(rx), y0: lo(ry), x1: hi(rx + rw), y1: hi(ry + rh), rx, ry, rw, rh }
     }
 
     /// `CharacterAtlasGenerator` for the diffuse channel: `out = lerp(prev, src, alpha)`, with the
@@ -95,12 +120,12 @@ impl Atlas {
         weight: &Image,
         dont_blend_alpha: bool,
     ) {
-        let (x0, y0, x1, y1) = self.region(rect);
-        let (w, h) = ((x1 - x0).max(1) as f32, (y1 - y0).max(1) as f32);
-        let source = Source::new(src, x1 - x0);
+        let r = self.region(rect);
+        let (x0, y0, x1, y1) = (r.x0, r.y0, r.x1, r.y1);
+        let source = Source::new(src, r.width());
         for y in y0..y1 {
             for x in x0..x1 {
-                let (u, v) = ((x - x0) as f32 / w + 0.5 / w, (y - y0) as f32 / h + 0.5 / h);
+                let (u, v) = r.uv(x, y);
                 let s = source.sample(u, v);
                 let a = weight.sample(u, v)[3];
                 let prev = self.px[y * self.size + x];
@@ -122,12 +147,12 @@ impl Atlas {
     /// (x in alpha scaled by red, y in green) decoded to a vector, faded toward `(0, 0, 1)` by
     /// the weight, stored as a colour and blended over the previous contents.
     pub fn blit_normal(&mut self, rect: Rect, src: &Image, weight: &Image, dont_blend_alpha: bool) {
-        let (x0, y0, x1, y1) = self.region(rect);
-        let (w, h) = ((x1 - x0).max(1) as f32, (y1 - y0).max(1) as f32);
-        let source = Source::new(src, x1 - x0);
+        let r = self.region(rect);
+        let (x0, y0, x1, y1) = (r.x0, r.y0, r.x1, r.y1);
+        let source = Source::new(src, r.width());
         for y in y0..y1 {
             for x in x0..x1 {
-                let (u, v) = ((x - x0) as f32 / w + 0.5 / w, (y - y0) as f32 / h + 0.5 / h);
+                let (u, v) = r.uv(x, y);
                 let s = source.sample(u, v);
                 let a = weight.sample(u, v)[3];
                 let nx = s[3] * s[0];
@@ -164,12 +189,12 @@ impl Atlas {
         factors: [f32; 3],
         dont_blend_alpha: bool,
     ) {
-        let (x0, y0, x1, y1) = self.region(rect);
-        let (w, h) = ((x1 - x0).max(1) as f32, (y1 - y0).max(1) as f32);
-        let source = src.map(|s| Source::new(s, x1 - x0));
+        let r = self.region(rect);
+        let (x0, y0, x1, y1) = (r.x0, r.y0, r.x1, r.y1);
+        let source = src.map(|s| Source::new(s, r.width()));
         for y in y0..y1 {
             for x in x0..x1 {
-                let (u, v) = ((x - x0) as f32 / w + 0.5 / w, (y - y0) as f32 / h + 0.5 / h);
+                let (u, v) = r.uv(x, y);
                 let s = source.as_ref().map_or([1.0, 0.0, 0.0, 0.0], |s| s.sample(u, v));
                 let a = weight.sample(u, v)[3];
                 let prev = self.px[y * self.size + x];
@@ -278,6 +303,33 @@ mod tests {
                 && (i32::from(p[2]) - 200).abs() <= 1,
             "{p:?}"
         );
+    }
+
+    #[test]
+    fn fractional_rectangles_keep_their_corner_for_the_source_uvs() {
+        // At 1024 px the brows rectangle (1295, 193, 265, 125) is (647.5, 96.5, 132.5, 62.5): pixel 648
+        // is the first whose centre is inside, 1/132.5 of a pixel past the corner, not at u = 0.5/132.
+        let mut a = Atlas::new(1024, Channel::Diffuse);
+        let gradient = Image {
+            w: 4,
+            h: 1,
+            px: vec![[0, 0, 0, 255], [85, 85, 85, 255], [170, 170, 170, 255], [255, 255, 255, 255]],
+            has_alpha: true,
+            srgb: true,
+        };
+        let on = solid(2, 2, [0, 0, 0, 255]);
+        a.blit_diffuse((1295.0, 193.0, 265.0, 125.0), &gradient, &on, false);
+        let row = 100 * 1024;
+        // Outside: pixel 647's centre (647.5) sits exactly on the corner; 779 is the last inside.
+        assert_eq!(a.px[row + 646][3], 0);
+        assert_eq!(a.px[row + 780][3], 0);
+        assert_eq!(a.px[row + 779][3], 255);
+        let first = a.px[row + 648][0];
+        let last = a.px[row + 779][0];
+        assert!(first < 8 && last > 247, "{first} {last}");
+        // The middle of the rectangle reads between the two middle texels, in linear light (about 138).
+        let mid = a.px[row + 714][0];
+        assert!((120..=150).contains(&mid), "{mid}");
     }
 
     #[test]
