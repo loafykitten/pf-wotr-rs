@@ -323,6 +323,7 @@ impl Builder<'_> {
                     indices,
                     submeshes: d.submeshes,
                     aabb: d.aabb,
+                    skin: None,
                 });
                 Some(u32::try_from(self.meta.meshes.len() - 1)?)
             }
@@ -1086,6 +1087,7 @@ pub fn build(
                 rendering_layer_mask: u32::try_from(v.i64_at("m_RenderingLayerMask").unwrap_or(1))
                     .unwrap_or(1),
                 property_block: None,
+                skin: None,
             });
             if let Some(bt) = baked.get(&(sc.name.clone(), o.path_id)) {
                 let r = b.meta.renderers.last_mut().expect("just pushed");

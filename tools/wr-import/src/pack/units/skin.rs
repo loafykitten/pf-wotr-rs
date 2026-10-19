@@ -83,7 +83,7 @@ pub fn read_attr(mesh: &DecodedMesh, ch: Channel, v: usize, n: usize) -> Option<
 /// Unity writes only as many slots per vertex as the mesh needs: indices `uint32 x N` in channel 13
 /// and, for N > 1, weights `float x N` in channel 12; a mesh bound one bone per vertex has no
 /// weight channel at all and every weight is one.
-fn skin_data(mesh: &DecodedMesh) -> Result<Vec<([u32; 4], [f32; 4])>> {
+pub fn skin_data(mesh: &DecodedMesh) -> Result<Vec<([u32; 4], [f32; 4])>> {
     let i = channel(mesh, BLEND_INDICES).context("mesh has no blend indices")?;
     let w = channel(mesh, BLEND_WEIGHTS);
     ensure!((1..=4).contains(&i.dimension), "{} bone slots per vertex", i.dimension);
@@ -117,6 +117,85 @@ fn skin_data(mesh: &DecodedMesh) -> Result<Vec<([u32; 4], [f32; 4])>> {
         out.push((idx, wt));
     }
     Ok(out)
+}
+
+/// A mesh's skin in the pack's layout (`wr_assets::SKIN_STRIDE` bytes per vertex): four weights
+/// (float32) then four bone indices (uint32). Weights are normalised to sum to one, as Unity's
+/// skinning does; a vertex with no weight keeps all four at zero (it stays in the bind pose).
+///
+/// # Errors
+///
+/// A mesh without skin channels.
+pub fn skin_blob(mesh: &DecodedMesh) -> Result<Vec<u8>> {
+    Ok(skin_bytes(&skin_data(mesh)?))
+}
+
+/// [`skin_blob`] of per-vertex indices and weights already read.
+#[must_use]
+pub fn skin_bytes(data: &[([u32; 4], [f32; 4])]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() * 32);
+    for (idx, wt) in data {
+        let total: f32 = wt.iter().filter(|w| **w > 0.0).sum();
+        for w in wt {
+            let w = if total > 0.0 && *w > 0.0 { w / total } else { 0.0 };
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        for i in idx {
+            out.extend_from_slice(&i.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Sets the mesh's bounds to cover every pose in `skins` (each a full set of skin matrices, as
+/// for [`pose`]), then grows them by a tenth of their size and 0.1 m, so a renderer culled or
+/// shadow-tested by them stays inside while it animates.
+///
+/// # Errors
+///
+/// As [`pose`] and [`refresh_bounds`].
+pub fn animated_bounds(mesh: &mut DecodedMesh, skins: &[Vec<Mat4>]) -> Result<()> {
+    type Box3 = ([f32; 3], [f32; 3]);
+    let union = |a: Option<Box3>, b: Option<Box3>| match (a, b) {
+        (Some((alo, ahi)), Some((blo, bhi))) => Some((
+            [alo[0].min(blo[0]), alo[1].min(blo[1]), alo[2].min(blo[2])],
+            [ahi[0].max(bhi[0]), ahi[1].max(bhi[1]), ahi[2].max(bhi[2])],
+        )),
+        (a, b) => a.or(b),
+    };
+    let mut aabb: Option<Box3> = None;
+    let mut subs: Vec<Option<Box3>> = vec![None; mesh.submeshes.len()];
+    for s in skins {
+        let mut m = mesh.clone();
+        pose(&mut m, s)?;
+        refresh_bounds(&mut m)?;
+        let (c, e) = m.aabb;
+        let b = ([c[0] - e[0], c[1] - e[1], c[2] - e[2]], [c[0] + e[0], c[1] + e[1], c[2] + e[2]]);
+        aabb = union(aabb, Some(b));
+        for (acc, sm) in subs.iter_mut().zip(&m.submeshes) {
+            *acc = union(*acc, sm.bounds);
+        }
+    }
+    let grow = |b: Box3| {
+        let mut b = b;
+        for k in 0..3 {
+            let pad = (b.1[k] - b.0[k]) * 0.1 + 0.1;
+            b.0[k] -= pad;
+            b.1[k] += pad;
+        }
+        b
+    };
+    if let Some(b) = aabb {
+        let (lo, hi) = grow(b);
+        mesh.aabb = (
+            [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0],
+            [(hi[0] - lo[0]) / 2.0, (hi[1] - lo[1]) / 2.0, (hi[2] - lo[2]) / 2.0],
+        );
+    }
+    for (sm, b) in mesh.submeshes.iter_mut().zip(subs) {
+        sm.bounds = b.map(grow);
+    }
+    Ok(())
 }
 
 /// The float32 channel `c` as `dim` floats per vertex starting at `offset`, or an error.

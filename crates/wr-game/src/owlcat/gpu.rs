@@ -17,6 +17,9 @@ pub struct GpuTexture {
 pub struct GpuMesh {
     pub streams: Vec<wgpu::Buffer>,
     pub index: wgpu::Buffer,
+    /// A skinned mesh's weights and bone indices (`wr_assets::Mesh::skin`); its streams are
+    /// also bound as storage then, for the skinning pass.
+    pub skin: Option<wgpu::Buffer>,
 }
 
 /// Unity's built-in default textures, by kind.
@@ -249,6 +252,13 @@ fn upload_texture(
     })
 }
 
+/// Whether a buffer of `len` bytes, padded to whole words as [`padded`] does, fits a device whose
+/// buffers and storage bindings are limited to `max_buffer` and `max_binding` bytes.
+fn buffer_fits(len: u64, storage: bool, max_buffer: u64, max_binding: u64) -> bool {
+    let padded_len = len.div_ceil(4).max(1).saturating_mul(4);
+    padded_len <= max_buffer && (!storage || padded_len <= max_binding)
+}
+
 fn padded(b: &[u8]) -> Vec<u8> {
     let mut v = b.to_vec();
     v.resize(b.len().div_ceil(4).max(1) * 4, 0);
@@ -302,25 +312,57 @@ impl Gpu {
         }
         let mut meshes = Vec::with_capacity(m.meshes.len());
         for mesh in &m.meshes {
-            let streams = mesh
-                .streams
-                .iter()
-                .map(|s| {
-                    uploaded += s.data.len;
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(&mesh.name),
-                        contents: &padded(pack.blob(s.data)),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
+            let usage = if mesh.skin.is_some() {
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE
+            } else {
+                wgpu::BufferUsages::VERTEX
+            };
+            // Check the padded sizes against the device before creating anything: a buffer the
+            // device can't hold comes back as an error, not a wgpu validation failure.
+            let limits = device.limits();
+            let fits = |len: u64, storage: bool| -> Result<()> {
+                if !buffer_fits(
+                    len,
+                    storage,
+                    limits.max_buffer_size,
+                    limits.max_storage_buffer_binding_size,
+                ) {
+                    bail!("{}: a buffer of {len} bytes exceeds the device's limits", mesh.name);
+                }
+                Ok(())
+            };
+            let skinned = mesh.skin.is_some();
+            for s in &mesh.streams {
+                fits(s.data.len, skinned)?;
+            }
+            if let Some(b) = mesh.skin {
+                fits(b.len, true)?;
+            }
+            fits(mesh.indices.len, false)?;
+            let mut streams = Vec::with_capacity(mesh.streams.len());
+            for s in &mesh.streams {
+                uploaded += s.data.len;
+                streams.push(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&mesh.name),
+                    contents: &padded(pack.blob(s.data)),
+                    usage,
+                }));
+            }
+            let skin = mesh.skin.map(|b| {
+                uploaded += b.len;
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&mesh.name),
+                    contents: &padded(pack.blob(b)),
+                    usage: wgpu::BufferUsages::STORAGE,
                 })
-                .collect();
+            });
             uploaded += mesh.indices.len;
             let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&mesh.name),
                 contents: &padded(pack.blob(mesh.indices)),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            meshes.push(GpuMesh { streams, index });
+            meshes.push(GpuMesh { streams, index, skin });
         }
         Ok(Self {
             textures,
@@ -339,5 +381,22 @@ impl Gpu {
         p: &Program,
     ) -> wgpu::ShaderModule {
         self.modules.entry(p.msl_hash).or_insert_with(|| module(device, pack, p)).clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffers_are_checked_padded_against_the_device_limits() {
+        // 10 bytes pad to 12; an empty blob still takes a word.
+        assert!(buffer_fits(10, false, 12, 0));
+        assert!(!buffer_fits(10, false, 11, 0));
+        assert!(buffer_fits(0, false, 4, 0));
+        // Storage buffers answer to the binding limit too.
+        assert!(buffer_fits(100, false, 1000, 50));
+        assert!(!buffer_fits(100, true, 1000, 50));
+        assert!(!buffer_fits(u64::MAX, false, u64::MAX - 1, u64::MAX));
     }
 }

@@ -4,6 +4,8 @@ Written 2026-10-18, stream `chars` (Sonnet 5.5). **[M]** measured here, **[C]** 
 code, **[I]** inferred. Local outputs (packs, specs, screenshots) are under `cache/poc7/` and the
 scratch folder; nothing here is committed data.
 
+> **Step 2 (animation) is in `docs/poc7/animation.md`**: the units idle in motion and one walks, skinned on the GPU (pack format v3).
+
 ## Result of stage 1
 
 `wr-visual spec Manual_13` hydrates the save through `wr-sim` and writes the 21 units that are in the game

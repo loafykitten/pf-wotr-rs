@@ -9,6 +9,7 @@ description = "The Bevy app. POC-6 first light: an area pack drawn through Owlca
 
 [dependencies]
 wr-assets.workspace = true
+wr-anim.workspace = true
 wr-paths.workspace = true
 anyhow.workspace = true
 libc.workspace = true

@@ -36,6 +36,14 @@ pub struct PackMeta {
     pub lighting: Option<LightingSetup>,
     /// Programs of the render pipeline itself (deferred lighting, light culling, …).
     pub pipeline_programs: Vec<PipelineProgram>,
+    /// Bone hierarchies of the animated units.
+    pub rigs: Vec<wr_anim::Rig>,
+    /// Animation clips (shared by the units that play them).
+    pub clips: Vec<wr_anim::Clip>,
+    /// Animator controllers (monster locomotion).
+    pub controllers: Vec<wr_anim::Controller>,
+    /// One per animated unit: its rig, clips and locomotion. Skinned renderers refer to it.
+    pub animations: Vec<wr_anim::loco::UnitAnimation>,
     /// What the importer skipped and why (class or shader → count), for the report.
     pub skipped: Vec<(String, u32)>,
 }
@@ -188,7 +196,15 @@ pub struct Mesh {
     pub submeshes: Vec<SubMesh>,
     /// Local AABB: centre and extent.
     pub aabb: ([f32; 3], [f32; 3]),
+    /// A skinned mesh in its bind pose: [`SKIN_STRIDE`] bytes per vertex, four bone weights
+    /// (float32, summing to one) then four bone indices (uint32) into the renderer's
+    /// [`SkinBinding`]. `channels` still describe the position, normal and tangent the skinning
+    /// replaces; its other channels are used as they are.
+    pub skin: Option<BlobRef>,
 }
+
+/// Bytes per vertex of [`Mesh::skin`].
+pub const SKIN_STRIDE: u64 = 32;
 
 // ---------------------------------------------------------------------------------------
 // Shaders
@@ -457,6 +473,21 @@ pub struct Renderer {
     pub rendering_layer_mask: u32,
     /// Values a script sets through `MaterialPropertyBlock` (e.g. `BakedTerrain`).
     pub property_block: Option<PropertyBlock>,
+    /// A skinned renderer of an animated unit: the bones that pose its (bind pose) mesh.
+    pub skin: Option<SkinBinding>,
+}
+
+/// How a skinned renderer's mesh follows a unit's rig.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SkinBinding {
+    /// Index into [`PackMeta::animations`].
+    pub animation: u32,
+    /// The rig bone of each of the mesh's bones (`SkinnedMeshRenderer.bones`).
+    pub bones: Vec<u32>,
+    /// `Mesh.bindposes`, column-major, one per bone. A vertex moves by
+    /// `rig_world[bones[i]] * bind_poses[i]`, in the unit's root space (the renderer's matrix
+    /// places that space in the world).
+    pub bind_poses: Vec<[f32; 16]>,
 }
 
 /// A `MaterialPropertyBlock`: per-renderer overrides of material properties.

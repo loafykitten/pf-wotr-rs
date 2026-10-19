@@ -166,6 +166,26 @@ enum Cmd {
     /// Counts equipment entity body parts whose renderer prefab root is inactive (what
     /// `BodyPart.SkinnedRenderer` can find), over every `.ee` bundle or just the given GUIDs.
     EeCensus { guids: Vec<String> },
+    /// Decodes one `AnimationClip` (survey): bindings, curve counts, the first keys of the first
+    /// curves and the sampled values at the given times.
+    AnimClip {
+        target: String,
+        #[arg(allow_hyphen_values = true)]
+        path_id: i64,
+        #[arg(long, default_value_t = 0)]
+        file_id: i32,
+        /// Clip times (seconds) to sample.
+        #[arg(long, value_delimiter = ',')]
+        at: Vec<f32>,
+        /// Curves whose keys to print.
+        #[arg(long, default_value_t = 3)]
+        keys: usize,
+    },
+    /// Decodes every `AnimationClip` of the given bundles and reports what the clip reader can
+    /// check without the engine: decoding errors, non-finite values, the streamed curves'
+    /// continuity (`Clip::continuity_error`), unit rotation quaternions, and the gap between a
+    /// looping clip's first and last pose.
+    AnimCheck { bundles: Vec<String> },
     /// Prints a pack's metadata as JSON (blobs as offsets).
     PackInfo { pack: PathBuf },
     /// Builds an area's runtime asset pack (meshes, BC textures, materials, Owlcat
@@ -462,6 +482,55 @@ fn main() -> Result<()> {
             let c = report::scene_census(&paths.bundles())?;
             eprintln!("scene census: {} bundles in {:?}", c.bundles, t.elapsed());
             write_json(&wr_paths::cache_root().join("import"), "scene_census.json", &c)
+        }
+        Cmd::AnimClip { target, path_id, file_id, at, keys } => {
+            use wr_import::unity::value::PPtr;
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            let bundle = ctx.locations.guid_to_bundle.get(&target).cloned().unwrap_or(target);
+            let files = universe.files_of(&bundle)?;
+            let first = files.first().context("empty bundle")?;
+            let o =
+                universe.resolve(first, PPtr { file_id, path_id })?.context("object not found")?;
+            let clip = wr_import::anim::decode_clip(&o.read()?)?;
+            println!(
+                "{}: {:.4}..{:.4} s, looping {}, {} bindings, {} streamed + {} dense + {} constant curves",
+                clip.name,
+                clip.start,
+                clip.stop,
+                clip.looping,
+                clip.bindings.len(),
+                clip.streamed.curves.len(),
+                clip.dense.curves,
+                clip.constant.len()
+            );
+            for (i, c) in clip.streamed.curves.iter().take(keys).enumerate() {
+                println!("streamed curve {i}: {} keys", c.len());
+                for k in c.iter().take(6) {
+                    println!("  t {:>12.5} coeff {:?}", k.time, k.coeff);
+                }
+            }
+            let mut out = Vec::new();
+            for t in at {
+                clip.sample(t, &mut out);
+                println!("t {t}: {:?}", &out[..out.len().min(16)]);
+            }
+            Ok(())
+        }
+        Cmd::AnimCheck { bundles } => {
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            for target in bundles {
+                let bundle = ctx.locations.guid_to_bundle.get(&target).cloned().unwrap_or(target);
+                let mut r = wr_import::anim::CheckReport::default();
+                for f in universe.files_of(&bundle)? {
+                    for o in f.objects.iter().filter(|o| o.class_id == class_id::ANIMATION_CLIP) {
+                        r.add(&f.read(o)?);
+                    }
+                }
+                println!("{bundle}: {}", serde_json::to_string_pretty(&r)?);
+            }
+            Ok(())
         }
         Cmd::PackInfo { pack } => {
             // SAFETY: a pack written by `PackWriter` (new file, renamed into place); this
