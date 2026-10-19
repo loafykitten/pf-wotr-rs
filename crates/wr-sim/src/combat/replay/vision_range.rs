@@ -310,9 +310,10 @@ impl Driver<'_> {
     /// (counted, a difference reported). `None` (counted by cause) when neither has a value.
     fn vis_corpulence(&mut self, w: &mut World, u: EntityIdx) -> Option<f32> {
         let at = w.combat.nav.at;
-        let key = w.unit(u).map(|x| {
-            (x.state_size.or(x.original_size).map(|s| s as i32), x.original_size.map(|s| s as i32))
-        });
+        let original = crate::spawn::original_size(w, u);
+        let key = w
+            .unit(u)
+            .map(|x| (x.state_size.or(original).map(|s| s as i32), original.map(|s| s as i32)));
         let bumps = w.combat.vision.corp_bumps.get(&u);
         let now = SizeWatch {
             key,

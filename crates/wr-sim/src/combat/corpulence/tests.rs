@@ -248,8 +248,48 @@ fn a_race_set_after_the_size_was_read_moves_the_original_size_and_not_the_state_
     assert_eq!(corpulence(&mut w, u), Ok(0.9));
     assert_eq!(w.unit(u).unwrap().state_size, Some(Size::Medium), "latched by the first read");
     crate::spawn::levelup::set_race(&mut w, u, race);
-    assert_eq!(w.unit(u).unwrap().original_size, Some(Size::Small));
+    assert_eq!(crate::spawn::original_size(&w, u), Some(Size::Small));
     assert_eq!(w.unit(u).unwrap().state_size, Some(Size::Medium));
     // Medium against Small: one step up, 1 / 0.66.
     assert_eq!(corpulence(&mut w, u), Ok(view_corpulence(0.9, 1.0_f32 / 0.66)));
+}
+
+#[test]
+fn original_size_follows_the_current_blueprint_when_it_is_swapped() {
+    use wr_content::Guid;
+    use wr_content::node::Node;
+    // `PretendUnit` swaps `unit.blueprint`; `OriginalSize` is `Race?.Size ?? Blueprint.Size`.
+    let (mut w, u) = world(0.9);
+    let unit_bp = |g: u128, size: Size| {
+        w.content.insert(crate::content::Blueprint {
+            guid: Guid(g),
+            name: format!("B{g}"),
+            obj: crate::facts::tests::obj(
+                "Kingmaker.Blueprints.BlueprintUnit",
+                &[("Size", Node::Int(size as i64))],
+            ),
+            source: crate::content::Source::Bbp,
+        });
+        Guid(g)
+    };
+    let (medium, large) = (unit_bp(0x61, Size::Medium), unit_bp(0x62, Size::Large));
+    w.unit_mut(u).unwrap().blueprint = Some(medium);
+    w.unit_mut(u).unwrap().original_size = Some(Size::Medium);
+    assert_eq!(corpulence(&mut w, u), Ok(0.9));
+    assert_eq!(w.unit(u).unwrap().state_size, Some(Size::Medium));
+    w.unit_mut(u).unwrap().blueprint = Some(large);
+    assert_eq!(crate::spawn::original_size(&w, u), Some(Size::Large));
+    reset_size_scale(&mut w, u);
+    // Medium against a Large original: one step down, times 0.66.
+    assert_eq!(corpulence(&mut w, u), Ok(view_corpulence(0.9, 0.66)));
+    // A race overrides the blueprint's size, and the blueprint comes back when it goes.
+    w.unit_mut(u).unwrap().blueprint = Some(medium);
+    assert_eq!(crate::spawn::original_size(&w, u), Some(Size::Medium));
+}
+
+#[test]
+fn a_body_saved_polymorphed_has_the_polymorphs_view() {
+    let (mut w, u) = world(0.9);
+    w.unit_mut(u).unwrap().body.polymorphed = true;
+    assert_eq!(corpulence(&mut w, u), Err(Cause::Polymorph));
 }

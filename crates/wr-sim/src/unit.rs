@@ -102,6 +102,9 @@ pub struct Slot {
 #[derive(Debug, Clone, Default)]
 pub struct Body {
     pub current_hand_set: i32,
+    /// `UnitBody.IsPolymorphed` (saved; `ApplyPolymorphEffect` isn't ported, so only a saved
+    /// body has it).
+    pub polymorphed: bool,
     pub slots: Vec<Slot>,
     /// `m_EmptyHandWeapon`.
     pub empty_hand: Option<EntityIdx>,
@@ -358,7 +361,7 @@ fn levels(w: &World, u: EntityIdx) -> (i32, i32) {
 
 /// `ModifiableValueHitPoints.CalculateSizeBonus(OriginalSize)`.
 pub fn hp_size_bonus(w: &mut World, u: EntityIdx) -> i32 {
-    match w.unit(u).and_then(|x| x.original_size) {
+    match crate::spawn::original_size(w, u) {
         Some(Size::Tiny) => 0,
         Some(Size::Small) => 10,
         Some(Size::Medium) => 20,

@@ -928,6 +928,7 @@ impl Loader<'_> {
         }
         Body {
             current_hand_set: b.i32_or("m_CurrentHandsEquipmentSetIndex", 0),
+            polymorphed: b.bool_or("IsPolymorphed", false),
             slots,
             empty_hand,
             empty_hand_stack,

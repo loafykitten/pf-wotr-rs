@@ -240,7 +240,9 @@ fn view_source(w: &World, u: EntityIdx) -> Result<Source, Cause> {
     if x.spawned_with_doll {
         return Err(Cause::Doll);
     }
-    if polymorph_active(w, u) {
+    // A body saved polymorphed (`UnitBody.IsPolymorphed`; the sim doesn't port the effect that
+    // sets it) or an active polymorph fact: the view is the polymorph's.
+    if x.body.polymorphed || polymorph_active(w, u) {
         return Err(Cause::Polymorph);
     }
     // (Suppression, which makes the dummy view, exists only in areas with parts.)
@@ -330,8 +332,7 @@ pub fn corpulence(w: &mut World, u: EntityIdx) -> Result<f32, Cause> {
     if x.size_part_from_save {
         return Err(Cause::Size);
     }
-    // (`Descriptor.OriginalSize` is the race's size, else the blueprint's: `set_race` keeps it.)
-    let original = x.original_size.ok_or(Cause::Size)?;
+    let original = crate::spawn::original_size(w, u).ok_or(Cause::Size)?;
     let size = x.state_size.ok_or(Cause::Size)?;
     let inputs = ScaleInputs {
         original,

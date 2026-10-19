@@ -51,17 +51,20 @@ decompiled code, [I] inferred.
   race preset are hydrated from `UnitPartDollData.Default` (`Unit::doll_gender_female`).
 - **The unit's prefab**: the one it was spawned with in this run (`Unit::view_prefab`); after its view was made again (a
   polymorph started or ended, the dummy swapped: `corpulence::view_replaced`) or for a loaded unit, `CreateView`'s order above.
-  The spawning data's prefab id becomes `CustomPrefabGuid` (`UnitDescriptor` constructor, `!Body.IsPolymorphed`, which a unit
-  being built satisfies), so a view made again is the spawn's prefab, not the blueprint's. A placeholder saved with a doll
+  The spawning data's prefab id becomes `CustomPrefabGuid` (`UnitDescriptor` constructor, guarded by `!Body.IsPolymorphed`: the body
+  is the placeholder's saved one, hydrated with its `IsPolymorphed`, and a polymorphed one keeps the blueprint's prefab; such a body
+  makes the corpulence unknown, cause polymorph) so a view made again is the spawn's prefab, not the blueprint's. A placeholder saved with a doll
   (`Unit::spawned_with_doll`) has an unknown view origin, whichever prefab it names. `HasDummyView`
   is the vision module's (`Vision::dummy`: saved, flipped by `update_has_dummy_view`).
-- **The size**: `OriginalSize` (`Unit::original_size`, the race's size, else the blueprint's; `levelup::set_race` moves it, as
-  the game's property follows `Progression.Race`) and `State.Size` (`Unit::state_size`, written by `set_state_size` and the
-  size-change facts' `UnitPartSizeModifier`). The `State.Size` getter keeps `OriginalSize` as first read (`m_Size`), and the view's
-  per-frame `Update` reads it, so the evaluator latches it through the same `spawn::state_size` the rules code uses: a race set
-  later moves `OriginalSize` and not `State.Size` (the scale then follows the difference, as in the game). The latch happens at
-  the first evaluation or other read in the sim, not at the game's first frame: a race set between the two is a window the sim
-  cannot see.
+- **The size**: `OriginalSize` is derived on every read (`spawn::original_size`: `Progression.Race?.Size ?? Blueprint.Size`, from
+  the unit's race and its *current* blueprint, which `PretendUnit` swaps; the stored `Unit::original_size` answers only when the
+  content has neither). The HP size bonus, the sheet, `ChangeUnitSize` and the size part read it the same way. `State.Size`
+  (`Unit::state_size`) is written by `set_state_size` and the size-change facts' `UnitPartSizeModifier`, and by `SelectRace.Apply`
+  (`State.Size = OriginalSize` after `SetRace`, race changed or not: the setter's `UpdateSizeModifiers` and size event). The
+  `State.Size` getter keeps `OriginalSize` as first read (`m_Size`), and the view's per-frame `Update` reads it, so the evaluator
+  latches it through the same `spawn::state_size` the rules code uses: a race set later moves `OriginalSize` and not `State.Size`
+  (the scale then follows the difference, as in the game). The latch happens at the first evaluation or other read in the sim,
+  not at the game's first frame: a race set between the two is a window the sim cannot see.
 - **The scale percent**: `AddUnitScale` is ported (`components/state.rs`: `UpdateScalePercent` with its 0.005 dead band,
   `ResetScalePercent`, then `UpdateSizeModifiers`); `UnitHelper.CreateUnitCopy` copies it.
 - **The cache**: filled when first asked, reset where the game resets (`spawn::update_size_modifiers`, `levelup::set_race`,

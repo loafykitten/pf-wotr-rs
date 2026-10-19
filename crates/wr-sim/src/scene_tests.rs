@@ -2091,7 +2091,7 @@ fn a_placeholders_prefab_is_the_prefab_a_replaced_view_is_made_from() {
             .into_iter()
             .collect(),
     ));
-    let make = |w: &mut World, id: &str, doll: bool| {
+    let make_with = |w: &mut World, id: &str, doll: bool, polymorphed: bool| {
         let e = w.add_entity(Entity {
             unique_id: id.into(),
             clr: "UnitEntityData",
@@ -2128,21 +2128,32 @@ fn a_placeholders_prefab_is_the_prefab_a_replaced_view_is_made_from() {
             prefab_id: Some("spawnprefab".into()),
             doll,
             optimized_hide: false,
-            body: None,
+            body: polymorphed
+                .then(|| crate::unit::Body { polymorphed: true, ..Default::default() }),
             inventory: Vec::new(),
             inventory_collection: None,
             unmodelled: Vec::new(),
         };
+        if polymorphed {
+            // (The hydrator puts a placeholder's saved body on its reserved unit.)
+            w.unit_mut(e).expect("unit").body.polymorphed = true;
+        }
         crate::spawn::construct(w, e, &bp, Some(&p), true);
         w.unit_mut(e).expect("unit").view_prefab = Some("spawnprefab".into());
         e
     };
+    let make = |w: &mut World, id: &str, doll: bool| make_with(w, id, doll, false);
     let u = make(&mut w, "p1", false);
     assert_eq!(w.unit(u).unwrap().custom_prefab_guid.as_deref(), Some("spawnprefab"));
     assert_eq!(corpulence::corpulence(&mut w, u), Ok(0.9));
     // The dummy swapped out and the real view made again: still the spawning data's prefab.
     corpulence::view_replaced(&mut w, u);
     assert_eq!(corpulence::corpulence(&mut w, u), Ok(0.9));
+    // A placeholder saved with a polymorphed body keeps the blueprint's prefab
+    // (`if (!unit.Body.IsPolymorphed)` around `CustomPrefabGuid = current.PrefabGuid`).
+    let pm = make_with(&mut w, "p3", false, true);
+    assert_eq!(w.unit(pm).unwrap().custom_prefab_guid, None);
+    assert_eq!(corpulence::corpulence(&mut w, pm), Err(Cause::Polymorph));
     let d = make(&mut w, "p2", true);
     assert_eq!(corpulence::corpulence(&mut w, d), Err(Cause::Doll));
     corpulence::view_replaced(&mut w, d);

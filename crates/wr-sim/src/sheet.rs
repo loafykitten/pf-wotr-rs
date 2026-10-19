@@ -179,7 +179,7 @@ pub fn unit_json(w: &World, u: EntityIdx) -> J {
         "prone": {"Active": unit.prone_active, "ShouldBeActive": unit.prone_should_be_active,
                   "Duration": unit.prone_duration},
         "faction": guid(unit.faction),
-        "original_size": unit.original_size.map(|s| s as i32),
+        "original_size": crate::spawn::original_size(w, u).map(|s| s as i32),
         "hp": {"max": max, "damage": unit.damage, "nonlethal": nonlethal, "temporary": temp,
                "left": crate::csharp::arith::sub(max, unit.damage)},
         "conditions": crate::unit_state::dump_counts(w, u, false),

@@ -23,7 +23,7 @@ use wr_content::Guid;
 use crate::content::{Blueprint, View, is_a};
 use crate::feature_param::{self, FeatureParam};
 use crate::stats::ops;
-use crate::stats::types::{Size, StatType};
+use crate::stats::types::StatType;
 use crate::world::{CompRef, EntityIdx, FactIdx, FactKind, World};
 
 /// `LevelUpActionPriority`.
@@ -276,12 +276,6 @@ pub fn set_race(w: &mut World, u: EntityIdx, race: Guid) {
         }
     }
     w.unit_mut(u).expect("unit").progression.race = Some(race);
-    // `Descriptor.OriginalSize` is `Progression.Race?.Size ?? Blueprint.Size`: it follows the
-    // race (`State.Size` keeps what it was set to or first read).
-    let race_size = bp(w, Some(race)).and_then(|r| Size::from_i64(r.view().int("Size")));
-    if let Some(size) = race_size {
-        w.unit_mut(u).expect("unit").original_size = Some(size);
-    }
     if let Some(b) = bp(w, Some(race)) {
         crate::unit_facts::add_fact(w, u, &b);
     }
@@ -535,7 +529,13 @@ fn select_race(w: &mut World, u: EntityIdx, st: &mut State, race: Guid) {
         st.can_select_race_stat = true;
     }
     lend(w, st, |w| set_race(w, u, race));
-    // `State.Size = OriginalSize`: set at construction (`spawn::initialize`).
+    // `unit.State.Size = unit.OriginalSize` (`SelectRace.Apply`), also when the race didn't
+    // change: the setter's `UpdateSizeModifiers` (the size modifiers, the view's cached size
+    // scale) and `HandleUnitSizeChanged`.
+    match crate::spawn::original_size(w, u) {
+        Some(size) => lend(w, st, |w| crate::spawn::set_state_size(w, u, size)),
+        None => w.coverage.unsupported("SelectRace: OriginalSize unknown"),
+    }
     let features = r.view().guids("m_Features");
     add_features_from_progression(w, u, st, &features, race, 0);
 }
@@ -2096,6 +2096,7 @@ mod param_tests {
 
     use super::*;
     use crate::facts::tests::{feature, obj};
+    use crate::stats::types::Size;
 
     fn put(w: &World, g: u128, ty: &str, set: &[(&str, Node)]) -> Rc<Blueprint> {
         w.content.insert(Blueprint {
@@ -2105,6 +2106,27 @@ mod param_tests {
             source: crate::content::Source::Bbp,
         });
         w.content.get(Guid(g)).expect("inserted")
+    }
+
+    /// `SelectRace.Apply` sets `State.Size = OriginalSize` after `SetRace`, also when the race
+    /// is the one the unit has: the setter's `UpdateSizeModifiers` resets the view's cached size
+    /// scale and `HandleUnitSizeChanged` is raised.
+    #[test]
+    fn selecting_a_race_sets_the_state_size_even_when_the_race_does_not_change() {
+        let (mut w, u) = crate::stats::tests::world_with_unit();
+        let race = put(
+            &w,
+            81,
+            "Kingmaker.Blueprints.Classes.BlueprintRace",
+            &[("Size", Node::Int(Size::Large as i64))],
+        );
+        w.unit_mut(u).unwrap().progression.race = Some(race.guid);
+        w.unit_mut(u).unwrap().state_size = Some(Size::Small);
+        let events = w.combat.corpulence.events.len();
+        select_race(&mut w, u, &mut State::default(), race.guid);
+        assert_eq!(w.unit(u).unwrap().state_size, Some(Size::Large));
+        assert!(w.combat.corpulence.events.len() > events, "the size scale was reset");
+        assert!(w.combat.vision.size_gen.get(&u).copied().unwrap_or(0) > 0, "a size write");
     }
 
     /// LearnSpell items read the list's spells through `SpellLevelList.SpellsFiltered`, whose
