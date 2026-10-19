@@ -19,13 +19,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use wr_assets::{
-    AssetId, Channel as MeshChannel, Mesh as PackMesh, SubMesh, TexDimension, TexFormat, Texture,
-    VertexStream,
+    AssetId, Channel as MeshChannel, Mesh as PackMesh, SkinBinding, SubMesh, TexDimension,
+    TexFormat, Texture, VertexStream,
 };
 use wr_view::UnitView;
 
+use super::anim::{AnimCache, BuiltRig, bound_poses, build_rig};
 use super::atlas::{self, Atlas, Rect};
 use super::image::{self, Image};
 use super::skin;
@@ -33,7 +34,6 @@ use super::{UnitPrefab, bindposes, placement, push_renderer_for};
 use crate::area::ObjRef;
 use crate::catalog::Locations;
 use crate::pack::{Builder, SceneIndex, mesh as pack_mesh, skip};
-use crate::transform::{self, Node, Trs};
 use crate::unity::serialized::{SerializedFile, class_id};
 use crate::unity::value::{PPtr, Value};
 
@@ -549,66 +549,11 @@ fn select(eq: &Equipment) -> (Vec<(PartRef, usize)>, Vec<PartRef>) {
     (geometry, overlay)
 }
 
-/// The rig: the `AnimatorPrefab`'s hierarchy with the skeleton's bone scales and offsets applied,
-/// each transform's matrix relative to the rig root.
-struct Rig {
-    by_name: HashMap<String, i64>,
-    rel: HashMap<i64, Mat4>,
-}
-
-impl Rig {
-    fn build(sc: &SceneIndex, root: i64, skeleton: Option<&Value>) -> Result<Self> {
-        let mut by_name: HashMap<String, i64> = HashMap::new();
-        let mut nodes: HashMap<i64, Node<i64>> = HashMap::new();
-        let mut stack = vec![root];
-        while let Some(t) = stack.pop() {
-            let go = sc.transform_go.get(&t).copied().unwrap_or(0);
-            let name = sc.gos.get(&go).map_or(String::new(), |g| g.0.clone());
-            by_name.entry(name).or_insert(t);
-            let Some(n) = sc.nodes.get(&t) else { bail!("rig transform {t} unreadable") };
-            let mut node = n.clone();
-            if t == root {
-                // `Character.Start`: the instantiated rig sits at the character's origin.
-                node = Node { local: Trs::IDENTITY, parent: None };
-            }
-            nodes.insert(t, node);
-            if let Some(kids) = sc.children.get(&t) {
-                // Popped in reverse, so the first child is visited last; `or_insert` keeps the
-                // first visit, as `CacheHierarchy` does with its own stack.
-                stack.extend(kids.iter().copied());
-            }
-        }
-        if let Some(sk) = skeleton {
-            for bone in sk.get("Bones").and_then(Value::as_array).unwrap_or_default() {
-                let Some(&t) = bone.str_at("Name").and_then(|n| by_name.get(n)) else { continue };
-                let node = nodes.get_mut(&t).context("bone node")?;
-                node.local.scale =
-                    bone.get("Scale").and_then(Value::vec3).map_or(Vec3::ONE, Vec3::from_array);
-                if bone.get("ApplyOffset").and_then(Value::as_bool).unwrap_or(false) {
-                    node.local.position = bone
-                        .get("Offset")
-                        .and_then(Value::vec3)
-                        .map_or(Vec3::ZERO, Vec3::from_array);
-                }
-            }
-        }
-        let (worlds, errors) = transform::world_transforms(&nodes);
-        anyhow::ensure!(errors.is_empty(), "rig hierarchy: {errors:?}");
-        let rel = worlds.into_iter().map(|(k, w)| (k, Mat4::from_cols_array(&w.matrix))).collect();
-        Ok(Self { by_name, rel })
-    }
-
-    fn bone(&self, name: &str) -> Option<Mat4> {
-        self.by_name.get(name).and_then(|t| self.rel.get(t)).copied()
-    }
-}
-
 /// Everything shared between the characters of one pack run.
 pub(super) struct Cache {
     scenes: HashMap<String, Rc<SceneIndex>>,
     ees: HashMap<String, Rc<Ee>>,
     images: HashMap<TexId, Rc<Image>>,
-    rigs: HashMap<(String, i64, String), Rc<Rig>>,
     /// Atlas size in pixels (the game's High texture setting gives 2048).
     pub atlas_size: usize,
     /// Things composed approximately or not at all, for the report.
@@ -621,7 +566,6 @@ impl Cache {
             scenes: HashMap::new(),
             ees: HashMap::new(),
             images: HashMap::new(),
-            rigs: HashMap::new(),
             atlas_size,
             notes: Vec::new(),
         }
@@ -664,9 +608,12 @@ impl Cache {
     }
 }
 
-/// One skinned part: its mesh posed on the character's rig.
-struct PosedPart {
+/// One skinned part: its mesh in the bind pose, with the names of its bones and their bind poses.
+struct SkinnedPart {
     mesh: pack_mesh::DecodedMesh,
+    /// The bones of the part's `SkinnedMeshRenderer`, by transform name.
+    bones: Vec<String>,
+    bind: Vec<Mat4>,
 }
 
 /// `GetComponentInChildren<T>()` over transforms: depth first from `root`, the root first. The queried
@@ -711,12 +658,7 @@ fn find_smr(sc: &SceneIndex, go: i64) -> Option<(i64, Value)> {
     sc.file.read(o).ok().map(|v| (o.path_id, v))
 }
 
-fn pose_part(
-    b: &Builder<'_>,
-    cache: &mut Cache,
-    rig: &Rig,
-    part: &Part,
-) -> Result<Option<PosedPart>> {
+fn skinned_part(b: &Builder<'_>, cache: &mut Cache, part: &Part) -> Result<Option<SkinnedPart>> {
     let Some(prefab) = part.prefab else { return Ok(None) };
     let sc = cache.scene(prefab.file)?;
     let Some((_, smr)) = find_smr(&sc, prefab.info.path_id) else { return Ok(None) };
@@ -725,7 +667,7 @@ fn pose_part(
     };
     let Some(mo) = b.universe.resolve(prefab.file, mp)? else { return Ok(None) };
     let mv = mo.read()?;
-    let mut mesh = pack_mesh::decode(b.universe, &mv)?;
+    let mesh = pack_mesh::decode(b.universe, &mv)?;
     let bind = bindposes(&mv)?;
     let bones: Vec<Option<i64>> = smr
         .get("m_Bones")
@@ -741,17 +683,17 @@ fn pose_part(
         bind.len(),
         bones.len()
     );
-    let mut skin_mats = Vec::with_capacity(bind.len());
-    for (i, bone) in bones.iter().take(bind.len()).enumerate() {
-        let name = bone
-            .and_then(|t| sc.transform_go.get(&t))
-            .and_then(|g| sc.gos.get(g))
-            .map(|g| g.0.as_str());
-        // A bone the rig doesn't have (the game stops matching there) stays where the mesh was
-        // authored: the rig's rest pose equals the authoring pose.
-        skin_mats.push(name.and_then(|n| rig.bone(n)).map_or(Mat4::IDENTITY, |m| m * bind[i]));
-    }
-    if let Err(e) = skin::pose(&mut mesh, &skin_mats) {
+    let names: Vec<String> = bones
+        .iter()
+        .take(bind.len())
+        .map(|bone| {
+            bone.and_then(|t| sc.transform_go.get(&t))
+                .and_then(|g| sc.gos.get(g))
+                .map_or_else(String::new, |g| g.0.clone())
+        })
+        .collect();
+    // The part must carry the skin the merge reads.
+    if let Err(e) = skin::skin_data(&mesh) {
         let skin_len = mv.get("m_Skin").and_then(Value::as_array).map_or(0, <[Value]>::len);
         let vbcw = mv
             .path("m_VariableBoneCountWeights.m_Data")
@@ -762,17 +704,60 @@ fn pose_part(
             mesh.channels.get(10..).unwrap_or_default()
         );
     }
-    Ok(Some(PosedPart { mesh }))
+    Ok(Some(SkinnedPart { mesh, bones: names, bind }))
 }
 
-/// Merges posed meshes into one with a fixed layout: position and normal float3, tangent float4,
-/// UV0 float2, one submesh. (`Mesh.CombineMeshes` followed by `mesh.uv = uvs`.)
-fn merge(parts: &[PosedPart], name: &str) -> Result<pack_mesh::DecodedMesh> {
+/// `Character.CompareSkinningMatrices`: the first 12 elements agree within 1e-4.
+fn same_skinning(a: &Mat4, b: &Mat4) -> bool {
+    let (a, b) = (a.to_cols_array_2d(), b.to_cols_array_2d());
+    (0..4).all(|c| (0..3).all(|r| ((a[c][r] - b[c][r]) as f64).abs() <= 0.0001))
+}
+
+/// The merged character mesh and its merged bone list.
+struct Merged {
+    /// The combined mesh, with the merged skin in stream 1 (channels 12 and 13).
+    mesh: pack_mesh::DecodedMesh,
+    /// The rig bone of each merged bone, and its bind pose.
+    bones: Vec<u32>,
+    bind: Vec<Mat4>,
+}
+
+/// Merges skinned parts into one mesh with a fixed layout: position and normal float3, tangent
+/// float4, UV0 float2, one submesh (`Mesh.CombineMeshes` followed by `mesh.uv = uvs`), and their
+/// bones into one list as `Character.EnsureBones` does: a part's bone is looked up by name in the
+/// character's rig (the first miss ends the part's mapping, the bones after it keep merged bone
+/// 0), and reuses a merged bone of the same name and bind pose.
+fn merge(parts: &[SkinnedPart], name: &str, rig: &BuiltRig) -> Result<Merged> {
     let mut vertices: Vec<u8> = Vec::new();
+    let mut skins: Vec<([u32; 4], [f32; 4])> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut count = 0u32;
+    let mut merged_names: Vec<&str> = Vec::new();
+    let mut merged_bones: Vec<u32> = Vec::new();
+    let mut merged_bind: Vec<Mat4> = Vec::new();
     for p in parts {
         let m = &p.mesh;
+        let mut mapping = vec![0u32; p.bind.len()];
+        for (i, bone) in p.bones.iter().enumerate() {
+            let Some(&rb) = rig.by_name.get(bone) else { break };
+            let found = (0..merged_bind.len())
+                .find(|&j| same_skinning(&merged_bind[j], &p.bind[i]) && merged_names[j] == bone);
+            mapping[i] = match found {
+                Some(j) => j as u32,
+                None => {
+                    merged_names.push(bone);
+                    merged_bones.push(rb);
+                    merged_bind.push(p.bind[i]);
+                    (merged_bind.len() - 1) as u32
+                }
+            };
+        }
+        for (mut idx, wt) in skin::skin_data(m)? {
+            for i in &mut idx {
+                *i = *mapping.get(*i as usize).context("bone index past the part's bones")?;
+            }
+            skins.push((idx, wt));
+        }
         let read = |ch: usize, v: usize, n: usize| -> Option<[f32; 4]> {
             let c = m.channels.get(ch).copied().flatten()?;
             skin::read_attr(m, c, v, n)
@@ -829,11 +814,13 @@ fn merge(parts: &[PosedPart], name: &str) -> Result<pack_mesh::DecodedMesh> {
     channels[1] = Some(MeshChannel { stream: 0, offset: 12, format: 0, dimension: 3 });
     channels[2] = Some(MeshChannel { stream: 0, offset: 24, format: 0, dimension: 4 });
     channels[4] = Some(MeshChannel { stream: 0, offset: 40, format: 0, dimension: 2 });
-    Ok(pack_mesh::DecodedMesh {
+    channels[12] = Some(MeshChannel { stream: 1, offset: 0, format: 0, dimension: 4 });
+    channels[13] = Some(MeshChannel { stream: 1, offset: 16, format: 10, dimension: 4 });
+    let mesh = pack_mesh::DecodedMesh {
         name: name.to_owned(),
         vertex_count: count,
         channels,
-        streams: vec![(vertices, 48)],
+        streams: vec![(vertices, 48), (skin::skin_bytes(&skins), 32)],
         index_u32: true,
         indices: indices.iter().flat_map(|i| i.to_le_bytes()).collect(),
         submeshes: vec![SubMesh {
@@ -844,7 +831,8 @@ fn merge(parts: &[PosedPart], name: &str) -> Result<pack_mesh::DecodedMesh> {
             bounds: Some((lo, hi)),
         }],
         aabb: (centre, extent),
-    })
+    };
+    Ok(Merged { mesh, bones: merged_bones, bind: merged_bind })
 }
 
 /// `Character.MergeOverlays`: the three atlases.
@@ -1086,11 +1074,17 @@ fn push_texture(b: &mut Builder<'_>, name: &str, at: &Atlas, unit: &str) -> Resu
     Ok(u32::try_from(b.meta.textures.len() - 1)?)
 }
 
+/// The name of a transform's GameObject.
+fn av_name(sc: &SceneIndex, t: i64) -> String {
+    sc.transform_go.get(&t).and_then(|g| sc.gos.get(g)).map_or_else(String::new, |g| g.0.clone())
+}
+
 /// Composes and adds a character unit.
 pub(super) fn add(
     b: &mut Builder<'_>,
     locations: &Locations,
     cache: &mut Cache,
+    anim: &mut AnimCache,
     prefab: &UnitPrefab,
     u: &UnitView,
 ) -> Result<()> {
@@ -1113,16 +1107,18 @@ pub(super) fn add(
     let root = *rsc.go_transform.get(&ago).context("animator without transform")?;
     let skeleton = pptr_obj(b, prefab.sc.file, &ch, "m_Skeleton")?;
     let sk_key = skeleton.as_ref().map(|s| (s.file.name.clone(), s.info.path_id));
-    let rig_key = (animator.file.name.clone(), root, format!("{sk_key:?}"));
-    let rig = match cache.rigs.get(&rig_key) {
-        Some(r) => r.clone(),
-        None => {
-            let sv = skeleton.map(|s| s.read()).transpose()?;
-            let r = Rc::new(Rig::build(&rsc, root, sv.as_ref())?);
-            cache.rigs.insert(rig_key, r.clone());
-            r
-        }
+    let rig_key = format!("{}#{root}#{sk_key:?}", animator.file.name);
+    let (rig_index, rig) = anim.rig(b, &rig_key, || {
+        let sv = skeleton.map(|s| s.read()).transpose()?;
+        build_rig(&rsc, root, &av_name(&rsc, root), Mat4::IDENTITY, true, sv.as_ref())
+    })?;
+    // `Character.AnimationSet` is the human set unless the prefab names its own.
+    let set = match ch.get("m_AnimationSet").and_then(Value::as_pptr).filter(|p| !p.is_null()) {
+        Some(p) => b.universe.resolve(prefab.sc.file, p)?.context("animation set not found")?,
+        None => anim.human_set(b)?,
     };
+    let (loco, clips) = anim.locomotion(b, set)?;
+    let animation = anim.animation(b, &u.id, rig_index, loco, clips)?;
     // Equipment: the prefab's saved entities and ramps, then the spec's.
     let mut eq = Equipment::default();
     if !u.replace_base_equipment {
@@ -1191,17 +1187,40 @@ pub(super) fn add(
     let (geometry, overlay) = select(&eq);
     anyhow::ensure!(!geometry.is_empty(), "no body parts to draw");
     // Meshes in dictionary order.
-    let mut posed = Vec::new();
+    let mut parts = Vec::new();
     for (key, _) in &geometry {
         let part = &eq.ees[key.ee].parts[key.part];
-        match pose_part(b, cache, &rig, part) {
-            Ok(Some(p)) => posed.push(p),
+        match skinned_part(b, cache, part) {
+            Ok(Some(p)) => parts.push(p),
             Ok(None) => {}
             Err(e) => skip(&mut b.report, format!("character part {}: {e:#}", eq.ees[key.ee].name)),
         }
     }
-    anyhow::ensure!(!posed.is_empty(), "no skinned mesh");
-    let merged = merge(&posed, &format!("Character_{}", u.id))?;
+    anyhow::ensure!(!parts.is_empty(), "no skinned mesh");
+    let mut merged = merge(&parts, &format!("Character_{}", u.id), &rig)?;
+    // Bounds that cover the unit's idle and walk poses.
+    let skin_blob = skin::skin_blob(&merged.mesh)?;
+    let skins: Vec<Vec<Mat4>> = bound_poses(b, &b.meta.animations[animation as usize], 8)
+        .iter()
+        .map(|w| {
+            merged
+                .bones
+                .iter()
+                .zip(&merged.bind)
+                .map(|(rb, bind)| w[*rb as usize] * *bind)
+                .collect()
+        })
+        .collect();
+    skin::animated_bounds(&mut merged.mesh, &skins)?;
+    merged.mesh.streams.truncate(1);
+    merged.mesh.channels[12] = None;
+    merged.mesh.channels[13] = None;
+    let binding = SkinBinding {
+        animation,
+        bones: merged.bones.clone(),
+        bind_poses: merged.bind.iter().map(Mat4::to_cols_array).collect(),
+    };
+    let merged = merged.mesh;
     let mesh_index = {
         let mut streams = Vec::new();
         for (bytes, stride) in &merged.streams {
@@ -1210,6 +1229,8 @@ pub(super) fn add(
         }
         let indices = b.w.blob(&merged.indices)?;
         b.report.mesh_bytes += merged.indices.len() as u64;
+        let skin = b.w.blob(&skin_blob)?;
+        b.report.mesh_bytes += skin_blob.len() as u64;
         b.meta.meshes.push(PackMesh {
             id: AssetId { file: format!("character:{}", u.id), path_id: 0 },
             name: merged.name.clone(),
@@ -1220,6 +1241,7 @@ pub(super) fn add(
             indices,
             submeshes: merged.submeshes.clone(),
             aabb: merged.aabb,
+            skin: Some(skin),
         });
         u32::try_from(b.meta.meshes.len() - 1)?
     };
@@ -1262,7 +1284,17 @@ pub(super) fn add(
         &["_NORMALMAP", "_MASKSMAP"],
     )?;
     let matrix = placement(u, prefab.root_scale(), prefab.forbid_rotation);
-    push_renderer_for(b, prefab, u, "Character", mesh_index, vec![Some(mat)], matrix, 9);
+    push_renderer_for(
+        b,
+        prefab,
+        u,
+        "Character",
+        mesh_index,
+        vec![Some(mat)],
+        matrix,
+        9,
+        Some(binding),
+    );
     Ok(())
 }
 
@@ -1385,19 +1417,30 @@ mod tests {
         assert_eq!(first_active_match(3, &kids, &|_| true, &has), Some(3));
     }
 
-    fn triangle_part(sub: &[(u32, u32)], verts: u32) -> PosedPart {
+    /// A part of `verts` vertices (positions only, plus a skin of one bone each) bound to `bones`.
+    fn triangle_part(sub: &[(u32, u32)], verts: u32, bones: &[&str], bind: &[Mat4]) -> SkinnedPart {
         let positions: Vec<u8> = (0..verts)
             .flat_map(|i| [i as f32, 0.0, 0.0].into_iter().flat_map(f32::to_le_bytes))
+            .collect();
+        let skin: Vec<u8> = (0..verts)
+            .flat_map(|_| {
+                [1.0f32, 0.0, 0.0, 0.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .chain([0u32, 0, 0, 0].into_iter().flat_map(u32::to_le_bytes))
+            })
             .collect();
         let idx: Vec<u8> = (0..verts).flat_map(|i| (i as u16).to_le_bytes()).collect();
         let mut channels = vec![None; 14];
         channels[0] = Some(MeshChannel { stream: 0, offset: 0, format: 0, dimension: 3 });
-        PosedPart {
+        channels[12] = Some(MeshChannel { stream: 1, offset: 0, format: 0, dimension: 4 });
+        channels[13] = Some(MeshChannel { stream: 1, offset: 16, format: 10, dimension: 4 });
+        SkinnedPart {
             mesh: pack_mesh::DecodedMesh {
                 name: "part".into(),
                 vertex_count: verts,
                 channels,
-                streams: vec![(positions, 12)],
+                streams: vec![(positions, 12), (skin, 32)],
                 index_u32: false,
                 indices: idx,
                 submeshes: sub
@@ -1410,15 +1453,38 @@ mod tests {
                     .collect(),
                 aabb: Default::default(),
             },
+            bones: bones.iter().map(|b| (*b).to_owned()).collect(),
+            bind: bind.to_vec(),
+        }
+    }
+
+    /// A rig of bones `a`, `b` and `c` (rig bones 0, 1, 2).
+    fn rig3() -> BuiltRig {
+        let bone = |n: &str, parent: u32| wr_anim::Bone {
+            name: n.into(),
+            hash: 0,
+            parent,
+            rest: wr_anim::Trs::IDENTITY,
+        };
+        let rig = wr_anim::Rig {
+            name: "r".into(),
+            bones: vec![bone("a", u32::MAX), bone("b", 0), bone("c", 1)],
+            root: Mat4::IDENTITY.to_cols_array(),
+            overrides: Vec::new(),
+        };
+        BuiltRig {
+            by_name: [("a", 0u32), ("b", 1), ("c", 2)].map(|(n, i)| (n.to_owned(), i)).into(),
+            by_transform: HashMap::new(),
+            rig,
         }
     }
 
     #[test]
     fn merging_keeps_only_each_parts_first_submesh() {
         // Part A: 6 vertices, submeshes (0..3) and (3..6); part B: 3 vertices, one submesh.
-        let a = triangle_part(&[(0, 3), (3, 3)], 6);
-        let b = triangle_part(&[(0, 3)], 3);
-        let m = merge(&[a, b], "merged").unwrap();
+        let a = triangle_part(&[(0, 3), (3, 3)], 6, &["a"], &[Mat4::IDENTITY]);
+        let b = triangle_part(&[(0, 3)], 3, &["a"], &[Mat4::IDENTITY]);
+        let m = merge(&[a, b], "merged", &rig3()).unwrap().mesh;
         // Every vertex of both parts is copied; only A's first and B's triangles are indexed, B's offset by 6.
         assert_eq!(m.vertex_count, 9);
         let idx: Vec<u32> =
@@ -1426,5 +1492,39 @@ mod tests {
         assert_eq!(idx, vec![0, 1, 2, 6, 7, 8]);
         assert_eq!(m.submeshes.len(), 1);
         assert_eq!(m.submeshes[0].index_count, 6);
+    }
+
+    #[test]
+    fn merged_bones_are_shared_by_name_and_bind_pose() {
+        let shift = Mat4::from_translation(glam::Vec3::new(0.0, 1.0, 0.0));
+        // Part A binds a and b; part B binds b again (same bind pose: shared), b once more with
+        // another bind pose (a new merged bone) and a bone the rig doesn't have, then c, which the
+        // game never reaches (the miss ends the mapping).
+        let a = triangle_part(&[(0, 3)], 3, &["a", "b"], &[Mat4::IDENTITY, Mat4::IDENTITY]);
+        let b = triangle_part(
+            &[(0, 3)],
+            3,
+            &["b", "b", "nope", "c"],
+            &[Mat4::IDENTITY, shift, Mat4::IDENTITY, Mat4::IDENTITY],
+        );
+        let m = merge(&[a, b], "merged", &rig3()).unwrap();
+        assert_eq!(m.bones, vec![0, 1, 1]);
+        assert_eq!(m.bind, vec![Mat4::IDENTITY, Mat4::IDENTITY, shift]);
+    }
+
+    #[test]
+    fn bone_slots_are_remapped_into_the_merged_list() {
+        let mut a = triangle_part(&[(0, 3)], 3, &["a"], &[Mat4::IDENTITY]);
+        let mut b = triangle_part(&[(0, 3)], 3, &["b", "a"], &[Mat4::IDENTITY, Mat4::IDENTITY]);
+        // Part B's vertices use its second bone, "a", which part A already merged as bone 0.
+        for v in 0..3 {
+            b.mesh.streams[1].0[v * 32 + 16..v * 32 + 20].copy_from_slice(&1u32.to_le_bytes());
+        }
+        a.mesh.streams[1].0[16..20].copy_from_slice(&0u32.to_le_bytes());
+        let m = merge(&[a, b], "merged", &rig3()).unwrap();
+        // The skin stream: part B's vertex 0 (merged vertex 3) points at merged bone 0.
+        let skin = &m.mesh.streams[1].0;
+        assert_eq!(u32::from_le_bytes(skin[3 * 32 + 16..3 * 32 + 20].try_into().unwrap()), 0);
+        assert_eq!(m.bones, vec![0, 1]);
     }
 }

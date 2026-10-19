@@ -14,6 +14,7 @@ wr-nav.workspace = true
 wr-phys.workspace = true
 wr-los.workspace = true
 wr-view.workspace = true
+wr-anim.workspace = true
 texture2ddecoder = "0.1.2"
 anyhow = "1.0"
 flate2 = "1.1"

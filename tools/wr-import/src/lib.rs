@@ -3,6 +3,7 @@
 //! POC-0 scope: the gameplay-object inventory and navigation graph of one area, plus
 //! the yield report. Nothing here writes under the game install.
 
+pub mod anim;
 pub mod archeck;
 pub mod area;
 pub mod blueprints;

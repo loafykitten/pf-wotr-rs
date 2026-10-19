@@ -21,6 +21,7 @@ pub mod lights;
 pub mod pipeline;
 pub mod post;
 pub mod shadows;
+pub mod skinning;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -332,6 +333,8 @@ pub struct Renderer {
     /// Raster slope biases point lights can use (`f32` bits).
     point_biases: Vec<u32>,
     pub shadow_stats: ShadowStats,
+    /// The units' animation and skinning (a pack with units).
+    skinning: Option<skinning::Skinning>,
 }
 
 /// Resolution context for one draw's textures and samplers.
@@ -464,6 +467,7 @@ impl Renderer {
         if point_biases.is_empty() {
             point_biases.push((-shadow.settings.depth_bias).to_bits());
         }
+        let skinning = skinning::Skinning::new(device, &pack)?;
         let mut r = Self {
             shadow,
             casters: Vec::new(),
@@ -517,6 +521,7 @@ impl Renderer {
             post_on: false,
             scene_settings,
             defaults_vb,
+            skinning,
         };
         r.apply_light_controller();
         r.stats.skipped.extend(r.gpu.skipped_textures.clone());
@@ -701,6 +706,32 @@ impl Renderer {
         for g in &self.globals {
             let data = fill(&g.layout, &[&self.culling_cb, &self.consts], &mut self.missing);
             queue.write_buffer(&g.buffer, 0, &data);
+        }
+    }
+
+    /// Advances the units' animation to time `t` seconds, poses and skins them on the next
+    /// `encode`. A walking unit's shadow casters move with it; call `set_camera` afterwards so
+    /// the frame's shadows are planned for the new bounds.
+    pub fn animate(&mut self, queue: &wgpu::Queue, t: f32) {
+        let Some(sk) = self.skinning.as_mut() else { return };
+        for (ci, lo, hi) in sk.advance_to(queue, &self.pack, t) {
+            self.casters[ci].lo = lo;
+            self.casters[ci].hi = hi;
+        }
+    }
+
+    /// The animated units' ids.
+    #[must_use]
+    pub fn animated_units(&self) -> Vec<String> {
+        self.skinning
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.unit_ids().into_iter().map(str::to_owned).collect())
+    }
+
+    /// Sends a unit on a straight walk (a demonstration).
+    pub fn set_walk(&mut self, walk: Option<skinning::Walk>) {
+        if let Some(sk) = self.skinning.as_mut() {
+            sk.set_walk(walk);
         }
     }
 
@@ -1189,10 +1220,25 @@ impl Renderer {
                 continue;
             }
             let mesh = &meta.meshes[r.mesh as usize];
-            let (gstreams, gindex) = (
+            let (mut gstreams, gindex) = (
                 self.gpu.meshes[r.mesh as usize].streams.clone(),
                 self.gpu.meshes[r.mesh as usize].index.clone(),
             );
+            // A skinned unit's position stream is the buffer the skinning pass writes.
+            let mut skinned = false;
+            if r.skin.is_some()
+                && let Some(sk) = self.skinning.as_mut()
+            {
+                match sk.add_draw(device, &pack, &self.gpu, r) {
+                    Ok(Some((stream, out))) => {
+                        gstreams[stream] = out;
+                        skinned = true;
+                    }
+                    Ok(None) => {}
+                    Err(e) => self.stats.skipped.push(format!("{}: skinning: {e:#}", r.path)),
+                }
+            }
+            let casters_before = self.casters.len();
             let batched = r.static_batch.1 > 0;
             let matrix = if batched { Mat4::IDENTITY } else { Mat4::from_cols_array(&r.matrix) };
             // Static batching bakes each renderer's lightmap scale/offset into the combined
@@ -1416,6 +1462,18 @@ impl Renderer {
                     post: None,
                     caster: None,
                 });
+            }
+            if skinned && let Some(sk) = self.skinning.as_mut() {
+                // The caster slots this renderer added follow it when it walks.
+                sk.set_casters(
+                    (casters_before..self.casters.len())
+                        .map(|index| skinning::CasterBox {
+                            index,
+                            lo: self.casters[index].lo,
+                            hi: self.casters[index].hi,
+                        })
+                        .collect(),
+                );
             }
         }
         // Pipeline passes.
@@ -2013,6 +2071,9 @@ impl Renderer {
     /// Records one frame into `enc`, ending with the blit into `target` (a non-sRGB
     /// view of the display image, which already holds sRGB-encoded values).
     pub fn encode(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        if let Some(sk) = &self.skinning {
+            sk.encode(enc);
+        }
         self.encode_shadows(enc);
         // Light culling.
         if let Some((cp, bg, threads)) = &self.culling {

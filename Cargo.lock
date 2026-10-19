@@ -4758,6 +4758,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wr-anim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glam 0.34.1",
+ "serde",
+]
+
+[[package]]
 name = "wr-assets"
 version = "0.1.0"
 dependencies = [
@@ -4765,6 +4774,7 @@ dependencies = [
  "memmap2",
  "postcard",
  "serde",
+ "wr-anim",
 ]
 
 [[package]]
@@ -4807,6 +4817,7 @@ dependencies = [
  "libc",
  "serde_json",
  "wgpu",
+ "wr-anim",
  "wr-assets",
  "wr-paths",
 ]
@@ -4826,6 +4837,7 @@ dependencies = [
  "serde",
  "serde_json",
  "texture2ddecoder",
+ "wr-anim",
  "wr-assets",
  "wr-los",
  "wr-nav",

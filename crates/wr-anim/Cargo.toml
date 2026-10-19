@@ -1,0 +1,16 @@
+[package]
+name = "wr-anim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Animation runtime: Unity generic clips (streamed, dense and constant curves), Mecanim state machines and blend trees, and pose evaluation for a bone hierarchy."
+
+[dependencies]
+anyhow.workspace = true
+glam = "0.34"
+serde.workspace = true
+
+[lints]
+workspace = true

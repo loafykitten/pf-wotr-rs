@@ -31,7 +31,7 @@ pub use model::*;
 /// File magic: `WRPACK`, then a NUL and the format generation.
 pub const MAGIC: [u8; 8] = *b"WRPACK\x001";
 /// Bumped whenever [`PackMeta`] or the layout changes incompatibly.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Where blob data starts.
 pub const DATA_START: u64 = 4096;
 /// Alignment of every blob (and of the metadata).
@@ -222,6 +222,16 @@ impl Pack {
             for s in &x.streams {
                 self.check(s.data, &x.name)?;
             }
+            if let Some(sk) = x.skin {
+                self.check(sk, &x.name)?;
+                ensure!(
+                    sk.len == u64::from(x.vertex_count) * SKIN_STRIDE,
+                    "{}: skin of {} bytes for {} vertices",
+                    x.name,
+                    sk.len,
+                    x.vertex_count
+                );
+            }
         }
         for p in &m.programs {
             self.check(p.msl, &p.shader)?;
@@ -262,10 +272,41 @@ impl Pack {
                 ensure_idx(c.fragment, m.programs.len(), "caster program")?;
             }
         }
+        for rig in &m.rigs {
+            rig.validate()?;
+        }
+        for c in &m.clips {
+            c.validate()?;
+        }
+        for c in &m.controllers {
+            c.validate(m.clips.len())?;
+        }
+        for a in &m.animations {
+            a.validate(m.rigs.len(), m.clips.len(), &m.controllers)?;
+        }
         for r in &m.renderers {
             ensure_idx(r.mesh, m.meshes.len(), "mesh")?;
             for mat in r.materials.iter().flatten() {
                 ensure_idx(*mat, m.materials.len(), "material")?;
+            }
+            if let Some(sk) = &r.skin {
+                ensure_idx(sk.animation, m.animations.len(), "animation")?;
+                let rig = &m.rigs[m.animations[sk.animation as usize].rig as usize];
+                ensure!(
+                    sk.bones.len() == sk.bind_poses.len(),
+                    "{}: {} bones for {} bind poses",
+                    r.path,
+                    sk.bones.len(),
+                    sk.bind_poses.len()
+                );
+                ensure!(
+                    m.meshes[r.mesh as usize].skin.is_some(),
+                    "{}: skinned renderer on a mesh without skin",
+                    r.path
+                );
+                for b in &sk.bones {
+                    ensure_idx(*b, rig.bones.len(), "rig bone")?;
+                }
             }
         }
         for l in &m.lightmaps {

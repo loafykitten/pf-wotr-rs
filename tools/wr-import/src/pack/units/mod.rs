@@ -16,6 +16,7 @@
 //! only (no rig, no bind poses, composed meshes without skin): animation needs the importer to
 //! write the unposed meshes with their skin and the rigs (docs/poc7/characters.md, step 2).
 
+pub mod anim;
 pub mod atlas;
 pub mod census;
 pub mod character;
@@ -27,7 +28,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use glam::{Mat4, Quat, Vec3};
 use serde::Serialize;
-use wr_assets::{AssetId, Mesh as PackMesh, Renderer, RendererKind, VertexStream};
+use wr_assets::{AssetId, Mesh as PackMesh, Renderer, RendererKind, SkinBinding, VertexStream};
 use wr_view::{UnitView, UnitsSpec};
 
 use super::{Builder, SceneIndex, mesh as pack_mesh, skip};
@@ -46,6 +47,10 @@ pub struct UnitsReport {
     pub left_out: Vec<String>,
     /// Prefab kinds seen: plain, character, baked.
     pub kinds: HashMap<String, usize>,
+    /// Units with an animation (a rig, clips and a locomotion), and what was left out or
+    /// approximated in the animation data.
+    pub animated: usize,
+    pub anim_notes: Vec<String>,
 }
 
 /// A unit prefab opened for baking: its hierarchy and the `UnitEntityView` root.
@@ -163,8 +168,9 @@ pub(super) fn add(
 ) -> Result<UnitsReport> {
     let mut rep = UnitsReport { spec_units: spec.units.len(), ..Default::default() };
     let mut prefabs: HashMap<String, std::rc::Rc<UnitPrefab>> = HashMap::new();
-    let mut baked_meshes: HashMap<(String, i64), Option<u32>> = HashMap::new();
+    let mut baked_meshes = BakedMeshes::new();
     let mut characters = character::Cache::new(atlas_size);
+    let mut anim = anim::AnimCache::default();
     for u in &spec.units {
         let prefab = match prefabs.get(&u.prefab) {
             Some(p) => p.clone(),
@@ -194,9 +200,9 @@ pub(super) fn add(
         *rep.kinds.entry(kind.to_owned()).or_default() += 1;
         let before = b.meta.renderers.len();
         let r = if character {
-            character::add(b, locations, &mut characters, &prefab, u)
+            character::add(b, locations, &mut characters, &mut anim, &prefab, u)
         } else {
-            plain(b, &prefab, u, &mut baked_meshes)
+            plain(b, &mut anim, &prefab, u, &mut baked_meshes)
         };
         match r {
             Ok(()) if b.meta.renderers.len() > before => {
@@ -207,19 +213,75 @@ pub(super) fn add(
             Err(e) => rep.left_out.push(format!("{} {} ({kind}): {e:#}", u.id, u.name)),
         }
     }
+    rep.animated = b.meta.animations.len();
+    rep.anim_notes = std::mem::take(&mut anim.notes);
     Ok(rep)
 }
 
-/// A plain skinned prefab: each `SkinnedMeshRenderer` under the root, posed in the prefab's
-/// rest pose.
-fn plain(
+/// A mesh baked once per prefab renderer: its pack index and, for a skinned one, the rig bone and
+/// bind pose of each of its bones.
+#[derive(Clone)]
+struct BakedMesh {
+    mesh: u32,
+    bones: Vec<u32>,
+    bind: Vec<[f32; 16]>,
+}
+
+type BakedMeshes = HashMap<(String, i64, bool), Option<BakedMesh>>;
+
+/// The animation of a plain unit prefab: the rig of its `Animator` and the unit's locomotion.
+/// The rig's rest pose must reproduce the prefab's own transforms, or the unit isn't animated.
+fn plain_animation(
     b: &mut Builder<'_>,
+    anim: &mut anim::AnimCache,
     prefab: &UnitPrefab,
     u: &UnitView,
-    baked: &mut HashMap<(String, i64), Option<u32>>,
+) -> Result<(u32, std::rc::Rc<anim::BuiltRig>)> {
+    let (animator, set) = anim::plain_animator(b, anim, prefab)?;
+    let sc = &prefab.sc;
+    let (loco, clips) = anim.locomotion(b, set)?;
+    let t = anim::bind_root(b, sc, animator, &clips);
+    let parent = match sc.parents.get(&t).copied().flatten() {
+        Some(p) if prefab.under_root(p) => prefab.rel(p),
+        _ => Mat4::IDENTITY,
+    };
+    let key = format!("{}#{t}", u.prefab);
+    let name = sc.transform_go.get(&t).and_then(|g| sc.gos.get(g)).map_or("", |g| g.0.as_str());
+    let (rig_index, rig) =
+        anim.rig(b, &key, || anim::build_rig(sc, t, name, parent, t == prefab.root, None))?;
+    // The rig at rest equals the prefab's transforms (what stage 1 posed the meshes with).
+    let mut worlds = Vec::new();
+    rig.rig.world_matrices(&rig.rig.posed_rest(), &mut worlds);
+    for (tr, &bone) in &rig.by_transform {
+        let want = prefab.rel(*tr).to_cols_array();
+        let got = worlds[bone as usize].to_cols_array();
+        let err = want.iter().zip(&got).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        anyhow::ensure!(err < 1e-3, "rig bone {bone} rests {err} away from the prefab's transform");
+    }
+    let animation = anim.animation(b, &u.id, rig_index, loco, clips)?;
+    Ok((animation, rig))
+}
+
+/// A plain skinned prefab: each `SkinnedMeshRenderer` under the root. With an animation the mesh
+/// is stored unposed with its skin and the renderer names its bones; without one, in the
+/// prefab's rest pose.
+fn plain(
+    b: &mut Builder<'_>,
+    anim: &mut anim::AnimCache,
+    prefab: &UnitPrefab,
+    u: &UnitView,
+    baked: &mut BakedMeshes,
 ) -> Result<()> {
     let sc = &prefab.sc;
     let matrix = placement(u, prefab.root_scale(), prefab.forbid_rotation);
+    let animated = match plain_animation(b, anim, prefab, u) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            anim.notes
+                .push(format!("{} {}: drawn in the rest pose, not animated: {e:#}", u.id, u.name));
+            None
+        }
+    };
     let mut any = false;
     for o in sc.file.objects.iter().filter(|o| o.class_id == class_id::SKINNED_MESH_RENDERER) {
         let v = sc.file.read(o)?;
@@ -242,19 +304,19 @@ fn plain(
             .iter()
             .map(|x| x.as_pptr().and_then(transform_of))
             .collect();
-        let key = (u.prefab.clone(), o.path_id);
+        let key = (u.prefab.clone(), o.path_id, animated.is_some());
         let mesh = match baked.get(&key) {
-            Some(m) => *m,
+            Some(m) => m.clone(),
             None => {
-                let m = bake_mesh(
-                    b,
-                    prefab,
-                    sc.file,
-                    mp,
-                    &bones,
-                    &format!("{}/{}", u.prefab, o.path_id),
-                )?;
-                baked.insert(key, m);
+                let hint = format!("{}/{}", u.prefab, o.path_id);
+                let m = match &animated {
+                    Some((animation, rig)) => {
+                        bake_skinned(b, prefab, sc.file, mp, &bones, rig, *animation, &hint)?
+                    }
+                    None => bake_mesh(b, prefab, sc.file, mp, &bones, &hint)?
+                        .map(|mesh| BakedMesh { mesh, bones: Vec::new(), bind: Vec::new() }),
+                };
+                baked.insert(key, m.clone());
                 m
             }
         };
@@ -276,12 +338,79 @@ fn plain(
             continue;
         }
         any = true;
-        push_renderer(b, sc, o, &v, go, mesh, mats, matrix, u);
+        let skin = animated.as_ref().map(|(animation, _)| SkinBinding {
+            animation: *animation,
+            bones: mesh.bones.clone(),
+            bind_poses: mesh.bind.clone(),
+        });
+        push_renderer(b, sc, o, &v, go, mesh.mesh, mats, matrix, u, skin);
     }
     if !any {
         bail!("no drawable SkinnedMeshRenderer");
     }
     Ok(())
+}
+
+/// Decodes the mesh `mp` points at and stores it unposed with its skin. The renderer's `bones`
+/// (transform ids of the prefab) are matched to the rig's bones; the mesh's bounds cover the
+/// unit's idle and walk poses.
+#[allow(clippy::too_many_arguments)]
+fn bake_skinned(
+    b: &mut Builder<'_>,
+    prefab: &UnitPrefab,
+    from: &SerializedFile<'_>,
+    mp: PPtr,
+    bones: &[Option<i64>],
+    rig: &anim::BuiltRig,
+    animation: u32,
+    id_hint: &str,
+) -> Result<Option<BakedMesh>> {
+    let _ = prefab;
+    let Some(mo) = b.universe.resolve(from, mp)? else { return Ok(None) };
+    let mv = mo.read()?;
+    let mut decoded = match pack_mesh::decode(b.universe, &mv) {
+        Ok(d) => d,
+        Err(e) => {
+            skip(&mut b.report, format!("unit mesh: {e:#}"));
+            return Ok(None);
+        }
+    };
+    let bind = bindposes(&mv)?;
+    anyhow::ensure!(
+        bind.len() <= bones.len(),
+        "{}: {} bind poses for {} bones",
+        decoded.name,
+        bind.len(),
+        bones.len()
+    );
+    let mut rig_bones = Vec::with_capacity(bind.len());
+    for (i, bone) in bones.iter().take(bind.len()).enumerate() {
+        let t = bone.with_context(|| {
+            format!("{}: bone {i} is not a transform of the prefab", decoded.name)
+        })?;
+        let r = rig
+            .by_transform
+            .get(&t)
+            .with_context(|| format!("{}: bone {i} is not in the rig", decoded.name))?;
+        rig_bones.push(*r);
+    }
+    let skin_blob = skin::skin_blob(&decoded)?;
+    let skins: Vec<Vec<Mat4>> = anim::bound_poses(b, &b.meta.animations[animation as usize], 8)
+        .iter()
+        .map(|w| rig_bones.iter().zip(&bind).map(|(rb, bind)| w[*rb as usize] * *bind).collect())
+        .collect();
+    skin::animated_bounds(&mut decoded, &skins)?;
+    let mesh = intern_baked(
+        b,
+        decoded,
+        AssetId { file: format!("skinned:{id_hint}"), path_id: mo.info.path_id },
+        Some(&skin_blob),
+    )?;
+    Ok(Some(BakedMesh {
+        mesh,
+        bones: rig_bones,
+        bind: bind.iter().map(Mat4::to_cols_array).collect(),
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -295,6 +424,7 @@ fn push_renderer(
     materials: Vec<Option<u32>>,
     matrix: Mat4,
     u: &UnitView,
+    skin: Option<SkinBinding>,
 ) {
     b.meta.renderers.push(Renderer {
         renderer: AssetId { file: sc.file.name.clone(), path_id: o.path_id },
@@ -320,6 +450,7 @@ fn push_renderer(
         )
         .unwrap_or(1),
         property_block: None,
+        skin,
     });
 }
 
@@ -369,6 +500,7 @@ fn bake_mesh(
         b,
         decoded,
         AssetId { file: format!("baked:{id_hint}"), path_id: mo.info.path_id },
+        None,
     )?))
 }
 
@@ -393,7 +525,12 @@ pub fn bindposes(mesh: &Value) -> Result<Vec<Mat4>> {
 }
 
 /// Writes a decoded (and already posed) mesh into the pack.
-fn intern_baked(b: &mut Builder<'_>, d: pack_mesh::DecodedMesh, id: AssetId) -> Result<u32> {
+fn intern_baked(
+    b: &mut Builder<'_>,
+    d: pack_mesh::DecodedMesh,
+    id: AssetId,
+    skin: Option<&[u8]>,
+) -> Result<u32> {
     let mut streams = Vec::new();
     for (bytes, stride) in &d.streams {
         streams.push(VertexStream { data: b.w.blob(bytes)?, stride: *stride });
@@ -401,6 +538,8 @@ fn intern_baked(b: &mut Builder<'_>, d: pack_mesh::DecodedMesh, id: AssetId) -> 
     }
     let indices = b.w.blob(&d.indices)?;
     b.report.mesh_bytes += d.indices.len() as u64;
+    let skin = skin.map(|s| b.w.blob(s)).transpose()?;
+    b.report.mesh_bytes += skin.map_or(0, |s| s.len);
     b.meta.meshes.push(PackMesh {
         id,
         name: d.name,
@@ -411,6 +550,7 @@ fn intern_baked(b: &mut Builder<'_>, d: pack_mesh::DecodedMesh, id: AssetId) -> 
         indices,
         submeshes: d.submeshes,
         aabb: d.aabb,
+        skin,
     });
     Ok(u32::try_from(b.meta.meshes.len() - 1)?)
 }
@@ -426,6 +566,7 @@ pub(super) fn push_renderer_for(
     materials: Vec<Option<u32>>,
     matrix: Mat4,
     layer: u32,
+    skin: Option<SkinBinding>,
 ) {
     b.meta.renderers.push(Renderer {
         renderer: AssetId { file: prefab.sc.file.name.clone(), path_id: 0 },
@@ -448,6 +589,7 @@ pub(super) fn push_renderer_for(
         static_batch: (0, 0),
         rendering_layer_mask: u32::MAX,
         property_block: None,
+        skin,
     });
 }
 

@@ -10,6 +10,11 @@
 //!         [--pack cache/poc6/packs/prologue_caves_1.wrpack] [--windowed]
 //!         [--present fifo|immediate] [--settle 10] [--dwell 37.5] [--point N]
 //! ```
+//!
+//! `--mode anim` (POC-7 step 2) captures an image sequence of the units animating, from the first
+//! point or `--look`: `--frames N --fps F [--t0 SECONDS]` frames at `t0 + k / F` seconds of
+//! animation time, and `--walk UNIT[,SPEED[,START[,DISTANCE]]]` sends one unit (by its id in the
+//! spec) on a straight walk (default 3.3 m/s from t = 1 s for 6 m).
 
 mod frames;
 mod owlcat;
@@ -43,6 +48,7 @@ enum Mode {
     Shots,
     Bench,
     View,
+    Anim,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +70,27 @@ struct Args {
     qos_interactive: bool,
     /// `--latency N`: the surface's maximum frame latency (wgpu's default when unset).
     latency: Option<u32>,
+    /// `--mode anim`: frames to capture, their rate and the animation time of the first.
+    frames: usize,
+    fps: f32,
+    t0: f32,
+    walk: Option<owlcat::skinning::Walk>,
+}
+
+/// `UNIT[,SPEED[,START[,DISTANCE]]]`.
+fn parse_walk(s: &str) -> Option<owlcat::skinning::Walk> {
+    let mut it = s.split(',');
+    let unit = it.next()?.to_owned();
+    let mut num = |d: f32| it.next().map_or(Some(d), |v| v.parse().ok());
+    let speed = num(3.3)?;
+    let start = num(1.0)?;
+    let distance = num(6.0)?;
+    (!unit.is_empty() && speed > 0.0 && distance >= 0.0).then_some(owlcat::skinning::Walk {
+        unit,
+        start,
+        speed,
+        distance,
+    })
 }
 
 fn opt<'a>(a: &'a [String], k: &str) -> Option<&'a str> {
@@ -89,6 +116,7 @@ impl Args {
                 "shots" => Mode::Shots,
                 "bench" => Mode::Bench,
                 "view" => Mode::View,
+                "anim" => Mode::Anim,
                 m => return Err(format!("unknown mode {m}")),
             },
             windowed: a.iter().any(|x| x == "--windowed"),
@@ -103,6 +131,10 @@ impl Args {
             front_ccw: opt(&a, "--front").is_none_or(|v| v != "cw"),
             qos_interactive: opt(&a, "--qos").is_none_or(|v| v != "default"),
             latency: opt(&a, "--latency").and_then(|v| v.parse().ok()),
+            frames: opt(&a, "--frames").and_then(|v| v.parse().ok()).unwrap_or(24),
+            fps: opt(&a, "--fps").and_then(|v| v.parse().ok()).unwrap_or(12.0),
+            t0: opt(&a, "--t0").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            walk: opt(&a, "--walk").and_then(parse_walk),
         })
     }
 }
@@ -113,6 +145,8 @@ struct Shared {
     point: usize,
     /// Capture this point after the frame that renders it (main → render).
     capture: Option<(usize, PathBuf)>,
+    /// `--mode anim`: the animation time the capture frame shows (main → render).
+    anim_time: Option<f32>,
     /// Captures done (render → main).
     captured: Vec<(usize, String, f64)>,
     first_frame_s: Option<f64>,
@@ -140,6 +174,8 @@ struct Run {
     frame_times: Vec<Vec<f64>>,
     last_frame: Option<Instant>,
     waiting_capture: bool,
+    /// `--mode anim`: frames captured so far.
+    anim_step: usize,
 }
 
 /// Render-world state.
@@ -233,6 +269,7 @@ fn main() {
         frame_times: vec![Vec::new(); points.len()],
         last_frame: None,
         waiting_capture: false,
+        anim_step: 0,
     })
     .add_systems(Startup, setup)
     .add_systems(Update, drive);
@@ -347,6 +384,7 @@ fn finish(run: &Run, shared: &Shared) {
         Mode::Shots => "run-shots.json",
         Mode::Bench => "run-bench.json",
         Mode::View => "run-view.json",
+        Mode::Anim => "run-anim.json",
     };
     let _ = std::fs::write(
         run.args.out.join(name),
@@ -435,6 +473,25 @@ fn drive(mut run: ResMut<Run>, shared: Res<SharedRes>, mut exit: MessageWriter<A
                 run.waiting_capture = true;
             }
         }
+        Mode::Anim => {
+            if run.waiting_capture {
+                if sh.captured.len() > run.anim_step {
+                    run.waiting_capture = false;
+                    run.anim_step += 1;
+                    run.frames_here = 0;
+                    if run.anim_step >= run.args.frames {
+                        finish(&run, &sh);
+                        exit.write(AppExit::Success);
+                    }
+                }
+            } else if run.frames_here >= run.args.settle.min(3) {
+                let t = run.args.t0 + run.anim_step as f32 / run.args.fps;
+                let path = run.args.out.join(format!("frame{:03}.png", run.anim_step));
+                sh.anim_time = Some(t);
+                sh.capture = Some((run.idx, path));
+                run.waiting_capture = true;
+            }
+        }
         Mode::Bench => {
             let started = *run.point_started.get_or_insert(now);
             if now.duration_since(started).as_secs_f64() >= run.args.dwell {
@@ -491,6 +548,14 @@ impl Plugin for OwlcatPlugin {
                 None
             }
         };
+        let mut renderer = renderer;
+        if let Some(r) = renderer.as_mut() {
+            let ids = r.animated_units();
+            if !ids.is_empty() {
+                eprintln!("animated units: {}", ids.join(" "));
+            }
+            r.set_walk(self.args.walk.clone());
+        }
         if let (Some(r), Ok(mut s)) = (&renderer, self.shared.0.lock()) {
             let st = &r.stats;
             s.load = Some(serde_json::json!({
@@ -532,9 +597,9 @@ fn record(
     images: Res<RenderAssets<GpuImage>>,
 ) {
     let Some(target) = images.get(side.display) else { return };
-    let (point, capture) = {
+    let (point, capture, anim_time) = {
         let Ok(s) = side.shared.0.lock() else { return };
-        (s.point, s.capture.clone())
+        (s.point, s.capture.clone(), s.anim_time)
     };
     let side = &mut *side;
     let Some(r) = side.renderer.as_mut() else { return };
@@ -549,6 +614,13 @@ fn record(
             s.shadows.push((point, r.shadow_stats.clone()));
             s.missing_constants = r.missing_constants();
         }
+    }
+    if let Some(t) = anim_time {
+        // Animation capture: pose the units at `t`, then plan the frame's shadows again (a walking
+        // unit's casters moved).
+        r.animate(&queue, t);
+        let pose = side.points[point.min(side.points.len() - 1)].pose;
+        r.set_camera(&queue, &pose, 100.0 + t);
     }
     let dev = device.wgpu_device();
     let mut enc =
@@ -593,6 +665,7 @@ fn record(
             });
         if let Ok(mut s) = side.shared.0.lock() {
             s.capture = None;
+            s.anim_time = None;
             match res {
                 Ok(()) => s.captured.push((cp, path.display().to_string(), since_start())),
                 Err(e) => s.error = Some(format!("capture: {e:#}")),

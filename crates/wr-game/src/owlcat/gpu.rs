@@ -17,6 +17,9 @@ pub struct GpuTexture {
 pub struct GpuMesh {
     pub streams: Vec<wgpu::Buffer>,
     pub index: wgpu::Buffer,
+    /// A skinned mesh's weights and bone indices (`wr_assets::Mesh::skin`); its streams are
+    /// also bound as storage then, for the skinning pass.
+    pub skin: Option<wgpu::Buffer>,
 }
 
 /// Unity's built-in default textures, by kind.
@@ -302,6 +305,11 @@ impl Gpu {
         }
         let mut meshes = Vec::with_capacity(m.meshes.len());
         for mesh in &m.meshes {
+            let usage = if mesh.skin.is_some() {
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE
+            } else {
+                wgpu::BufferUsages::VERTEX
+            };
             let streams = mesh
                 .streams
                 .iter()
@@ -310,17 +318,25 @@ impl Gpu {
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some(&mesh.name),
                         contents: &padded(pack.blob(s.data)),
-                        usage: wgpu::BufferUsages::VERTEX,
+                        usage,
                     })
                 })
                 .collect();
+            let skin = mesh.skin.map(|b| {
+                uploaded += b.len;
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&mesh.name),
+                    contents: &padded(pack.blob(b)),
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
+            });
             uploaded += mesh.indices.len;
             let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&mesh.name),
                 contents: &padded(pack.blob(mesh.indices)),
                 usage: wgpu::BufferUsages::INDEX,
             });
-            meshes.push(GpuMesh { streams, index });
+            meshes.push(GpuMesh { streams, index, skin });
         }
         Ok(Self {
             textures,
