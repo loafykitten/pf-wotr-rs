@@ -940,7 +940,7 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   `ITargetRulebookHandler<T>`, nested classes included (`CheatsCommon+CheatedDice`), for each rule that is T or
   derives from T (the interfaces are contravariant). 31 classes, 77 pairs over 62 rules; `span_ok` keeps counting
   `GLOBAL_HANDLERS` and gains nothing (a unit test asserts its pairs are in the generated table). Rerun the script
-  when the game's code changes. A component record's shape is checked world-free (`$<type>$<name>` of its class).
+  when the game's code changes. A component record's shape is checked world-free (`$<type>$<name>` of its class). An echoed root's handlers (old recordings without call sites) are left out: not fired, and reported as echoed.
 - Draws: `draw_ok` for every draw (a presentation draw's payload and site too: a site of the simulation's is not a
   presentation draw's), the context (a simulation draw's rule class, stable unit ids and ordinal) and, in a replay's
   trace, `forced` on simulation draws only: `span_ok`'s checks.

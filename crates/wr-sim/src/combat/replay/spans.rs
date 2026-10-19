@@ -382,7 +382,10 @@ impl Driver<'_> {
         let trace = self.trace;
         let mut rules: HashMap<i64, String> = HashMap::new();
         let mut recorded: Vec<HandlerRun> = Vec::new();
-        for r in &trace.records {
+        // (An echoed root, a presentation root without a call site in an old recording, is the
+        // recording's by definition, not fired, and reported as such.)
+        let echoed = |i: usize| self.echoed.iter().any(|(s, e)| *s <= i && i <= *e);
+        for (i, r) in trace.records.iter().enumerate() {
             match r["k"].as_str() {
                 Some("rule") => {
                     if let Some(id) = r["id"].as_i64() {
@@ -390,7 +393,7 @@ impl Driver<'_> {
                         rules.insert(id, class.rsplit(['.', '+']).next().unwrap_or("").to_owned());
                     }
                 }
-                Some("h") if dispatched(r) => {
+                Some("h") if dispatched(r) && !echoed(i) => {
                     let phase = match r["phase"].as_str() {
                         Some("mod_before") => "mod_before",
                         Some("about") => "about",
