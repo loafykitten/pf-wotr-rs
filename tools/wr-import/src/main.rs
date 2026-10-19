@@ -118,6 +118,54 @@ enum Cmd {
     /// Writes `cache/sim/unit-prefabs.json`: each unit prefab's `UnitEntityView.m_IsInGame`
     /// (the `IsInGameBySettings` a unit built from it starts with), for the sim.
     UnitPrefabs,
+    /// Prints a bundle's objects and GameObject hierarchy (a prefab's survey). `target` is a
+    /// bundle name or an asset GUID of the location list.
+    Tree {
+        target: String,
+        /// Script or Unity class names whose serialized fields are printed.
+        #[arg(long)]
+        fields: Vec<String>,
+        /// Unity classes whose objects are listed by name and id.
+        #[arg(long)]
+        list: Vec<String>,
+        #[arg(long)]
+        depth: Option<usize>,
+    },
+    /// Prints one object of a bundle as JSON with its pointers resolved to class and name
+    /// (`--expand N` follows them N levels). `target` is a bundle name or a location-list GUID;
+    /// `path_id` is read in the bundle's first serialized file (or, with `--file-id`, through
+    /// its external reference N).
+    Obj {
+        target: String,
+        #[arg(allow_hyphen_values = true, default_value_t = 0)]
+        path_id: i64,
+        #[arg(long, default_value_t = 0)]
+        file_id: i32,
+        /// Instead of a path id: the first MonoBehaviour (of the first serialized file) with this
+        /// script class.
+        #[arg(long)]
+        script: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        expand: usize,
+        #[arg(long, default_value_t = 12)]
+        items: usize,
+    },
+    /// Prints a shader's passes and, for each, the Metal source of its subprograms whose keywords
+    /// include every `--kw` (all of them when none is given). `target` as for `tree`
+    /// (`globalgamemanagers.assets` is read as a player file).
+    ShaderMsl {
+        target: String,
+        #[arg(allow_hyphen_values = true)]
+        path_id: i64,
+        #[arg(long)]
+        kw: Vec<String>,
+        /// Print only the pass with this name.
+        #[arg(long)]
+        pass: Option<String>,
+    },
+    /// Counts equipment entity body parts whose renderer prefab root is inactive (what
+    /// `BodyPart.SkinnedRenderer` can find), over every `.ee` bundle or just the given GUIDs.
+    EeCensus { guids: Vec<String> },
     /// Prints a pack's metadata as JSON (blobs as offsets).
     PackInfo { pack: PathBuf },
     /// Builds an area's runtime asset pack (meshes, BC textures, materials, Owlcat
@@ -128,6 +176,13 @@ enum Cmd {
         /// Output file (default `cache/poc6/packs/<area>.wrpack`).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Bake the unit views of a spec (`wr-visual spec <save>`) into the pack, in their
+        /// bind pose at the saved positions.
+        #[arg(long)]
+        units: Option<PathBuf>,
+        /// Character atlas size in pixels (the game's High texture setting is 2048).
+        #[arg(long, default_value_t = 1024)]
+        atlas_size: usize,
     },
 }
 
@@ -290,6 +345,103 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Dump { class, limit, bundles } => dump(&bundles, &class, limit),
+        Cmd::EeCensus { guids } => {
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            let only = (!guids.is_empty()).then_some(guids.as_slice());
+            let c = wr_import::pack::units::census::run(&universe, &ctx.locations, only)?;
+            println!("{}", serde_json::to_string_pretty(&c)?);
+            Ok(())
+        }
+        Cmd::ShaderMsl { target, path_id, kw, pass } => {
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            let bundle = ctx.locations.guid_to_bundle.get(&target).cloned().unwrap_or(target);
+            let file = if bundle.ends_with(".assets") && !bundle.contains("CAB-") {
+                let donors = universe.files_of("utility_shaders")?;
+                universe.add_loose_file_with_donors(&ctx.paths.data().join(&bundle), &donors)?;
+                universe.file(&bundle)?.context("player file")?
+            } else {
+                *universe.files_of(&bundle)?.first().context("empty bundle")?
+            };
+            let o = file.object(path_id).context("no such object")?;
+            let v = file.read(o)?;
+            let mut d = wr_import::pack::shader::DecodedShader::decode(&v)?;
+            println!("shader {}", d.name);
+            for pi in 0..d.passes.len() {
+                let info = d.passes[pi].info.clone();
+                if pass.as_ref().is_some_and(|p| !info.name.eq_ignore_ascii_case(p)) {
+                    continue;
+                }
+                println!("== pass {} tags {:?}\nstate {:?}", info.name, info.tags, info.state);
+                let blobs: Vec<(&str, usize)> = d.passes[pi]
+                    .vertex
+                    .iter()
+                    .map(|b| ("vertex", *b))
+                    .chain(d.passes[pi].fragment.iter().map(|b| ("fragment", *b)))
+                    .collect();
+                for (stage, b) in blobs {
+                    let (_, kws, msl) = d.subprogram(b)?;
+                    if kw.iter().all(|k| kws.contains(k)) {
+                        println!("-- {stage} blob {b} keywords {kws:?}\n{msl}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        Cmd::Obj { target, path_id, file_id, script, expand, items } => {
+            use wr_import::unity::value::PPtr;
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            let bundle = ctx.locations.guid_to_bundle.get(&target).cloned().unwrap_or(target);
+            let files = universe.files_of(&bundle)?;
+            let first = files.first().context("empty bundle")?;
+            let path_id = match &script {
+                Some(want) => {
+                    let mut found = None;
+                    for o in first.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR)
+                    {
+                        let v = first.read(o)?;
+                        if universe.script_of(first, &v)?.is_some_and(|s| &s.class == want) {
+                            found = Some(o.path_id);
+                            break;
+                        }
+                    }
+                    found.with_context(|| format!("no MonoBehaviour of script {want}"))?
+                }
+                None => path_id,
+            };
+            let o =
+                universe.resolve(first, PPtr { file_id, path_id })?.context("object not found")?;
+            let v = o.read()?;
+            let j = wr_import::tree::annotate(
+                &universe,
+                o.file,
+                &v,
+                wr_import::tree::Expand { depth: expand, max_items: items },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&j)?);
+            Ok(())
+        }
+        Cmd::Tree { target, fields, list, depth } => {
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            let bundle = ctx.locations.guid_to_bundle.get(&target).cloned().unwrap_or(target);
+            let opt = wr_import::tree::TreeOptions { fields, list, max_depth: depth };
+            let files = if bundle.ends_with(".assets") && !bundle.contains("CAB-") {
+                // A loose player file (`globalgamemanagers.assets`): types without trees borrow
+                // them from `utility_shaders`, as the pack does.
+                let donors = universe.files_of("utility_shaders")?;
+                universe.add_loose_file_with_donors(&ctx.paths.data().join(&bundle), &donors)?;
+                universe.file(&bundle)?.into_iter().collect()
+            } else {
+                universe.files_of(&bundle)?
+            };
+            for f in files {
+                print!("{}", wr_import::tree::describe(&universe, f, &opt)?);
+            }
+            Ok(())
+        }
         Cmd::UnitPrefabs => {
             let t = Instant::now();
             let ctx = context()?;
@@ -318,11 +470,16 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&p.meta)?);
             Ok(())
         }
-        Cmd::Pack { area, out } => {
+        Cmd::Pack { area, out, units, atlas_size } => {
             let ctx = context()?;
             let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
             let cache = wr_paths::cache_root().join("poc6");
             let out = out.unwrap_or_else(|| cache.join("packs").join(format!("{area}.wrpack")));
+            anyhow::ensure!(
+                (16..=8192).contains(&atlas_size),
+                "--atlas-size {atlas_size}: want 16 to 8192 pixels"
+            );
+            let spec = units.as_deref().map(wr_view::UnitsSpec::read).transpose()?;
             let rep = wr_import::pack::build(
                 &ctx.paths.data(),
                 &universe,
@@ -330,6 +487,7 @@ fn main() -> Result<()> {
                 &area,
                 &out,
                 &cache.join("metallib"),
+                spec.as_ref().map(|s| (&ctx.locations, s, atlas_size)),
             )?;
             eprintln!(
                 "pack: {} renderers, {} meshes, {} materials, {} textures, {} programs ({} metallibs), {} lights; {:.1} MiB in {} ms",
@@ -343,6 +501,15 @@ fn main() -> Result<()> {
                 rep.pack_bytes as f64 / 1048576.0,
                 rep.timings_ms.get("total").copied().unwrap_or(0)
             );
+            if let Some(u) = &rep.units {
+                eprintln!(
+                    "units: {} of {} placed, {} renderers; kinds {:?}",
+                    u.placed, u.spec_units, u.renderers, u.kinds
+                );
+                for l in &u.left_out {
+                    eprintln!("  left out: {l}");
+                }
+            }
             let report_dir = out.parent().map_or_else(|| cache.join("packs"), Path::to_path_buf);
             write_json(&report_dir, &format!("{area}.report.json"), &rep)
         }

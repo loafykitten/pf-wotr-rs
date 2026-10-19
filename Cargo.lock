@@ -4831,6 +4831,7 @@ dependencies = [
  "wr-nav",
  "wr-paths",
  "wr-phys",
+ "wr-view",
  "zip",
 ]
 
@@ -4939,6 +4940,31 @@ dependencies = [
  "memmap2",
  "serde_json",
  "wr-paths",
+]
+
+[[package]]
+name = "wr-view"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "wr-visual"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "wr-content",
+ "wr-paths",
+ "wr-save",
+ "wr-sim",
+ "wr-text",
+ "wr-view",
 ]
 
 [[package]]

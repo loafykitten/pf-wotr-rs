@@ -1,0 +1,23 @@
+[package]
+name = "wr-visual"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "What the hydrated sim says a unit looks like: the unit views a save puts in an area, as a spec the importer and the renderer read (POC-7 stage 1)."
+
+[dependencies]
+wr-paths.workspace = true
+wr-content.workspace = true
+wr-save.workspace = true
+wr-sim = { path = "../wr-sim" }
+wr-view.workspace = true
+wr-text.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

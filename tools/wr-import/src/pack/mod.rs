@@ -14,6 +14,7 @@ pub mod metal;
 pub mod msl;
 pub mod shader;
 pub mod tex;
+pub mod units;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -68,6 +69,8 @@ pub struct PackReport {
     pub transcoded_textures: Vec<String>,
     pub skipped: BTreeMap<String, u32>,
     pub timings_ms: BTreeMap<String, u128>,
+    /// The unit views baked in (`--units`).
+    pub units: Option<units::UnitsReport>,
 }
 
 /// One scene file's objects, indexed for the walk.
@@ -79,6 +82,10 @@ struct SceneIndex {
     transform_go: HashMap<i64, i64>,
     parents: HashMap<i64, Option<i64>>,
     worlds: HashMap<i64, transform::World>,
+    /// Every transform's local TRS and parent (what `worlds` was composed from).
+    nodes: HashMap<i64, Node<i64>>,
+    /// Each transform's children (`m_Children` order).
+    children: HashMap<i64, Vec<i64>>,
 }
 
 impl SceneIndex {
@@ -86,6 +93,7 @@ impl SceneIndex {
         let mut gos = HashMap::new();
         let mut go_transform = HashMap::new();
         let mut parents = HashMap::new();
+        let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
         let mut nodes: HashMap<i64, Node<i64>> = HashMap::new();
         for o in &file.objects {
             match o.class_id {
@@ -136,6 +144,17 @@ impl SceneIndex {
                             .unwrap_or([1.0; 3])
                             .into(),
                     };
+                    children.insert(
+                        o.path_id,
+                        v.get("m_Children")
+                            .and_then(Value::as_array)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|c| c.as_pptr())
+                            .filter(|p| p.file_id == 0)
+                            .map(|p| p.path_id)
+                            .collect(),
+                    );
                     nodes.insert(o.path_id, Node { local, parent });
                     parents.insert(o.path_id, parent);
                     go_transform.insert(go, o.path_id);
@@ -145,7 +164,17 @@ impl SceneIndex {
         }
         let (worlds, _errors) = transform::world_transforms(&nodes);
         let transform_go = go_transform.iter().map(|(g, t)| (*t, *g)).collect();
-        Ok(Self { name: name.to_owned(), file, gos, go_transform, transform_go, parents, worlds })
+        Ok(Self {
+            name: name.to_owned(),
+            file,
+            gos,
+            go_transform,
+            transform_go,
+            parents,
+            worlds,
+            nodes,
+            children,
+        })
     }
 
     fn transform_go(&self, t: i64) -> Option<i64> {
@@ -650,6 +679,7 @@ pub fn build(
     area: &str,
     out: &Path,
     metal_cache: &Path,
+    units: Option<(&crate::catalog::Locations, &wr_view::UnitsSpec, usize)>,
 ) -> Result<PackReport> {
     let t_all = Instant::now();
     let mut t = Instant::now();
@@ -1067,6 +1097,13 @@ pub fn build(
         }
     }
     b.report.timings_ms.insert("renderers".into(), t.elapsed().as_millis());
+
+    // Units: the save's unit views, baked in their bind pose.
+    if let Some((locations, spec, atlas_size)) = units {
+        t = Instant::now();
+        b.report.units = Some(units::add(&mut b, locations, spec, atlas_size)?);
+        b.report.timings_ms.insert("units".into(), t.elapsed().as_millis());
+    }
 
     // Pipeline programs.
     t = Instant::now();

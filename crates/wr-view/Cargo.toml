@@ -1,0 +1,16 @@
+[package]
+name = "wr-view"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The unit views of an area as the sim says they are: the spec `wr-visual` writes and the importer and renderer read."
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
