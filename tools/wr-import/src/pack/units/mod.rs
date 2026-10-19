@@ -17,6 +17,7 @@
 //! write the unposed meshes with their skin and the rigs (docs/poc7/characters.md, step 2).
 
 pub mod atlas;
+pub mod census;
 pub mod character;
 pub mod image;
 pub mod skin;

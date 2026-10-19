@@ -307,29 +307,42 @@ mod tests {
 
     #[test]
     fn fractional_rectangles_keep_their_corner_for_the_source_uvs() {
-        // At 1024 px the brows rectangle (1295, 193, 265, 125) is (647.5, 96.5, 132.5, 62.5): pixel 648
-        // is the first whose centre is inside, 1/132.5 of a pixel past the corner, not at u = 0.5/132.
+        // At 1024 px the brows rectangle (1295, 193, 265, 125) is (647.5, 96.5, 132.5, 62.5). A pixel is
+        // drawn when its centre is inside, centres on the left and top edges included: columns 647..=779,
+        // rows 96..=158. The first column's centre sits exactly on the corner, so its u is 0 (not the
+        // 0.5/132 a rounded rectangle gives), and every u is measured from the fractional corner.
+        // A high-frequency source (alternating black and white texels) makes any shift of u show.
         let mut a = Atlas::new(1024, Channel::Diffuse);
-        let gradient = Image {
-            w: 4,
+        let stripes = Image {
+            w: 256,
             h: 1,
-            px: vec![[0, 0, 0, 255], [85, 85, 85, 255], [170, 170, 170, 255], [255, 255, 255, 255]],
+            px: (0..256).map(|i| [(i % 2) as u8 * 255, 0, 0, 255]).collect(),
             has_alpha: true,
-            srgb: true,
+            srgb: false,
         };
         let on = solid(2, 2, [0, 0, 0, 255]);
-        a.blit_diffuse((1295.0, 193.0, 265.0, 125.0), &gradient, &on, false);
-        let row = 100 * 1024;
-        // Outside: pixel 647's centre (647.5) sits exactly on the corner; 779 is the last inside.
-        assert_eq!(a.px[row + 646][3], 0);
-        assert_eq!(a.px[row + 780][3], 0);
-        assert_eq!(a.px[row + 779][3], 255);
-        let first = a.px[row + 648][0];
-        let last = a.px[row + 779][0];
-        assert!(first < 8 && last > 247, "{first} {last}");
-        // The middle of the rectangle reads between the two middle texels, in linear light (about 138).
-        let mid = a.px[row + 714][0];
-        assert!((120..=150).contains(&mid), "{mid}");
+        a.blit_diffuse((1295.0, 193.0, 265.0, 125.0), &stripes, &on, false);
+        let drawn = |x: usize, y: usize| a.px[y * 1024 + x][3] == 255;
+        // Exact boundary pixels, horizontally and vertically.
+        assert!(!drawn(646, 100) && drawn(647, 100), "left edge");
+        assert!(drawn(779, 100) && !drawn(780, 100), "right edge");
+        assert!(!drawn(700, 95) && drawn(700, 96), "top edge");
+        assert!(drawn(700, 158) && !drawn(700, 159), "bottom edge");
+        // Interior values: what the sampler returns at the exact fractional u, encoded as the sRGB
+        // target stores it (the source is raw, so it reads as linear light).
+        let encode = |v: f32| crate::pack::units::image::linear_to_srgb(v);
+        let mut differs_from_rounded = 0;
+        for x in [647usize, 648, 649, 700, 714, 778, 779] {
+            let u_exact = (x as f32 + 0.5 - 647.5) / 132.5;
+            let u_rounded = (x as f32 - 648.0 + 0.5) / 132.0;
+            let want = encode(stripes.sample(u_exact, 0.5)[0]);
+            let old = encode(stripes.sample(u_rounded, 0.5)[0]);
+            let got = a.px[100 * 1024 + x][0];
+            assert!(got.abs_diff(want) <= 1, "x {x}: got {got}, want {want}");
+            differs_from_rounded += usize::from(want.abs_diff(old) > 8);
+        }
+        // The test only means something if the rounded rectangle would have given other values.
+        assert!(differs_from_rounded >= 3, "{differs_from_rounded}");
     }
 
     #[test]

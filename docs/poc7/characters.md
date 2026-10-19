@@ -28,9 +28,16 @@ Seelah, Lann, Camelia, Wenduag). Every unit is in its rig's rest pose (a T-pose)
   baked characters without an embedded renderer) and the size scale. Not done: the diffuse alpha mask is sampled without minification.
 - Second review (Sol, independent), four more fixed: the race-dependent arrays are indexed by their stored slot (a null at 0 no longer
   shifts race 1's links to race 0), atlas blits keep the rectangle's fractional corner for the source UVs (a pixel is drawn when its centre
-  is inside, as the shader's quad covers it), `BodyPart.SkinnedRenderer` does not look into inactive objects (`GetComponentInChildren`'s
-  default; the component's `enabled` flag plays no part; Unity's lookup is native code, so this is its documented behaviour, not read
-  from the decompiled source), and `BuildMesh` keeps only each part's first submesh (`CombineInstance.subMeshIndex` is 0). Tests for all four.
+  is inside, as the shader's quad covers it; the test checks the boundary pixels of the brows rectangle at 1024 px (columns 647 to 779, rows
+  96 to 158) and interior values against the sampler's exact fractional u, and fails on the earlier rounded rectangle: pixel 647 was not drawn),
+  `BodyPart.SkinnedRenderer` (`GetComponentInChildren`): the queried renderer prefab root is always searched, whatever its own state, and
+  inactive descendants hide their subtrees (Unity 2020.3 documentation of `GameObject.GetComponentInChildren`: "the GameObject on which the
+  method is called is always searched regardless of this parameter", "only active child GameObjects are included"; the component's `enabled`
+  flag plays no part). The evidence in the game's data: `wr-import ee-census` over all 3,137 equipment entities (8,040 body parts, 6,551
+  with a renderer prefab) finds every renderer prefab root active, every renderer in an active descendant, none hidden by an inactive
+  descendant: no unit, in Manual_13 or elsewhere, depends on the rule. (A first version skipped an inactive root too; Sol's second review
+  corrected it.) And `BuildMesh` keeps only each part's first submesh (`CombineInstance.subMeshIndex` is 0). Tests for the lookup (a renderer on an
+  inactive root is found; an inactive descendant is skipped) and the merge.
   Re-shot close-ups carry the suffix `-r2` in the screenshot folder.
 - Screenshots (gitignored, `fixtures/captures/poc7/characters-stage1/`): `route-point0.png` (the caves from route pose 0,
   with the player; Seelah and Anevia are in the frame too, see "Differences from the original"). Close-ups from

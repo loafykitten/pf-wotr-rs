@@ -669,9 +669,13 @@ struct PosedPart {
     mesh: pack_mesh::DecodedMesh,
 }
 
-/// `GetComponentInChildren<T>()` over transforms: depth first from `root`, the root first, never
-/// entering a GameObject that is inactive (`includeInactive` defaults to false, so an inactive object
-/// hides its whole subtree; the component's own `enabled` flag plays no part in the lookup).
+/// `GetComponentInChildren<T>()` over transforms: depth first from `root`, the root first. The queried
+/// GameObject is always searched, whatever its own state; below it `includeInactive` (false by default)
+/// skips inactive GameObjects, and an inactive one hides its whole subtree. The component's own
+/// `enabled` flag plays no part. (Unity's documentation says exactly this about the root and about
+/// "active child GameObjects"; whether a child of an inactive root counts as active is native
+/// behaviour it doesn't spell out. No shipped equipment entity depends on it:
+/// `wr-import ee-census` finds every renderer prefab root active.)
 fn first_active_match(
     root: i64,
     children: &dyn Fn(i64) -> Vec<i64>,
@@ -680,7 +684,7 @@ fn first_active_match(
 ) -> Option<i64> {
     let mut stack = vec![root];
     while let Some(t) = stack.pop() {
-        if !active(t) {
+        if t != root && !active(t) {
             continue;
         }
         if matches(t) {
@@ -1370,8 +1374,13 @@ mod tests {
         assert_eq!(first_active_match(1, &kids, &|_| true, &has), Some(4));
         // 2 inactive: its renderer-bearing child is not entered, so 3 is found.
         assert_eq!(first_active_match(1, &kids, &|t| t != 2, &has), Some(3));
-        // The root inactive: nothing.
-        assert_eq!(first_active_match(1, &kids, &|t| t != 1, &has), None);
+        // The queried object is searched even when inactive: a renderer on an inactive root is found,
+        // and an inactive root with none still lets its active descendants be searched.
+        let on_root = |t: i64| t == 1;
+        assert_eq!(first_active_match(1, &kids, &|t| t != 1, &on_root), Some(1));
+        assert_eq!(first_active_match(1, &kids, &|t| t != 1, &has), Some(4));
+        // An inactive descendant is skipped even when it is the only match.
+        assert_eq!(first_active_match(1, &kids, &|t| t != 3, &|t| t == 3), None);
         // The root itself can be the match.
         assert_eq!(first_active_match(3, &kids, &|_| true, &has), Some(3));
     }

@@ -163,6 +163,9 @@ enum Cmd {
         #[arg(long)]
         pass: Option<String>,
     },
+    /// Counts equipment entity body parts whose renderer prefab root is inactive (what
+    /// `BodyPart.SkinnedRenderer` can find), over every `.ee` bundle or just the given GUIDs.
+    EeCensus { guids: Vec<String> },
     /// Prints a pack's metadata as JSON (blobs as offsets).
     PackInfo { pack: PathBuf },
     /// Builds an area's runtime asset pack (meshes, BC textures, materials, Owlcat
@@ -342,6 +345,14 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Dump { class, limit, bundles } => dump(&bundles, &class, limit),
+        Cmd::EeCensus { guids } => {
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            let only = (!guids.is_empty()).then_some(guids.as_slice());
+            let c = wr_import::pack::units::census::run(&universe, &ctx.locations, only)?;
+            println!("{}", serde_json::to_string_pretty(&c)?);
+            Ok(())
+        }
         Cmd::ShaderMsl { target, path_id, kw, pass } => {
             let ctx = context()?;
             let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
