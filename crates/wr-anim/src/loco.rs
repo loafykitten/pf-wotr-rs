@@ -114,6 +114,8 @@ pub fn select_walk(walk: &[Option<u32>], ty: usize) -> Option<u32> {
 struct Playing {
     clip: u32,
     time: f32,
+    /// Playback speed: the clip keeps the rate it last had while it fades out.
+    rate: f32,
 }
 
 /// A unit's locomotion being played.
@@ -178,7 +180,7 @@ impl UnitPlayer {
         };
         if let Locomotion::Clips { idle, .. } = &anim.loco {
             let len = clips[*idle as usize].length();
-            me.cur = Some(Playing { clip: *idle, time: idle_phase * len });
+            me.cur = Some(Playing { clip: *idle, time: idle_phase * len, rate: 1.0 });
         }
         Ok(me)
     }
@@ -235,16 +237,17 @@ impl UnitPlayer {
                         0.0
                     };
                     self.prev = Some((cur.clone(), 0.0));
-                    self.cur = Some(Playing { clip: want, time: start });
+                    self.cur = Some(Playing { clip: want, time: start, rate: 0.0 });
                 }
                 let speed = self.speed;
                 let rate = |clip: u32| if clip == idle { 1.0 } else { speed * SPEED_MAPPING };
                 if let Some(cur) = self.cur.as_mut() {
-                    cur.time += dt * rate(cur.clip);
+                    cur.rate = rate(cur.clip);
+                    cur.time += dt * cur.rate;
                 }
                 let mut done = false;
                 if let Some((p, f)) = self.prev.as_mut() {
-                    p.time += dt * rate(p.clip);
+                    p.time += dt * p.rate;
                     *f += dt;
                     done = transition <= 0.0 || *f >= transition;
                 }
@@ -392,6 +395,24 @@ mod tests {
         p.update(&clips, 1.0);
         p.update(&clips, 0.0);
         assert!(p.pose(&clips, &r, &mut s).local[0].position[0] < 5.0);
+    }
+
+    #[test]
+    fn the_walk_keeps_its_pace_while_it_fades_out() {
+        let (anim, clips) = human();
+        let r = rig();
+        let mut p = UnitPlayer::new(&anim, &r, &clips, &[], 0.0).unwrap();
+        let mut s = Vec::new();
+        p.set_speed(3.3);
+        p.update(&clips, 0.6);
+        // The walk clip (100 + t) has played 0.6 s; the fade to the idle lasts 0.5 s. Stop, and
+        // let 0.2 s pass: the outgoing walk goes on at the pace it had (1.0), to 100.8, while the
+        // idle has played 0.2 s (x = 0.2): the fade is at 0.2 / 0.5 = 0.4 of the way (the idle's
+        // weight), so the pose is 100.8 * 0.6 + 0.2 * 0.4.
+        p.set_speed(0.0);
+        p.update(&clips, 0.2);
+        let x = p.pose(&clips, &r, &mut s).local[0].position[0];
+        assert!((x - (100.8 * 0.6 + 0.2 * 0.4)).abs() < 1e-3, "{x}");
     }
 
     #[test]

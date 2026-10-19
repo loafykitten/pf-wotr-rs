@@ -130,6 +130,24 @@ impl UnitPrefab {
         Ok(false)
     }
 
+    /// The `Skeleton` asset of the prefab's `Character` (per-bone scale and offset), if it has both.
+    /// A baked character keeps its skeleton: `SkeletonUpdateService` updates every registered
+    /// character's bones each late update, baked or not.
+    fn character_skeleton(&self, b: &Builder<'_>) -> Result<Option<Value>> {
+        for o in self.sc.file.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR) {
+            let v = self.sc.file.read(o)?;
+            if !b.universe.script_of(self.sc.file, &v)?.is_some_and(|s| s.class == "Character") {
+                continue;
+            }
+            let Some(p) = v.get("m_Skeleton").and_then(Value::as_pptr).filter(|p| !p.is_null())
+            else {
+                return Ok(None);
+            };
+            return b.universe.resolve(self.sc.file, p)?.map(|o| o.read()).transpose();
+        }
+        Ok(None)
+    }
+
     fn has_script(&self, b: &Builder<'_>, class: &str) -> Result<bool> {
         for o in self.sc.file.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR) {
             let v = self.sc.file.read(o)?;
@@ -245,13 +263,15 @@ fn plain_animation(
         Some(p) if prefab.under_root(p) => prefab.rel(p),
         _ => Mat4::IDENTITY,
     };
-    let key = format!("{}#{t}", u.prefab);
+    let skeleton = prefab.character_skeleton(b)?;
+    let key = format!("{}#{t}#{}", u.prefab, skeleton.is_some());
     let name = sc.transform_go.get(&t).and_then(|g| sc.gos.get(g)).map_or("", |g| g.0.as_str());
-    let (rig_index, rig) =
-        anim.rig(b, &key, || anim::build_rig(sc, t, name, parent, t == prefab.root, None))?;
-    // The rig at rest equals the prefab's transforms (what stage 1 posed the meshes with).
+    let (rig_index, rig) = anim.rig(b, &key, || {
+        anim::build_rig(sc, t, name, parent, t == prefab.root, skeleton.as_ref())
+    })?;
+    // The rig at rest (before any skeleton override) equals the prefab's transforms.
     let mut worlds = Vec::new();
-    rig.rig.world_matrices(&rig.rig.posed_rest(), &mut worlds);
+    rig.rig.world_matrices(&rig.rig.rest_pose(), &mut worlds);
     for (tr, &bone) in &rig.by_transform {
         let want = prefab.rel(*tr).to_cols_array();
         let got = worlds[bone as usize].to_cols_array();

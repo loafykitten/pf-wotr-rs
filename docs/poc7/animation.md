@@ -12,7 +12,7 @@ combat, skinned on the GPU through Owlcat's own G-buffer and shadow draws. One u
 straight line with its walk cycle (an offline demo, not gameplay): the player (human clip locomotion) and the
 monitor lizard (controller locomotion) are captured.
 
-- **Pack format v3** (`wr-assets`): `PackMeta` gains `rigs`, `clips`, `controllers` and `animations` (one
+- **Pack format v3** (`wr-assets`; `Pack::open` also checks that every skin weight is a number and every weighted bone index is one of the renderer's bones, and that a skinned mesh's position channel is a float32x3 inside a stream that holds every vertex, so the skinning pass cannot index out of range): `PackMeta` gains `rigs`, `clips`, `controllers` and `animations` (one
   `UnitAnimation` per animated unit); a skinned `Mesh` keeps its unposed vertex streams plus `skin` (32 bytes a
   vertex: four weights, four bone indices); a skinned `Renderer` carries a `SkinBinding` (the unit's animation,
   the rig bone of each mesh bone, the bind poses). Opening a v2 pack fails with "rebuild it"; tests cover the
@@ -30,7 +30,7 @@ monitor lizard (controller locomotion) are captured.
   the vertex stream, so both passes see the animated mesh through the game's own vertex shaders. A test runs the
   compute shader on a three-vertex mesh and compares it with the CPU formula (skipped without a GPU adapter).
 - **`wr-game --mode anim`**: `--frames N --fps F [--t0 S]` captures `N` frames at animation time `t0 + k / F`
-  (animation advances in 1/60 s steps), from `--look` or the first route point; `--walk UNIT[,SPEED[,START[,DIST]]]`
+  (animation advances in ticks of 1/60 s, the game's frame at 60 Hz; capture times snap to that grid, so rates that are multiples of 1/60 s land on ticks exactly and the simulation doesn't depend on the capture rate), from `--look` or the first route point; `--walk UNIT[,SPEED[,START[,DIST]]]`
   sends the unit with that spec id on a straight walk (default 3.3 m/s from 1 s for 6 m).
 
 How to rerun (repo root, game installed, `cache/poc7/Manual_13.units.json` from `wr-visual spec Manual_13`):
@@ -68,8 +68,9 @@ variants (`VariantIdle`, `MicroIdle`) are extra actions started by a timer and a
   `AnimatorController`, driven by `WalkSpeed = Speed / DefaultSpeedMps`, `MoveType`, `Stopping`, `InCombat` and
   `IdleOffset` (`Random.value` when `m_HasOffset`). The five controllers here are one layer (index
   `m_DefaultLayerIndex`, weight one; the weapon style overrides are empty) of single-clip states Idle, Walk, Run,
-  Charge, Stealth (each with a speed multiplier and, for walking states, the `WalkSpeed` parameter as speed) and
-  transitions on `WalkSpeed` and `MoveType`, fixed duration 0.15 to 0.25 s. No blend tree with children appears
+  Charge, Stealth (each with a speed multiplier and, for walking states, the `WalkSpeed` parameter as speed; the
+  spider and the elemental also have walk-into and run-into states left by an exit time) and transitions on
+  `WalkSpeed` and `MoveType`, fixed durations from about 0.01 to 0.4 s. No blend tree with children appears
   in these units (the player supports 1D trees; 2D and direct trees are refused at import).
 
 Stand-ins for `Random.value`: the idle start phase and `IdleOffset` come from a hash of the unit's id, so a
@@ -111,7 +112,7 @@ checked (`wr-import anim-check <bundle>`):
   properties of bones the rig lacks (the tendril bones on the no-tendril centipede, 12 of 90 on the elemental's
   idle, 3 of 200 on `FreeHands_Stealth`): the pack report lists them (`anim_notes`). Hash and path scheme
   therefore agree with the data.
-- **The rig at rest equals stage 1's posed meshes**: for all 21 units, skinning the unposed mesh with the new
+- **The rig at rest equals stage 1's posed meshes** (measured before the review fix that gave Anevia's baked rig its skeleton overrides, which moves her slightly): for all 21 units, skinning the unposed mesh with the new
   rig's rest pose and bind poses reproduces the stage-1 baked positions to 5e-6 m (a throwaway comparison
   against the stage-1 pack; the plain prefabs also assert at import that each rig bone's rest matrix equals
   the prefab's transform).
@@ -131,7 +132,9 @@ animator sits on `FakePivot`, above `Lizard_Monitor_RIG`): `bind_root` takes the
 the locomotion clips' paths resolve [I: the avatar's skeleton starts at the model's root; how Unity picks it is
 not read]. A character's rig is its `AnimatorPrefab`, reset to the unit's origin as `Character.Start` does, with
 the `Skeleton` asset's per-bone scale (and, with `ApplyOffset`, position) as **overrides** applied after the
-animation, as `BoneUpdateJob` does every late update.
+animation, as `BoneUpdateJob` does every late update. Anevia's baked character keeps her `Skeleton` too
+(`SkeletonUpdateService` updates every registered character): her rig has the same 165 overrides as the other
+female characters; the rest check compares the rig *before* the overrides with the prefab.
 
 A skinned mesh's bones are matched to rig bones by transform (plain prefabs) or by name (characters). A
 character's body is merged from its parts as `Character.BuildMesh` does, now with the skin: the merged bone list

@@ -85,12 +85,9 @@ fn parse_walk(s: &str) -> Option<owlcat::skinning::Walk> {
     let speed = num(3.3)?;
     let start = num(1.0)?;
     let distance = num(6.0)?;
-    (!unit.is_empty() && speed > 0.0 && distance >= 0.0).then_some(owlcat::skinning::Walk {
-        unit,
-        start,
-        speed,
-        distance,
-    })
+    let ok = |x: f32| x.is_finite() && x >= 0.0;
+    let fits = !unit.is_empty() && speed.is_finite() && speed > 0.0 && ok(start) && ok(distance);
+    (fits && it.next().is_none()).then_some(owlcat::skinning::Walk { unit, start, speed, distance })
 }
 
 fn opt<'a>(a: &'a [String], k: &str) -> Option<&'a str> {
@@ -101,6 +98,38 @@ impl Args {
     fn parse() -> Result<Self, String> {
         let a: Vec<String> = std::env::args().collect();
         let root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        // `--mode anim`'s timing: finite, a positive rate, a start in range, a bounded count.
+        let number = |k: &str, d: f32| -> Result<f32, String> {
+            match opt(&a, k) {
+                None => Ok(d),
+                Some(v) => v
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|x| x.is_finite())
+                    .ok_or_else(|| format!("{k} {v}: want a finite number")),
+            }
+        };
+        let fps = number("--fps", 12.0)?;
+        let t0 = number("--t0", 0.0)?;
+        if fps <= 0.0 || !(0.0..=100_000.0).contains(&t0) {
+            return Err(format!(
+                "--fps {fps} --t0 {t0}: want a positive rate and a start of 0 to 100000 s"
+            ));
+        }
+        let frames = match opt(&a, "--frames") {
+            None => 24,
+            Some(v) => v
+                .parse::<usize>()
+                .ok()
+                .filter(|n| (1..=100_000).contains(n))
+                .ok_or_else(|| format!("--frames {v}: want 1 to 100000"))?,
+        };
+        let walk = match opt(&a, "--walk") {
+            None => None,
+            Some(v) => Some(parse_walk(v).ok_or_else(|| {
+                format!("--walk {v}: want UNIT[,SPEED[,START[,DISTANCE]]] with finite, non-negative numbers")
+            })?),
+        };
         Ok(Self {
             pack: opt(&a, "--pack").map_or_else(
                 || root.join("cache/poc6/packs/prologue_caves_1.wrpack"),
@@ -131,10 +160,10 @@ impl Args {
             front_ccw: opt(&a, "--front").is_none_or(|v| v != "cw"),
             qos_interactive: opt(&a, "--qos").is_none_or(|v| v != "default"),
             latency: opt(&a, "--latency").and_then(|v| v.parse().ok()),
-            frames: opt(&a, "--frames").and_then(|v| v.parse().ok()).unwrap_or(24),
-            fps: opt(&a, "--fps").and_then(|v| v.parse().ok()).unwrap_or(12.0),
-            t0: opt(&a, "--t0").and_then(|v| v.parse().ok()).unwrap_or(0.0),
-            walk: opt(&a, "--walk").and_then(parse_walk),
+            frames,
+            fps,
+            t0,
+            walk,
         })
     }
 }
@@ -670,6 +699,22 @@ fn record(
                 Ok(()) => s.captured.push((cp, path.display().to_string(), since_start())),
                 Err(e) => s.error = Some(format!("capture: {e:#}")),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walks_parse_with_defaults_and_reject_nonsense() {
+        let w = parse_walk("3708").unwrap();
+        assert_eq!((w.speed, w.start, w.distance), (3.3, 1.0, 6.0));
+        let w = parse_walk("3708,2.5,0.5,4").unwrap();
+        assert_eq!((w.speed, w.start, w.distance), (2.5, 0.5, 4.0));
+        for bad in ["", "u,0", "u,-1", "u,inf", "u,1,nan", "u,1,1,-3", "u,1,1,1,1", "u,x"] {
+            assert!(parse_walk(bad).is_none(), "{bad}");
         }
     }
 }

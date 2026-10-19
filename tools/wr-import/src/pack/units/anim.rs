@@ -312,6 +312,10 @@ impl AnimCache {
         clips.dedup();
         let layer = u32::try_from(v.i64_at("m_DefaultLayerIndex").unwrap_or(1))?;
         ensure!((layer as usize) < c.layers.len(), "default layer {layer}");
+        ensure!(
+            !c.layers[layer as usize].states.is_empty(),
+            "default layer {layer} has no states the player models (masked or additive)"
+        );
         Ok((
             Locomotion::Controller {
                 controller,

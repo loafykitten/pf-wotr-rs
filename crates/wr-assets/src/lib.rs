@@ -212,6 +212,61 @@ impl Pack {
         Ok(())
     }
 
+    /// What the skinning pass reads of a skinned mesh's vertex streams: float32 positions (and
+    /// normals and tangents when they share the stream), word aligned and inside the stride, in a
+    /// stream that holds every vertex.
+    fn check_skinned_streams(x: &Mesh) -> Result<()> {
+        let pos = x
+            .channels
+            .first()
+            .copied()
+            .flatten()
+            .with_context(|| format!("{}: skinned mesh without positions", x.name))?;
+        ensure!(pos.format == 0 && pos.dimension >= 3, "{}: positions are not float32x3", x.name);
+        let s = x
+            .streams
+            .get(usize::from(pos.stream))
+            .with_context(|| format!("{}: position stream {} missing", x.name, pos.stream))?;
+        ensure!(s.stride % 4 == 0 && s.stride > 0, "{}: stride {}", x.name, s.stride);
+        let need = u64::from(s.stride)
+            .checked_mul(u64::from(x.vertex_count))
+            .with_context(|| format!("{}: vertex data overflows", x.name))?;
+        ensure!(s.data.len >= need, "{}: {} bytes of stream for {need}", x.name, s.data.len);
+        for (i, c) in x.channels.iter().enumerate().take(3) {
+            let Some(c) = c.filter(|c| c.stream == pos.stream) else { continue };
+            if i == 0 || (c.format == 0 && c.dimension >= 3) {
+                ensure!(
+                    c.offset % 4 == 0 && u32::from(c.offset) + 12 <= s.stride,
+                    "{}: channel {i} at {} in a stride of {}",
+                    x.name,
+                    c.offset,
+                    s.stride
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Every bone weight of a skin blob is a number and every used influence names one of the
+    /// renderer's `bones`.
+    fn check_skin_indices(&self, x: &Mesh, bones: usize) -> Result<()> {
+        let Some(sk) = x.skin else { return Ok(()) };
+        for (v, row) in self.blob(sk).as_chunks::<32>().0.iter().enumerate() {
+            for k in 0..4 {
+                let w = f32::from_le_bytes(row[k * 4..k * 4 + 4].try_into().unwrap_or_default());
+                let i =
+                    u32::from_le_bytes(row[16 + k * 4..20 + k * 4].try_into().unwrap_or_default());
+                ensure!(w.is_finite(), "{}: vertex {v} has a weight that isn't a number", x.name);
+                ensure!(
+                    w <= 0.0 || (i as usize) < bones,
+                    "{}: vertex {v} weighs bone {i} of {bones}",
+                    x.name
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         let m = &self.meta;
         for t in &m.textures {
@@ -231,6 +286,7 @@ impl Pack {
                     sk.len,
                     x.vertex_count
                 );
+                Self::check_skinned_streams(x)?;
             }
         }
         for p in &m.programs {
@@ -284,12 +340,17 @@ impl Pack {
         for a in &m.animations {
             a.validate(m.rigs.len(), m.clips.len(), &m.controllers)?;
         }
+        let mut checked_skins = std::collections::HashSet::new();
         for r in &m.renderers {
             ensure_idx(r.mesh, m.meshes.len(), "mesh")?;
             for mat in r.materials.iter().flatten() {
                 ensure_idx(*mat, m.materials.len(), "material")?;
             }
             if let Some(sk) = &r.skin {
+                // The skinning pass indexes the renderer's palette with the skin's bone indices.
+                if checked_skins.insert((r.mesh, sk.bones.len())) {
+                    self.check_skin_indices(&m.meshes[r.mesh as usize], sk.bones.len())?;
+                }
                 ensure_idx(sk.animation, m.animations.len(), "animation")?;
                 let rig = &m.rigs[m.animations[sk.animation as usize].rig as usize];
                 ensure!(
@@ -455,10 +516,26 @@ mod tests {
             clips: vec![0],
             loco: Locomotion::Clips { idle: 0, walk: vec![None, None], transition: 0.1 },
         });
-        let skin = w.blob(&[0u8; 64]).unwrap();
+        // Two vertices of one float3 position each (12 bytes), the first on bone 1, the second
+        // split between both bones.
+        let skin_rows: [([f32; 4], [u32; 4]); 2] =
+            [([1.0, 0.0, 0.0, 0.0], [1, 0, 0, 0]), ([0.5, 0.5, 0.0, 0.0], [0, 1, 0, 0])];
+        let skin_bytes: Vec<u8> = skin_rows
+            .iter()
+            .flat_map(|(w, i)| {
+                w.iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .chain(i.iter().flat_map(|x| x.to_le_bytes()))
+                    .collect::<Vec<u8>>()
+            })
+            .collect();
+        let skin = w.blob(&skin_bytes).unwrap();
+        let stream = w.blob(&[0u8; 24]).unwrap();
         meta.meshes.push(Mesh {
             name: "m".into(),
             vertex_count: 2,
+            channels: vec![Some(Channel { stream: 0, offset: 0, format: 0, dimension: 3 })],
+            streams: vec![VertexStream { data: stream, stride: 12 }],
             skin: Some(skin),
             ..Default::default()
         });
@@ -524,6 +601,18 @@ mod tests {
         }));
         // An animation that isn't there.
         assert!(bad("e4.wrpack", |m| m.renderers[0].skin.as_mut().unwrap().animation = 1));
+        // A skin that weighs a bone the renderer doesn't have (vertex 0 weighs bone 1 of 1).
+        assert!(bad("e8.wrpack", |m| {
+            let sk = m.renderers[0].skin.as_mut().unwrap();
+            sk.bones.truncate(1);
+            sk.bind_poses.truncate(1);
+        }));
+        // Streams the skinning pass can't read: a missing stream, a misaligned or overrunning
+        // position, a stream too short for the vertices.
+        assert!(bad("e9.wrpack", |m| m.meshes[0].channels[0].as_mut().unwrap().stream = 3));
+        assert!(bad("e10.wrpack", |m| m.meshes[0].channels[0].as_mut().unwrap().offset = 2));
+        assert!(bad("e11.wrpack", |m| m.meshes[0].channels[0].as_mut().unwrap().offset = 4));
+        assert!(bad("e12.wrpack", |m| m.meshes[0].streams[0].stride = 16));
         // A skinned renderer on a mesh without skin.
         assert!(bad("e5.wrpack", |m| m.meshes[0].skin = None));
         // A locomotion clip the unit doesn't list.

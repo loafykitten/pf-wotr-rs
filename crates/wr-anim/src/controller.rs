@@ -117,6 +117,15 @@ impl Controller {
             ensure!((*c as usize) < pack_clips, "{}: clip {c} of {pack_clips}", self.name);
         }
         let np = self.params.len() as u32;
+        for p in &self.params {
+            ensure!(
+                p.default.is_finite(),
+                "{}: parameter {} defaults to {}",
+                self.name,
+                p.name,
+                p.default
+            );
+        }
         for l in &self.layers {
             if l.states.is_empty() {
                 continue;
@@ -145,6 +154,11 @@ impl Controller {
             Motion::Blend1D { param, children } => {
                 ensure!((*param as usize) < self.params.len(), "blend parameter {param}");
                 ensure!(!children.is_empty(), "blend tree without children");
+                ensure!(
+                    children.iter().all(|c| c.0.is_finite())
+                        && children.windows(2).all(|w| w[0].0 <= w[1].0),
+                    "blend tree thresholds are not finite and ascending"
+                );
                 for (_, c) in children {
                     self.check_motion(c)?;
                 }
@@ -214,8 +228,11 @@ impl Player {
         s.cycle_param.map_or(s.cycle_offset, |i| self.params[i as usize])
     }
 
+    /// Sets a parameter; a value that isn't a number is ignored.
     pub fn set(&mut self, param: usize, value: f32) {
-        self.params[param] = value;
+        if value.is_finite() {
+            self.params[param] = value;
+        }
     }
 
     #[must_use]
@@ -234,9 +251,16 @@ impl Player {
         l.fade.as_ref().map_or(l.state, |f| f.dest)
     }
 
-    fn test(&self, t: &Transition, time: f32) -> bool {
-        if t.has_exit_time && time < t.exit_time {
-            return false;
+    /// Whether `t` may fire at normalised state time `time`: its exit time has been reached (for a
+    /// looping state, reached again in the current cycle: a transition waiting on a condition fires
+    /// at the next cycle's exit point, not at once) and its conditions hold.
+    fn test(&self, t: &Transition, time: f32, looping: bool) -> bool {
+        if t.has_exit_time {
+            let reached = time >= t.exit_time
+                && (!looping || time.rem_euclid(1.0) >= t.exit_time.rem_euclid(1.0));
+            if !reached {
+                return false;
+            }
         }
         if t.conditions.is_empty() && !t.has_exit_time {
             return false;
@@ -268,7 +292,7 @@ impl Player {
             }
             let ls = self.layers[li].clone();
             let cur = &layer.states[ls.state as usize];
-            let len = self.motion_length(clips, &cur.motion, self.motion_param_value(&cur.motion));
+            let len = self.motion_length(clips, &cur.motion);
             let speed = self.speed(cur);
             let mut time = ls.time;
             if len > 0.0 {
@@ -279,8 +303,7 @@ impl Player {
             if let Some(f) = &mut fade {
                 f.elapsed += dt;
                 let dst = &layer.states[f.dest as usize];
-                let dlen =
-                    self.motion_length(clips, &dst.motion, self.motion_param_value(&dst.motion));
+                let dlen = self.motion_length(clips, &dst.motion);
                 if dlen > 0.0 {
                     f.dest_time += dt * self.speed(dst) / dlen;
                 }
@@ -292,23 +315,15 @@ impl Player {
             }
             if fade.is_none() {
                 let cur = &layer.states[state as usize];
-                let hit =
-                    layer.any_state.iter().chain(&cur.transitions).find(|t| {
-                        (t.dest != state || t.can_transition_to_self) && self.test(t, time)
-                    });
+                let hit = layer.any_state.iter().chain(&cur.transitions).find(|t| {
+                    (t.dest != state || t.can_transition_to_self) && self.test(t, time, cur.looping)
+                });
                 if let Some(t) = hit {
-                    let dst = &layer.states[t.dest as usize];
                     let duration = if t.fixed_duration {
                         t.duration
                     } else {
-                        t.duration
-                            * self.motion_length(
-                                clips,
-                                &cur.motion,
-                                self.motion_param_value(&cur.motion),
-                            )
+                        t.duration * self.motion_length(clips, &cur.motion)
                     };
-                    let _ = dst;
                     fade = Some(Fade { dest: t.dest, dest_time: t.offset, elapsed: 0.0, duration });
                     if duration <= 0.0 {
                         state = t.dest;
@@ -324,21 +339,15 @@ impl Player {
         }
     }
 
-    fn motion_param_value(&self, m: &Motion) -> f32 {
-        match m {
-            Motion::Blend1D { param, .. } => self.params[*param as usize],
-            Motion::Clip(_) => 0.0,
-        }
-    }
-
-    /// The motion's length in seconds at blend value `v`.
-    fn motion_length(&self, clips: &[BoundClip<'_>], m: &Motion, v: f32) -> f32 {
+    /// The motion's length in seconds: a clip's, or a blend tree's at its parameter's value (each
+    /// tree reads its own parameter).
+    fn motion_length(&self, clips: &[BoundClip<'_>], m: &Motion) -> f32 {
         match m {
             Motion::Clip(i) => clips[*i as usize].clip.length(),
-            Motion::Blend1D { children, .. } => {
-                let (a, b, w) = blend_pair(children, v);
-                let la = self.motion_length(clips, &children[a].1, v);
-                let lb = self.motion_length(clips, &children[b].1, v);
+            Motion::Blend1D { param, children } => {
+                let (a, b, w) = blend_pair(children, self.params[*param as usize]);
+                let la = self.motion_length(clips, &children[a].1);
+                let lb = self.motion_length(clips, &children[b].1);
                 la + (lb - la) * w
             }
         }
@@ -420,13 +429,14 @@ impl Player {
 /// The two children a 1D blend value falls between and the weight of the second.
 fn blend_pair(children: &[(f32, Motion)], v: f32) -> (usize, usize, f32) {
     let n = children.len();
-    if v <= children[0].0 {
+    // A parameter that isn't a number selects the first child.
+    if !v.is_finite() || v <= children[0].0 {
         return (0, 0, 0.0);
     }
     if v >= children[n - 1].0 {
         return (n - 1, n - 1, 0.0);
     }
-    let hi = children.iter().position(|c| c.0 >= v).unwrap_or(n - 1);
+    let hi = children.iter().position(|c| c.0 >= v).unwrap_or(n - 1).max(1);
     let lo = hi - 1;
     let span = children[hi].0 - children[lo].0;
     (lo, hi, if span > 0.0 { (v - children[lo].0) / span } else { 0.0 })
@@ -580,6 +590,78 @@ mod tests {
             "{}",
             p.layers[0].time
         );
+    }
+
+    #[test]
+    fn a_looping_states_exit_time_waits_for_the_next_cycle() {
+        let (mut c, r) = (controller(), rig());
+        // Idle -> Walk only from 75% of the idle clip on, once WalkSpeed is up.
+        c.layers[0].states[0].transitions[0].has_exit_time = true;
+        c.layers[0].states[0].transitions[0].exit_time = 0.75;
+        let clips = [clip(1.0, 2.0), clip(3.0, 1.0)];
+        let binders: Vec<Binder> = clips.iter().map(|k| Binder::new(k, &r)).collect();
+        let bound: Vec<BoundClip<'_>> =
+            clips.iter().zip(&binders).map(|(k, b)| BoundClip { clip: k, binder: b }).collect();
+        let mut p = Player::new(&c);
+        // 2.2 s into the 2 s idle: cycle position 0.1, before the exit point.
+        p.update(&c, &bound, 2.2);
+        p.set(0, 1.0);
+        p.update(&c, &bound, 0.0);
+        assert_eq!(p.state(0), 0);
+        // At 1.75 cycles (3.5 s) the exit point comes round again.
+        p.update(&c, &bound, 1.3);
+        assert_eq!(p.state(0), 1);
+    }
+
+    #[test]
+    fn nested_blend_trees_use_their_own_parameter_for_their_length() {
+        let (mut c, r) = (controller(), rig());
+        c.params.push(Param { id: 2, name: "Inner".into(), kind: ParamKind::Float, default: 1.0 });
+        // Outer tree on param 0 over [clip 0 (2 s), inner tree on param 1 over clips 0 and 1].
+        c.layers[0].states[0].motion = Motion::Blend1D {
+            param: 0,
+            children: vec![
+                (0.0, Motion::Clip(0)),
+                (
+                    1.0,
+                    Motion::Blend1D {
+                        param: 1,
+                        children: vec![(0.0, Motion::Clip(0)), (1.0, Motion::Clip(1))],
+                    },
+                ),
+            ],
+        };
+        c.validate(2).unwrap();
+        let clips = [clip(1.0, 2.0), clip(3.0, 1.0)];
+        let binders: Vec<Binder> = clips.iter().map(|k| Binder::new(k, &r)).collect();
+        let bound: Vec<BoundClip<'_>> =
+            clips.iter().zip(&binders).map(|(k, b)| BoundClip { clip: k, binder: b }).collect();
+        let mut p = Player::new(&c);
+        p.set(0, 1.0);
+        // Outer value 1 selects the inner tree; its own parameter (1) selects the 1 s clip, so the
+        // state's clock runs one cycle a second, not half a cycle as the outer value would give.
+        p.set(1, 1.0);
+        let len = p.motion_length(&bound, &c.layers[0].states[0].motion);
+        assert!((len - 1.0).abs() < 1e-6, "{len}");
+    }
+
+    #[test]
+    fn non_finite_parameters_and_bad_thresholds_are_harmless() {
+        let kids = vec![(0.0, Motion::Clip(0))];
+        assert_eq!(blend_pair(&kids, f32::NAN), (0, 0, 0.0));
+        assert_eq!(blend_pair(&kids, 5.0), (0, 0, 0.0));
+        let mut c = controller();
+        let mut p = Player::new(&c);
+        p.set(0, f32::NAN);
+        assert_eq!(p.get(0), 0.0);
+        c.params[0].default = f32::NAN;
+        assert!(c.validate(2).is_err());
+        let mut c = controller();
+        c.layers[0].states[0].motion = Motion::Blend1D {
+            param: 0,
+            children: vec![(1.0, Motion::Clip(0)), (0.0, Motion::Clip(1))],
+        };
+        assert!(c.validate(2).is_err());
     }
 
     #[test]

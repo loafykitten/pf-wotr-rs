@@ -147,7 +147,10 @@ pub struct Skinning {
     palette_used: u32,
     units: Vec<UnitRt>,
     draws: Vec<SkinDraw>,
-    time: f32,
+    /// The animation clock in 1/60 s ticks.
+    tick: u64,
+    max_groups: u32,
+    max_binding: u64,
     walk: Option<Walk>,
     scratch: Vec<f32>,
 }
@@ -157,7 +160,7 @@ impl std::fmt::Debug for Skinning {
         f.debug_struct("Skinning")
             .field("units", &self.units.len())
             .field("draws", &self.draws.len())
-            .field("time", &self.time)
+            .field("tick", &self.tick)
             .finish_non_exhaustive()
     }
 }
@@ -231,6 +234,7 @@ impl Skinning {
         if m.animations.is_empty() {
             return Ok(None);
         }
+        let limits = device.limits();
         let capacity: usize = m
             .renderers
             .iter()
@@ -238,9 +242,16 @@ impl Skinning {
             .map(|s| s.bones.len())
             .sum::<usize>()
             .max(1);
+        let palette_bytes = u64::try_from(capacity)?
+            .checked_mul(64)
+            .filter(|b| *b <= limits.max_storage_buffer_binding_size);
+        let Some(palette_bytes) = palette_bytes else {
+            anyhow::bail!("{capacity} skin matrices don't fit a storage binding");
+        };
+        let palette_capacity = u32::try_from(capacity)?;
         let palette = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("skin palette"),
-            size: (capacity * 64) as u64,
+            size: palette_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -262,11 +273,13 @@ impl Skinning {
             pipeline,
             layout,
             palette,
-            palette_capacity: u32::try_from(capacity)?,
+            palette_capacity,
             palette_used: 0,
             units,
             draws: Vec::new(),
-            time: 0.0,
+            tick: 0,
+            max_groups: limits.max_compute_workgroups_per_dimension,
+            max_binding: limits.max_storage_buffer_binding_size,
             walk: None,
             scratch: Vec::new(),
         }))
@@ -296,13 +309,29 @@ impl Skinning {
         let mesh = &pack.meta.meshes[r.mesh as usize];
         let g = &gpu.meshes[r.mesh as usize];
         let Some(skin_buf) = &g.skin else { return Ok(None) };
-        let pos = mesh.channels.first().copied().flatten();
-        let Some(pos) = pos.filter(|c| c.format == 0 && c.dimension >= 3) else {
+        let Some(pos) =
+            mesh.channels.first().copied().flatten().filter(|c| c.format == 0 && c.dimension >= 3)
+        else {
             anyhow::bail!("{}: positions are not float32x3", mesh.name);
         };
         let stream = usize::from(pos.stream);
-        let stride = mesh.streams[stream].stride;
+        let (Some(src), Some(vs)) = (g.streams.get(stream), mesh.streams.get(stream)) else {
+            anyhow::bail!("{}: position stream {stream} missing", mesh.name);
+        };
+        let stride = vs.stride;
         ensure!(stride.is_multiple_of(4), "{}: stream stride {stride}", mesh.name);
+        ensure!(
+            src.size() <= self.max_binding && skin_buf.size() <= self.max_binding,
+            "{}: stream of {} bytes exceeds a storage binding",
+            mesh.name,
+            src.size()
+        );
+        ensure!(
+            mesh.vertex_count.div_ceil(64) <= self.max_groups,
+            "{}: {} vertices need more workgroups than the device dispatches",
+            mesh.name,
+            mesh.vertex_count
+        );
         let word = |c: Option<wr_assets::Channel>, dim: u8| -> Result<u32> {
             match c {
                 Some(c)
@@ -318,11 +347,13 @@ impl Skinning {
         let tan = word(mesh.channels.get(2).copied().flatten(), 3)?;
         let base = self.palette_used;
         let bones = u32::try_from(sk.bones.len())?;
-        ensure!(base + bones <= self.palette_capacity, "palette overflow");
-        self.palette_used += bones;
+        ensure!(
+            base.checked_add(bones).is_some_and(|e| e <= self.palette_capacity),
+            "palette overflow"
+        );
         let out = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("{} (skinned)", r.path)),
-            size: g.streams[stream].size(),
+            size: src.size(),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -338,15 +369,15 @@ impl Skinning {
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: g.streams[stream].as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 1, resource: src.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: skin_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.palette.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
             ],
         });
+        // Nothing below can fail: the palette slice is taken only now, so draws and palette stay in
+        // the same order.
+        self.palette_used += bones;
         let unit = sk.animation as usize;
         self.units[unit].placement = mat(&r.matrix);
         self.draws.push(SkinDraw {
@@ -372,16 +403,17 @@ impl Skinning {
     }
 
     fn walk_speed(&self, unit: &UnitRt) -> f32 {
+        let time = self.tick as f32 * STEP;
         match &self.walk {
-            Some(w) if w.unit == unit.id && self.time >= w.start && unit.walked < w.distance => {
-                w.speed
-            }
+            Some(w) if w.unit == unit.id && time >= w.start && unit.walked < w.distance => w.speed,
             _ => 0.0,
         }
     }
 
-    /// Advances the animation to time `t` (in steps of [`STEP`]), poses every unit and uploads the
-    /// skin matrices. Returns the world displacement of each caster box that moved.
+    /// Advances the animation to time `t`, snapped to the nearest tick of the 60 Hz grid the game
+    /// steps on (so a capture rate that is a multiple of 1/60 s lands on ticks exactly, and the
+    /// simulation doesn't depend on it); the clock never goes back. Then poses every unit and
+    /// uploads the skin matrices. Returns the world bounds of each caster box that moved.
     pub fn advance_to(
         &mut self,
         queue: &wgpu::Queue,
@@ -389,20 +421,20 @@ impl Skinning {
         t: f32,
     ) -> Vec<(usize, Vec3, Vec3)> {
         let m = &pack.meta;
-        while self.time + 1e-6 < t {
-            let dt = (t - self.time).min(STEP);
+        let target = if t.is_finite() { (t.clamp(0.0, 1.0e6) * 60.0).round() as u64 } else { 0 };
+        while self.tick < target {
             for i in 0..self.units.len() {
                 let speed = self.walk_speed(&self.units[i]);
                 let remaining =
                     self.walk.as_ref().map_or(0.0, |w| w.distance - self.units[i].walked);
                 let u = &mut self.units[i];
                 u.player.set_speed(speed);
-                u.player.update(&m.clips, dt);
+                u.player.update(&m.clips, STEP);
                 if speed > 0.0 {
-                    u.walked += (speed * dt).min(remaining.max(0.0));
+                    u.walked += (speed * STEP).min(remaining.max(0.0));
                 }
             }
-            self.time += dt;
+            self.tick += 1;
         }
         // Poses.
         for u in &mut self.units {
@@ -421,9 +453,7 @@ impl Skinning {
             let world = forward * u.walked;
             let local = u.placement.inverse().transform_vector3(world);
             let pre = Mat4::from_translation(local).to_cols_array();
-            let first = data.len();
             wr_anim::palette(&u.worlds, &d.bones, &d.bind, &pre, &mut data);
-            debug_assert_eq!(data.len() - first, d.bones.len() * 16);
             if u.walked > 0.0 {
                 for c in &d.casters {
                     moved.push((c.index, c.lo + world, c.hi + world));

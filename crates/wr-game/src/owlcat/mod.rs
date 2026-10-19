@@ -527,6 +527,8 @@ impl Renderer {
         r.stats.skipped.extend(r.gpu.skipped_textures.clone());
         r.set_static_globals();
         r.build(device, queue)?;
+        // The units' first pose, so every mode (not just `--mode anim`) draws them posed.
+        r.animate(queue, 0.0);
         Ok(r)
     }
 
