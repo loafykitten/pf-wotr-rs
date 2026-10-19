@@ -855,6 +855,182 @@ view state flipped, `view#K:flip` or `view#last:flip`, which swaps that recorded
   have the replay's window open compare its start state with the recording's (at least the units' timers) and
   invalidate on a difference, or pin the frames between the reload and the window.
 
+## Records inside root rule spans (2026-10-18, stream audit)
+
+[C] A root rule (`Rulebook.Trigger` outside any rule) is replayed as a unit: `Driver::root` runs it and the main
+loop moves on to the record after its `rule_end`, so every record in between is skipped unless something takes it.
+The rule's steps, handlers, results and environment are read by the code that fires it; its draws and mutations are
+compared in the T0 streams (`oracle_stream` against `sim_stream_without`). What was open was the observation
+records WrathOracle writes inside a span (`k` = "obs"): Sol's review of the vision range found `clog_q`, `imp_s`,
+`mem_q`, `eng_prov` and `proj_launch` in depth-0 spans, consumed explicitly in the commands' spans and nowhere said
+to be in the others.
+
+**The survey** [M] (a counting pass in the driver, not kept: for each root its kind, then its records by `k` and
+`ev`; 111 runs of the sweep's 24 captures, 30,322 records in the spans, every one counted once). The root's kind is
+how `root_inner` handles it: *command* (pulled by `attack_rule`, checked record by record by `span_ok`), *spell*
+(`spell_root`), *phase* (driven by its class: `RuleInitiativeRoll`, its tie-break `RuleRollD20`,
+`RuleAttackWithWeaponResolve`, `RuleCanApplyBuff`, `RuleAttackWithWeapon`), *placed* (computed at its call site),
+*echoed*, *skipped*:
+
+| family (inside a span) | command | spell | phase | placed | echoed | skipped | consumed by |
+|---|---|---|---|---|---|---|---|
+| `clog_q` | 11,969 | 15 | 2,313 (initiative 1,779, resolve 312, buff 222) | 0 | 0 | 0 | `game_log::check::compare` at the run's end (all of them, by place in the recorded queue); `span_ok` also checks the command's |
+| `imp_s` | 2,317 | 0 | 304 (resolve) | 0 | 0 | 0 | `imp_span` after the sim fires the rule (every root) |
+| `mem_q` | 2,286 | 0 | 0 | 0 | 0 | 0 | `imp_span`, matched with the sim's `AddToMemory` calls |
+| `eng_prov` | 190 | 0 | 0 | 0 | 0 | 0 | commands: `attack_span` queues it for the next engagement tick; others: nothing (before this stream) |
+| `proj_launch` | 124 | 0 | 0 | 0 | 0 | 0 | commands: `attack_rule` against the sim's launches; others: nothing (before this stream) |
+| `draw` | 2,629 | 3 | 2,228 (initiative 986, tie-break d20 986, resolve 256) | 0 | 0 | 0 | the T0 stream |
+| `mut` (`damage`, `rule_bonus`, `fact_attach`) | 533 + 4,749 | 0 | 152 + 509 | 0 | 0 | 0 | the T0 stream |
+| `invalid` (the game's replay left its recording) | 0 | 0 | 0 | 1 | 0 | 0 | nothing; accepted (see below) |
+| `env` (not counted in the survey) | | | | | | | read by the code that fires the root, or reported (see below) |
+
+No run has an echoed, placed or skipped root holding an observation: the echoed set is empty on every capture, and a placed root holds none by construction
+(`origin_span_is_inert`). The one `invalid` record sits in a root whose call site isn't placed. Those three kinds
+already report (`presentation root rules echoed`, `a root … whose call site isn't placed`, `root rule …`), so a
+record in their spans never made a run valid.
+
+[C] What the game does at each point, so what the sim must do (the principle: a record is checked against what the
+sim computed, or taken as an input and counted, or reported; none is skipped):
+- `clog_q`: `GameLogController`'s did hook queues the rule's event after its subscribers. The sim queues the same
+  event whenever it fires the rule, and `compare` matches every recorded `clog_q` with the sim's queue in order
+  (type, frame, rule, class and units, enabled, override, its place right after the rule's `did`). A span the sim
+  doesn't fire leaves the sim's queue short, which `compare` reports, so no change to the check; only a recording
+  without `combat_log` skipped it silently inside spans (the outside ones are reported by `clog_record`).
+- `imp_s`, `mem_q`: handlers of the rule's did event, the same in every root. `imp_span` (after the sim fires the rule,
+  whatever the root's kind) matches them with the sim's operations and reports them without the impatience observer.
+- `eng_prov`: `UnitCombatEngagementController.OnEventDidTrigger` for an attack roll or an attack with a weapon. The
+  sim's rule handler makes the same call when it fires such a rule (a phase `RuleAttackWithWeapon`). **Gap:** in any
+  other root nothing took it. Now every `eng_prov` in a non-command span is placed as `span_ok` places the commands'
+  (`spans::provoke_placed`: the root's frame, inside the engagement controller's did handler of the rule its caller
+  names, of that rule's initiator, once per rule, while that rule is the innermost open one and between `trig_end`
+  and `did`: `Open` follows the rules' stages as `span_ok` does), then queued like theirs (`Driver::eng_prov`) and matched with the
+  sim's provoke calls at the next engagement tick, so a root the sim doesn't fire, or fires without the provoke,
+  reports "the attacks of opportunity provoked differ from the sim's queue"; a record that isn't such a provoke is
+  reported at once.
+- `proj_launch`: `LaunchProjectile` in `RuleAttackWithWeapon.OnTrigger`. **Gap:** a phase-driven attack (one the
+  commands didn't pull) was never checked. The command path's check is now `Driver::proj_launches`, shared with
+  `drive_root`'s attack. Each launch is placed as `span_ok` places a command's (`commands::launch_placed`: the root's
+  frame, between `trig` and `trig_end`, outside any handler, right after its attack roll's end, exactly its fields,
+  its rule, roll and target) and then equals the sim's. A launch inside any other span, or with no `proj_arrival`
+  observer, is reported.
+- `env`: read by the code that fires the root: the attack roll's (`RuleAttackWithWeapon`'s attack), the resolve's
+  and the flat-footed check's, each the first record for its rule and units (`find_env`; `Driver::env_reads`). Any
+  other `env` in a span (a second one, one of a root that reads none) is reported, and so is one out of its place: an
+  `env` is written by the rule it names, in its `OnTrigger`, outside its handlers (`Open::env_placed`, through `Life`'s
+  stack). A resolve nested in a phase-driven attack (a weapon without a projectile resolves at once; `poc5-tb-55` and
+  the older captures without the commands' records) has its own `env`, placed in that resolve's computation (so one
+  in an attack without a nested resolve, or moved outside it, is reported; the sim fired the nested resolve if the T0
+  streams agree on its rule records). Its positions must equal the roll's, both recorded
+  (`positions_agree`; a null coordinate is no position): its damage reads the distance then
+  (`DistanceDamageBonus`), and the sim reuses the roll's positions, so the equality is the check that makes the reuse right.
+- Handlers (T0 drops handler records, so nothing else compares them). The recording's handlers that the sim's bus
+  dispatches, a fact's component and an `ActivatableAbility`, are compared **one to one, in order, with the sim's
+  deliveries** over the whole window (`spans::handlers_finish`): `Rulebook::handler_log` is kept by a replay and
+  filled in `rulebook/bus.rs` as `RulebookEventBus` delivers (the rule's type chain, which is the contravariant
+  matching, and the real subscription lists, which is the subscribed state): phase, rule, the component's class and
+  name (the full class name, so a namespace counts), the fact's id and blueprint (both the handler's and the fact's), the
+  owner typed (a unit, or an item with its blueprint), and **the rule instance**: its class, its initiator and its
+  ordinal among the window's rules of that class and initiator (the sim counts the rules it triggers, the recording
+  its `rule` records, the same way; the rules line up on every valid run, as the T0 streams do), so a handler moved
+  into another roll of the same class passes no more than into another unit's. [M] On the 111 runs 53,294 recorded handlers equal the sim's
+  deliveries, in order, with no difference (the 74 deliveries the load made before the window aren't in the log:
+  it is turned on when the driver starts). No snapshot of the sim's facts is consulted, so there is no stale-state
+  rejection (a buff attached by an earlier handler) or acceptance (a component detached earlier), and an attached
+  but turned-off component is exact. A singleton (no fact: the sim has no controllers) is a class the game's code
+  has handle the rule: `span_ok`'s `handler_identity_ok` with a table **generated from the game's code** by
+  `scripts/gen-handler-table.py` (`handler_table.rs`: class declarations' names and bases in `decompiled/`):
+  every non-component class implementing `IGlobalRulebookHandler<T>`, and every fact or part class
+  (`ActivatableAbility`, `UnitPartFavoredEnemy`) implementing `IInitiatorRulebookHandler<T>` or
+  `ITargetRulebookHandler<T>`, nested classes included (`CheatsCommon+CheatedDice`), for each rule that is T or
+  derives from T (the interfaces are contravariant). 31 classes, 77 pairs over 62 rules; `span_ok` keeps counting
+  `GLOBAL_HANDLERS` and gains nothing (a unit test asserts its pairs are in the generated table). Rerun the script
+  when the game's code changes. A component record's shape is checked world-free (`$<type>$<name>` of its class). An echoed root's handlers (old recordings without call sites) are left out: not fired, and reported as echoed.
+- Draws: `draw_ok` for every draw (a presentation draw's payload and site too: a site of the simulation's is not a
+  presentation draw's), the context (a simulation draw's rule class, stable unit ids and ordinal) and, in a replay's
+  trace, `forced` on simulation draws only: `span_ok`'s checks.
+- `env` fields: an accepted `env` is typed as `span_ok` types it (`env_record_ok`: the rule's units, every field of
+  its kind, `EngagedBy` the sim's units in order, a flat-footed check's only at the root), and a position is three
+  finite coordinates (`pos` no longer truncates extras).
+- Count: an attack roll and a resolve close with exactly one `env` (`span_ok`'s count; `Open::envs_ok`), including a
+  resolve nested in a phase-driven attack: one removed would leave the sim reusing the roll's positions unchecked.
+  A ranged attack's resolve that comes later is its own root and has its own.
+- Tutorial facts: `oracle_stream` drops the tutorial's `fact_attach`/`fact_detach` from the compared stream, and their
+  unique-id check (`record_entry`) never sees a record a root consumes. `spans::projected` mirrors that filter
+  (`stream_drops_fact`, shared), so a Tutorial mutation inside a span is reported. [M] None of the 111 runs (nor
+  `-137` to `-140`) has one inside a span (they are all outside: 123 attaches).
+- Attribution, as `span_ok` does it: a draw and a mutation the projection keeps are the innermost rule's, in the open
+  handler (`rule` and `h`, `Life::attributed`); a simulation draw is in the rule's `OnTrigger` or one of its handlers,
+  damage after `did` outside its handlers, a bonus in `OnTrigger` or a handler. A root's own stack fields are a root's
+  (`spans::root_ok`: depth 0, parent 0, handler 0, a context, a reason at the push, an id; a cast's rules carry an
+  ability as their reason and may be in another event's context, so those aren't required to be null and 0).
+- `result`, `bonuses`: the oracle never writes them (the projection derives them from `rule` and `rule_end`, and a
+  raw one in a trace is ignored as input), so a stray one is reported.
+- `invalid`: the oracle's own statement that the game's replay left its recording (`Sched.Invalidate`). The sim is
+  checked against the game's actual trace, so it is not the sim's matter: accepted everywhere, inside spans too
+  (counted as `oracle_invalid`): in a phase-driven root's span (`span_records`), in a command's (`attack_span`, which
+  also takes the attack counts' roots that never enter `Driver::root`), in a presentation root's (`origin_span_is_inert`
+  takes it, so the root keeps its call site), and in a command's (`span_ok`). The runs that hold one (`-134`
+  tb-lizard replay-2, `-135` replay-2-perturbed and replay-3-perturbed) are judged by what the sim computes.
+  **`-135` replay-3-perturbed is valid now** (it was invalid only because its `invalid` note, written inside the root
+  flat-footed check of tick 442, made the planner drop that root's call site, which left its `env` unread). That run
+  is the perturbed replay of `poc5-tb9`: the game's replay flipped a camera scroll result, at tick 442 made a
+  `RuleCheckTargetFlatFooted` where the recording had a `RuleCalculateAttacksCount`, wrote the note, and went on to
+  tick 443 (111,442 records). The trace is the game's actual run, and the sim reproduces it: 20 roots driven, T0
+  equal, no report. "Valid" says the sim agrees with the game's trace; whether the game's replay stayed on its
+  recording is the oracle's own verdict, the note.
+- `mut`: compared only if `project::project_records` keeps it: `damage`, `xp`, `fact_attach`, `fact_detach` and a
+  `rule_bonus` to a tracked rule (`target_rule` > 0); it drops every other `what` (`stat_value`, `stat_mod_add`,
+  `stat_mod_remove`, `rule_temp_mod`, ...), and no other checker of the replay reads those kinds. [M] Surveyed on
+  the sweep's 111 runs and `-137` to `-140`: inside root spans there are only `damage` (685), `fact_attach` (509)
+  and `rule_bonus` (4,749, every one tracked); the unprojected kinds are all outside spans (`stat_value` 2,406,
+  `stat_mod_add` 2,370, `stat_mod_remove` 6 in the sweep's captures). So a span now reports any other `mut`
+  (`spans::projected`). **Open, not the spans':** the mutations outside spans that nothing compares (the sim doesn't emit
+  them, T0 doesn't project them); the fix is for the sim to emit them and T0 to compare them, a piece of work of its own.
+- Structure: one state machine, `replay/life.rs` (`Life`), shared by `span_ok` (the commands' attack spans, which check
+  every field besides) and the audit of the other root spans (`spans::Open`), so the two cannot drift. A nested rule is
+  pushed by the innermost rule in its `OnTrigger` or one of its handlers (its `parent`, `depth`, open `handler` and
+  `context_parent`, its id above the last rule's). The steps `about`, `trig`, `trig_end`, `did`, `rule_end` come in
+  turn from the innermost rule and not while its own handler is open. A handler of the innermost rule opens in the
+  phase its stage allows (`mod_before` before `about`, `about` after it, `mod_after` then `did` after `trig_end`, no
+  `mod_after` once a `did` handler has opened), with an id above the last handler's, and closes with its id and rule
+  as the innermost. A record out of its place is reported. The extraction changed nothing in `span_ok`'s behaviour
+  (every check moved with its inputs; the sweep and the suites agree).
+- `rule_bonus`: the projection buffers a bonus to a tracked rule and emits it at that rule's `rule_end`, so the audit
+  accepts one only if its target is a rule open on the stack at the mutation; a target never allocated, or already
+  closed, is dropped by T0 and reported here.
+- Frame: a root rule fires within one frame, so every record of its span (its `rule_end` too) carries the root's `t`;
+  one that doesn't is reported. It holds on all 111 runs (no exception).
+- Any other observation, or a record of another kind (`cmd`, `tb`, `time`, `input`) in a span: reported. The replay
+  doesn't take a record it can't name.
+
+**Counters** (`Outcome::spans`, one line of `wr-combat replay`: "inside root rules' spans (the commands' own apart)"):
+`clog_q`, `imp_s`, `mem_q`, `eng_prov`, `proj_launch` found in non-command spans, each checked as above,
+`oracle_invalid` and `reported`. Totals of the sweep [M]: `clog_q` 2,328, `imp_s` 304, `mem_q` 0, `eng_prov` 0, `proj_launch` 0, `oracle_invalid` 1, reported 0; invalid: -122 `tb-nearest` (record and both replays), every other run valid
+(`-135` replay-3-perturbed turned valid, above).
+
+**Tests** (`poc5_spells.rs`, `records_inside_driven_root_spans_are_checked_or_reported`, `poc5-tb-123/tb-chain`; the
+unit tests `a_root_attacks_launch_is_placed_like_a_commands`, `a_root_spans_provoke_is_placed_like_a_commands` and
+`a_root_spans_structure_follows_span_oks`, `a_root_spans_records_are_attributed_like_span_oks` and
+`a_nested_resolves_positions_must_agree_with_the_rolls` and `a_nested_resolve_needs_its_one_environment` and `the_singleton_handler_table_agrees_with_the_commands` and
+`an_environment_record_is_typed_and_a_position_has_three_coordinates` and
+`a_recorded_handler_belongs_to_its_rule_instance` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
+the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
+`combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
+`proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
+the initiative roll's span, a root's `rule_end` of another frame, a `stat_value` mutation, a `did` before
+`trig_end`, an `h_end` of another id, a `mod_after` handler after a `did` one, a `rule_bonus` to a rule never
+allocated and one to a rule already closed, a draw and a damage mutation of no rule the span has, a draw in no open
+handler, an initiative root with its `parent` or `handler` changed, and a tutorial fact attached, a handler renamed to a class that doesn't exist, a presentation draw at a
+simulation site, and a component handler lost, with another fact's id, two distinct deliveries of one rule's phase exchanged (the multiset kept,
+asserted), a fact blueprint that isn't the handler's, an owner of another type, and a component class of another
+namespace; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
+accepted and counted (the run stays valid, `oracle_invalid` equal to the notes added). The phase-driven placing of a
+launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
+and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is
+tested on spans fed record by record, since no capture has a phase-driven attack with
+either. On the code of `04bc016` the `result`, `bonuses` and `env` cases are not reported (and a valid `eng_prov` copy only
+by the provoke queue's mismatch at the next engagement tick, without being placed).
+
 ## Status at the previous wrap-up (Astra review of b26f3a1..ba96d22; superseded by the section above)
 
 **Everything above describes the earlier mod (`c7117fd` to `ba96d22`), whose recordings do not observe the unmodified game

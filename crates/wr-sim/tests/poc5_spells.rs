@@ -365,6 +365,472 @@ fn wrong_projectile_launches_are_reported() {
     assert!(missed.is_empty(), "{missed:#?}");
 }
 
+/// Observation records inside a driven root rule's span are checked or reported, never skipped
+/// (`docs/poc5/tb-replay.md`, "Records inside root rule spans"): a combat log event of an
+/// initiative roll damaged or lost, and a record of each family (or of none the replay knows)
+/// added to the span of a root the sim fires without it.
+#[test]
+#[ignore = "needs the game's packs, cache/sim/log-strings.json, Manual_18 and the poc5-tb-123 capture"]
+fn records_inside_driven_root_spans_are_checked_or_reported() {
+    let Some(dir) = fixture_in(CHAIN_REVEALED.0, CHAIN_REVEALED.1) else {
+        eprintln!("{}/{} not present: skipped", CHAIN_REVEALED.0, CHAIN_REVEALED.1);
+        return;
+    };
+    /// The first root `RuleInitiativeRoll` (driven by its phase): its record's index.
+    fn initiative(recs: &[V]) -> usize {
+        recs.iter()
+            .position(|r| {
+                r["k"] == "rule"
+                    && r["depth"] == 0
+                    && r["class"].as_str().is_some_and(|c| c.ends_with("RuleInitiativeRoll"))
+            })
+            .expect("an initiative roll")
+    }
+    /// The first record of kind `k` inside a phase-driven root's span (an initiative roll's or a
+    /// resolve's): its index.
+    fn handled(recs: &[V], k: &str) -> usize {
+        let mut open = false;
+        for (i, r) in recs.iter().enumerate() {
+            if r["k"] == "rule" && r["depth"] == 0 {
+                open = r["class"].as_str().is_some_and(|c| {
+                    c.ends_with("RuleInitiativeRoll") || c.ends_with("RuleAttackWithWeaponResolve")
+                });
+            } else if open && r["k"] == k {
+                return i;
+            }
+        }
+        panic!("no {k} in a phase-driven root")
+    }
+    /// The first record satisfying `f` inside a depth-0 root of the class (`suffix`) that has one.
+    fn in_span(recs: &[V], suffix: &str, f: impl Fn(&V) -> bool) -> usize {
+        let mut open = false;
+        for (i, r) in recs.iter().enumerate() {
+            if r["k"] == "rule" && r["depth"] == 0 {
+                open = r["class"].as_str().is_some_and(|c| c.ends_with(suffix));
+            } else if open && f(r) {
+                return i;
+            }
+        }
+        panic!("no such record in a {suffix} root")
+    }
+    /// The first `clog_q` of that root (its rule event).
+    fn event(recs: &[V]) -> usize {
+        let root = initiative(recs);
+        let id = recs[root]["id"].clone();
+        recs.iter()
+            .position(|r| r["ev"] == "clog_q" && r["rule"] == id)
+            .expect("the initiative's event")
+    }
+    /// A copy of the first record of observation `ev` (it is in a command's span), added right
+    /// after the initiative root's record, in its frame.
+    fn add(recs: &mut Vec<V>, ev: &str) {
+        let mut x =
+            recs.iter().find(|r| r["k"] == "obs" && r["ev"] == ev).expect("a record").clone();
+        let root = initiative(recs);
+        x["t"] = recs[root]["t"].clone();
+        recs.insert(root + 1, x);
+        renumber(recs);
+    }
+    /// The events after id `from` renumbered by `delta` in every record that names one (the events,
+    /// the ticks' queues, the messages' sources), the numbering staying valid: an event removed
+    /// (`delta` -1) leaves no gap, one added (+1) no duplicate.
+    fn shift_ids(recs: &mut [V], from: i64, delta: i64) {
+        let shift = |v: &mut V| {
+            if let Some(i) = v.as_i64().filter(|i| *i > from) {
+                *v = json!(i + delta);
+            }
+        };
+        for r in recs.iter_mut() {
+            match r["ev"].as_str() {
+                Some("clog_q") => shift(&mut r["id"]),
+                Some("clog_msg") => shift(&mut r["src"]),
+                Some("clog_tick") => {
+                    if let Some(q) = r["q"].as_array_mut() {
+                        for e in q {
+                            shift(&mut e[0]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let cases: [(&str, Change); 36] = [
+        // The initiative's rule event, queued by the combat log's did hook: compared with the
+        // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
+        ("events queued, the sim queued", |recs| {
+            let at = event(recs);
+            let id = recs[at]["id"].as_i64().expect("an id");
+            // (A tick's queue holding it loses the entry.)
+            for r in recs.iter_mut().filter(|r| r["ev"] == "clog_tick") {
+                if let Some(q) = r["q"].as_array_mut() {
+                    q.retain(|e| e[0].as_i64() != Some(id));
+                }
+            }
+            recs.remove(at);
+            shift_ids(recs, id, -1);
+            renumber(recs);
+        }),
+        ("combat log: queued event #", |recs| {
+            let at = event(recs);
+            recs[at]["rule"] = json!(recs[at]["rule"].as_i64().unwrap_or(0) + 1);
+        }),
+        ("combat log: queued event #", |recs| {
+            let at = event(recs);
+            recs[at]["en"] = json!(false);
+        }),
+        ("events queued, the sim queued", |recs| {
+            let at = event(recs);
+            let id = recs[at]["id"].as_i64().expect("an id");
+            shift_ids(recs, id, 1);
+            let mut x = recs[at].clone();
+            x["id"] = json!(id + 1);
+            recs.insert(at + 1, x);
+            renumber(recs);
+        }),
+        // The event of a recording that doesn't declare the observer.
+        ("driven replay: clog_q inside a root rule's span", |recs| {
+            if let Some(o) = recs[0]["observers"].as_array_mut() {
+                o.retain(|x| x != "combat_log");
+            }
+            // (Only the rules' events inside root spans stay.)
+            let mut open = None;
+            recs.retain(|r| {
+                if r["k"] == "rule" && r["depth"] == 0 {
+                    open = Some(r["id"].clone());
+                } else if r["k"] == "rule_end" && open.as_ref() == Some(&r["id"]) {
+                    open = None;
+                }
+                let log =
+                    r["k"] == "obs" && r["ev"].as_str().is_some_and(|e| e.starts_with("clog_"));
+                !log || (open.is_some() && r["ev"] == "clog_q")
+            });
+            renumber(recs);
+        }),
+        // Another family's record in a span of a root that has none of its handlers.
+        ("driven replay: impatience: a record out of its rule's handler", |recs| {
+            add(recs, "imp_s")
+        }),
+        ("driven replay: memory: an AddToMemory the sim didn't make", |recs| add(recs, "mem_q")),
+        ("driven replay: eng_prov inside a root rule's span", |recs| add(recs, "eng_prov")),
+        ("driven replay: eng_prov inside a root rule's span", |recs| {
+            add(recs, "eng_prov");
+            let root = initiative(recs);
+            recs[root + 1]["u"] = json!("none");
+        }),
+        ("driven replay: proj_launch inside a root rule's span", |recs| add(recs, "proj_launch")),
+        // A record of no family the replay knows, and of no kind it takes.
+        ("driven replay: an unknown_family observation inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "obs", "t": t, "ev": "unknown_family"}));
+            renumber(recs);
+        }),
+        ("driven replay: a cmd record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "cmd", "t": t, "ev": "start"}));
+            renumber(recs);
+        }),
+        // A record of another frame than its root's (the span is one frame's).
+        ("driven replay: a rule_end record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let id = recs[root]["id"].clone();
+            let end = (root..recs.len())
+                .find(|&i| recs[i]["k"] == "rule_end" && recs[i]["id"] == id)
+                .expect("its end");
+            recs[end]["t"] = json!(recs[end]["t"].as_i64().unwrap_or(0) + 1);
+        }),
+        // The structure of the span (`life.rs`, shared with the commands' `span_ok`): a handler
+        // closed with another id, a `mod_after` handler after a `did` one, a bonus to a rule that
+        // was never allocated, and one to a rule already closed (T0 emits a bonus at its rule's end).
+        ("driven replay: a h_end record inside a root rule's span", |recs| {
+            let at = handled(recs, "h_end");
+            recs[at]["id"] = json!(recs[at]["id"].as_i64().unwrap_or(0) + 1000);
+        }),
+        (
+            "a h record inside a root rule's span: a record out of its place in the rule's life",
+            |recs| {
+                // Just before the initiative roll's own `did`: a `did` handler of it, then a
+                // `mod_after` one (ids above every other).
+                let root = initiative(recs);
+                let id = recs[root]["id"].clone();
+                let did = (root..recs.len())
+                    .find(|&i| recs[i]["k"] == "did" && recs[i]["id"] == id)
+                    .expect("its did");
+                let top = recs.iter().filter_map(|r| r["id"].as_i64()).max().unwrap_or(0) + 1_000;
+                let t = recs[root]["t"].clone();
+                let pair = |n: i64, phase: &str| {
+                    [
+                        json!({"seq": 0, "k": "h", "t": t, "id": n, "rule": id, "phase": phase,
+                        "class": "Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbility"}),
+                        json!({"seq": 0, "k": "h_end", "t": t, "id": n, "rule": id, "changes": []}),
+                    ]
+                };
+                let new: Vec<V> = [pair(top, "did"), pair(top + 1, "mod_after")].concat();
+                recs.splice(did..did, new);
+                renumber(recs);
+            },
+        ),
+        ("driven replay: a rule_bonus mutation inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "mut", "t": t, "what": "rule_bonus", "target_rule": 1_000_000_000}),
+            );
+            renumber(recs);
+        }),
+        ("driven replay: a rule_bonus mutation inside a root rule's span", |recs| {
+            // To a rule that is already closed: the root before the last initiative roll.
+            let root = recs
+                .iter()
+                .rposition(|r| {
+                    r["k"] == "rule"
+                        && r["depth"] == 0
+                        && r["class"].as_str().is_some_and(|c| c.ends_with("RuleInitiativeRoll"))
+                })
+                .expect("an initiative roll");
+            let before = recs[..root]
+                .iter()
+                .rev()
+                .find(|r| r["k"] == "rule" && r["depth"] == 0)
+                .expect("an earlier root")["id"]
+                .clone();
+            let t = recs[root]["t"].clone();
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "mut", "t": t, "what": "rule_bonus", "target_rule": before}),
+            );
+            renumber(recs);
+        }),
+        // A draw or a damage of no rule the span has (T0 projects both whatever their rule), a root
+        // whose own stack fields are not a root's.
+        ("driven replay: a draw record inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| r["k"] == "draw");
+            recs[at]["rule"] = json!(999_999_999);
+        }),
+        ("driven replay: a draw record inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| r["k"] == "draw");
+            recs[at]["h"] = json!(5);
+        }),
+        ("driven replay: a damage mutation inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleAttackWithWeaponResolve", |r| {
+                r["k"] == "mut" && r["what"] == "damage"
+            });
+            recs[at]["rule"] = json!(999_999_999);
+        }),
+        ("rule record inside a root rule's span: a root whose stack fields", |recs| {
+            let root = initiative(recs);
+            recs[root]["parent"] = json!(999_999_999);
+        }),
+        ("rule record inside a root rule's span: a root whose stack fields", |recs| {
+            let root = initiative(recs);
+            recs[root]["handler"] = json!(999_999_999);
+        }),
+        // A tutorial fact's attach: dropped from the compared stream, and its id checker never sees
+        // a record a root consumes.
+        ("driven replay: a fact_attach mutation inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let (t, id) = (recs[root]["t"].clone(), recs[root]["id"].clone());
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "mut", "t": t, "what": "fact_attach", "class": "Tutorial",
+                    "rule": id, "h": 0, "owner": "x", "fact": {"$fact": "1", "blueprint": "b"}}),
+            );
+            renumber(recs);
+        }),
+        // A handler of a class the rule has no such handler of (T0 drops handler records), and a
+        // presentation draw at a site of the simulation's.
+        (
+            "a h record inside a root rule's span: a handler the rule's subscribers don't have",
+            |recs| {
+                let at = in_span(recs, "RuleAttackWithWeaponResolve", |r| {
+                    r["k"] == "h" && r.get("fact").is_none() && r.get("component").is_none()
+                });
+                recs[at]["class"] = json!("Kingmaker.Controllers.NoSuchHandler");
+            },
+        ),
+        ("driven replay: a draw record inside a root rule's span", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| r["k"] == "draw" && r["c"] == "sim");
+            let mut x = recs[at].clone();
+            x["c"] = json!("pres");
+            x.as_object_mut().expect("an object").remove("ctx");
+            recs.insert(at + 1, x);
+            renumber(recs);
+        }),
+        // The handlers the recording dispatched to a fact's component are the sim's deliveries, one to
+        // one and in order: one lost, another fact's, one more.
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            let id = recs[at]["id"].clone();
+            let end = (at..recs.len())
+                .find(|&i| recs[i]["k"] == "h_end" && recs[i]["id"] == id)
+                .expect("its end");
+            recs.drain(end..=end);
+            recs.drain(at..=at);
+            renumber(recs);
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            recs[at]["fact"]["$fact"] = json!("FFFF");
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            // Two distinct deliveries of one rule's phase, their identities exchanged: the same
+            // multiset, in the other order.
+            let hs: Vec<usize> = (0..recs.len())
+                .filter(|&i| recs[i]["k"] == "h" && recs[i].get("component").is_some())
+                .collect();
+            let (a, b) = hs
+                .windows(2)
+                .map(|p| (p[0], p[1]))
+                .find(|&(a, b)| {
+                    recs[a]["rule"] == recs[b]["rule"]
+                        && recs[a]["phase"] == recs[b]["phase"]
+                        && recs[a]["fact"] != recs[b]["fact"]
+                })
+                .expect("two deliveries of one rule's phase");
+            const KEYS: [&str; 5] = ["class", "component", "fact", "blueprint", "owner"];
+            let ident = |r: &V| KEYS.map(|k| r[k].to_string());
+            let (ia, ib) = (ident(&recs[a]), ident(&recs[b]));
+            assert_ne!(ia, ib, "two distinct deliveries");
+            for k in KEYS {
+                let (x, y) = (recs[a][k].clone(), recs[b][k].clone());
+                recs[a][k] = y;
+                recs[b][k] = x;
+            }
+            let (na, nb) = (ident(&recs[a]), ident(&recs[b]));
+            let mut before = [ia.clone(), ib.clone()];
+            let mut after = [na.clone(), nb.clone()];
+            before.sort();
+            after.sort();
+            assert_eq!(before, after, "the multiset of deliveries is preserved");
+            assert_ne!(na, ia, "the order is not");
+        }),
+        // A component's identity in the fields the compared tuple has: the fact's blueprint (the
+        // record names it twice), the owner's type, the component class's namespace.
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            recs[at]["fact"]["blueprint"] = json!("00000000000000000000000000000001");
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            let id = recs[at]["owner"]["$unit"].clone();
+            recs[at]["owner"] = json!({"$item": id, "blueprint": null});
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            let short = recs[at]["class"]
+                .as_str()
+                .unwrap_or("")
+                .rsplit('.')
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            recs[at]["class"] = json!(format!("Some.Other.Namespace.{short}"));
+        }),
+        // A mutation the T0 projection drops (stat values, modifiers) compares nowhere.
+        ("driven replay: a stat_value mutation inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "mut", "t": t, "what": "stat_value"}));
+            renumber(recs);
+        }),
+        // A rule's `did` before its `trig_end` (and its rewind) is out of its place.
+        ("driven replay: a did record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let id = recs[root]["id"].clone();
+            let at = (root..recs.len())
+                .find(|&i| recs[i]["k"] == "trig_end" && recs[i]["id"] == id)
+                .expect("its trig_end");
+            let mut did = recs[at].clone();
+            did["k"] = json!("did");
+            recs.insert(at, did);
+            renumber(recs);
+        }),
+        // The oracle writes no raw `result` or `bonuses` records, and an environment is only the
+        // one the root's code reads (the initiative roll reads none).
+        ("driven replay: a result record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "result", "t": t, "id": 1}));
+            renumber(recs);
+        }),
+        ("driven replay: a bonuses record inside a root rule's span", |recs| {
+            let root = initiative(recs);
+            let t = recs[root]["t"].clone();
+            recs.insert(root + 1, json!({"seq": 0, "k": "bonuses", "t": t, "id": 1}));
+            renumber(recs);
+        }),
+        ("driven replay: an env record inside a root rule's span", |recs| {
+            let mut x = recs.iter().find(|r| r["k"] == "env").expect("an environment").clone();
+            let root = initiative(recs);
+            x["t"] = recs[root]["t"].clone();
+            recs.insert(root + 1, x);
+            renumber(recs);
+        }),
+    ];
+    let mut missed = Vec::new();
+    for (i, (want, change)) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let changed = trace.edited(change);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        let reports: Vec<_> = w.coverage.unsupported.keys().collect();
+        let numbering = reports.iter().any(|k| k.contains("malformed or unknown log"));
+        if w.valid() || numbering || !reports.iter().any(|k| k.contains(want)) {
+            missed.push(format!("case {i}: {want}: {reports:?}"));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+    // The oracle's own `invalid` note is accepted in every kind of root, counted: the first
+    // initiative roll (phase-driven), the presentation roots with a call site, and the attack
+    // counts and attacks of the commands (their spans never enter `Driver::root`).
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let mut notes = 0;
+    let changed = trace.edited(|recs| {
+        let mut roots = vec![initiative(recs)];
+        for (i, r) in recs.iter().enumerate() {
+            let class = r["class"].as_str().unwrap_or("");
+            if r["k"] == "rule"
+                && r["depth"] == 0
+                && [
+                    "RuleCheckTargetFlatFooted",
+                    "RuleCalculateAttacksCount",
+                    "RuleAttackWithWeapon",
+                ]
+                .iter()
+                .any(|c| class.ends_with(c) || class.ends_with(&format!("{c}Limbs")))
+            {
+                roots.push(i);
+            }
+        }
+        notes = roots.len();
+        // (From the last, so the earlier indices hold.)
+        for &root in roots.iter().rev() {
+            let t = recs[root]["t"].clone();
+            recs.insert(
+                root + 1,
+                json!({"seq": 0, "k": "obs", "t": t, "ev": "invalid", "why": "x"}),
+            );
+        }
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+    assert_eq!((out.spans.oracle_invalid, out.spans.reported), (notes, 0));
+    assert!(notes > 10, "{notes}");
+}
+
 /// The ranged centipede's spit (`GiantCentipedeSpitAbilityAiAction`, a `BlueprintAiCastSpell`).
 const SPIT: &str = "14db26a8a9b3be448860e12a07559f46";
 

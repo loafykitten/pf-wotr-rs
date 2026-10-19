@@ -14,6 +14,7 @@ use serde_json::{Value as J, json};
 
 use crate::combat::oracle::{Rv, rv};
 
+use super::life::Life;
 use super::{Driver, Phase};
 use crate::combat::commands::{self as uc, Cmd, Desync, Fx, Inputs, Of, R, Set, State};
 use crate::world::{EntityIdx, World};
@@ -1205,7 +1206,7 @@ impl Driver<'_> {
 
 /// The rule whose engagement handler made a provoke (its subscribers list's type argument, as the
 /// recorded caller has it): `RuleAttackRoll` or `RuleAttackWithWeapon`.
-fn provoke_rule(r: &Rv) -> Option<&'static str> {
+pub(super) fn provoke_rule(r: &Rv) -> Option<&'static str> {
     let o = r["origin"].as_str()?;
     ["RuleAttackRoll", "RuleAttackWithWeapon"].into_iter().find(|c| {
         o.contains(&format!(
@@ -2117,13 +2118,7 @@ impl Inputs for Driver<'_> {
         }
         // The projectiles the weapon launches (`LaunchProjectiles`: one per blueprint), for the
         // projectile pin's launch records.
-        let projectiles: Vec<String> = wp
-            .projectile_refs()
-            .into_iter()
-            .flatten()
-            .filter(|g| w.content.get(*g).is_some())
-            .map(|g| g.to_string())
-            .collect();
+        let projectiles = projectile_blueprints(w, &wp);
         let mut rule = crate::combat::attack::RuleAttackWithWeapon::new(a, t, wp, spec.penalty);
         rule.is_first_attack = spec.is_first_attack;
         rule.is_full_attack = spec.is_full_attack;
@@ -2140,43 +2135,7 @@ impl Inputs for Driver<'_> {
         for p in w.combat.pending_resolves.iter_mut().skip(before) {
             p.source_id = rid;
         }
-        // With the projectile pin's observer (`proj_arrival`), its launches in the span (placed by
-        // `span_ok`) are the sim's, in order (`LaunchProjectile`: one per blueprint, its resolve
-        // the on-hit trigger, no callback): its blueprint and its attack roll's exact
-        // `AttackResult`.
-        if self.trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
-            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
-        }) {
-            let launches: Vec<&Rv> = trace.records[at..=end]
-                .iter()
-                .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
-                .collect();
-            let made: Vec<Option<&str>> = w
-                .combat
-                .pending_resolves
-                .iter()
-                .skip(before)
-                .map(|p| {
-                    usize::try_from(p.attack_result)
-                        .ok()
-                        .and_then(|i| crate::combat::attack::ATTACK_RESULTS.get(i).copied())
-                })
-                .collect();
-            let ok = launches.len() == made.len()
-                && made.len() == projectiles.len()
-                && launches.iter().zip(&made).zip(&projectiles).all(|((l, res), bp)| {
-                    res.is_some()
-                        && l["res"].as_str() == *res
-                        && l["bp"].as_str() == Some(bp.as_str())
-                        && l["trig"] == "RuleAttackWithWeaponResolve"
-                        && l["cb"] == false
-                });
-            if !ok {
-                w.coverage.unsupported(
-                    "driven replay: commands: an attack's projectiles launched differ from the sim's",
-                );
-            }
-        }
+        self.proj_launches(w, at, end, before, &projectiles);
         // (`AllAttacks[i].Rule.AttackRoll`, for the impatience controller's damage handler.)
         if let Some(seq) = rule.attack_roll_seq
             && w.combat.impatience.on
@@ -2189,6 +2148,79 @@ impl Inputs for Driver<'_> {
             None => Err(Desync(format!("command {c}'s attack rule made no roll"))),
         }
     }
+}
+
+impl Driver<'_> {
+    /// The projectiles a rule attack launched (`before` is the length of the sim's launched
+    /// resolves before it fired), against the span's `proj_launch` records (`at..=end`). With the
+    /// projectile pin's observer (`proj_arrival`) its launches in the span (placed by `span_ok`
+    /// or `span_records`) are the sim's, in order (`LaunchProjectile`: one per blueprint, its
+    /// resolve the on-hit trigger, no callback): its blueprint and its attack roll's exact
+    /// `AttackResult`. Launch records without the observer are reported.
+    pub(super) fn proj_launches(
+        &mut self,
+        w: &mut World,
+        at: usize,
+        end: usize,
+        before: usize,
+        projectiles: &[String],
+    ) -> bool {
+        self.launches_checked = Some(at);
+        let trace = self.trace;
+        let launches: Vec<usize> = (at..=end)
+            .filter(|&k| trace.records[k]["k"] == "obs" && trace.records[k]["ev"] == "proj_launch")
+            .collect();
+        let declared = trace.records.iter().find(|x| x["k"] == "begin").is_some_and(|b| {
+            b["observers"].as_array().is_some_and(|o| o.iter().any(|x| x == "proj_arrival"))
+        });
+        if !declared {
+            if !launches.is_empty() {
+                w.coverage.unsupported(
+                    "driven replay: an attack's projectile launches without the proj_arrival observer",
+                );
+            }
+            return false;
+        }
+        let placed = launches.iter().all(|&k| launch_placed(&trace.records, at, k));
+        let made: Vec<Option<&str>> = w
+            .combat
+            .pending_resolves
+            .iter()
+            .skip(before)
+            .map(|p| {
+                usize::try_from(p.attack_result)
+                    .ok()
+                    .and_then(|i| crate::combat::attack::ATTACK_RESULTS.get(i).copied())
+            })
+            .collect();
+        let ok = placed
+            && launches.len() == made.len()
+            && made.len() == projectiles.len()
+            && launches.iter().zip(&made).zip(projectiles).all(|((&k, res), bp)| {
+                let l = &trace.records[k];
+                res.is_some()
+                    && l["res"].as_str() == *res
+                    && l["bp"].as_str() == Some(bp.as_str())
+                    && l["trig"] == "RuleAttackWithWeaponResolve"
+                    && l["cb"] == false
+            });
+        if !ok {
+            w.coverage.unsupported(
+                "driven replay: commands: an attack's projectiles launched differ from the sim's",
+            );
+        }
+        ok
+    }
+}
+
+/// The blueprints of the projectiles `wp` launches (`LaunchProjectiles`: one per blueprint).
+pub(super) fn projectile_blueprints(w: &World, wp: &crate::combat::weapon::Weapon) -> Vec<String> {
+    wp.projectile_refs()
+        .into_iter()
+        .flatten()
+        .filter(|g| w.content.get(*g).is_some())
+        .map(|g| g.to_string())
+        .collect()
 }
 
 /// Binds (or checks) the game's id of the item in `u`'s limb `i`: an id the sim knows is that
@@ -2389,6 +2421,23 @@ fn base_fields() -> serde_json::Map<String, J> {
     m
 }
 
+/// `Rules.StableId`: the id, or for an id longer than 8 (a unit created in the window, or a GUID
+/// id) `new:` and its blueprint; `-` for none.
+pub(super) fn stable_id(w: &World, v: &J) -> Option<String> {
+    match v {
+        J::Null => Some("-".into()),
+        J::Object(o) => {
+            let id = o.get("$unit")?.as_str()?;
+            if id.len() <= 8 {
+                return Some(id.to_owned());
+            }
+            let e = *w.by_id.get(id)?;
+            Some(format!("new:{}", w.unit(e)?.blueprint?))
+        }
+        _ => None,
+    }
+}
+
 /// A root rule's span (`span[0]` the root), as WrathOracle's `Rules.cs` writes it: every record of
 /// frame `tick`, in each rule's order (its push with its snapshot, `mod_before` handlers, `about`,
 /// `about` handlers, `trig`, its own computation with nested rules, `trig_end`, `mod_after` then `did`
@@ -2419,8 +2468,6 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         initiator: J,
         target: J,
         fields: serde_json::Map<String, J>,
-        /// 0 pushed, 1 about, 2 trig, 3 trig_end, 4 did.
-        stage: u8,
         /// Its environment records.
         envs: usize,
         /// The bonuses its `rule_bonus` mutations added (value, descriptor, type, stat, fact).
@@ -2431,7 +2478,6 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         before_handlers: bool,
         /// Its reason at `about`.
         reason: J,
-        did_handlers: bool,
         draws: i64,
         /// Its `ActivatableAbility` handlers at about and did (identity-free records: counted).
         activatable: [usize; 2],
@@ -2445,22 +2491,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         /// Its game log event queued (`clog_q`, once at most).
         clog: bool,
     }
-    // `Rules.StableId`: the id, or for an id longer than 8 (a unit created in the window, or a GUID
-    // id) `new:` and its blueprint; `-` for none.
-    let stable = |v: &J| -> Option<String> {
-        match v {
-            J::Null => Some("-".into()),
-            J::Object(o) => {
-                let id = o.get("$unit")?.as_str()?;
-                if id.len() <= 8 {
-                    return Some(id.to_owned());
-                }
-                let e = *w.by_id.get(id)?;
-                Some(format!("new:{}", w.unit(e)?.blueprint?))
-            }
-            _ => None,
-        }
-    };
+    let stable = |v: &J| stable_id(w, v);
     let frame = |r: &J| -> Option<Frame> {
         let reason = match r.get("reason_at_push") {
             Some(J::Null) => true,
@@ -2489,13 +2520,11 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                         && f.values().all(observed)
                 })?
                 .clone(),
-            stage: 0,
             envs: 0,
             bonuses: Vec::new(),
             push_reason: r.get("reason_at_push").cloned().unwrap_or(J::Null),
             before_handlers: false,
             reason: J::Null,
-            did_handlers: false,
             draws: 0,
             activatable: [0, 0],
             components: [Vec::new(), Vec::new()],
@@ -2508,12 +2537,8 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
     };
     let Some(root) = frame(&span[0]).filter(|_| envelope_ok(&span[0])) else { return false };
     // Ids are allocated in order through the window: each new rule's and handler's is above the last.
-    let (mut last_rule, mut last_handler) = (root.id, 0_i64);
+    let mut life = Life::new(root.id);
     let mut frames = vec![root];
-    // The global handler stack: (handler, its rule).
-    let mut handlers: Vec<(i64, i64)> = Vec::new();
-    // The open handlers' classes (with `handlers`).
-    let mut handler_classes: Vec<String> = Vec::new();
     let mut seq = span[0]["seq"].as_i64();
     for (n, x) in span.iter().enumerate().skip(1) {
         // Every record carries its trace sequence number, in order.
@@ -2523,39 +2548,42 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
         }
         seq = s;
         let Some(top) = frames.last() else { return false };
-        let (rule, stage) = (top.id, top.stage);
-        let handler = handlers.last().map_or(0, |h| h.0);
-        let own_handler = handlers.last().is_some_and(|h| h.1 == rule);
+        // (The rules' and handlers' structure is `Life`'s, shared with the audit of the other
+        // root spans.)
+        let (rule, stage) = (life.rule(), life.stage());
+        let own_handler = life.own_handler();
         let id = x["id"].as_i64();
-        let attributed = x["rule"].as_i64() == Some(rule) && x["h"].as_i64() == Some(handler);
+        let attributed = life.attributed(x["rule"].as_i64(), x["h"].as_i64());
         // A step's diff, applied to the innermost rule's fields.
-        let step = |frames: &mut Vec<Frame>, want: u8, next: u8| -> bool {
-            let ok = id == Some(rule) && stage == want && !own_handler;
-            ok && frames.last_mut().is_some_and(|f| {
-                f.stage = next;
-                apply_diff(&mut f.fields, &x["changes"])
-                    && bonus_state_ok(&f.fields, w)
-                    && added_agree(&f.fields, &f.bonuses)
-                    && (next == 5 || untriggered(&f.fields))
-                    && f.fields.get("Target").is_none_or(|t| *t == f.target)
-            })
+        let step = |frames: &mut Vec<Frame>, life: &mut Life, want: u8, next: u8| -> bool {
+            let ok = life.can_step(id, want);
+            ok && {
+                life.advance(next);
+                frames.last_mut().is_some_and(|f| {
+                    apply_diff(&mut f.fields, &x["changes"])
+                        && bonus_state_ok(&f.fields, w)
+                        && added_agree(&f.fields, &f.bonuses)
+                        && (next == 5 || untriggered(&f.fields))
+                        && f.fields.get("Target").is_none_or(|t| *t == f.target)
+                })
+            }
         };
         if !envelope_ok(x) {
             return false;
         }
         let ok = match x["k"].as_str() {
             Some("rule") => {
-                let ok = x["parent"].as_i64() == Some(rule)
-                    && x["depth"].as_u64().and_then(|d| usize::try_from(d).ok())
-                        == Some(frames.len())
-                    && x["handler"].as_i64() == Some(handler)
-                    // Pushed by an ordinary `Trigger`: its context is its parent (`PreviousEvent`).
-                    && x["context_parent"] == x["parent"]
-                    && (stage == 2 || own_handler)
-                    && id.is_some_and(|i| i > last_rule);
+                // (Pushed by an ordinary `Trigger`: its context is its parent, `PreviousEvent`.)
+                let ok = life.can_push(
+                    id,
+                    x["parent"].as_i64(),
+                    x["depth"].as_u64(),
+                    x["handler"].as_i64(),
+                    x["context_parent"] == x["parent"],
+                );
                 match frame(x) {
                     Some(f) if ok => {
-                        last_rule = f.id;
+                        life.push(f.id);
                         frames.push(f);
                         true
                     }
@@ -2586,12 +2614,12 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     if let Some(f) = frames.last_mut() {
                         f.reason = x["reason"].clone();
                     }
-                    step(&mut frames, 0, 1)
+                    step(&mut frames, &mut life, 0, 1)
                 }
             }
-            Some("trig") => step(&mut frames, 1, 2),
-            Some("trig_end") => step(&mut frames, 2, 3),
-            Some("did") => step(&mut frames, 3, 4),
+            Some("trig") => step(&mut frames, &mut life, 1, 2),
+            Some("trig_end") => step(&mut frames, &mut life, 2, 3),
+            Some("did") => step(&mut frames, &mut life, 3, 4),
             Some("rule_end") => {
                 // An attack roll's and a resolve's environment once, a flat-footed check's at most once.
                 let envs = match short_class(&top.class) {
@@ -2632,7 +2660,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     && top.components.iter().all(|c| sorted(c) == components)
                     && envs
                     && x["bonuses"].as_array().is_some_and(|b| b.iter().all(|b| bonus_ok(b, w)))
-                    && step(&mut frames, 4, 5)
+                    && step(&mut frames, &mut life, 4, 5)
                     && frames.last().is_some_and(|f| {
                         f.fields.get("m_Triggered") == Some(&J::Bool(true))
                             && f.fields.get("IsTriggered") == Some(&J::Bool(true))
@@ -2653,24 +2681,22 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                             })
                     });
                 frames.pop();
+                life.end_rule();
                 ok && (frames.is_empty() == (n == span.len() - 1))
             }
             Some("h") => {
-                // Its phase is the rule's stage's: before `about`, after it, or after `trig_end`
-                // (`mod_after` handlers before `did` ones).
-                let phase_ok = match (x["phase"].as_str(), stage) {
-                    (Some("mod_before"), 0) | (Some("about"), 1) => true,
-                    (Some("mod_after"), 3) => !top.did_handlers,
-                    (Some("did"), 3) => true,
-                    _ => false,
-                };
-                let ok = x["rule"].as_i64() == Some(rule)
-                    && !own_handler
-                    && phase_ok
-                    && handler_identity_ok(w, x, &top.class, &top.initiator, &top.target)
-                    && id.is_some_and(|i| i > last_handler);
+                // Its phase is the rule's stage's (`Life`).
+                let phase = x["phase"].as_str().unwrap_or("");
+                let ok = life.can_open(id, x["rule"].as_i64(), phase)
+                    && handler_identity_ok(
+                        w,
+                        x,
+                        &top.class,
+                        &top.initiator,
+                        &top.target,
+                        &counted_singleton,
+                    );
                 if ok && let Some(f) = frames.last_mut() {
-                    f.did_handlers |= x["phase"] == "did";
                     f.before_handlers |= x["phase"] == "mod_before";
                     let did = usize::from(x["phase"] == "did");
                     if x["class"] == ACTIVATABLE {
@@ -2691,16 +2717,12 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     }
                 }
                 if let Some(i) = id.filter(|_| ok) {
-                    handlers.push((i, rule));
-                    handler_classes.push(x["class"].as_str().unwrap_or("").to_owned());
-                    last_handler = i;
+                    life.open(i, x["class"].as_str().unwrap_or(""), phase);
                 }
                 ok
             }
             Some("h_end") => {
-                let ok = own_handler
-                    && id == Some(handler)
-                    && x["rule"].as_i64() == Some(rule)
+                let ok = life.can_close(id, x["rule"].as_i64())
                     && frames.last_mut().is_some_and(|f| {
                         apply_diff(&mut f.fields, &x["changes"])
                             && bonus_state_ok(&f.fields, w)
@@ -2709,8 +2731,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                             // `RulebookTargetEvent.Target` is readonly.
                             && f.fields.get("Target").is_none_or(|t| *t == f.target)
                     });
-                handlers.pop();
-                handler_classes.pop();
+                life.close();
                 ok
             }
             Some("draw") => {
@@ -2773,7 +2794,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 // `RuleDealDamage` (its bother unit, then its end), `OffensiveActionsController`'s
                 // for a `RuleAttackRoll` (the target's bother unit). Matched with the sim's
                 // operations after the sim fires the rule (`imp_span`).
-                let handler = handler_classes.last().map(String::as_str);
+                let handler = life.handler().map(|h| h.class.as_str());
                 // Its units: the bother unit is the rule's target, bothered by its initiator; the
                 // damage handler's end is the initiator's, with the rule's id.
                 let units_ok = match x["at"].as_str() {
@@ -2813,7 +2834,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                     && own_handler
                     && stage == 3
                     && short_class(&top.class) == "RuleAttackRoll"
-                    && handler_classes.last().map(String::as_str)
+                    && life.handler().map(|h| h.class.as_str())
                         == Some("Kingmaker.Controllers.OffensiveActionsController")
                     && a.is_some()
                     && t.is_some()
@@ -2851,35 +2872,9 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
             // attack roll's end; its rule, roll and target this attack's, nothing else. Its flight
             // and arrival (`proj_hit`) are the pin's, outside rule spans.
             Some("obs") if x["ev"] == "proj_launch" => {
-                let shape = x.as_object().is_some_and(|o| {
-                    let mut k: Vec<&str> = o.keys().map(String::as_str).collect();
-                    k.sort_unstable();
-                    k == [
-                        "bp", "cb", "ev", "k", "p", "res", "roll", "rule", "seq", "t", "tgt",
-                        "trig",
-                    ]
-                });
-                let roll = x["roll"].as_i64();
-                let roll_ended = roll.is_some()
-                    && span[n - 1]["k"] == "rule_end"
-                    && span[n - 1]["id"].as_i64() == roll
-                    && span[..n].iter().any(|r| {
-                        r["k"] == "rule"
-                            && r["id"].as_i64() == roll
-                            && r["parent"].as_i64() == Some(rule)
-                            && r["class"]
-                                .as_str()
-                                .is_some_and(|c| short_class(c) == "RuleAttackRoll")
-                    });
-                shape
-                    && !own_handler
+                !own_handler
                     && stage == 2
-                    && short_class(&top.class) == "RuleAttackWithWeapon"
-                    && x["rule"].as_i64() == Some(rule)
-                    && roll_ended
-                    && x["p"].as_str().is_some_and(|p| !p.is_empty())
-                    && x["tgt"].as_str().is_some()
-                    && x["tgt"].as_str() == top.target["$unit"].as_str()
+                    && launch_ok(x, &span[..=n], rule, &top.class, &top.target)
             }
             Some("obs") if x["ev"] == "eng_prov" => {
                 // Called by the handler of this very rule (its subscribers list's type argument).
@@ -2890,7 +2885,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 let ok = own_handler
                     && stage == 3
                     && top.provokes == 0
-                    && handler_classes.last().map(String::as_str)
+                    && life.handler().map(|h| h.class.as_str())
                         == Some("Kingmaker.Controllers.Combat.UnitCombatEngagementController")
                     && x["fn"] == "ProvokeAttackOfOpportunity"
                     && x["u"].as_str().is_some()
@@ -2901,20 +2896,18 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
                 }
                 ok
             }
+            // The oracle's own note that the game's replay left its recording: not a rule's
+            // record, counted by the caller (`attack_rule`).
+            Some("obs") if x["ev"] == "invalid" => true,
             Some("env") => {
                 // Written in the rule's `OnTrigger` prefix.
                 // (A flat-footed check's only at the root: `FlatFootedPrefix` writes it when one rule
                 // is open; inside an attack it's nested.)
                 let ok = stage == 2
                     && !own_handler
-                    && (short_class(&top.class) != "RuleCheckTargetFlatFooted" || frames.len() == 1)
-                    && env_ok(x, &top.class, &top.initiator, &top.target)
-                    // `EngagedBy`'s keys, ordinal-sorted and unique, each the sim's unit.
-                    && x.get("target_engaged_by").and_then(J::as_array).is_none_or(|a| {
-                        a.iter().all(|u| {
-                            u.as_str().and_then(|id| w.by_id.get(id)).is_some_and(|e| w.unit(*e).is_some())
-                        }) && a.windows(2).all(|p| p[0].as_str() < p[1].as_str())
-                    });
+                    && (short_class(&top.class) != "RuleCheckTargetFlatFooted"
+                        || frames.len() == 1)
+                    && env_record_ok(w, x, &top.class, &top.initiator, &top.target);
                 if let Some(f) = frames.last_mut() {
                     f.envs += 1;
                 }
@@ -2932,7 +2925,7 @@ fn span_ok(span: &[J], cx: &SpanCx<'_>) -> bool {
             return false;
         }
     }
-    frames.is_empty() && handlers.is_empty()
+    frames.is_empty() && life.no_handlers()
 }
 
 /// A draw's payload (`Rng`): its class, member with its arguments and value (finite numbers), its
@@ -3042,6 +3035,66 @@ pub(super) fn draw_ok(x: &J, sites: &HashMap<i64, (String, String)>) -> bool {
             st.split(':').count() == 4
                 && st.split(':').all(|p| p.len() == 8 && p.chars().all(|c| c.is_ascii_hexdigit()))
         })
+}
+
+/// The `proj_launch` at `k` of the root rule at `at`, placed as `span_ok` places a command's: in
+/// the root's frame, at its `OnTrigger` (after `trig`, before `trig_end`) outside any handler,
+/// with the fields, rule, roll and target [`launch_ok`] requires.
+pub(super) fn launch_placed(recs: &[Rv], at: usize, k: usize) -> bool {
+    let root = &recs[at];
+    let id = root["id"].as_i64().unwrap_or(0);
+    let (mut trig, mut trig_end, mut open) = (false, false, 0_i64);
+    for x in &recs[at + 1..k] {
+        match x["k"].as_str() {
+            Some("trig") if x["id"].as_i64() == Some(id) => trig = true,
+            Some("trig_end") if x["id"].as_i64() == Some(id) => trig_end = true,
+            Some("h") => open += 1,
+            Some("h_end") => open -= 1,
+            _ => {}
+        }
+    }
+    let span: Vec<J> = recs[at..=k].iter().map(Rv::to_json).collect();
+    recs[k]["t"] == root["t"]
+        && trig
+        && !trig_end
+        && open == 0
+        && launch_ok(
+            &span[k - at],
+            &span,
+            id,
+            root["class"].as_str().unwrap_or(""),
+            &span[0]["target"],
+        )
+}
+
+/// A `proj_launch` record (the last of `span`, the root's span from its record): in
+/// `RuleAttackWithWeapon`'s `OnTrigger` (`rule`, `class`, `target`: the innermost rule), right
+/// after its own attack roll's end; its rule, roll and target this attack's, nothing else. The
+/// caller places it (outside any handler, at the rule's `OnTrigger`, in the frame).
+fn launch_ok(x: &J, span: &[J], rule: i64, class: &str, target: &J) -> bool {
+    let n = span.len() - 1;
+    let shape = x.as_object().is_some_and(|o| {
+        let mut k: Vec<&str> = o.keys().map(String::as_str).collect();
+        k.sort_unstable();
+        k == ["bp", "cb", "ev", "k", "p", "res", "roll", "rule", "seq", "t", "tgt", "trig"]
+    });
+    let roll = x["roll"].as_i64();
+    let roll_ended = roll.is_some()
+        && span[n - 1]["k"] == "rule_end"
+        && span[n - 1]["id"].as_i64() == roll
+        && span[..n].iter().any(|r| {
+            r["k"] == "rule"
+                && r["id"].as_i64() == roll
+                && r["parent"].as_i64() == Some(rule)
+                && r["class"].as_str().is_some_and(|c| short_class(c) == "RuleAttackRoll")
+        });
+    shape
+        && short_class(class) == "RuleAttackWithWeapon"
+        && x["rule"].as_i64() == Some(rule)
+        && roll_ended
+        && x["p"].as_str().is_some_and(|p| !p.is_empty())
+        && x["tgt"].as_str().is_some()
+        && x["tgt"].as_str() == target["$unit"].as_str()
 }
 
 /// Whether a type's handler interfaces (`TypeDef::handlers`) handle `rule_class` in `phase`:
@@ -3331,7 +3384,7 @@ fn mutation_ok(x: &J, rule: i64, w: &World) -> bool {
 /// with the rules each handles (its `IRulebookHandler<T>`s: `ShadowSpellController`'s
 /// `RulebookTargetEvent` as the target events seen inside attacks); another class or rule is reported
 /// (the sim models none of them: an unknown one may act).
-const GLOBAL_HANDLERS: &[(&str, Option<&[&str]>)] = &[
+pub(super) const GLOBAL_HANDLERS: &[(&str, Option<&[&str]>)] = &[
     ("Kingmaker.Controllers.ShadowSpellController", Some(TARGET_EVENTS)),
     (
         "Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbility",
@@ -3745,6 +3798,13 @@ fn is_achievement(class: &str) -> bool {
     class.starts_with("Kingmaker.Achievements.")
 }
 
+/// Whether `GLOBAL_HANDLERS` lists the singleton `handler` for the rule (`span_ok`'s).
+fn counted_singleton(handler: &str, rule: &str) -> bool {
+    GLOBAL_HANDLERS
+        .iter()
+        .any(|(h, rules)| *h == handler && rules.is_none_or(|r| r.contains(&rule)))
+}
+
 /// The global singleton handlers (`GLOBAL_HANDLERS` but `ActivatableAbility`, a fact, and the
 /// achievements, subscribed or not by state outside the save) that handle the rule, each once.
 fn singleton_handlers(rule_class: &str) -> HashMap<String, usize> {
@@ -3785,7 +3845,17 @@ fn activatable_subscribers(w: &World, initiator: &J, rule_class: &str) -> usize 
 
 /// A handler's identity (`Rules.Identity`): its class, and for a fact's component the component,
 /// blueprint, fact and owner: the sim's fact of that id, blueprint and owner (a unit or an item).
-fn handler_identity_ok(w: &World, x: &J, rule_class: &str, initiator: &J, target: &J) -> bool {
+/// A handler without a fact is a singleton, known by `singleton` (its class and the rule's short
+/// class): `span_ok`'s `GLOBAL_HANDLERS` (the handlers it counts), the audit of the other root
+/// spans' table generated from the game's code (`handler_table.rs`).
+pub(super) fn handler_identity_ok(
+    w: &World,
+    x: &J,
+    rule_class: &str,
+    initiator: &J,
+    target: &J,
+    singleton: &dyn Fn(&str, &str) -> bool,
+) -> bool {
     let Some(o) = x.as_object() else { return false };
     let class_ok = o
         .get("class")
@@ -3794,11 +3864,9 @@ fn handler_identity_ok(w: &World, x: &J, rule_class: &str, initiator: &J, target
     let base = ["k", "t", "seq", "id", "rule", "phase", "class"];
     if o.keys().all(|k| base.contains(&k.as_str())) {
         return class_ok
-            && o.get("class").and_then(J::as_str).is_some_and(|c| {
-                GLOBAL_HANDLERS.iter().any(|(h, rules)| {
-                    *h == c && rules.is_none_or(|r| r.contains(&short_class(rule_class)))
-                })
-            })
+            && o.get("class")
+                .and_then(J::as_str)
+                .is_some_and(|c| singleton(c, short_class(rule_class)))
             && matches!(o.get("phase").and_then(J::as_str), Some("about" | "did"))
             && o.len() == base.iter().filter(|k| o.contains_key(**k)).count();
     }
@@ -3870,6 +3938,17 @@ fn handler_identity_ok(w: &World, x: &J, rule_class: &str, initiator: &J, target
 
 /// An environment record (`Hooks`' `env`) of the innermost rule: a kind the replay reads, its units
 /// the rule's, every field there and typed, positions of two finite `float` triples.
+/// An environment record's fields (typed, the rule's units) and `EngagedBy`'s keys, ordinal-sorted
+/// and unique, each the sim's unit.
+pub(super) fn env_record_ok(w: &World, x: &J, class: &str, initiator: &J, target: &J) -> bool {
+    env_ok(x, class, initiator, target)
+        && x.get("target_engaged_by").and_then(J::as_array).is_none_or(|a| {
+            a.iter().all(|u| {
+                u.as_str().and_then(|id| w.by_id.get(id)).is_some_and(|e| w.unit(*e).is_some())
+            }) && a.windows(2).all(|p| p[0].as_str() < p[1].as_str())
+        })
+}
+
 fn env_ok(x: &J, class: &str, initiator: &J, target: &J) -> bool {
     let Some(o) = x.as_object() else { return false };
     let kind = short_class(class);
@@ -4159,6 +4238,9 @@ impl Driver<'_> {
                 "a UnitAttack rule's span with records of another frame, kind or rule",
             );
         }
+        // The oracle's own notes that the game's replay left its recording (`span_ok` took them).
+        self.out.spans.oracle_invalid +=
+            recs[at..=end].iter().filter(|x| x["k"] == "obs" && x["ev"] == "invalid").count();
         // Its provokes (accepted in the engagement controller's handler).
         for i in at..=end {
             let r = &self.trace.records[i];

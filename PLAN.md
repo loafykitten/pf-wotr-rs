@@ -54,9 +54,9 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     `CanBeInVisionRange` in enumeration order) and `phys_sync` (each `Physics.SyncTransforms` by caller, and
     `DollRoom`'s `PhysicsScene.Simulate`). The sim reads none of them yet from a recording: next, readers that
     replace the vision range's corpulence and start hypotheses with the records.
-  - Open: the driven replay skips the game's observation records inside root rule spans it doesn't drive
-    (`root_inner`; found in the vision range's review: `clog_q`, `imp_s`, `mem_q`, `eng_prov`, `proj_launch` inside
-    depth-0 rule spans), a consumption audit to do. A replay's window can start one frame apart (523B's `TimeToNextRoundTick`; `docs/poc5/tb-replay.md`, end);
+  - Records inside root rule spans (stream audit, `docs/poc5/tb-replay.md`, `replay/spans.rs`): surveyed on 111 runs and
+    each family is checked or reported (`clog_q` by the log's comparison, `imp_s`/`mem_q` by `imp_span`; `eng_prov` and
+    `proj_launch` in a span the commands don't pull are now matched like theirs, any other record is reported). Open: a replay's window can start one frame apart (523B's `TimeToNextRoundTick`; `docs/poc5/tb-replay.md`, end);
     loot's proposed observers (`loot_drop`, `ent_created`, `prone_step`, `tt_prep` Duration, `awake_set`,
     `docs/poc5/loot-and-prone.md`).
 - **Parallel streams (twenty-second session, Opus 5.5 (high) agents in git worktrees, `scripts/worktree-setup.sh`;

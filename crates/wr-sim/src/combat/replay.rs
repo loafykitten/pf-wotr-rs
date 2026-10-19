@@ -200,6 +200,8 @@ pub struct Outcome {
     pub roam: roaming::RoamCounts,
     /// The prone controller (`replay/prone.rs`).
     pub prone: prone::ProneCounts,
+    /// The observation records inside root rules' spans (`replay/spans.rs`).
+    pub spans: spans::SpanCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
     /// messages against the recording's ([`crate::game_log::check`]).
     pub clog: Option<crate::game_log::check::Summary>,
@@ -394,7 +396,8 @@ fn plan_origins(t: &Trace) -> HashMap<usize, (usize, Option<Caller>)> {
 
 /// A root computed at its call site may hold only its own rule's steps and handlers, draws of the
 /// presentation class and at most one `env`, its own (a flat-footed check's, for the same units):
-/// no observation (a combat join), mutation, nested rule, sim draw or handler exception.
+/// no observation (a combat join; the oracle's `invalid` note apart), mutation, nested rule, sim
+/// draw or handler exception.
 fn origin_span_is_inert(root: &Rv, inner: &[Rv]) -> bool {
     let class = short(root["class"].as_str().unwrap_or(""));
     let own_env = |x: &Rv| {
@@ -409,6 +412,8 @@ fn origin_span_is_inert(root: &Rv, inner: &[Rv]) -> bool {
             Some("about" | "trig" | "trig_end" | "did" | "rule_end" | "h" | "h_end") => true,
             Some("draw") => x["c"] == "pres",
             Some("env") => own_env(x),
+            // The oracle's own note that the game's replay left its recording (`spans.rs`).
+            Some("obs") => x["ev"] == "invalid",
             _ => false,
         })
 }
@@ -441,13 +446,21 @@ fn oracle_stream(
             continue;
         }
         // The tutorial system (`Kingmaker.Tutorial`) is UI-driven; its facts are not ported.
-        if r["k"] == "mut" && r["class"] == "Tutorial" {
+        if r["k"] == "mut" && stream_drops_fact(r["class"].as_str()) {
             *out.excluded.entry("fact_attach Tutorial".into()).or_default() += 1;
             continue;
         }
         v.push(r);
     }
     v
+}
+
+/// Whether the compared stream leaves out a fact's mutation of this class: the tutorial's facts
+/// (`Kingmaker.Tutorial`, UI-driven, not ported). Their unique ids are checked outside root spans
+/// (`Some("mut") if r["what"] == "fact_attach"` in `record_entry`), which never sees a record a root
+/// consumes, so a span holds none (`spans::projected`).
+pub(super) fn stream_drops_fact(class: Option<&str>) -> bool {
+    class == Some("Tutorial")
 }
 
 /// The phases of a frame the replay places events in or runs, in the registration order of
@@ -1033,6 +1046,12 @@ struct Driver<'t> {
     prone_cursor: Option<usize>,
     /// Each unit's visit this frame: 1 stopped (`EnterProneState`), 2 its `InterruptAll` came.
     prone_visit: HashMap<EntityIdx, u8>,
+    /// The root rule (its record index) whose projectile launches were last checked against the
+    /// sim's (`proj_launches`).
+    launches_checked: Option<usize>,
+    /// The `env` records the current root's code looked up (rule class, initiator, target): the
+    /// ones `span_records` accepts.
+    env_reads: Vec<(&'static str, String, String)>,
     out: Outcome,
 }
 
@@ -1152,6 +1171,9 @@ impl<'t> Driver<'t> {
         super::life::update_turn_based(w);
         let cx = Cx { sink };
         fire::set_current(w, Some(cx.clone()));
+        // The handlers the bus delivers rules to from here on, for the one-to-one check with the
+        // recording's (`spans::handlers_finish`).
+        w.rulebook.handler_log = Some(Vec::new());
         let recs = &trace.records;
         let port = recs.iter().any(|r| r["k"] == "obs" && r["ev"] == "choose_next")
             && recs.iter().any(|r| r["k"] == "obs" && r["ev"] == "turn_tick");
@@ -1284,6 +1306,8 @@ impl<'t> Driver<'t> {
             prone_falls: Vec::new(),
             prone_cursor: None,
             prone_visit: HashMap::new(),
+            launches_checked: None,
+            env_reads: Vec::new(),
             out,
         };
         let mut d = d;
@@ -1634,6 +1658,7 @@ impl<'t> Driver<'t> {
             w.events.push("draw", p);
         }
         fire::set_current(w, None);
+        self.handlers_finish(w);
         if self.clog {
             let inputs = std::mem::take(&mut self.clog_inputs);
             self.out.clog = Some(crate::game_log::check::compare(w, &self.trace.records, inputs));
@@ -3999,9 +4024,14 @@ impl Driver<'_> {
     }
 
     fn root(&mut self, w: &mut World, i: usize) -> usize {
+        self.env_reads.clear();
+        // The handlers' identities against the sim's facts as the rule starts.
+        let end = root_end(&self.trace.records, i);
+        self.span_handlers(w, i, end);
         let next = self.root_inner(w, i);
         // The impatience handlers' records inside it, after the sim fired it (or didn't).
         self.imp_span(w, i, next - 1);
+        self.span_records(w, i, next - 1);
         next
     }
 
@@ -4162,6 +4192,11 @@ impl Driver<'_> {
                         "RuleCheckTargetFlatFooted: IgnoreVisibility or IgnoreConcealment set",
                     );
                 }
+                self.env_reads.push((
+                    "RuleCheckTargetFlatFooted",
+                    w.entity(a).unique_id.clone(),
+                    w.entity(t).unique_id.clone(),
+                ));
                 let Some(env) = flat_footed_env(trace, start, end, a, t, w) else {
                     w.coverage.unsupported(
                         "driven replay: a root flat-footed check without its recorded environment",
@@ -4213,13 +4248,44 @@ impl Driver<'_> {
                         "driven replay: a root attack without a running attack command (its controller is not established)",
                     );
                 }
-                if let Some(env) = env_in(trace, start, end, a, t, w) {
+                self.env_reads.push((
+                    "RuleAttackRoll",
+                    w.entity(a).unique_id.clone(),
+                    w.entity(t).unique_id.clone(),
+                ));
+                let rolled = env_in(trace, start, end, a, t, w);
+                // A resolve nested in the attack (a weapon without a projectile resolves at once)
+                // has its own environment record, which `span_records` places in that resolve's
+                // computation. Its damage reads the distance between the units then
+                // (`DistanceDamageBonus`), and the sim reuses the roll's positions: the two
+                // records must both parse and agree, so the reuse is a check, not an assumption.
+                let (ai, ti) = (w.entity(a).unique_id.clone(), w.entity(t).unique_id.clone());
+                self.env_reads.push(("RuleAttackWithWeaponResolve", ai.clone(), ti.clone()));
+                if let Some(k) =
+                    find_env(trace, start, end, "RuleAttackWithWeaponResolve", &ai, &ti)
+                    && !positions_agree(
+                        &trace.records[k],
+                        rolled.as_ref().and_then(|e| e.positions),
+                    )
+                {
+                    w.coverage.unsupported(
+                        "driven replay: a resolve nested in an attack with positions other than the roll's (or not both recorded)",
+                    );
+                }
+                if let Some(env) = rolled {
                     w.combat.env.push(((a, t), env));
                 }
                 let before = w.combat.pending_resolves.len();
                 match super::attack::attack_from_snapshot(w, a, t, &r["fields"]) {
                     Some(mut rule) => {
                         fire::fire(w, &cx, &mut rule, |_| None);
+                        let projectiles = commands::projectile_blueprints(w, &rule.weapon);
+                        if self.proj_launches(w, start, end, before, &projectiles) {
+                            self.out.spans.proj_launch += self.trace.records[start..=end]
+                                .iter()
+                                .filter(|x| x["k"] == "obs" && x["ev"] == "proj_launch")
+                                .count();
+                        }
                         // The resolves this attack launched, by the recorded rule identity.
                         let id = r["id"].as_i64();
                         for p in w.combat.pending_resolves.iter_mut().skip(before) {
@@ -4256,6 +4322,7 @@ impl Driver<'_> {
                     w.entity(rule.initiator).unique_id.clone(),
                     w.entity(rule.target).unique_id.clone(),
                 );
+                self.env_reads.push(("RuleAttackWithWeaponResolve", ids.0.clone(), ids.1.clone()));
                 let at_impact = resolve_env(trace, start, end, &ids.0, &ids.1);
                 // The positions at impact (the resolve's damage reads the distance then): the
                 // resolve's `env` record, or else the roll's, only where the observations
@@ -4478,6 +4545,25 @@ fn apply_recorded_awake(w: &mut World, set: &std::collections::BTreeSet<String>)
 
 /// The positions at impact: the `env` record WrathOracle writes as a weapon attack's resolve
 /// triggers (`RuleAttackWithWeaponResolve.OnTrigger` prefix), inside the resolve's span.
+/// The first `env` record of the span `start..=end` for `rule` between the units `a` and `t`
+/// (its index): the one the root's code reads.
+fn find_env(
+    trace: &Trace,
+    start: usize,
+    end: usize,
+    rule: &str,
+    a: &str,
+    t: &str,
+) -> Option<usize> {
+    (start..=end).find(|&k| {
+        let e = &trace.records[k];
+        e["k"] == "env"
+            && e["rule"] == rule
+            && unit_id(&e["initiator"]) == Some(a)
+            && unit_id(&e["target"]) == Some(t)
+    })
+}
+
 fn resolve_env(
     trace: &Trace,
     start: usize,
@@ -4485,12 +4571,7 @@ fn resolve_env(
     a: &str,
     t: &str,
 ) -> Option<([f32; 3], [f32; 3])> {
-    let e = trace.records[start..=end].iter().find(|e| {
-        e["k"] == "env"
-            && e["rule"] == "RuleAttackWithWeaponResolve"
-            && unit_id(&e["initiator"]) == Some(a)
-            && unit_id(&e["target"]) == Some(t)
-    })?;
+    let e = &trace.records[find_env(trace, start, end, "RuleAttackWithWeaponResolve", a, t)?];
     pos_pair(&e["at"])
 }
 
@@ -4649,12 +4730,7 @@ fn env_in(
     w: &mut World,
 ) -> Option<AttackEnv> {
     let (ai, ti) = (w.entity(a).unique_id.clone(), w.entity(t).unique_id.clone());
-    let e = trace.records[start..=end].iter().find(|e| {
-        e["k"] == "env"
-            && e["rule"] == "RuleAttackRoll"
-            && unit_id(&e["initiator"]) == Some(ai.as_str())
-            && unit_id(&e["target"]) == Some(ti.as_str())
-    })?;
+    let e = &trace.records[find_env(trace, start, end, "RuleAttackRoll", &ai, &ti)?];
     let int = |k: &str| e[k].as_i64().and_then(|v| i32::try_from(v).ok());
     let (
         Some(target_flanked),
@@ -4728,12 +4804,7 @@ fn flat_footed_env(
     w: &World,
 ) -> Option<AttackEnv> {
     let (ai, ti) = (w.entity(a).unique_id.as_str(), w.entity(t).unique_id.as_str());
-    let e = trace.records[start..=end].iter().find(|e| {
-        e["k"] == "env"
-            && e["rule"] == "RuleCheckTargetFlatFooted"
-            && unit_id(&e["initiator"]) == Some(ai)
-            && unit_id(&e["target"]) == Some(ti)
-    })?;
+    let e = &trace.records[find_env(trace, start, end, "RuleCheckTargetFlatFooted", ai, ti)?];
     let mut env = AttackEnv::neutral();
     env.target_remembers_initiator = e["target_remembers_initiator"].as_bool()?;
     env.target_can_act_in_combat = e["target_can_act_in_combat"].as_bool()?;
@@ -4744,10 +4815,16 @@ fn flat_footed_env(
 }
 
 fn pos(v: &Rv) -> Option<[f32; 3]> {
-    let a = v.as_array()?;
+    let a = v.as_array().filter(|a| a.len() == 3)?;
     #[allow(clippy::cast_possible_truncation)]
     let f = |i: usize| a.get(i).and_then(Rv::as_f64).map(|x| x as f32);
     Some([f(0)?, f(1)?, f(2)?])
+}
+
+/// Whether a nested resolve's `env` record (`at`) gives the same positions as the attack roll's:
+/// both parsed (a null coordinate is no position) and equal.
+fn positions_agree(resolve: &Rv, roll: Option<([f32; 3], [f32; 3])>) -> bool {
+    matches!((pos_pair(&resolve["at"]), roll), (Some(a), Some(b)) if a == b)
 }
 
 fn pos_pair(at: &Rv) -> Option<([f32; 3], [f32; 3])> {
@@ -4758,12 +4835,15 @@ mod agent;
 mod ai;
 mod commands;
 mod engage;
+mod handler_table;
 mod impatience;
+mod life;
 mod look;
 mod memory;
 mod nav;
 mod prone;
 mod roaming;
+mod spans;
 mod spells;
 mod targets;
 mod vision;

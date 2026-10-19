@@ -884,7 +884,8 @@ fn a_clear_after_its_turn_end_comes_before_the_buffs_controller() {
     let (mut w, u) = world_in_area();
     w.unit_mut(u).expect("unit").combat.in_combat = true;
     let f = timed_buff(&mut w, u, 975, 4 * S);
-    let root = json!({"k": "rule", "t": 1, "id": 1, "depth": 0, "class": "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll",
+    let root = json!({"k": "rule", "t": 1, "id": 1, "depth": 0, "parent": 0, "context_parent": 0, "handler": 0,
+        "reason_at_push": null, "class": "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll",
         "initiator": {"$unit": "u"}, "fields": {}});
     let recs = vec![
         input(-1, "tbm:on"),
@@ -899,6 +900,10 @@ fn a_clear_after_its_turn_end_comes_before_the_buffs_controller() {
         tb(1, "turn_end", Some("u"), 5 * S),
         tb(1, "turn_clear", Some("u"), 5 * S),
         root,
+        json!({"k": "about", "t": 1, "id": 1}),
+        json!({"k": "trig", "t": 1, "id": 1}),
+        json!({"k": "trig_end", "t": 1, "id": 1}),
+        json!({"k": "did", "t": 1, "id": 1}),
         json!({"k": "rule_end", "t": 1, "id": 1}),
     ];
     let _ = run(&mut w, &trace(recs));
@@ -1342,4 +1347,520 @@ fn reveals_the_replay_cant_place_are_reported() {
     assert!(has_report(&w, "driven replay: an insp_reveal record without"));
     let w = reveal_run(true, vec![reveal(0, true, "Kingmaker.Controllers.NotAController")]);
     assert!(has_report(&w, "driven replay: an entity's reveal from a caller not modelled"));
+}
+
+/// A projectile launch inside a phase-driven attack's span is placed as a command's is (`span_ok`):
+/// in the root's frame, between `trig` and `trig_end` outside any handler, right after its attack
+/// roll's end, with exactly its fields and this attack's rule, roll and target.
+#[test]
+fn a_root_attacks_launch_is_placed_like_a_commands() {
+    let class = "Kingmaker.RuleSystem.Rules.";
+    let launch = json!({"k": "obs", "t": 5, "seq": 9, "ev": "proj_launch", "bp": "b", "cb": false,
+        "p": "proj", "res": "Hit", "roll": 2, "rule": 1, "tgt": "b", "trig": "RuleAttackWithWeaponResolve"});
+    // The records of the span in an order: `T` trig, `E` trig_end, `[` the attack roll's push,
+    // `]` its end, `L` the launch, `h` a handler's open, `H` its close.
+    let recs = |launch: J, order: &str| {
+        let piece = |c: char| match c {
+            'T' => json!({"k": "trig", "t": 5, "id": 1}),
+            'E' => json!({"k": "trig_end", "t": 5, "id": 1}),
+            '[' => {
+                json!({"k": "rule", "t": 5, "id": 2, "parent": 1, "depth": 1, "class": format!("{class}RuleAttackRoll")})
+            }
+            ']' => json!({"k": "rule_end", "t": 5, "id": 2}),
+            'h' => json!({"k": "h", "t": 5, "id": 3, "rule": 1, "phase": "did"}),
+            'H' => json!({"k": "h_end", "t": 5, "id": 3, "rule": 1}),
+            _ => launch.clone(),
+        };
+        let mut v = vec![
+            json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": format!("{class}RuleAttackWithWeapon"), "target": {"$unit": "b"}}),
+        ];
+        v.extend(order.chars().map(piece));
+        v.push(json!({"k": "rule_end", "t": 5, "id": 1}));
+        let at = order.chars().position(|c| c == 'L').unwrap_or(0) + 1;
+        (rvs(&v), at)
+    };
+    let placed = |launch: J, order: &str| {
+        let (r, at) = recs(launch, order);
+        super::commands::launch_placed(&r, 0, at)
+    };
+    assert!(placed(launch.clone(), "T[]LE"), "the launch as the observer writes it");
+    for key in ["rule", "roll", "tgt", "p", "t", "bp", "res", "trig", "cb"] {
+        let mut l = launch.clone();
+        l.as_object_mut().expect("an object").remove(key);
+        assert!(!placed(l, "T[]LE"), "{key} missing");
+    }
+    for (key, v) in [
+        ("rule", json!(7)),
+        ("roll", json!(3)),
+        ("tgt", json!("c")),
+        ("p", json!("")),
+        ("t", json!(6)),
+    ] {
+        let mut l = launch.clone();
+        l[key] = v;
+        assert!(!placed(l, "T[]LE"), "{key} changed");
+    }
+    let mut l = launch.clone();
+    l["extra"] = json!(1);
+    assert!(!placed(l, "T[]LE"), "a field more");
+    assert!(!placed(launch.clone(), "[]LTE"), "before `trig`");
+    assert!(!placed(launch.clone(), "TE[]L"), "after `trig_end`");
+    assert!(!placed(launch.clone(), "T[L]E"), "inside its attack roll");
+    assert!(!placed(launch.clone(), "T[]hLHE"), "inside a handler");
+    assert!(placed(launch, "ThH[]LE"), "after a closed handler");
+}
+
+/// A provoke inside a phase-driven root's span is placed as a command's is (`span_ok`): in the
+/// root's frame, in the engagement controller's did handler of the rule its caller names, of that
+/// rule's initiator, once per rule, while the rule is between `trig_end` and `did`. Built from
+/// spans, fed to the placing record by record.
+#[test]
+fn a_root_spans_provoke_is_placed_like_a_commands() {
+    use super::spans::{Open, provoke_placed};
+    let engagement = "Kingmaker.Controllers.Combat.UnitCombatEngagementController";
+    let class = "Kingmaker.RuleSystem.Rules.RuleAttackRoll";
+    // The pieces of a span: `T` trig, `E` trig_end, `D` did, `h` the engagement handler's open,
+    // `H` its close, `P` the provoke (its position is the one placed).
+    let piece = |c: char, handler: &str, phase: &str, prov: &J| match c {
+        'T' => json!({"k": "trig", "t": 5, "id": 1}),
+        'E' => json!({"k": "trig_end", "t": 5, "id": 1}),
+        'D' => json!({"k": "did", "t": 5, "id": 1}),
+        'h' => json!({"k": "h", "t": 5, "id": 3, "class": handler, "rule": 1, "phase": phase}),
+        'H' => json!({"k": "h_end", "t": 5, "id": 3, "rule": 1}),
+        _ => prov.clone(),
+    };
+    let prov = json!({"k": "obs", "t": 5, "ev": "eng_prov", "u": "a"});
+    let rule = Some("RuleAttackRoll");
+    let placed = |order: &str, handler: &str, phase: &str, prov: &J, rule: Option<&str>| {
+        let mut v = vec![
+            json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+            json!({"k": "about", "t": 5, "id": 1}),
+        ];
+        v.extend(order.chars().map(|c| piece(c, handler, phase, prov)));
+        let recs = rvs(&v);
+        let mut open = Open::new(&recs[0]);
+        for r in &recs[1..] {
+            if r["ev"] == "eng_prov" {
+                return provoke_placed(&mut open, r, rule);
+            }
+            // (A step out of its order is reported by the span's walk: `fed` below.)
+            let _ = open.feed(r);
+        }
+        false
+    };
+    // Every step in its order is fed without a report; a rewind or a repeat is reported.
+    let fed = |order: &str| {
+        let mut v = vec![
+            json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+            json!({"k": "about", "t": 5, "id": 1}),
+        ];
+        v.extend(order.chars().map(|c| piece(c, engagement, "did", &prov)));
+        v.push(json!({"k": "rule_end", "t": 5, "id": 1}));
+        let recs = rvs(&v);
+        let mut open = Open::new(&recs[0]);
+        recs[1..].iter().all(|r| open.feed(r))
+    };
+    assert!(fed("TED"), "about, trig, trig_end, did, rule_end");
+    assert!(fed("TEhHD"), "a did handler between trig_end and did");
+    assert!(!fed("TDE"), "a did before trig_end (and its rewind)");
+    assert!(!fed("TEDD"), "a did twice");
+    assert!(!fed("ET"), "trig_end before trig");
+    assert!(!fed("TTED"), "trig twice");
+    assert!(!fed("TE"), "a rule closed before its did");
+    assert!(!fed("ThHED"), "a did handler in OnTrigger");
+    assert!(placed("TEhPHD", engagement, "did", &prov, rule), "as the game raises it");
+    // The rule still in `OnTrigger` (`trig_end` after the handler), or past `did`.
+    assert!(!placed("ThPHE", engagement, "did", &prov, rule), "before trig_end");
+    assert!(!placed("TEDhPH", engagement, "did", &prov, rule), "after did");
+    assert!(!placed("EThPH", engagement, "did", &prov, rule), "stages out of order");
+    assert!(!placed("TEhPHD", engagement, "about", &prov, rule), "another phase");
+    assert!(!placed("TEhPHD", "Other.Handler", "did", &prov, rule), "another handler");
+    assert!(!placed("TEPD", engagement, "did", &prov, rule), "outside any handler");
+    assert!(
+        !placed("TEhPHD", engagement, "did", &prov, Some("RuleAttackWithWeapon")),
+        "another rule's"
+    );
+    assert!(!placed("TEhPHD", engagement, "did", &prov, None), "no rule named");
+    let mut other = prov.clone();
+    other["u"] = json!("b");
+    assert!(!placed("TEhPHD", engagement, "did", &other, rule), "another unit");
+    let mut later = prov.clone();
+    later["t"] = json!(6);
+    assert!(!placed("TEhPHD", engagement, "did", &later, rule), "another frame");
+    // Once per rule: a second provoke of the same handler's rule.
+    let recs = rvs(&[
+        json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}}),
+        json!({"k": "about", "t": 5, "id": 1}),
+        piece('T', "", "", &prov),
+        piece('E', "", "", &prov),
+        piece('h', engagement, "did", &prov),
+        prov.clone(),
+        prov.clone(),
+    ]);
+    let mut open = Open::new(&recs[0]);
+    for r in &recs[1..5] {
+        assert!(open.feed(r));
+    }
+    assert!(provoke_placed(&mut open, &recs[5], rule));
+    assert!(!provoke_placed(&mut open, &recs[6], rule), "a second provoke of a rule");
+}
+
+/// The structure of a root's span (`life.rs`, shared with `span_ok`): nested rules pushed in the
+/// parent's `OnTrigger`, steps in turn, handlers of the innermost rule in the phase its stage
+/// allows with ascending ids, closed with their id and rule, a `mod_after` before the first `did`
+/// handler; and a `rule_bonus` only to a rule still open.
+#[test]
+fn a_root_spans_structure_follows_span_oks() {
+    use super::spans::{Open, projected};
+    let class = "Kingmaker.RuleSystem.Rules.RuleAttackRoll";
+    let rule = |id: i64, parent: i64, depth: u64, handler: i64| {
+        json!({"k": "rule", "t": 5, "id": id, "parent": parent, "depth": depth, "handler": handler,
+            "context_parent": parent, "class": class, "initiator": {"$unit": "a"}})
+    };
+    let step = |k: &str, id: i64| json!({"k": k, "t": 5, "id": id});
+    let h = |id: i64, rule: i64, phase: &str| json!({"k": "h", "t": 5, "id": id, "rule": rule, "phase": phase, "class": "C"});
+    let h_end = |id: i64, rule: i64| json!({"k": "h_end", "t": 5, "id": id, "rule": rule});
+    let root = json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "class": class, "initiator": {"$unit": "a"}});
+    // Whether every record is in its place (the root first).
+    let fed = |records: Vec<J>| {
+        let recs = rvs(&records);
+        let mut open = Open::new(&recs[0]);
+        recs[1..].iter().all(|r| open.feed(r))
+    };
+    let with = |tail: Vec<J>| {
+        let mut v = vec![root.clone(), step("about", 1), step("trig", 1)];
+        v.extend(tail);
+        v
+    };
+    // A nested rule in `OnTrigger`, with its own steps, then the rest of the root.
+    let nested = |depth: u64, handler: i64| {
+        vec![
+            rule(2, 1, depth, handler),
+            step("about", 2),
+            step("trig", 2),
+            step("trig_end", 2),
+            step("did", 2),
+            step("rule_end", 2),
+        ]
+    };
+    let finish = || vec![step("trig_end", 1), step("did", 1), step("rule_end", 1)];
+    let all = |a: Vec<J>, b: Vec<J>| with([a, b].concat());
+    assert!(fed(all(nested(1, 0), finish())), "a nested rule in OnTrigger");
+    assert!(!fed(all(nested(2, 0), finish())), "another depth");
+    assert!(!fed(all(nested(1, 9), finish())), "another handler");
+    let mut early = vec![root.clone(), step("about", 1)];
+    early.extend(nested(1, 0));
+    assert!(!fed(early), "a nested rule before trig");
+    // Handlers: ids ascend, closed with their id and rule.
+    let after = |hh: Vec<J>| {
+        let mut v = vec![root.clone(), step("about", 1), step("trig", 1), step("trig_end", 1)];
+        v.extend(hh);
+        v.extend([step("did", 1), step("rule_end", 1)]);
+        v
+    };
+    assert!(fed(after(vec![h(3, 1, "mod_after"), h_end(3, 1), h(4, 1, "did"), h_end(4, 1)])));
+    assert!(
+        !fed(after(vec![h(3, 1, "did"), h_end(3, 1), h(4, 1, "mod_after"), h_end(4, 1)])),
+        "a mod_after after a did handler"
+    );
+    assert!(!fed(after(vec![h(3, 1, "did"), h_end(9, 1)])), "an h_end of another id");
+    assert!(!fed(after(vec![h(3, 1, "did"), h_end(3, 2)])), "an h_end of another rule");
+    assert!(
+        !fed(after(vec![h(3, 1, "did"), h_end(3, 1), h(3, 1, "did"), h_end(3, 1)])),
+        "a handler id not above the last"
+    );
+    assert!(!fed(after(vec![h(3, 2, "did"), h_end(3, 2)])), "a handler of another rule");
+    assert!(!fed(after(vec![h(3, 1, "about"), h_end(3, 1)])), "a handler of another stage");
+    assert!(!fed(after(vec![h_end(3, 1)])), "an h_end without its handler");
+    // A rule bonus is projected only to a rule open at the mutation.
+    let bonus = |t: i64| json!({"k": "mut", "t": 5, "what": "rule_bonus", "target_rule": t});
+    let recs = rvs(&[root.clone(), step("about", 1), step("trig", 1), rule(2, 1, 1, 0)]);
+    let mut open = Open::new(&recs[0]);
+    assert!(recs[1..].iter().all(|r| open.feed(r)));
+    let r = |v: J| rvs(&[v]).remove(0);
+    assert!(projected(&open, &r(bonus(2))), "an open nested rule");
+    assert!(projected(&open, &r(bonus(1))), "the open root");
+    assert!(!projected(&open, &r(bonus(99))), "a rule never allocated");
+    assert!(!projected(&open, &r(bonus(0))), "an untracked rule");
+    assert!(projected(&open, &r(json!({"k": "mut", "t": 5, "what": "damage"}))));
+    assert!(!projected(&open, &r(json!({"k": "mut", "t": 5, "what": "stat_value"}))));
+    for k in ["about", "trig", "trig_end", "did", "rule_end"] {
+        assert!(open.feed(&r(step(k, 2))));
+    }
+    assert!(!projected(&open, &r(bonus(2))), "a rule already closed");
+}
+
+/// A resolve nested in an attack takes the roll's positions only if its own record agrees: equal,
+/// and both recorded.
+#[test]
+fn a_nested_resolves_positions_must_agree_with_the_rolls() {
+    let env = |at: J| {
+        rvs(&[json!({"k": "env", "rule": "RuleAttackWithWeaponResolve", "at": at})]).remove(0)
+    };
+    let at = |i: [f64; 3], t: [f64; 3]| json!({"initiator_pos": i, "target_pos": t});
+    let roll = Some(([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]));
+    assert!(positions_agree(&env(at([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])), roll), "equal");
+    assert!(!positions_agree(&env(at([1.0, 2.0, 3.5], [4.0, 5.0, 6.0])), roll), "a coordinate off");
+    assert!(!positions_agree(&env(at([1.0, 2.0, 3.0], [4.0, 5.0, 6.5])), roll), "the target's off");
+    assert!(
+        !positions_agree(&env(at([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])), None),
+        "the roll's not recorded"
+    );
+    let null = json!({"initiator_pos": [1.0, null, 3.0], "target_pos": [4.0, 5.0, 6.0]});
+    assert!(!positions_agree(&env(null), roll), "a null coordinate in the resolve's");
+    let both = json!({"initiator_pos": null, "target_pos": null});
+    assert!(!positions_agree(&env(both), None), "null in both");
+    assert!(!positions_agree(&rvs(&[json!({"k": "env"})]).remove(0), None), "no positions at all");
+}
+
+/// A draw, a mutation and an environment of a root's span belong to the innermost rule, in the
+/// open handler and in the stage `span_ok` allows (a simulation draw and a bonus in `OnTrigger`
+/// or a handler, damage after `did` outside handlers, an environment in `OnTrigger` of the rule it
+/// names); a root's own stack fields are a root's.
+#[test]
+fn a_root_spans_records_are_attributed_like_span_oks() {
+    use super::spans::{Open, root_ok};
+    let class = |c: &str| format!("Kingmaker.RuleSystem.Rules.{c}");
+    let r = |v: J| rvs(&[v]).remove(0);
+    let root = r(
+        json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "parent": 0, "context_parent": 0, "handler": 0,
+        "reason_at_push": null, "class": class("RuleAttackWithWeapon"), "initiator": {"$unit": "a"}}),
+    );
+    assert!(root_ok(&root));
+    for (k, v) in [
+        ("parent", json!(7)),
+        ("handler", json!(7)),
+        ("depth", json!(1)),
+        ("context_parent", json!(null)),
+        ("id", json!(0)),
+    ] {
+        let mut x = root.to_json();
+        x[k] = v;
+        assert!(!root_ok(&r(x)), "a root with its {k} changed");
+    }
+    let mut x = root.to_json();
+    x.as_object_mut().expect("an object").remove("reason_at_push");
+    assert!(!root_ok(&r(x)), "a root without its reason at the push");
+    // A cast's rules carry an ability as their reason, and may be in another event's context.
+    let mut x = root.to_json();
+    x["reason_at_push"] = json!({"ability": "b"});
+    x["context_parent"] = json!(44);
+    assert!(root_ok(&r(x)));
+
+    let step = |k: &str, id: i64| r(json!({"k": k, "t": 5, "id": id}));
+    let draw =
+        |rule: i64, h: i64, c: &str| r(json!({"k": "draw", "t": 5, "c": c, "rule": rule, "h": h}));
+    let m = |what: &str, rule: i64, h: i64| {
+        r(json!({"k": "mut", "t": 5, "what": what, "rule": rule, "h": h}))
+    };
+    let env = |rule: &str| r(json!({"k": "env", "t": 5, "rule": rule}));
+    let nested = r(
+        json!({"k": "rule", "t": 5, "id": 2, "parent": 1, "depth": 1, "handler": 0, "context_parent": 1,
+        "class": class("RuleAttackWithWeaponResolve"), "initiator": {"$unit": "a"}}),
+    );
+    let mut open = Open::new(&root);
+    for rec in [step("about", 1), step("trig", 1)] {
+        assert!(open.feed(&rec));
+    }
+    // In the root's `OnTrigger`.
+    assert!(open.draw_placed(&draw(1, 0, "sim")));
+    assert!(!open.draw_placed(&draw(9, 0, "sim")), "another rule's draw");
+    assert!(!open.draw_placed(&draw(1, 4, "sim")), "a draw in a handler that isn't open");
+    assert!(open.mut_placed(&m("rule_bonus", 1, 0)));
+    assert!(!open.mut_placed(&m("rule_bonus", 9, 0)), "a bonus of another rule");
+    assert!(!open.mut_placed(&m("rule_bonus", 1, 4)), "a bonus in a handler that isn't open");
+    assert!(!open.mut_placed(&m("damage", 1, 0)), "damage before did");
+    assert!(open.env_placed(&env("RuleAttackWithWeapon")));
+    assert!(
+        !open.env_placed(&env("RuleAttackWithWeaponResolve")),
+        "a resolve's env, no resolve open"
+    );
+    // A nested resolve: its env is placed in its `OnTrigger`, not the attack's.
+    assert!(open.feed(&nested));
+    assert!(!open.env_placed(&env("RuleAttackWithWeaponResolve")), "before its about and trig");
+    for rec in [step("about", 2), step("trig", 2)] {
+        assert!(open.feed(&rec));
+    }
+    assert!(open.env_placed(&env("RuleAttackWithWeaponResolve")));
+    assert!(!open.env_placed(&env("RuleAttackWithWeapon")), "the attack's env inside the resolve");
+    assert!(open.draw_placed(&draw(2, 0, "sim")));
+    assert!(!open.draw_placed(&draw(1, 0, "sim")), "the parent's draw while the resolve is open");
+    assert!(open.feed(&step("trig_end", 2)));
+    assert!(!open.env_placed(&env("RuleAttackWithWeaponResolve")), "after trig_end");
+    assert!(!open.draw_placed(&draw(2, 0, "sim")), "a simulation draw after trig_end");
+    assert!(open.draw_placed(&draw(2, 0, "pres")), "a presentation draw has no stage");
+    assert!(open.feed(&step("did", 2)));
+    assert!(open.mut_placed(&m("damage", 2, 0)), "damage after did");
+    assert!(!open.mut_placed(&m("damage", 1, 0)), "damage of the parent");
+    assert!(open.mut_placed(&m("fact_attach", 2, 0)));
+    assert!(!open.mut_placed(&m("fact_attach", 3, 0)), "a fact attached by no open rule");
+}
+
+/// An attack roll or a resolve (a weapon without a projectile resolves at once, nested in the
+/// attack) closes with exactly one environment record, as `span_ok` requires: one removed (so the
+/// sim reuses the roll's positions unchecked) or doubled is reported. The tutorial's facts are
+/// dropped from the compared stream, so a span holds none.
+#[test]
+fn a_nested_resolve_needs_its_one_environment() {
+    use super::spans::{Open, projected};
+    let class = |c: &str| format!("Kingmaker.RuleSystem.Rules.{c}");
+    let r = |v: J| rvs(&[v]).remove(0);
+    let root = r(
+        json!({"k": "rule", "t": 5, "id": 1, "depth": 0, "parent": 0, "context_parent": 0, "handler": 0,
+        "reason_at_push": null, "class": class("RuleAttackWithWeapon"), "initiator": {"$unit": "a"}}),
+    );
+    let step = |k: &str, id: i64| r(json!({"k": k, "t": 5, "id": id}));
+    let nested = r(
+        json!({"k": "rule", "t": 5, "id": 2, "parent": 1, "depth": 1, "handler": 0, "context_parent": 1,
+        "class": class("RuleAttackWithWeaponResolve"), "initiator": {"$unit": "a"}}),
+    );
+    let env = r(json!({"k": "env", "t": 5, "rule": "RuleAttackWithWeaponResolve"}));
+    let ends = |envs: usize| {
+        let mut open = Open::new(&root);
+        for rec in
+            [step("about", 1), step("trig", 1), nested.clone(), step("about", 2), step("trig", 2)]
+        {
+            assert!(open.feed(&rec));
+        }
+        for _ in 0..envs {
+            assert!(open.env_placed(&env));
+            *open.envs.entry(open.life.rule()).or_default() += 1;
+        }
+        open.envs_ok(&step("rule_end", 2))
+    };
+    assert!(ends(1), "its environment");
+    assert!(!ends(0), "the environment removed");
+    assert!(!ends(2), "the environment doubled");
+    // Facts attached or detached are projected, a tutorial's are not.
+    let open = Open::new(&root);
+    let fact =
+        |what: &str, class: &str| r(json!({"k": "mut", "t": 5, "what": what, "class": class}));
+    assert!(projected(&open, &fact("fact_attach", "Buff")));
+    assert!(projected(&open, &fact("fact_detach", "Buff")));
+    assert!(!projected(&open, &fact("fact_attach", "Tutorial")));
+    assert!(!projected(&open, &fact("fact_detach", "Tutorial")));
+}
+
+/// The singleton handlers of a root's span come from the game's code (`scripts/gen-handler-table.py`
+/// from the interfaces `IGlobalRulebookHandler<T>` and the facts' `IInitiatorRulebookHandler<T>`),
+/// and the handlers `span_ok` counts (`GLOBAL_HANDLERS`) are among them, rule by rule.
+#[test]
+fn the_singleton_handler_table_agrees_with_the_commands() {
+    use super::commands::GLOBAL_HANDLERS;
+    use super::handler_table::handles;
+    for (handler, rules) in GLOBAL_HANDLERS {
+        for rule in rules.expect("a rule list") {
+            assert!(handles(handler, rule), "{handler} for {rule}");
+        }
+    }
+    // The cast's: reporting, the overtips, touch spells, the magus, the kineticist, the shadow
+    // spell controller on a spell resistance check, a fact's activatable ability.
+    for (h, r) in [
+        ("Kingmaker.Utility.ReportingUtils", "RuleCastSpell"),
+        ("Kingmaker.UI._ConsoleUI.Overtips.OvertipsVM", "RuleCastSpell"),
+        ("Kingmaker.Controllers.TouchSpellsController", "RuleCastSpell"),
+        ("Kingmaker.Controllers.MagusController", "RuleCastSpell"),
+        ("Kingmaker.UnitLogic.Class.Kineticist.KineticistController", "RuleCastSpell"),
+        ("Kingmaker.Controllers.ShadowSpellController", "RuleSpellResistanceCheck"),
+        ("Kingmaker.UnitLogic.ActivatableAbilities.ActivatableAbility", "RuleCastSpell"),
+    ] {
+        assert!(handles(h, r), "{h} for {r}");
+    }
+    assert!(!handles("Kingmaker.Controllers.NoSuchHandler", "RuleCastSpell"));
+    assert!(!handles("Kingmaker.Utility.ReportingUtils", "RuleAttackWithWeapon"), "another rule");
+    // A fact's component is no singleton.
+    assert!(!handles("Kingmaker.UnitLogic.FactLogic.Counterspell", "RuleCastSpell"));
+}
+
+/// An accepted environment record is typed as `span_ok` types it, and a position is three finite
+/// coordinates, no more and no fewer.
+#[test]
+fn an_environment_record_is_typed_and_a_position_has_three_coordinates() {
+    let (w, u) = world_in_area();
+    let unit = json!({"$unit": w.entity(u).unique_id});
+    let at = json!({"initiator_pos": [1.0, 2.0, 3.0], "target_pos": [4.0, 5.0, 6.0]});
+    let env = || {
+        json!({"seq": 1, "k": "env", "t": 5, "rule": "RuleAttackRoll", "initiator": unit, "target": unit,
+            "at": at, "concealment_initiator_from_target": 0, "concealment_target_from_initiator": 0,
+            "target_can_act_in_combat": true, "target_engaged_by": [], "target_flanked": false,
+            "target_is_get_up": false, "target_remembers_initiator": true})
+    };
+    let class = "Kingmaker.RuleSystem.Rules.RuleAttackRoll";
+    let ok = |x: &J| super::commands::env_record_ok(&w, x, class, &unit, &unit);
+    assert!(ok(&env()));
+    let mut x = env();
+    x["target_is_get_up"] = json!("garbage");
+    assert!(!ok(&x), "a get-up flag that isn't a boolean");
+    let mut x = env();
+    x["at"]["initiator_pos"] = json!([1.0, 2.0, 3.0, 4.0]);
+    assert!(!ok(&x), "a position of four coordinates");
+    let mut x = env();
+    x["target_engaged_by"] = json!(["no-such-unit"]);
+    assert!(!ok(&x), "an engaged-by unit the sim doesn't have");
+    let r = |v: J| rvs(&[v]).remove(0);
+    assert!(pos(&r(json!([1.0, 2.0, 3.0]))).is_some());
+    assert!(pos(&r(json!([1.0, 2.0, 3.0, 4.0]))).is_none(), "extra coordinates are not truncated");
+    assert!(pos(&r(json!([1.0, 2.0]))).is_none());
+}
+
+/// A handler is delivered to a rule, not to a class of rules: the recorded handlers carry the rule's
+/// class, initiator and ordinal among that class and initiator's rules, as the sim's log does. A
+/// handler of one initiative roll moved into another's (the rule references updated), by another
+/// unit or by the same unit, changes the list; so does an owner of another type, a fact blueprint
+/// that isn't the handler's, a component class of another namespace.
+#[test]
+fn a_recorded_handler_belongs_to_its_rule_instance() {
+    use super::spans::recorded_handlers;
+    let class = "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll";
+    let root = |id: i64, unit: &str| json!({"k": "rule", "id": id, "depth": 0, "class": class, "initiator": {"$unit": unit}});
+    let h = |id: i64, rule: i64, phase: &str| {
+        json!({"k": "h", "id": id, "rule": rule, "phase": phase,
+            "class": "Kingmaker.Designers.Mechanics.Facts.AddBuffOnCombatStart",
+            "component": "$AddBuffOnCombatStart$c1", "blueprint": "bp", "fact": {"$fact": "F1", "blueprint": "bp"},
+            "owner": {"$unit": "u1"}})
+    };
+    let end = |id: i64| json!({"k": "rule_end", "id": id});
+    let list = |v: Vec<J>| recorded_handlers(&rvs(&v), |_| false);
+    // Two rolls by two units, or by one: the handler in the first, or moved into the second.
+    let two = |units: (&str, &str), in_first: bool| {
+        let mut v = vec![root(1, units.0)];
+        if in_first {
+            v.push(h(10, 1, "about"));
+        }
+        v.extend([end(1), root(2, units.1)]);
+        if !in_first {
+            v.push(h(10, 2, "about"));
+        }
+        v.push(end(2));
+        v
+    };
+    assert_ne!(
+        list(two(("u1", "u2"), true)),
+        list(two(("u1", "u2"), false)),
+        "moved to another unit's roll"
+    );
+    assert_ne!(
+        list(two(("u1", "u1"), true)),
+        list(two(("u1", "u1"), false)),
+        "moved to the same unit's next roll"
+    );
+    assert_eq!(list(two(("u1", "u1"), true)), list(two(("u1", "u1"), true)));
+    // The identity fields.
+    let one = |edit: &dyn Fn(&mut J)| {
+        let mut x = h(10, 1, "about");
+        edit(&mut x);
+        list(vec![root(1, "u1"), x, end(1)])
+    };
+    let base = one(&|_| {});
+    assert_ne!(base, one(&|x| x["fact"]["blueprint"] = json!("other")), "the fact's blueprint");
+    assert_ne!(
+        base,
+        one(&|x| x["owner"] = json!({"$item": "u1", "blueprint": null})),
+        "an item as owner"
+    );
+    assert_ne!(
+        base,
+        one(&|x| x["class"] = json!("Other.Namespace.AddBuffOnCombatStart")),
+        "another namespace"
+    );
 }
