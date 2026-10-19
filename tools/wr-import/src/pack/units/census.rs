@@ -104,7 +104,15 @@ pub fn run(universe: &Universe, locations: &Locations, only: Option<&[String]>) 
         };
         for f in files {
             for o in f.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR) {
-                let Ok(v) = f.read(o) else { continue };
+                // A behaviour that can't be decoded may be an equipment entity: the census isn't
+                // exhaustive without it.
+                let v = match f.read(o) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        c.unreadable.push(format!("{g}: object {}: {e:#}", o.path_id));
+                        continue;
+                    }
+                };
                 if !universe.script_of(f, &v)?.is_some_and(|s| s.class == "EquipmentEntity") {
                     continue;
                 }
@@ -123,7 +131,10 @@ pub fn run(universe: &Universe, locations: &Locations, only: Option<&[String]>) 
                         continue;
                     };
                     c.with_renderer_prefab += 1;
-                    let Some(go) = universe.resolve(f, ptr)? else { continue };
+                    let Some(go) = universe.resolve(f, ptr)? else {
+                        c.unreadable.push(format!("{g}: part {i}: renderer prefab not found"));
+                        continue;
+                    };
                     let gv = go.read()?;
                     let (with, without) =
                         (find(go.file, &gv, true, true), find(go.file, &gv, false, true));
