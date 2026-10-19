@@ -489,9 +489,14 @@ pub struct SceneState {
     /// Cutscenes the sim classified (started, restored, or in their closures): a recorded
     /// command of another one is reported.
     pub classified_cutscenes: std::collections::HashSet<Guid>,
-    /// Unit prefabs' `IsInGameBySettings` by asset GUID (`cache/sim/unit-prefabs.json`,
-    /// [`crate::scene_spawn::load_unit_prefabs`]); `None` when the table wasn't built.
-    pub unit_prefabs: Option<Rc<HashMap<String, Option<bool>>>>,
+    /// Unit prefabs' `UnitEntityView` settings (`IsInGameBySettings`, `m_Corpulence`, the size
+    /// scale override) by asset GUID (`cache/sim/unit-prefabs.json`,
+    /// [`crate::scene_spawn::load_unit_prefabs`]); `None` when the table wasn't built (or has
+    /// another schema).
+    pub unit_prefabs: Option<Rc<HashMap<String, crate::scene_spawn::UnitPrefab>>>,
+    /// The doll prefabs' settings (`cache/sim/doll-prefabs.json`,
+    /// [`crate::scene_spawn::load_doll_prefabs`]); `None` when the file wasn't extracted.
+    pub doll_prefabs: Option<Rc<crate::scene_spawn::DollPrefabs>>,
     /// Area parts' bounds (`cache/sim/area-bounds.json`, [`crate::area_parts`]); `None` when
     /// the table wasn't extracted.
     pub area_bounds: Option<Rc<crate::area_parts::AreaBoundsTable>>,

@@ -286,6 +286,10 @@ pub struct Hit {
     /// slots of the result buffer (dropped after, their entity link gone, or duplicates of the
     /// unit).
     pub extra_slots: u32,
+    /// The collider is lost (its transform unknown): its radius is unknown with it until an
+    /// update the sim models, whatever the corpulence is (statistics: [`Cause::Corpulence`]
+    /// names an unbounded radius, not where it comes from).
+    pub lost: bool,
 }
 
 /// What a tick found beyond updating the colliders.
@@ -608,6 +612,7 @@ impl Bounds {
                 order_known: !c.history_unknown,
                 capped: None,
                 extra_slots: c.replaced,
+                lost: c.transform.is_none(),
             });
         }
         cap(&mut out);
@@ -1360,6 +1365,7 @@ mod tests {
             order_known: true,
             capped: None,
             extra_slots: 0,
+            lost: false,
         };
         let hits = [
             hit(A, Tri::In, None),

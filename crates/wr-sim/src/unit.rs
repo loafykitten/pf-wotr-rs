@@ -102,6 +102,9 @@ pub struct Slot {
 #[derive(Debug, Clone, Default)]
 pub struct Body {
     pub current_hand_set: i32,
+    /// `UnitBody.IsPolymorphed` (saved; `ApplyPolymorphEffect` isn't ported, so only a saved
+    /// body has it).
+    pub polymorphed: bool,
     pub slots: Vec<Slot>,
     /// `m_EmptyHandWeapon`.
     pub empty_hand: Option<EntityIdx>,
@@ -268,6 +271,15 @@ pub struct Unit {
     pub custom_prefab_guid: Option<String>,
     /// The prefab of the view a unit built in this run was given (`EntityCreator.SpawnUnit`).
     pub view_prefab: Option<String>,
+    /// `UnitPartDollData.Default`'s gender when it has a `RacePreset` (`UnitEntityData.CreateView`
+    /// builds such a unit's view from the doll prefab: `true` female), for a unit hydrated from
+    /// a save without one; `None` for a unit without the part or not hydrated.
+    pub doll_gender_female: Option<bool>,
+    /// The unit was spawned from a placeholder saved with a doll (`UnitSpawningData.Doll`): its
+    /// view was made from the doll, which one isn't known.
+    pub spawned_with_doll: bool,
+    /// The save had a `UnitPartDollData` (read: [`Self::doll_gender_female`], or no `RacePreset`).
+    pub doll_hydrated: bool,
     /// `UnitState.Prone.Active` (saved).
     pub prone_active: bool,
     /// `UnitState.Prone.ShouldBeActive` (saved): a knockdown's request, consumed by the next
@@ -349,7 +361,7 @@ fn levels(w: &World, u: EntityIdx) -> (i32, i32) {
 
 /// `ModifiableValueHitPoints.CalculateSizeBonus(OriginalSize)`.
 pub fn hp_size_bonus(w: &mut World, u: EntityIdx) -> i32 {
-    match w.unit(u).and_then(|x| x.original_size) {
+    match crate::spawn::original_size(w, u) {
         Some(Size::Tiny) => 0,
         Some(Size::Small) => 10,
         Some(Size::Medium) => 20,

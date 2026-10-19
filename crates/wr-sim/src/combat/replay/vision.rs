@@ -98,6 +98,10 @@ pub struct VisCounts {
     /// Pairs (a unit and a collider) the sim left to the recording, by cause: an unknown
     /// corpulence, an unknown position, an unknown `enabled`, the view-scale band.
     pub range_open: [usize; 5],
+    /// Of those left for the corpulence (an unbounded radius), the pairs of lost colliders (their
+    /// units' positions unknown): the radius is unknown with the collider, not for want of the
+    /// corpulence.
+    pub range_open_lost: usize,
     /// Pairs the sim decided, each equal to the recording's.
     pub range_decided_given_start: usize,
     /// Of the pairs left open only by the view-scale band, those where the answer with scale 1
@@ -112,11 +116,19 @@ pub struct VisCounts {
     pub range_within_1mm: usize,
     pub range_closest_um: u64,
     pub range_rounding: usize,
-    /// Unit-frames whose corpulence the recording hasn't shown yet (the radius is unknown, the
-    /// pairs it leaves open the recording's).
+    /// Unit-frames whose corpulence neither the recording (a valid read) nor the sim
+    /// (`combat::corpulence`) has (the radius is unknown, the pairs it leaves open the
+    /// recording's), by the sim's cause.
     pub range_corp_unknown: usize,
+    pub range_corp_cause: [usize; crate::combat::corpulence::Cause::ALL.len()],
     /// Of those, unit-frames with a read the sim's view of size changes made stale.
     pub range_corp_stale: usize,
+    /// Unit-frames where the recording had no valid read and the sim's corpulence was used.
+    pub range_corp_computed: usize,
+    /// Unit-frames where both had a value (the recording's used), and the ones where they differed
+    /// (each reported).
+    pub range_corp_both: usize,
+    pub range_corp_disagree: usize,
     /// Unit-frames of a fade-hidden view whose collider's `enabled` isn't known.
     pub range_fade_unit_frames: usize,
     /// Pairs within 5 cm of the capsule's surface: those another view scale could decide.

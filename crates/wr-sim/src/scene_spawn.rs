@@ -30,16 +30,73 @@ fn guid_of(v: &serde_json::Value) -> Option<wr_content::Guid> {
     v["guid"].as_str().filter(|s| !s.is_empty()).and_then(wr_content::Guid::parse)
 }
 
-/// `cache/sim/unit-prefabs.json` (`wr-import unit-prefabs`, schema `wr-sim-unit-prefabs-v1`):
-/// each unit prefab's `UnitEntityView.m_IsInGame` by asset GUID.
+/// A unit prefab's `UnitEntityView` settings (`cache/sim/unit-prefabs.json`); a field the
+/// importer found no single value for is `None`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UnitPrefab {
+    /// `m_IsInGame` (`IsInGameBySettings`).
+    pub in_game: Option<bool>,
+    /// `m_Corpulence`.
+    pub corpulence: Option<f32>,
+    /// Whether the view has an `OverrideSizeScale` component.
+    pub override_present: Option<bool>,
+    /// `OverrideSizeScale.m_ScaleStepCoefficient` and `m_MaxScale`.
+    pub scale_step: Option<f32>,
+    pub max_scale: Option<f32>,
+}
+
+/// The table's schema (`wr-import unit-prefabs`).
+pub const UNIT_PREFABS_SCHEMA: &str = "wr-sim-unit-prefabs-v2";
+
+/// The schema of `cache/sim/doll-prefabs.json` (`wr-rules-data`).
+pub const DOLL_PREFABS_SCHEMA: &str = "wr-sim-doll-prefabs-v1";
+
+/// The `UnitEntityView` settings of the two prefabs a doll's view is made from
+/// (`BlueprintRoot.CharGen.MaleDoll` and `FemaleDoll`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DollPrefabs {
+    pub male: UnitPrefab,
+    pub female: UnitPrefab,
+}
+
+fn parse_prefab(x: &serde_json::Value) -> UnitPrefab {
+    // (The importer writes `f32`s; they read back exactly through `f64`.)
+    #[allow(clippy::cast_possible_truncation)]
+    let float = |x: &serde_json::Value| x.as_f64().map(|f| f as f32);
+    UnitPrefab {
+        in_game: x["in_game"].as_bool(),
+        corpulence: float(&x["corpulence"]),
+        override_present: x["override_present"].as_bool(),
+        scale_step: float(&x["scale_step"]),
+        max_scale: float(&x["max_scale"]),
+    }
+}
+
+/// `cache/sim/doll-prefabs.json`; `None` when it wasn't extracted (run `wr-rules-data`).
 #[must_use]
-pub fn load_unit_prefabs() -> Option<Rc<std::collections::HashMap<String, Option<bool>>>> {
-    let path = wr_paths::cache_root().join("sim").join("unit-prefabs.json");
+pub fn load_doll_prefabs() -> Option<Rc<DollPrefabs>> {
+    let path = wr_paths::cache_root().join("sim").join("doll-prefabs.json");
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    if v["schema"] != "wr-sim-unit-prefabs-v1" {
+    if v["schema"] != DOLL_PREFABS_SCHEMA {
         return None;
     }
-    let map = v["prefabs"].as_object()?.iter().map(|(k, x)| (k.clone(), x.as_bool())).collect();
+    Some(Rc::new(DollPrefabs {
+        male: parse_prefab(&v["male"]),
+        female: parse_prefab(&v["female"]),
+    }))
+}
+
+/// `cache/sim/unit-prefabs.json` (`wr-import unit-prefabs`, schema `wr-sim-unit-prefabs-v2`):
+/// each unit prefab's `UnitEntityView` settings by asset GUID. A table of another schema is
+/// treated as not built.
+#[must_use]
+pub fn load_unit_prefabs() -> Option<Rc<std::collections::HashMap<String, UnitPrefab>>> {
+    let path = wr_paths::cache_root().join("sim").join("unit-prefabs.json");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if v["schema"] != UNIT_PREFABS_SCHEMA {
+        return None;
+    }
+    let map = v["prefabs"].as_object()?.iter().map(|(k, x)| (k.clone(), parse_prefab(x))).collect();
     Some(Rc::new(map))
 }
 
@@ -51,7 +108,7 @@ pub fn load_unit_prefabs() -> Option<Rc<std::collections::HashMap<String, Option
 pub fn prefab_in_game(w: &mut World, asset: Option<&str>) -> bool {
     let value = asset
         .filter(|a| !a.is_empty())
-        .and_then(|a| w.scene.unit_prefabs.as_ref().and_then(|t| t.get(a).copied().flatten()));
+        .and_then(|a| w.scene.unit_prefabs.as_ref().and_then(|t| t.get(a)?.in_game));
     match value {
         Some(v) => v,
         None => {

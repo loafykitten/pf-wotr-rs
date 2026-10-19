@@ -91,7 +91,10 @@ fn create_preview_inner(w: &mut World, original: EntityIdx) -> Option<EntityIdx>
     if w.unit(original).is_some_and(|u| u.body.slots.iter().any(|s| s.item.is_some())) {
         w.coverage.unsupported("UnitHelper.CopyItems: creating the equipment again");
     }
-    // `UpdateScalePercent`: presentation. `unitEntityData.TurnOn()`.
+    // `Progression.UpdateScalePercent(unit.Progression.CurrentScalePercent)`.
+    let percent = w.combat.corpulence.scale_percent.get(&original).copied().unwrap_or(0.0);
+    crate::combat::corpulence::update_scale_percent(w, e, percent);
+    // `unitEntityData.TurnOn()`.
     crate::entity::turn_on(w, e);
     w.entity_mut(e).is_in_game = false;
     w.coverage.context = outer_ctx;

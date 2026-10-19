@@ -17,6 +17,7 @@ pub mod attack;
 pub mod commands;
 pub mod components;
 pub mod cooldowns;
+pub mod corpulence;
 pub mod counts;
 pub mod engage;
 pub mod fire;
@@ -185,6 +186,9 @@ pub struct CombatWorld {
     /// Line of sight: the geometry, the sight caches and the units in vision range, when the
     /// replay computes them (docs/poc5/vision.md).
     pub vision: vision::Vision,
+    /// What `UnitEntityView.Corpulence` is computed from besides the unit's state
+    /// (`combat::corpulence`).
+    pub corpulence: corpulence::Corpulence,
 }
 
 /// `UnitEntityData.IsInCombat`.

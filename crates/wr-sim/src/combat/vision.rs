@@ -767,6 +767,7 @@ pub fn note_fact_ending(w: &mut World, f: crate::world::FactIdx) {
         note_explicit_sync(w);
         if let Some(e) = w.fact(f).owner {
             w.combat.vision.views_replaced.push((e, true));
+            super::corpulence::view_replaced(w, e);
         }
     }
 }
@@ -779,6 +780,7 @@ pub fn note_fact_starting(w: &mut World, f: crate::world::FactIdx) {
         && let Some(e) = w.fact(f).owner
     {
         w.combat.vision.views_replaced.push((e, true));
+        super::corpulence::view_replaced(w, e);
     }
 }
 
@@ -825,4 +827,5 @@ pub fn update_has_dummy_view(w: &mut World, u: EntityIdx, sleeping: Option<bool>
         w.combat.vision.dummy_swaps.1 += 1;
     }
     w.combat.vision.views_replaced.push((u, false));
+    super::corpulence::view_replaced(w, u);
 }

@@ -928,6 +928,7 @@ impl Loader<'_> {
         }
         Body {
             current_hand_set: b.i32_or("m_CurrentHandsEquipmentSetIndex", 0),
+            polymorphed: b.bool_or("IsPolymorphed", false),
             slots,
             empty_hand,
             empty_hand_stack,
@@ -1284,6 +1285,7 @@ pub fn hydrate(
 
     ld.w.scene.cache = area.as_deref().and_then(crate::scene::SceneCache::load);
     ld.w.scene.unit_prefabs = crate::scene_spawn::load_unit_prefabs();
+    ld.w.scene.doll_prefabs = crate::scene_spawn::load_doll_prefabs();
     ld.w.scene.area_bounds = crate::area_parts::AreaBoundsTable::load_default();
 
     // ---- deserialization ----

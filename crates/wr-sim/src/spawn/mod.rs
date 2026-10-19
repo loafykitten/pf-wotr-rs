@@ -76,6 +76,9 @@ pub struct PlaceholderData {
     pub has_prefab_id: bool,
     /// `m_PrefabId`, when set: the prefab of the unit's view.
     pub prefab_id: Option<String>,
+    /// `m_DollData` is set (`UnitSpawningData.Doll`): `EntityCreator.SpawnUnit` builds the view
+    /// from the doll, and the unit gets a `UnitPartDollData` (neither is modelled: reported).
+    pub doll: bool,
     /// `m_IsOptimizedHide` (`UnitSpawningData.SimplifyWhenHidden`).
     pub optimized_hide: bool,
     pub body: Option<Body>,
@@ -457,6 +460,18 @@ fn initialize(w: &mut World, e: EntityIdx, bp: &Rc<Blueprint>, p: Option<&Placeh
     if let Some(race) = p.and_then(|p| p.race) {
         levelup::set_race(w, e, race);
     }
+    // `if (!unit.Body.IsPolymorphed) unit.CustomPrefabGuid = current.PrefabGuid;` (the body is
+    // `current?.Body`, a placeholder's saved one, which keeps its `IsPolymorphed`): the prefab
+    // the unit's view is made from again whenever it is replaced (`UnitEntityData.CreateView`),
+    // whatever the blueprint's is. A spawn without a prefab id leaves it unset.
+    if let Some(p) = p {
+        // (`Body = current?.Body`: a placeholder's saved body keeps its `IsPolymorphed`.)
+        if !p.body.as_ref().is_some_and(|b| b.polymorphed) {
+            w.unit_mut(e).expect("unit").custom_prefab_guid = p.prefab_id.clone();
+        }
+        // (A placeholder that was saved with a doll makes the view from it: not modelled.)
+        w.unit_mut(e).expect("unit").spawned_with_doll = p.doll;
+    }
     if w.unit(e).is_some_and(|u| u.progression.race.is_none())
         && let Some(race) = v.guid("m_Race")
     {
@@ -550,6 +565,20 @@ fn ensure_natural_proficiencies(w: &mut World, e: EntityIdx) {
     }
 }
 
+/// `UnitDescriptor.OriginalSize` (`UnitDescriptor.cs:308`): `Progression.Race?.Size ?? Blueprint.Size`,
+/// derived on every read from the unit's race and its *current* blueprint (`PretendUnit` swaps
+/// it, `SetRace` changes the race). The stored [`Unit::original_size`] (set at construction and
+/// from a save) answers only when the content has neither.
+#[must_use]
+pub fn original_size(w: &World, e: EntityIdx) -> Option<Size> {
+    let x = w.unit(e)?;
+    let size = |g: Guid| w.content.get(g).map(|b| b.view().int("Size"));
+    match x.progression.race.and_then(size).or_else(|| x.blueprint.and_then(size)) {
+        Some(i) => Size::from_i64(i),
+        None => x.original_size,
+    }
+}
+
 /// `UnitState.Size`'s getter: `m_Size`, set to `OriginalSize` on first read (`None` for a unit
 /// without either). A size part loaded from a save (its facts and `OnPostLoad` aren't hydrated)
 /// is reported.
@@ -557,9 +586,10 @@ pub fn state_size(w: &mut World, e: EntityIdx) -> Option<Size> {
     if w.unit(e)?.size_part_from_save {
         w.coverage.unsupported("UnitPartSizeModifier from a save (not hydrated)");
     }
+    let original = original_size(w, e);
     let u = w.unit_mut(e)?;
     if u.state_size.is_none() {
-        u.state_size = u.original_size;
+        u.state_size = original;
     }
     u.state_size
 }
@@ -590,7 +620,7 @@ pub fn set_state_size(w: &mut World, e: EntityIdx, size: Size) {
 pub fn update_size_part(w: &mut World, e: EntityIdx) {
     loop {
         let Some(f) = w.unit(e).and_then(|u| u.size_change_facts.last().copied()) else {
-            let original = w.unit(e).and_then(|u| u.original_size);
+            let original = original_size(w, e);
             if let Some(s) = original {
                 set_state_size(w, e, s);
             }
@@ -617,7 +647,7 @@ pub fn update_size_part(w: &mut World, e: EntityIdx) {
                     // `GetUnitSize`: `Delta` (0) `OriginalSize.Shift(SizeDelta, Fine)`, `Value` (1)
                     // the size.
                     size = match value_type {
-                        0 => w.unit(e).and_then(|u| u.original_size).map(|o| shift_size(o, delta)),
+                        0 => original_size(w, e).map(|o| shift_size(o, delta)),
                         1 => Size::from_i64(value),
                         _ => {
                             w.coverage.unsupported("ChangeUnitSize: an unknown change type");
@@ -656,6 +686,8 @@ pub fn update_size_modifiers(w: &mut World, e: EntityIdx) {
     {
         ops::remove_modifiers(w, e, t, D::Size);
     }
+    // `View?.ResetSizeScale()`.
+    crate::combat::corpulence::reset_size_scale(w, e);
     let size = state_size(w, e);
     // (AttackAndAC, Stealth, Reach) per size, Fine … Colossal.
     let m = match size {

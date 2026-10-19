@@ -1096,9 +1096,15 @@ fn a_unit_starts_with_its_prefabs_in_game_setting() {
     assert!(!w.coverage.valid(), "and reported");
     let (mut w, _) = world();
     w.scene.unit_prefabs = Some(Rc::new(
-        [("hiddenprefab".to_owned(), Some(false)), ("ambiguous".to_owned(), None)]
-            .into_iter()
-            .collect(),
+        [
+            (
+                "hiddenprefab".to_owned(),
+                crate::scene_spawn::UnitPrefab { in_game: Some(false), ..Default::default() },
+            ),
+            ("ambiguous".to_owned(), crate::scene_spawn::UnitPrefab::default()),
+        ]
+        .into_iter()
+        .collect(),
     ));
     assert!(!prefab_in_game(&mut w, Some("hiddenprefab")), "the prefab's setting");
     assert!(w.coverage.valid(), "{:?}", w.coverage.unsupported);
@@ -2060,4 +2066,96 @@ fn the_loaded_area_part_falls_back_to_the_closest_and_fails_closed() {
     assert!(matches!(w.scene.loaded_part, LoadedPart::Unknown(_)));
     let u = area_unit(&mut w, "u", [100.0, 0.0, 0.0], true);
     assert!(suppressed_at_load(&w, u).is_err());
+}
+
+/// `UnitDescriptor`'s constructor copies the spawning data's prefab into `CustomPrefabGuid`
+/// (`if (!unit.Body.IsPolymorphed)`), so a view made again later (a dummy swapped out) is made
+/// from the placeholder's prefab, not the blueprint's; a placeholder saved with a doll has no
+/// prefab view the sim can name.
+#[test]
+fn a_placeholders_prefab_is_the_prefab_a_replaced_view_is_made_from() {
+    use crate::combat::corpulence::{self, Cause};
+    use crate::scene_spawn::UnitPrefab;
+    use crate::spawn::PlaceholderData;
+    let (mut w, _) = world();
+    let bp = insert(
+        &w,
+        0x9A2,
+        "Kingmaker.Blueprints.BlueprintUnit",
+        &[("Prefab", Node::WeakLink(Some("blueprintprefab".into())))],
+    );
+    let prefab =
+        |c| UnitPrefab { corpulence: Some(c), override_present: Some(false), ..Default::default() };
+    w.scene.unit_prefabs = Some(Rc::new(
+        [("blueprintprefab".to_owned(), prefab(0.6)), ("spawnprefab".to_owned(), prefab(0.9))]
+            .into_iter()
+            .collect(),
+    ));
+    let make_with = |w: &mut World, id: &str, doll: bool, polymorphed: bool| {
+        let e = w.add_entity(Entity {
+            unique_id: id.into(),
+            clr: "UnitEntityData",
+            kind: EntityKind::Unit(Box::default()),
+            facts: FactsManager::default(),
+            parts: Vec::new(),
+            is_turned_on: false,
+            post_load_executed: false,
+            is_in_game: true,
+            subscribed: false,
+            disposing: false,
+            is_disposed: false,
+        });
+        let p = PlaceholderData {
+            entity: e,
+            unit_id: id.into(),
+            blueprint: Some(bp.guid),
+            group_id: None,
+            position: [0.0; 3],
+            orientation: 0.0,
+            is_in_game: true,
+            is_revealed: true,
+            is_finally_dead: false,
+            is_extra: false,
+            race: None,
+            faction: None,
+            pools: Vec::new(),
+            roaming: false,
+            roaming_idle_cutscene: false,
+            roaming_next_idle_cutscene: false,
+            roaming_part: None,
+            vendor_table: None,
+            has_prefab_id: true,
+            prefab_id: Some("spawnprefab".into()),
+            doll,
+            optimized_hide: false,
+            body: polymorphed
+                .then(|| crate::unit::Body { polymorphed: true, ..Default::default() }),
+            inventory: Vec::new(),
+            inventory_collection: None,
+            unmodelled: Vec::new(),
+        };
+        if polymorphed {
+            // (The hydrator puts a placeholder's saved body on its reserved unit.)
+            w.unit_mut(e).expect("unit").body.polymorphed = true;
+        }
+        crate::spawn::construct(w, e, &bp, Some(&p), true);
+        w.unit_mut(e).expect("unit").view_prefab = Some("spawnprefab".into());
+        e
+    };
+    let make = |w: &mut World, id: &str, doll: bool| make_with(w, id, doll, false);
+    let u = make(&mut w, "p1", false);
+    assert_eq!(w.unit(u).unwrap().custom_prefab_guid.as_deref(), Some("spawnprefab"));
+    assert_eq!(corpulence::corpulence(&mut w, u), Ok(0.9));
+    // The dummy swapped out and the real view made again: still the spawning data's prefab.
+    corpulence::view_replaced(&mut w, u);
+    assert_eq!(corpulence::corpulence(&mut w, u), Ok(0.9));
+    // A placeholder saved with a polymorphed body keeps the blueprint's prefab
+    // (`if (!unit.Body.IsPolymorphed)` around `CustomPrefabGuid = current.PrefabGuid`).
+    let pm = make_with(&mut w, "p3", false, true);
+    assert_eq!(w.unit(pm).unwrap().custom_prefab_guid, None);
+    assert_eq!(corpulence::corpulence(&mut w, pm), Err(Cause::Polymorph));
+    let d = make(&mut w, "p2", true);
+    assert_eq!(corpulence::corpulence(&mut w, d), Err(Cause::Doll));
+    corpulence::view_replaced(&mut w, d);
+    assert_eq!(corpulence::corpulence(&mut w, d), Err(Cause::Doll));
 }

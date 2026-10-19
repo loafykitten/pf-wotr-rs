@@ -970,8 +970,9 @@ fn missing_or_wrong_physics_and_path_records_are_reported() {
                 .collect();
             recs[b]["observers"] = json!(obs);
         }),
-        ("a graph event differs from the sim's", |recs| {
-            // A unit's corpulence reads all another value: its boxes aren't the recorded ones.
+        ("driven replay: corpulence: ", |recs| {
+            // A unit's corpulence reads all another value: the grid takes the sim's corpulence
+            // (its boxes are the recorded ones), and the reads are reported as differing from it.
             let at = tb(recs, |r| ev(r, "uc_v") && r["f"] == "corp");
             let u = recs[at]["u"].clone();
             for r in recs.iter_mut() {

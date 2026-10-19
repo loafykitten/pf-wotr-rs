@@ -163,6 +163,9 @@ pub struct Outcome {
     /// Line of sight computed (docs/poc5/vision.md): the counts, or why not.
     pub vision: Option<vision::VisCounts>,
     pub vision_off: Option<String>,
+    /// `UnitEntityView.Corpulence` from the unit's prefab and size against the recording's reads
+    /// (docs/poc5/corpulence.md); `None` when the recording holds none.
+    pub corpulence: Option<corp::CorpCounts>,
     pub mem_ticks: usize,
     pub mem_reads: usize,
     pub mem_inputs: usize,
@@ -1002,6 +1005,8 @@ struct Driver<'t> {
     /// The group memory is the sim's (the `memory` observer).
     mem: memory::MemDriver,
     vis: vision::VisDriver,
+    /// The check of `UnitEntityView.Corpulence` against the recording's reads.
+    corp: corp::CorpDriver,
     imp_init_n: usize,
     imp_init_closed: bool,
     imp_tick_frame: Option<i64>,
@@ -1274,6 +1279,7 @@ impl<'t> Driver<'t> {
             ags: agent::AgDriver::default(),
             mem: memory::MemDriver::default(),
             vis: vision::VisDriver::default(),
+            corp: corp::CorpDriver::default(),
             imp_init_n: 0,
             imp_init_closed: false,
             imp_tick_frame: None,
@@ -1543,6 +1549,7 @@ impl<'t> Driver<'t> {
         d.look_start(w);
         d.vis_start(w, &declared);
         d.out.vision_off = d.vis.off.clone();
+        d.corp.start(trace);
         d.roam_start(w, &declared);
         // The paths' records need the driven agent (`agent_sync` and its chain).
         // Observer `paths`' records without its declaration (a damaged begin record).
@@ -1641,6 +1648,9 @@ impl<'t> Driver<'t> {
         self.run_phases(w, &rest);
         self.vis_frame_end(w);
         self.vis_finish(w);
+        if self.corp.counts.reads > 0 {
+            self.out.corpulence = Some(std::mem::take(&mut self.corp.counts));
+        }
         if self.ag {
             self.ag_finish(w);
         }
@@ -3123,11 +3133,13 @@ impl Driver<'_> {
     fn record(&mut self, w: &mut World, i: usize) -> usize {
         let outer = self.record_depth == 0;
         let mark = w.combat.vision.bump_log.len();
+        let events = w.combat.corpulence.events.len();
         self.record_depth += 1;
         let next = self.record_entry(w, i);
         self.record_depth -= 1;
         if outer {
             w.combat.vision.restamp_bumps(mark, next.saturating_sub(1).max(i));
+            self.corp_entry_done(w, i, next, mark, events);
         }
         next
     }
@@ -4834,6 +4846,7 @@ fn pos_pair(at: &Rv) -> Option<([f32; 3], [f32; 3])> {
 mod agent;
 mod ai;
 mod commands;
+mod corp;
 mod engage;
 mod handler_table;
 mod impatience;

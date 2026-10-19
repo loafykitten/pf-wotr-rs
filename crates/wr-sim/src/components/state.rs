@@ -3,7 +3,8 @@
 //! `AddBackgroundWeaponProficiency.cs`, `AddMechanicsFeature.cs` (its `Runtime`),
 //! `AddFacts.cs`, `Kingmaker.Blueprints.Classes/AddClassLevels.cs`,
 //! `Kingmaker.Designers.Mechanics.Facts/AddFeatureOnClassLevel.cs`,
-//! `Kingmaker.Designers.Mechanics.Buffs/OverrideLocoMotion.cs`.
+//! `Kingmaker.Designers.Mechanics.Buffs/OverrideLocoMotion.cs`,
+//! `Kingmaker.UnitLogic.FactLogic/AddUnitScale.cs`.
 
 use super::{Port, bits, owner_unit, with_settings};
 use crate::registry::{Hook, Registry};
@@ -22,6 +23,7 @@ pub fn register(r: &mut Registry) {
         Port::new("AddImmortality", super::all_hooks(), add_immortality),
         Port::new("AddLocalMapMarker", super::all_hooks(), add_local_map_marker),
         Port::new("OverrideLocoMotion", bits(&[PostLoad]), override_loco_motion),
+        Port::new("AddUnitScale", bits(&[TurnOn, TurnOff]), add_unit_scale),
     ];
     for p in ports {
         r.register(Box::new(p));
@@ -36,6 +38,24 @@ pub fn register(r: &mut Registry) {
     p.ev = Some(super::levelup::add_feature_on_class_level_event);
     r.register(Box::new(p));
     r.note_inert("PrerequisiteFeature", "level-up prerequisite; read by progression, no runtime");
+}
+
+/// `AddUnitScale.OnTurnOn`: `Progression.UpdateScalePercent(ScaleIncreaseCoefficient)`, then
+/// `Descriptor.UpdateSizeModifiers()` (which resets the view's cached size scale);
+/// `OnTurnOff`: `ResetScalePercent()`, the same update.
+fn add_unit_scale(w: &mut World, c: CompRef, h: Hook) {
+    let Some(u) = owner_unit(w, c) else { return };
+    match h {
+        Hook::TurnOn => {
+            let Some(p) = with_settings(w, c, |v| v.f32("ScaleIncreaseCoefficient")) else {
+                return;
+            };
+            crate::combat::corpulence::update_scale_percent(w, u, p);
+        }
+        Hook::TurnOff => crate::combat::corpulence::reset_scale_percent(w, u),
+        _ => return,
+    }
+    crate::spawn::update_size_modifiers(w, u);
 }
 
 /// `MultiSet<T>.Add` / `Remove` on a proficiency set.
