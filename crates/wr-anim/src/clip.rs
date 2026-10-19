@@ -192,6 +192,20 @@ impl Clip {
             self.dense.curves
         );
         ensure!(self.stop >= self.start, "{}: stops before it starts", self.name);
+        ensure!(
+            self.start.is_finite() && self.stop.is_finite(),
+            "{}: start or stop isn't a number",
+            self.name
+        );
+        let finite = self.constant.iter().all(|v| v.is_finite())
+            && self.dense.samples.iter().all(|v| v.is_finite())
+            && self.dense.begin.is_finite()
+            && self.dense.rate.is_finite()
+            && self.streamed.curves.iter().flatten().all(|k| {
+                // The initial-value key sits at -f32::MAX, which is finite.
+                k.time.is_finite() && k.coeff.iter().all(|c| c.is_finite())
+            });
+        ensure!(finite, "{}: a curve value or coefficient isn't a number", self.name);
         Ok(())
     }
 
@@ -396,6 +410,41 @@ mod tests {
         let mut short = clip.clone();
         short.constant.pop();
         assert!(short.validate().is_err());
+    }
+
+    #[test]
+    fn non_finite_curve_values_are_rejected() {
+        let good = Clip {
+            name: "c".into(),
+            stop: 1.0,
+            bindings: vec![Binding { path: 1, attribute: ATTR_POSITION, type_id: 4 }],
+            constant: vec![0.0, 1.0, 2.0],
+            ..Clip::default()
+        };
+        good.validate().unwrap();
+        let mut c = good.clone();
+        c.constant[1] = f32::NAN;
+        assert!(c.validate().is_err());
+        let mut d = good.clone();
+        d.constant.clear();
+        d.dense = Dense {
+            rate: 30.0,
+            frames: 1,
+            curves: 3,
+            samples: vec![0.0, f32::INFINITY, 0.0],
+            ..Dense::default()
+        };
+        assert!(d.validate().is_err());
+        let mut s = good.clone();
+        s.constant.clear();
+        s.streamed = decode_streamed(&words(), 1).unwrap();
+        s.bindings = vec![Binding { path: 1, attribute: 77, type_id: 137 }];
+        s.validate().unwrap();
+        s.streamed.curves[0][1].coeff[2] = f32::NAN;
+        assert!(s.validate().is_err());
+        let mut t = good;
+        t.stop = f32::NAN;
+        assert!(t.validate().is_err());
     }
 
     #[test]

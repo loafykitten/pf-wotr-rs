@@ -550,6 +550,19 @@ pub(super) fn plain_animator(
     bail!("no UnitAnimationManager under the unit's root")
 }
 
+/// A unit's animation setup (its set resolved, its locomotion read, its record made) as an option: a
+/// failure anywhere in it becomes a note in the pack report and the unit is drawn in the rig's rest
+/// pose instead of being left out.
+pub(super) fn or_rest_pose<T>(notes: &mut Vec<String>, unit: &str, r: Result<T>) -> Option<T> {
+    match r {
+        Ok(v) => Some(v),
+        Err(e) => {
+            notes.push(format!("{unit}: drawn in the rest pose, not animated: {e:#}"));
+            None
+        }
+    }
+}
+
 /// The transform the clips' paths start from. That is the `Animator`'s own transform, except for
 /// prefabs that nest the rig below it (the monitor lizard's animator sits on a `FakePivot` above
 /// the rig's root): the descendant under which most of the clips' transform properties find a
@@ -766,6 +779,22 @@ mod tests {
                 ]),
             ),
         ])
+    }
+
+    #[test]
+    fn a_failed_animation_setup_is_a_note_not_an_omission() {
+        let mut notes = Vec::new();
+        // Resolving the set is part of the setup: its failure takes the same road.
+        let setup = || -> Result<u32> {
+            let set: Option<u32> = None;
+            let _set = set.context("animation set not found")?;
+            Ok(1)
+        };
+        assert_eq!(or_rest_pose(&mut notes, "3708 Seelah", setup()), None);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("3708 Seelah") && notes[0].contains("animation set not found"));
+        assert_eq!(or_rest_pose(&mut notes, "u", Ok(5)), Some(5));
+        assert_eq!(notes.len(), 1);
     }
 
     #[test]

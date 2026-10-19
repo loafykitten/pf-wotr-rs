@@ -26,7 +26,7 @@ use wr_assets::{
 };
 use wr_view::UnitView;
 
-use super::anim::{AnimCache, BuiltRig, bound_poses, build_rig};
+use super::anim::{AnimCache, BuiltRig, bound_poses, build_rig, or_rest_pose};
 use super::atlas::{self, Atlas, Rect};
 use super::image::{self, Image};
 use super::skin;
@@ -1112,23 +1112,17 @@ pub(super) fn add(
         let sv = skeleton.map(|s| s.read()).transpose()?;
         build_rig(&rsc, root, &av_name(&rsc, root), Mat4::IDENTITY, true, sv.as_ref())
     })?;
-    // `Character.AnimationSet` is the human set unless the prefab names its own.
-    let set = match ch.get("m_AnimationSet").and_then(Value::as_pptr).filter(|p| !p.is_null()) {
-        Some(p) => b.universe.resolve(prefab.sc.file, p)?.context("animation set not found")?,
-        None => anim.human_set(b)?,
-    };
-    // A character whose animation can't be read is drawn in the rig's rest pose, not left out.
-    let animation = match anim
-        .locomotion(b, set)
-        .and_then(|(loco, clips)| anim.animation(b, &u.id, rig_index, loco, clips))
-    {
-        Ok(a) => Some(a),
-        Err(e) => {
-            anim.notes
-                .push(format!("{} {}: drawn in the rest pose, not animated: {e:#}", u.id, u.name));
-            None
-        }
-    };
+    // A character whose animation can't be read (its set included) is drawn in the rig's rest pose,
+    // not left out. `Character.AnimationSet` is the human set unless the prefab names its own.
+    let setup = (|| -> Result<u32> {
+        let set = match ch.get("m_AnimationSet").and_then(Value::as_pptr).filter(|p| !p.is_null()) {
+            Some(p) => b.universe.resolve(prefab.sc.file, p)?.context("animation set not found")?,
+            None => anim.human_set(b)?,
+        };
+        let (loco, clips) = anim.locomotion(b, set)?;
+        anim.animation(b, &u.id, rig_index, loco, clips)
+    })();
+    let animation = or_rest_pose(&mut anim.notes, &format!("{} {}", u.id, u.name), setup);
     // Equipment: the prefab's saved entities and ramps, then the spec's.
     let mut eq = Equipment::default();
     if !u.replace_base_equipment {

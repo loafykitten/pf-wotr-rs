@@ -294,14 +294,8 @@ fn plain(
 ) -> Result<()> {
     let sc = &prefab.sc;
     let matrix = placement(u, prefab.root_scale(), prefab.forbid_rotation);
-    let animated = match plain_animation(b, anim, prefab, u) {
-        Ok(a) => Some(a),
-        Err(e) => {
-            anim.notes
-                .push(format!("{} {}: drawn in the rest pose, not animated: {e:#}", u.id, u.name));
-            None
-        }
-    };
+    let setup = plain_animation(b, anim, prefab, u);
+    let animated = anim::or_rest_pose(&mut anim.notes, &format!("{} {}", u.id, u.name), setup);
     let mut any = false;
     for o in sc.file.objects.iter().filter(|o| o.class_id == class_id::SKINNED_MESH_RENDERER) {
         let v = sc.file.read(o)?;

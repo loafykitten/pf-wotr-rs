@@ -274,8 +274,10 @@ impl Player {
     /// Whether `t` may fire in an update that took the state's normalised time from `prev` to
     /// `time`: its exit time was crossed in that update (a looping state crosses it again every
     /// cycle when it is below one, so a transition waiting on a condition fires at the next
-    /// crossing, not at once) and its conditions hold. A one-shot state that has finished stays
-    /// past its exit time.
+    /// crossing, not at once) and its conditions hold. Following Unity's documentation of
+    /// `AnimatorStateTransition.exitTime`, the exit time is true on the update that crosses it and
+    /// false on the next, for a state that doesn't loop too (the page doesn't address that case;
+    /// not verified against the original until the pose capture exists).
     fn test(&self, t: &Transition, prev: f32, time: f32, looping: bool) -> bool {
         if t.has_exit_time {
             let crossed = if looping && t.exit_time < 1.0 {
@@ -285,9 +287,8 @@ impl Player {
                     prev < at && at <= time
                 })
             } else {
-                // Once (above one, or a state that doesn't loop): reached, and not before this
-                // update unless the state has run out (then it stays eligible).
-                time >= t.exit_time && (prev < t.exit_time || !looping)
+                // Once (above one, or a state that doesn't loop): crossed in this update.
+                prev < t.exit_time && t.exit_time <= time
             };
             if !crossed {
                 return false;
@@ -652,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn a_one_shot_state_stays_past_its_exit_time_and_numbers_must_be_numbers() {
+    fn a_one_shot_states_exit_time_is_one_crossing_and_numbers_must_be_numbers() {
         let (mut c, r) = (controller(), rig());
         c.layers[0].states[0].looping = false;
         c.layers[0].states[0].transitions[0].has_exit_time = true;
@@ -662,10 +663,17 @@ mod tests {
         let bound: Vec<BoundClip<'_>> =
             clips.iter().zip(&binders).map(|(k, b)| BoundClip { clip: k, binder: b }).collect();
         let mut p = Player::new(&c);
+        // 1.5 s of the 2 s clip is 0.75: the exit time (0.5) was crossed with WalkSpeed at zero, and
+        // a condition that turns true afterwards does not start the transition.
         p.update(&c, &bound, 1.5);
         p.set(0, 1.0);
         p.update(&c, &bound, 0.1);
-        assert_eq!(p.state(0), 1);
+        assert_eq!(p.state(0), 0);
+        // With the condition already true, the crossing update fires it.
+        let mut q = Player::new(&c);
+        q.set(0, 1.0);
+        q.update(&c, &bound, 1.0);
+        assert_eq!(q.state(0), 1);
         // Non-finite playback values are refused at validation.
         for f in [
             |c: &mut Controller| c.layers[0].states[0].transitions[0].duration = f32::NAN,

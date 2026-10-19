@@ -157,7 +157,11 @@ machines (`m_StateConstantArray`, destinations indexing it; indices past it, whi
 (`If`, `IfNot`, `Greater`, `Less`, `Equals`, `NotEqual`). The player advances a state's clock by
 `dt * speed * param / motion length`; an exit time is a crossing (a looping state with an exit time below one crosses
 it every cycle, so a transition whose condition turns true after the crossing waits for the next one; a state
-that doesn't loop stays past it); the first transition (any-state ones first) whose conditions hold starts a
+that doesn't loop has one crossing, and a condition that turns true after it never fires the transition). This follows
+Unity's `AnimatorStateTransition.exitTime` page ("the Exit Time condition will be true" on the first frame past the
+point and false on the next; below one checked on every loop, above one "only once"). The page does not address
+non-looping states, and the behaviour is documented-but-unverified against the original until the pose capture
+exists; the first transition (any-state ones first) whose conditions hold starts a
 cross-fade of its duration (seconds for a fixed duration, else a fraction of the source state's length) during
 which both states run and no other transition starts, then the destination becomes current. Layers blend over the
 rest pose in order by weight; the unit sets layer `m_DefaultLayerIndex` to one and the others to zero (the
