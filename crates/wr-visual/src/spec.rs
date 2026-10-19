@@ -183,8 +183,9 @@ fn push(
     secondary: i32,
     preset: i32,
 ) {
-    // `Character.AddEquipmentEntity` ignores an entity the character already has.
-    if !out.iter().any(|e| e.ee == ee) {
+    // `Character.AddEquipmentEntity` ignores an entity the character already has. A class entry
+    // is kept either way: the game still sets its clothes ramps on the entity that is there.
+    if source.starts_with("class:") || !out.iter().any(|e| e.ee == ee) {
         out.push(EquipmentView { ee, source: source.to_owned(), primary, secondary, preset });
     }
 }
@@ -243,8 +244,8 @@ fn equipment(
             .and_then(|g| content.get(g));
         let Some(kee) = kee else { continue };
         let preset = source_bp.as_ref().map_or_else(
-            || ibp.view().i32("ForcedRampColorPresetIndex"),
-            |b| b.view().i32("ForcedRampColorPresetIndex"),
+            || ibp.view().i32("m_ForcedRampColorPresetIndex"),
+            |b| b.view().i32("m_ForcedRampColorPresetIndex"),
         );
         for ee in kee_links(&kee, gender, race) {
             push(&mut out, ee, &format!("item:{}", ibp.name), -1, -1, preset);

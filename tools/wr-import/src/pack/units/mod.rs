@@ -12,8 +12,9 @@
 //!
 //! Stage 1 poses every skinned mesh once on the CPU, in the rig's rest pose, in the unit's
 //! root space; the renderer carries the unit's placement (`T * R_y(orientation) * S(root
-//! scale)`), so one baked mesh serves every unit of a prefab. The pack keeps the skin
-//! channels, so a later stage can pose from the same streams.
+//! scale)`), so one baked mesh serves every unit of a prefab. The pack holds the *posed* geometry
+//! only (no rig, no bind poses, composed meshes without skin): animation needs the importer to
+//! write the unposed meshes with their skin and the rigs (docs/poc7/characters.md, step 2).
 
 pub mod atlas;
 pub mod character;
@@ -49,6 +50,8 @@ pub struct UnitsReport {
 /// A unit prefab opened for baking: its hierarchy and the `UnitEntityView` root.
 pub(super) struct UnitPrefab {
     pub sc: SceneIndex,
+    /// `UnitEntityView.ForbidRotation`: the view keeps the prefab's own orientation.
+    pub forbid_rotation: bool,
     /// The root's transform (`UnitEntityView`'s GameObject).
     pub root: i64,
 }
@@ -67,16 +70,18 @@ impl UnitPrefab {
             .with_context(|| format!("{bundle}: no scene objects"))?;
         let sc = SceneIndex::load(guid, file)?;
         let mut root = None;
+        let mut forbid_rotation = false;
         for o in file.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR) {
             let v = file.read(o)?;
             if b.universe.script_of(file, &v)?.is_some_and(|s| s.class == "UnitEntityView") {
                 let go = v.get("m_GameObject").and_then(Value::as_pptr).map_or(0, |p| p.path_id);
                 root = sc.go_transform.get(&go).copied();
+                forbid_rotation = v.get("ForbidRotation").and_then(Value::as_bool).unwrap_or(false);
                 break;
             }
         }
         let root = root.with_context(|| format!("{guid}: no UnitEntityView"))?;
-        Ok(Self { sc, root })
+        Ok(Self { sc, forbid_rotation, root })
     }
 
     /// `t`'s matrix relative to the root (the root itself is the identity).
@@ -130,14 +135,17 @@ impl UnitPrefab {
     }
 }
 
-/// The unit's placement in the world: `T(position) * R_y(orientation) * S(root scale)`.
+/// The unit's placement in the world: `T(position) * R_y(orientation) * S(root scale)`
+/// (`UnitEntityData.SetViewPosition`; a view with `ForbidRotation` keeps the identity rotation).
+/// The size scale of a unit whose size differs from its original is not applied.
 #[must_use]
-pub fn placement(u: &UnitView, root_scale: Vec3) -> Mat4 {
-    Mat4::from_scale_rotation_translation(
-        root_scale,
-        Quat::from_rotation_y(u.orientation.to_radians()),
-        Vec3::from_array(u.position),
-    )
+pub fn placement(u: &UnitView, root_scale: Vec3, forbid_rotation: bool) -> Mat4 {
+    let rotation = if forbid_rotation {
+        Quat::IDENTITY
+    } else {
+        Quat::from_rotation_y(u.orientation.to_radians())
+    };
+    Mat4::from_scale_rotation_translation(root_scale, rotation, Vec3::from_array(u.position))
 }
 
 /// A pointer in the prefab's file resolved to its transform's id, if it points at one there.
@@ -210,7 +218,7 @@ fn plain(
     baked: &mut HashMap<(String, i64), Option<u32>>,
 ) -> Result<()> {
     let sc = &prefab.sc;
-    let matrix = placement(u, prefab.root_scale());
+    let matrix = placement(u, prefab.root_scale(), prefab.forbid_rotation);
     let mut any = false;
     for o in sc.file.objects.iter().filter(|o| o.class_id == class_id::SKINNED_MESH_RENDERER) {
         let v = sc.file.read(o)?;
@@ -355,6 +363,7 @@ fn bake_mesh(
         skin_mats.push(prefab.rel(*t) * bind[i]);
     }
     skin::pose(&mut decoded, &skin_mats)?;
+    skin::refresh_bounds(&mut decoded)?;
     Ok(Some(intern_baked(
         b,
         decoded,

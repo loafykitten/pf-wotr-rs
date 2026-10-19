@@ -91,7 +91,9 @@ pub fn load(path: &Path) -> Result<Vec<RoutePoint>> {
 #[must_use]
 pub fn look_at(base: &RoutePoint, eye: Vec3, target: Vec3) -> RoutePoint {
     let f = (target - eye).normalize();
-    let r = Vec3::Y.cross(f).normalize();
+    // Straight up or down has no right vector: take +Z as the reference.
+    let up = if f.cross(Vec3::Y).length() < 1e-4 { Vec3::Z } else { Vec3::Y };
+    let r = up.cross(f).normalize();
     let u = f.cross(r);
     let w2c = bevy::math::Mat4::from_cols(
         bevy::math::Vec4::new(r.x, u.x, -f.x, 0.0),
@@ -109,8 +111,15 @@ pub fn look_at(base: &RoutePoint, eye: Vec3, target: Vec3) -> RoutePoint {
 /// Parses `ex,ey,ez,tx,ty,tz`.
 #[must_use]
 pub fn parse_look(s: &str) -> Option<(Vec3, Vec3)> {
-    let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-    (v.len() == 6).then(|| (Vec3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5])))
+    let v: Vec<f32> = s
+        .split(',')
+        .map(|x| x.trim().parse().ok().filter(|f: &f32| f.is_finite()))
+        .collect::<Option<_>>()?;
+    let (eye, target) = (
+        Vec3::new(*v.first()?, *v.get(1)?, *v.get(2)?),
+        Vec3::new(*v.get(3)?, *v.get(4)?, *v.get(5)?),
+    );
+    (v.len() == 6 && (target - eye).length() > 1e-3).then_some((eye, target))
 }
 
 #[cfg(test)]
@@ -145,5 +154,11 @@ mod tests {
             Some((Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)))
         );
         assert_eq!(parse_look("1,2"), None);
+        assert_eq!(parse_look("1,2,3,4,5,x"), None);
+        assert_eq!(parse_look("1,2,3,1,2,3"), None);
+        assert_eq!(parse_look("1,2,3,4,5,6,7"), None);
+        // Straight down still gives a camera.
+        let down = look_at(&base, Vec3::new(0.0, 10.0, 0.0), Vec3::ZERO);
+        assert!(down.pose.world_to_camera.is_finite());
     }
 }

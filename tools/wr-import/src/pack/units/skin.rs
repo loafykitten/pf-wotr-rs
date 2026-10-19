@@ -143,9 +143,54 @@ fn get3(mesh: &DecodedMesh, ch: Channel, v: usize) -> Result<Vec3> {
     Ok(Vec3::new(f(0), f(1), f(2)))
 }
 
+/// Recomputes `aabb` and every submesh's bounds from the mesh's (posed) float32 positions.
+///
+/// # Errors
+///
+/// A mesh without float32 positions or with an index past its vertices.
+pub fn refresh_bounds(mesh: &mut DecodedMesh) -> Result<()> {
+    let pos = float_channel(mesh, POSITION, 3)?;
+    let n = mesh.vertex_count as usize;
+    let mut points = Vec::with_capacity(n);
+    for v in 0..n {
+        points.push(get3(mesh, pos, v)?);
+    }
+    let bounds = |it: &mut dyn Iterator<Item = Vec3>| -> Option<([f32; 3], [f32; 3])> {
+        let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        let mut any = false;
+        for p in it {
+            lo = lo.min(p);
+            hi = hi.max(p);
+            any = true;
+        }
+        any.then(|| (lo.to_array(), hi.to_array()))
+    };
+    if let Some((lo, hi)) = bounds(&mut points.iter().copied()) {
+        let (lo, hi) = (Vec3::from_array(lo), Vec3::from_array(hi));
+        mesh.aabb = (((lo + hi) * 0.5).to_array(), ((hi - lo) * 0.5).to_array());
+    }
+    let isz = if mesh.index_u32 { 4 } else { 2 };
+    for sm in &mut mesh.submeshes {
+        let mut used = Vec::new();
+        for i in sm.first_index..sm.first_index + sm.index_count {
+            let o = i as usize * isz;
+            let raw = mesh.indices.get(o..o + isz).context("index out of range")?;
+            let idx = if mesh.index_u32 {
+                u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])
+            } else {
+                u32::from(u16::from_le_bytes([raw[0], raw[1]]))
+            };
+            let v = i64::from(sm.base_vertex) + i64::from(idx);
+            used.push(*points.get(usize::try_from(v)?).context("index past the vertices")?);
+        }
+        sm.bounds = bounds(&mut used.into_iter());
+    }
+    Ok(())
+}
+
 /// Poses `mesh` in place: `skin[i]` is `bone_i.localToWorld * bindpose_i`. Positions, normals
-/// (renormalised) and tangent xyz are replaced; the weights and indices stay, so the mesh can
-/// be posed again from its original streams.
+/// (renormalised) and tangent xyz are replaced (bounds are not: see [`refresh_bounds`]); the weights
+/// and indices stay in their channels.
 ///
 /// # Errors
 ///
@@ -156,9 +201,7 @@ pub fn pose(mesh: &mut DecodedMesh, skin: &[Mat4]) -> Result<()> {
     let pos = float_channel(mesh, POSITION, 3)?;
     let nrm = float_channel(mesh, NORMAL, 3).ok();
     let tan = float_channel(mesh, TANGENT, 3).ok();
-    // Normals follow the inverse transpose, as a non-uniform bone scale needs.
-    let normal_mats: Vec<Mat3> =
-        skin.iter().map(|m| Mat3::from_mat4(*m).inverse().transpose()).collect();
+    // Unity skins normals and tangents with the bone matrix' linear part, not its inverse transpose.
     let linear: Vec<Mat3> = skin.iter().map(|m| Mat3::from_mat4(*m)).collect();
     for (v, (idx, wt)) in data.iter().enumerate() {
         let p = get3(mesh, pos, v)?;
@@ -172,13 +215,12 @@ pub fn pose(mesh: &mut DecodedMesh, skin: &[Mat4]) -> Result<()> {
                 continue;
             }
             let b = idx[k] as usize;
-            let (Some(m), Some(nm), Some(lm)) = (skin.get(b), normal_mats.get(b), linear.get(b))
-            else {
+            let (Some(m), Some(lm)) = (skin.get(b), linear.get(b)) else {
                 bail!("vertex {v}: bone index {b} past {} bones", skin.len());
             };
             sp += m.transform_point3(p) * w;
             if let Some(n) = n {
-                sn += *nm * n * w;
+                sn += *lm * n * w;
             }
             if let Some(t) = t {
                 st += *lm * t * w;
@@ -290,6 +332,28 @@ mod tests {
         two.channels[13] = Some(Channel { stream: 1, offset: 16, format: 10, dimension: 2 });
         pose(&mut two, &[Mat4::IDENTITY, up]).unwrap();
         assert_eq!(pos(&two, 0), Vec3::new(1.0, 2.0, 0.0));
+    }
+
+    #[test]
+    fn bounds_follow_the_posed_positions() {
+        let mut m = mesh([[1.0, 0.0, 0.0, 0.0]; 2], [[0; 4]; 2]);
+        m.indices = [0u16, 1, 1].iter().flat_map(|i| i.to_le_bytes()).collect();
+        m.submeshes[0].index_count = 3;
+        pose(&mut m, &[Mat4::from_translation(Vec3::new(0.0, 10.0, 0.0))]).unwrap();
+        refresh_bounds(&mut m).unwrap();
+        assert_eq!(m.aabb, ([0.5, 11.0, 0.0], [0.5, 1.0, 0.0]));
+        assert_eq!(m.submeshes[0].bounds, Some(([0.0, 10.0, 0.0], [1.0, 12.0, 0.0])));
+    }
+
+    #[test]
+    fn normals_use_the_linear_part_under_non_uniform_scale() {
+        let mut m = mesh([[1.0, 0.0, 0.0, 0.0]; 2], [[0; 4]; 2]);
+        let nrm = channel(&m, NORMAL).unwrap();
+        put(&mut m, nrm, 0, &[1.0, 1.0, 0.0]).unwrap();
+        pose(&mut m, &[Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0))]).unwrap();
+        // Unity: (2, 1, 0) normalised, not the inverse transpose's (0.5, 1, 0).
+        let n0 = get3(&m, nrm, 0).unwrap();
+        assert!((n0 - Vec3::new(2.0, 1.0, 0.0).normalize()).length() < 1e-6, "{n0:?}");
     }
 
     #[test]

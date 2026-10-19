@@ -11,7 +11,7 @@
 //! sRGB render textures, so their RGB is decoded, mixed and encoded; the normal and mask atlases
 //! are linear.
 
-use super::image::Image;
+use super::image::{Image, linear_to_srgb, srgb_to_linear};
 
 /// A rectangle of the atlas in the 2048-pixel layout, `(x, y, w, h)`, `y` from the bottom.
 pub type Rect = (f32, f32, f32, f32);
@@ -34,17 +34,6 @@ impl Channel {
             Self::Normal => [128, 128, 255, 255],
         }
     }
-}
-
-fn srgb_to_linear(b: u8) -> f32 {
-    let c = f32::from(b) / 255.0;
-    if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-
-fn linear_to_srgb(l: f32) -> u8 {
-    let l = l.clamp(0.0, 1.0);
-    let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
-    (c * 255.0 + 0.5) as u8
 }
 
 fn unorm(f: f32) -> u8 {
@@ -118,8 +107,7 @@ impl Atlas {
                 let mut out = prev;
                 for k in 0..3 {
                     let p = srgb_to_linear(prev[k]);
-                    let q = srgb_to_linear(unorm(s[k]));
-                    out[k] = linear_to_srgb(p + a * (q - p));
+                    out[k] = linear_to_srgb(p + a * (s[k] - p));
                 }
                 if !dont_blend_alpha {
                     out[3] =
@@ -202,7 +190,13 @@ impl Atlas {
     /// The atlas as a mip chain (box filter), level 0 first, tightly packed RGBA8.
     #[must_use]
     pub fn with_mips(&self) -> (Vec<u8>, u32) {
-        let mut level = Image { w: self.size, h: self.size, px: self.px.clone(), has_alpha: true };
+        let mut level = Image {
+            w: self.size,
+            h: self.size,
+            px: self.px.clone(),
+            has_alpha: true,
+            srgb: self.channel == Channel::Diffuse,
+        };
         let mut out: Vec<u8> = Vec::new();
         let mut n = 0;
         loop {
@@ -221,13 +215,15 @@ impl Atlas {
 /// (a copy of the diffuse texture) gets the ramp colour for each texel's luminance, blended in by
 /// the mask. `primary` picks the mask channel: red for the primary ramp, green for the secondary.
 pub fn repaint(target: &mut Image, main: &Image, ramp: &Image, mask: &Image, primary: bool) {
+    // The shader re-encodes the decoded texel to gamma before taking its luminance.
+    let encode = |l: f32, srgb: bool| if srgb { f32::from(linear_to_srgb(l)) / 255.0 } else { l };
     for y in 0..target.h {
         for x in 0..target.w {
             let (u, v) = ((x as f32 + 0.5) / target.w as f32, (y as f32 + 0.5) / target.h as f32);
             let m = main.sample(u, v);
-            // The shader re-encodes the decoded texel to gamma before taking its luminance: the
-            // stored bytes themselves.
-            let luma = 0.299 * m[0] + 0.587 * m[1] + 0.114 * m[2];
+            let luma = 0.299 * encode(m[0], main.srgb)
+                + 0.587 * encode(m[1], main.srgb)
+                + 0.114 * encode(m[2], main.srgb);
             let r = ramp.sample(luma.clamp(0.0, 1.0), 0.5);
             let mk = mask.sample(u, v);
             let a = if primary { mk[0] } else { mk[1] };
@@ -235,8 +231,7 @@ pub fn repaint(target: &mut Image, main: &Image, ramp: &Image, mask: &Image, pri
             let mut out = prev;
             for k in 0..3 {
                 let p = srgb_to_linear(prev[k]);
-                let q = srgb_to_linear(unorm(r[k]));
-                out[k] = linear_to_srgb(p + a * (q - p));
+                out[k] = linear_to_srgb(p + a * (r[k] - p));
             }
             target.px[y * target.w + x] = out;
         }
@@ -251,10 +246,14 @@ mod tests {
         Image::filled(w, h, c)
     }
 
+    fn solid_srgb(w: usize, h: usize, c: [u8; 4]) -> Image {
+        Image { srgb: true, ..Image::filled(w, h, c) }
+    }
+
     #[test]
     fn diffuse_blit_lerps_by_the_textures_alpha_in_the_rectangle_only() {
         let mut a = Atlas::new(2048, Channel::Diffuse);
-        let red = solid(4, 4, [255, 0, 0, 255]);
+        let red = solid_srgb(4, 4, [255, 0, 0, 255]);
         a.blit_diffuse((0.0, 0.0, 100.0, 50.0), &red, &red, false);
         assert_eq!(a.px[10 * 2048 + 10], [255, 0, 0, 255]);
         assert_eq!(a.px[60 * 2048 + 10], [0, 0, 0, 0]);
@@ -268,9 +267,23 @@ mod tests {
     }
 
     #[test]
+    fn a_full_weight_diffuse_blit_reproduces_an_srgb_texture() {
+        let mut a = Atlas::new(2048, Channel::Diffuse);
+        let grey = solid_srgb(4, 4, [128, 64, 200, 255]);
+        a.blit_diffuse((0.0, 0.0, 16.0, 16.0), &grey, &grey, false);
+        let p = a.px[8 * 2048 + 8];
+        assert!(
+            (i32::from(p[0]) - 128).abs() <= 1
+                && (i32::from(p[1]) - 64).abs() <= 1
+                && (i32::from(p[2]) - 200).abs() <= 1,
+            "{p:?}"
+        );
+    }
+
+    #[test]
     fn diffuse_blit_can_keep_the_previous_alpha() {
         let mut a = Atlas::new(2048, Channel::Diffuse);
-        let tex = solid(2, 2, [10, 20, 30, 255]);
+        let tex = solid_srgb(2, 2, [10, 20, 30, 255]);
         a.blit_diffuse((0.0, 0.0, 8.0, 8.0), &tex, &tex, true);
         assert_eq!(a.px[2 * 2048 + 2][3], 0);
     }
@@ -278,7 +291,7 @@ mod tests {
     #[test]
     fn rectangles_scale_with_the_atlas() {
         let mut a = Atlas::new(1024, Channel::Diffuse);
-        let tex = solid(2, 2, [255, 255, 255, 255]);
+        let tex = solid_srgb(2, 2, [255, 255, 255, 255]);
         a.blit_diffuse((0.0, 0.0, 200.0, 200.0), &tex, &tex, false);
         assert_eq!(a.px[99 * 1024 + 99][3], 255);
         assert_eq!(a.px[101 * 1024 + 99][3], 0);
@@ -315,13 +328,19 @@ mod tests {
     #[test]
     fn repaint_maps_luminance_through_the_ramp_under_the_mask() {
         // A ramp from black to red; a mid-grey texel picks half red where the mask is on.
-        let ramp =
-            Image { w: 2, h: 1, px: vec![[0, 0, 0, 255], [255, 0, 0, 255]], has_alpha: true };
-        let main = solid(2, 2, [128, 128, 128, 255]);
+        let ramp = Image {
+            w: 2,
+            h: 1,
+            px: vec![[0, 0, 0, 255], [255, 0, 0, 255]],
+            has_alpha: true,
+            srgb: true,
+        };
+        let main = solid_srgb(2, 2, [128, 128, 128, 255]);
         let mask_on = solid(2, 2, [255, 0, 0, 255]);
         let mut t = main.clone();
         repaint(&mut t, &main, &ramp, &mask_on, true);
-        assert!((i32::from(t.px[0][0]) - 128).abs() <= 3 && t.px[0][1] == 0, "{:?}", t.px[0]);
+        // Half way along the ramp in linear light is sRGB 188.
+        assert!((i32::from(t.px[0][0]) - 188).abs() <= 3 && t.px[0][1] == 0, "{:?}", t.px[0]);
         // The secondary pass reads the other mask channel (off here): the target stays as it was.
         let mut u = main.clone();
         repaint(&mut u, &main, &ramp, &mask_on, false);

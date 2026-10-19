@@ -464,6 +464,10 @@ fn main() -> Result<()> {
             let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
             let cache = wr_paths::cache_root().join("poc6");
             let out = out.unwrap_or_else(|| cache.join("packs").join(format!("{area}.wrpack")));
+            anyhow::ensure!(
+                (16..=8192).contains(&atlas_size),
+                "--atlas-size {atlas_size}: want 16 to 8192 pixels"
+            );
             let spec = units.as_deref().map(wr_view::UnitsSpec::read).transpose()?;
             let rep = wr_import::pack::build(
                 &ctx.paths.data(),

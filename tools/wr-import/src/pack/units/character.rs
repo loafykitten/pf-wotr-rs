@@ -173,11 +173,11 @@ struct Ee {
     layer: i32,
     hide: i64,
     show_lower: bool,
-    primary_ramps: Vec<ObjRef>,
+    primary_ramps: Vec<Option<ObjRef>>,
     /// `PrimaryRamps.Count` (what `AddEquipmentEntity` tests).
     primary_ramp_count: usize,
-    secondary_ramps: Vec<ObjRef>,
-    special_primary: Vec<ObjRef>,
+    secondary_ramps: Vec<Option<ObjRef>>,
+    special_primary: Vec<Option<ObjRef>>,
     presets: Vec<(i32, i32)>,
     parts: Vec<Part>,
 }
@@ -194,19 +194,20 @@ fn pptr_obj(
     }
 }
 
-fn pptr_list(
+/// A list of pointers keeping every slot: an index into it means what it means in the game, null
+/// entries included.
+fn pptr_slots(
     b: &Builder<'_>,
     from: &SerializedFile<'_>,
     v: &Value,
     key: &str,
-) -> Result<Vec<ObjRef>> {
+) -> Result<Vec<Option<ObjRef>>> {
     let mut out = Vec::new();
     for x in v.get(key).and_then(Value::as_array).unwrap_or_default() {
-        if let Some(p) = x.as_pptr().filter(|p| !p.is_null())
-            && let Some(o) = b.universe.resolve(from, p)?
-        {
-            out.push(o);
-        }
+        out.push(match x.as_pptr().filter(|p| !p.is_null()) {
+            Some(p) => b.universe.resolve(from, p)?,
+            None => None,
+        });
     }
     Ok(out)
 }
@@ -253,6 +254,9 @@ fn tex_desc(b: &Builder<'_>, from: &SerializedFile<'_>, d: &Value) -> Result<Tex
     })
 }
 
+/// A ramp list with its slots: `None` is a null entry.
+type Ramps = Vec<Option<ObjRef>>;
+
 /// The `CharacterColorsProfile` an EE reads its ramps from, or its own lists.
 fn ramps_of(
     b: &Builder<'_>,
@@ -260,15 +264,15 @@ fn ramps_of(
     v: &Value,
     profile: &str,
     own: &str,
-) -> Result<(Vec<ObjRef>, Vec<ObjRef>)> {
+) -> Result<(Ramps, Ramps)> {
     if let Some(p) = pptr_obj(b, from, v, profile)? {
         let pv = p.read()?;
         return Ok((
-            pptr_list(b, p.file, &pv, "Ramps")?,
-            pptr_list(b, p.file, &pv, "SpecialRamps")?,
+            pptr_slots(b, p.file, &pv, "Ramps")?,
+            pptr_slots(b, p.file, &pv, "SpecialRamps")?,
         ));
     }
-    Ok((pptr_list(b, from, v, own)?, Vec::new()))
+    Ok((pptr_slots(b, from, v, own)?, Vec::new()))
 }
 
 fn load_ee(b: &Builder<'_>, locations: &Locations, guid: &str) -> Result<Ee> {
@@ -636,7 +640,15 @@ impl Cache {
         if let Some(e) = self.ees.get(guid) {
             return Ok(e.clone());
         }
-        let e = Rc::new(load_ee(b, locations, guid)?);
+        let mut ee = load_ee(b, locations, guid)?;
+        // `BodyPart.SkinnedRenderer`: the renderer prefab must hold a `SkinnedMeshRenderer`.
+        for p in &mut ee.parts {
+            if let Some(pf) = p.prefab {
+                let sc = self.scene(pf.file)?;
+                p.visible = p.material.is_some() && find_smr(&sc, pf.info.path_id).is_some();
+            }
+        }
+        let e = Rc::new(ee);
         self.ees.insert(guid.to_owned(), e.clone());
         Ok(e)
     }
@@ -721,7 +733,7 @@ fn pose_part(
             .map_or(0, <[Value]>::len);
         bail!(
             "{e:#}; channels {:?}, m_Skin {skin_len}, variable weights {vbcw}",
-            &mesh.channels[10..]
+            mesh.channels.get(10..).unwrap_or_default()
         );
     }
     Ok(Some(PosedPart { mesh }))
@@ -763,6 +775,12 @@ fn merge(parts: &[PosedPart], name: &str) -> Result<pack_mesh::DecodedMesh> {
                     u32::from(u16::from_le_bytes([raw[0], raw[1]]))
                 };
                 let v = i64::from(sm.base_vertex) + i64::from(idx);
+                anyhow::ensure!(
+                    (0..i64::from(m.vertex_count)).contains(&v),
+                    "{}: index {v} outside {} vertices",
+                    m.name,
+                    m.vertex_count
+                );
                 indices.push(u32::try_from(v)? + count);
             }
         }
@@ -816,11 +834,12 @@ fn compose_atlases(
         let (p, s, sp, ss) = sel.map_or((0, 0, -1, -1), |s| {
             (s.primary, s.secondary, s.special_primary, s.special_secondary)
         });
-        let pick = |special: &[ObjRef], normal: &[ObjRef], si: i32, i: i32| -> Option<ObjRef> {
-            if si >= 0 && (si as usize) < special.len() {
-                return Some(special[si as usize]);
-            }
-            (i >= 0 && (i as usize) < normal.len()).then(|| normal[i as usize])
+        let pick = |special: &[Option<ObjRef>], normal: &[Option<ObjRef>], si: i32, i: i32| {
+            let slot = |list: &[Option<ObjRef>], k: i32| -> Option<Option<ObjRef>> {
+                usize::try_from(k).ok().and_then(|k| list.get(k)).copied()
+            };
+            // A special index in range wins even over a null slot, as `RepaintTextures` does.
+            slot(special, si).or_else(|| slot(normal, i)).flatten()
         };
         let primary = pick(&ee.special_primary, &ee.primary_ramps, sp, p);
         // The game's secondary pick reads the *primary special* list for a special index (a typo
@@ -981,7 +1000,23 @@ fn compose_atlases(
     Ok(out)
 }
 
+/// `WR_DUMP_ATLAS=<dir>`: writes each composed atlas as a binary PPM (rows bottom first, as stored)
+/// for looking at; nothing reads them back.
+fn dump_atlas(name: &str, at: &Atlas) {
+    let Some(dir) = std::env::var_os("WR_DUMP_ATLAS") else { return };
+    let mut out = format!("P6\n{} {}\n255\n", at.size, at.size).into_bytes();
+    for y in (0..at.size).rev() {
+        for x in 0..at.size {
+            let p = at.px[y * at.size + x];
+            out.extend_from_slice(&[p[0], p[1], p[2]]);
+        }
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{name}.ppm")), out);
+}
+
 fn push_texture(b: &mut Builder<'_>, name: &str, at: &Atlas, unit: &str) -> Result<u32> {
+    dump_atlas(name, at);
     let (data, mips) = at.with_mips();
     let blob = b.w.blob(&data)?;
     b.report.texture_bytes += data.len() as u64;
@@ -1071,49 +1106,41 @@ pub(super) fn add(
             }
         }
     }
-    for e in &u.equipment {
-        let ee = match cache.ee(b, locations, &e.ee) {
-            Ok(x) => x,
-            Err(err) => {
-                skip(&mut b.report, format!("equipment entity: {err:#}"));
-                continue;
-            }
-        };
-        if e.source.starts_with("item:") {
-            // `AddItemEquipment`: no custom ramps (not tracked), the entity's preset otherwise.
-            let (mut p, mut s) = (-1, -1);
-            if let Some(&(pp, ss)) = usize::try_from(e.preset).ok().and_then(|i| ee.presets.get(i))
-            {
-                p = pp;
-                s = ss;
-            }
-            eq.add(ee, p, s);
-        } else if e.source.starts_with("class:") {
-            eq.add(ee.clone(), -1, -1);
-            if let Some(i) = eq.index(&e.ee) {
-                if e.primary >= 0 {
-                    eq.set_primary(i, e.primary);
+    // `DollData.CreateUnitView`: the skin, clothes and chosen entities, then their ramps; then the
+    // body items (`UpdateBodyEquipmentModel`) and the class clothes (`UpdateClassEquipment`).
+    let is_doll = |e: &wr_view::EquipmentView| {
+        !e.source.starts_with("item:") && !e.source.starts_with("class:")
+    };
+    for pass in [true, false] {
+        for e in u.equipment.iter().filter(|e| is_doll(e) == pass) {
+            let ee = match cache.ee(b, locations, &e.ee) {
+                Ok(x) => x,
+                Err(err) => {
+                    skip(&mut b.report, format!("equipment entity: {err:#}"));
+                    continue;
                 }
-                if e.secondary >= 0 {
-                    eq.set_secondary(i, e.secondary);
+            };
+            if e.source.starts_with("item:") {
+                // `AddItemEquipment`: no custom ramps (not tracked), the entity's colour preset otherwise.
+                let (mut p, mut s) = (-1, -1);
+                if let Some(&(pp, ss)) =
+                    usize::try_from(e.preset).ok().and_then(|i| ee.presets.get(i))
+                {
+                    p = pp;
+                    s = ss;
                 }
-            }
-        } else {
-            eq.add(ee, -1, -1);
-        }
-    }
-    // Doll ramps apply once everything is added (`DollData.ApplyRampIndices`).
-    for e in u
-        .equipment
-        .iter()
-        .filter(|e| !e.source.starts_with("item:") && !e.source.starts_with("class:"))
-    {
-        if let Some(i) = eq.index(&e.ee) {
-            if e.primary >= 0 {
-                eq.set_primary(i, e.primary);
-            }
-            if e.secondary >= 0 {
-                eq.set_secondary(i, e.secondary);
+                eq.add(ee, p, s);
+            } else {
+                eq.add(ee, -1, -1);
+                // Doll ramps and the class clothes' indices are set whether or not the entity was new.
+                if let Some(i) = eq.index(&e.ee) {
+                    if e.primary >= 0 {
+                        eq.set_primary(i, e.primary);
+                    }
+                    if e.secondary >= 0 {
+                        eq.set_secondary(i, e.secondary);
+                    }
+                }
             }
         }
     }
@@ -1177,7 +1204,7 @@ pub(super) fn add(
         &[("_UseNormalMapAtlas", 1.0)],
         &["_NORMALMAP", "_MASKSMAP"],
     )?;
-    let matrix = placement(u, prefab.root_scale());
+    let matrix = placement(u, prefab.root_scale(), prefab.forbid_rotation);
     push_renderer_for(b, prefab, u, "Character", mesh_index, vec![Some(mat)], matrix, 9);
     Ok(())
 }

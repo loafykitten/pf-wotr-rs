@@ -18,10 +18,14 @@ Seelah, Lann, Camelia, Wenduag). Every unit is in its rig's rest pose (a T-pose)
 - Route poses: the eight recorded poses now contain units at 0 (player, Seelah, Anevia), 1 (Camelia), 2, 3, 6
   (centipedes, a fly), 4 (Wenduag, Lann) and 5 (the spider) [M, by projecting the saved positions through the
   recorded matrices]. FLIP mean vs `oracle-2` is **unchanged** at this stage: 0.2529 / 0.1326 / 0.1017 /
-  0.1125 / 0.0694 / 0.1442 / 0.1003 / 0.0832 against the unitless 0.2526 / 0.1326 / 0.1015 / 0.1125 / 0.0705 /
+  0.1125 / 0.0695 / 0.1442 / 0.1003 / 0.0832 against the unitless 0.2526 / 0.1326 / 0.1015 / 0.1125 / 0.0705 /
   0.1444 / 0.0995 / 0.0832. The units are a few hundred pixels in a 2560x1440 frame, the T-pose is not
   the original's idle, and the original's units are lit by light probes and a party light we don't have. The
   player's feet land on the original's player to within a few pixels at pose 0 (checked by eye on a side by side).
+- Review (gpt-6.1-sol, high): 16 findings, 13 fixed (preset field name, ramp slots, class ramps precedence, linear-light atlas
+  filtering, linear normals, renderer check in body part selection, bounds after posing, index checks, panics, `ForbidRotation`,
+  `--look` validation, the doc's re-import claim); three are recorded as stage-1 limits below (the doll prefab, `PriorityEquipment`,
+  baked characters without an embedded renderer) and the size scale. Not done: the diffuse alpha mask is sampled without minification.
 - Screenshot: `/Volumes/Storage/Wrath-Rust/scratch-chars/route-units/point0.png` (the caves from route pose 0,
   with the player; Seelah and Anevia are in the frame too, see "Differences from the original"). Close-ups from
   a free camera (`wr-game --look ex,ey,ez,tx,ty,tz`): `/Volumes/Storage/Wrath-Rust/scratch-chars/shot-a/point0.png`
@@ -151,8 +155,13 @@ Missing (all needed later):
   nothing needs re-importing).
 - Light probes on dynamic objects (units are lit by the ambient L0 only), the original's unit lighting (rim, `FogOfWar` dissolve).
 - Weapons and `OutfitPart`s (capes, shields, backpacks, shoulder props), PBD cloth, hair physics, ragdolls and dismemberment.
-- Race preset skeleton overrides for dolls (`BlueprintRaceVisualPreset.MaleSkeleton` is a direct asset reference in the
-  blueprint: needs `BlueprintReferencedAssets`), per-item custom ramp indices and `HideEquipmentEntity` (saved, not hydrated by the sim).
+- The doll prefab itself (`CharGen.MaleDoll`/`FemaleDoll` and the race preset's skeletons are direct asset references in the
+  blueprints: they need `BlueprintReferencedAssets`; stage 1 builds the player on the blueprint's own `Character` prefab, which
+  has the same human rig), per-item custom ramp indices, `HideEquipmentEntity`, `ClassData.PriorityEquipment` (saved, not
+  hydrated by the sim; the class clothes use the highest-level class with entities) and `UseClassEquipment`'s exact gate (stage 1
+  uses "main character or doll").
+- The size scale of a unit whose size differs from its original (`GetSizeScale`; none in Manual_13) and baked characters
+  without an embedded renderer (`LoadBakedCharacter` builds one from `RendererDescriptions`; Anevia's prefab has hers).
 - `UseShadowMask` texture layers (59 in this save's EEs; the shadow bake darkens parts of an atlas region).
 - DXT/BC compression of the atlases (stage 1 stores RGBA8 with a box-filter mip chain) and the LOD atlases.
 - Run-time state: which units are visible (fog of war), `m_IsInGame` changes, prone and dead poses, `Fader` alpha.
@@ -169,7 +178,7 @@ Missing (all needed later):
   not visible in the original and are in ours; the corpse lying beside the player in the original is an animated scene
   prop (one of the 13 scene `SkinnedMeshRenderer`s the area pack still skips), not a unit.
 - No weapons, capes, shadows from outfit parts, no selection ring, no unit highlights.
-- Skinned units cast shadows through the same caster pass as static meshes (verified visually at the party).
+- Skinned units cast shadows through the same caster pass as static meshes (verified visually on Lann's floor shadow); their mesh bounds are recomputed from the posed positions.
 - The sim says no unit of this save is prone or unconscious (`life_state`/`prone` are in the spec for later).
 
 ## 4. Plan: live characters, in order
@@ -192,8 +201,9 @@ parts, `UseShadowMask`, fog-of-war visibility, the optimisation dummy rule.
 - A minimal `AnimationSet` driver: pick the idle (`VariantIdle` by class and race), the loco-motion blend (walk speed vs `MovementSpeedCoeff`),
   event times; the `AnimatorController` reader for blend trees: 1 to 1.5 weeks. Combat, spells, prone and dialogue animations are the rest of the
   game's set and are *not* in this step.
-- GPU skinning (compute producing the same vertex streams the G-buffer and shadow passes already read, a bone palette per unit,
-  the skeleton scale applied after the clip): 0.5 to 1 week.
+- Pack format extension (unposed meshes with skin, rigs, bind poses, merged character meshes keeping bone indices and weights against a
+  merged bone list) and GPU skinning (compute producing the same vertex streams the G-buffer and shadow passes already read, a bone
+  palette per unit, the skeleton scale applied after the clip): 1 to 1.5 weeks.
 - Sim-to-view glue: one `UnitView` per unit entity, driven by `Position`/`Orientation`/agent state each frame (the sim's agent already exists).
 *Pass:* pose equality with the original at fixed clip times, then in motion. *Comparison:* bone local transforms per frame of a few units (idle,
 walking at a fixed speed) captured from the game compared with ours: max rotation error in degrees and position error, over a 10 s clip.

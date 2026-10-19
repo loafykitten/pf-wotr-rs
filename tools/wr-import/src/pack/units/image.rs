@@ -9,6 +9,21 @@ use crate::area::Universe;
 use crate::pack::tex::payload;
 use crate::unity::value::Value;
 
+/// sRGB byte to linear light.
+#[must_use]
+pub fn srgb_to_linear(b: u8) -> f32 {
+    let c = f32::from(b) / 255.0;
+    if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Linear light to an sRGB byte.
+#[must_use]
+pub fn linear_to_srgb(l: f32) -> u8 {
+    let l = l.clamp(0.0, 1.0);
+    let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+    (c * 255.0 + 0.5) as u8
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Image {
     pub w: usize,
@@ -17,12 +32,15 @@ pub struct Image {
     pub px: Vec<[u8; 4]>,
     /// The source format carried an alpha channel (`CharacterAtlas.HasAlphaChannel`).
     pub has_alpha: bool,
+    /// The texture is sRGB (`m_ColorSpace`): the GPU filters its RGB in linear light, alpha as is.
+    pub srgb: bool,
 }
 
 impl Image {
+    /// A raw (non-sRGB) image of one colour.
     #[must_use]
     pub fn filled(w: usize, h: usize, c: [u8; 4]) -> Self {
-        Self { w, h, px: vec![c; w * h], has_alpha: true }
+        Self { w, h, px: vec![c; w * h], has_alpha: true, srgb: false }
     }
 
     #[must_use]
@@ -30,51 +48,74 @@ impl Image {
         self.px[y.min(self.h - 1) * self.w + x.min(self.w - 1)]
     }
 
-    /// Bilinear sample at UV (clamped), texel centres at `(i + 0.5) / size`.
+    /// A texel as the shader sees it: RGB in linear light for an sRGB texture, else `byte / 255`.
+    fn texel(&self, x: usize, y: usize) -> [f32; 4] {
+        let p = self.get(x, y);
+        if self.srgb {
+            [
+                srgb_to_linear(p[0]),
+                srgb_to_linear(p[1]),
+                srgb_to_linear(p[2]),
+                f32::from(p[3]) / 255.0,
+            ]
+        } else {
+            p.map(|c| f32::from(c) / 255.0)
+        }
+    }
+
+    /// Bilinear sample at UV (clamped), texel centres at `(i + 0.5) / size`, filtered where the
+    /// GPU filters (linear light for sRGB RGB).
     #[must_use]
     pub fn sample(&self, u: f32, v: f32) -> [f32; 4] {
         let x = (u * self.w as f32 - 0.5).clamp(0.0, (self.w - 1) as f32);
         let y = (v * self.h as f32 - 0.5).clamp(0.0, (self.h - 1) as f32);
         let (x0, y0) = (x.floor() as usize, y.floor() as usize);
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let (a, b, c, d) = (
+            self.texel(x0, y0),
+            self.texel(x0 + 1, y0),
+            self.texel(x0, y0 + 1),
+            self.texel(x0 + 1, y0 + 1),
+        );
         let mut out = [0.0; 4];
         for (k, o) in out.iter_mut().enumerate() {
-            let t = |xx: usize, yy: usize| f32::from(self.get(xx, yy)[k]);
-            let top = t(x0, y0) * (1.0 - fx) + t(x0 + 1, y0) * fx;
-            let bot = t(x0, y0 + 1) * (1.0 - fx) + t(x0 + 1, y0 + 1) * fx;
-            *o = (top * (1.0 - fy) + bot * fy) / 255.0;
+            let top = a[k] * (1.0 - fx) + b[k] * fx;
+            let bot = c[k] * (1.0 - fx) + d[k] * fx;
+            *o = top * (1.0 - fy) + bot * fy;
         }
         out
     }
 
-    /// Halves the image `n` times with a box filter (never below 1x1), for downsampling by powers
-    /// of two before the final bilinear step.
+    /// Halves the image with a box filter (never below 1x1), in the domain the GPU filters in.
     #[must_use]
     pub fn halved(&self) -> Self {
         let (w, h) = ((self.w / 2).max(1), (self.h / 2).max(1));
         let mut px = Vec::with_capacity(w * h);
         for y in 0..h {
             for x in 0..w {
-                let mut acc = [0u32; 4];
-                let mut n = 0;
+                let mut acc = [0f32; 4];
                 for dy in 0..2 {
                     for dx in 0..2 {
-                        let p = self.get(x * 2 + dx, y * 2 + dy);
+                        let t = self.texel(x * 2 + dx, y * 2 + dy);
                         for k in 0..4 {
-                            acc[k] += u32::from(p[k]);
+                            acc[k] += t[k] * 0.25;
                         }
-                        n += 1;
                     }
                 }
-                px.push([
-                    ((acc[0] + n / 2) / n) as u8,
-                    ((acc[1] + n / 2) / n) as u8,
-                    ((acc[2] + n / 2) / n) as u8,
-                    ((acc[3] + n / 2) / n) as u8,
-                ]);
+                let enc = |l: f32| (l.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                px.push(if self.srgb {
+                    [
+                        linear_to_srgb(acc[0]),
+                        linear_to_srgb(acc[1]),
+                        linear_to_srgb(acc[2]),
+                        enc(acc[3]),
+                    ]
+                } else {
+                    [enc(acc[0]), enc(acc[1]), enc(acc[2]), enc(acc[3])]
+                });
             }
         }
-        Self { w, h, px, has_alpha: self.has_alpha }
+        Self { w, h, px, has_alpha: self.has_alpha, srgb: self.srgb }
     }
 }
 
@@ -105,6 +146,9 @@ pub fn decode(universe: &Universe, v: &Value) -> Result<Image> {
         usize::try_from(v.i64_at("m_Width").unwrap_or(0))?,
         usize::try_from(v.i64_at("m_Height").unwrap_or(0))?,
     );
+    if w == 0 || h == 0 || w > 16384 || h > 16384 {
+        bail!("{name}: {w}x{h} texture");
+    }
     let raw = payload(universe, v)?;
     let mut bgra = vec![0u32; w * h];
     let block = |r: Result<(), &'static str>| r.map_err(|e| anyhow::anyhow!("{name}: {e}"));
@@ -145,7 +189,13 @@ pub fn decode(universe: &Universe, v: &Value) -> Result<Image> {
     if px.len() < w * h {
         bail!("{name}: payload decodes to {} of {} texels", px.len(), w * h);
     }
-    Ok(Image { w, h, px: px[..w * h].to_vec(), has_alpha: format_has_alpha(fmt) })
+    Ok(Image {
+        w,
+        h,
+        px: px[..w * h].to_vec(),
+        has_alpha: format_has_alpha(fmt),
+        srgb: v.i64_at("m_ColorSpace").unwrap_or(1) == 1,
+    })
 }
 
 #[cfg(test)]
@@ -154,13 +204,41 @@ mod tests {
 
     #[test]
     fn bilinear_sampling_interpolates_between_texel_centres() {
-        let img =
-            Image { w: 2, h: 1, px: vec![[0, 0, 0, 255], [255, 255, 255, 255]], has_alpha: true };
+        let img = Image {
+            w: 2,
+            h: 1,
+            px: vec![[0, 0, 0, 255], [255, 255, 255, 255]],
+            has_alpha: true,
+            srgb: false,
+        };
         let s = img.sample(0.5, 0.5);
         assert!((s[0] - 0.5).abs() < 1e-6);
         // Clamped outside the centres.
         assert_eq!(img.sample(0.0, 0.5)[0], 0.0);
         assert_eq!(img.sample(1.0, 0.5)[0], 1.0);
+    }
+
+    #[test]
+    fn srgb_textures_filter_in_linear_light() {
+        let img = Image {
+            w: 2,
+            h: 1,
+            px: vec![[0, 0, 0, 0], [255, 255, 255, 255]],
+            has_alpha: true,
+            srgb: true,
+        };
+        let s = img.sample(0.5, 0.5);
+        // The midpoint of black and white is 0.5 in linear light, and alpha stays linear.
+        assert!((s[0] - 0.5).abs() < 1e-6 && (s[3] - 0.5).abs() < 1e-6, "{s:?}");
+        let h = Image {
+            w: 2,
+            h: 2,
+            px: vec![[0, 0, 0, 0], [255, 255, 255, 255], [0, 0, 0, 0], [255, 255, 255, 255]],
+            ..img
+        }
+        .halved();
+        assert_eq!(h.px[0][0], 188);
+        assert_eq!(h.px[0][3], 128);
     }
 
     #[test]
@@ -170,6 +248,7 @@ mod tests {
             h: 2,
             px: vec![[0, 0, 0, 0], [100, 0, 0, 0], [100, 0, 0, 0], [200, 0, 0, 255]],
             has_alpha: true,
+            srgb: false,
         };
         let h = img.halved();
         assert_eq!((h.w, h.h), (1, 1));
