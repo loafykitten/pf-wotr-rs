@@ -83,3 +83,67 @@ pub fn load(path: &Path) -> Result<Vec<RoutePoint>> {
     }
     Ok(out)
 }
+
+/// A point looking from `eye` at `target` with `base`'s lens, as Unity's camera would be
+/// placed there: `worldToCamera` has the camera's right, up and negated forward axes as rows
+/// (`Quaternion.LookRotation(forward, up)`, then the `(1, 1, -1)` scale of camera space).
+/// For viewing units from where no recorded pose has them; there is no original to compare.
+#[must_use]
+pub fn look_at(base: &RoutePoint, eye: Vec3, target: Vec3) -> RoutePoint {
+    let f = (target - eye).normalize();
+    let r = Vec3::Y.cross(f).normalize();
+    let u = f.cross(r);
+    let w2c = bevy::math::Mat4::from_cols(
+        bevy::math::Vec4::new(r.x, u.x, -f.x, 0.0),
+        bevy::math::Vec4::new(r.y, u.y, -f.y, 0.0),
+        bevy::math::Vec4::new(r.z, u.z, -f.z, 0.0),
+        bevy::math::Vec4::new(-r.dot(eye), -u.dot(eye), f.dot(eye), 1.0),
+    );
+    let mut pose = base.pose;
+    pose.world_to_camera = w2c;
+    pose.position = eye;
+    pose.rig = None;
+    RoutePoint { sample: base.sample, pose }
+}
+
+/// Parses `ex,ey,ez,tx,ty,tz`.
+#[must_use]
+pub fn parse_look(s: &str) -> Option<(Vec3, Vec3)> {
+    let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    (v.len() == 6).then(|| (Vec3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn look_at_puts_the_target_straight_ahead() {
+        let base = RoutePoint {
+            sample: 0,
+            pose: CameraPose {
+                world_to_camera: bevy::math::Mat4::IDENTITY,
+                gpu_projection: bevy::math::Mat4::IDENTITY,
+                projection: bevy::math::Mat4::IDENTITY,
+                position: Vec3::ZERO,
+                near: 0.3,
+                far: 100.0,
+                width: 16,
+                height: 9,
+                rig: None,
+            },
+        };
+        let p = look_at(&base, Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 2.0, 13.0));
+        // The target is 10 in front of the camera: camera space looks down -Z.
+        let c = p.pose.world_to_camera.transform_point3(Vec3::new(1.0, 2.0, 13.0));
+        assert!((c - Vec3::new(0.0, 0.0, -10.0)).length() < 1e-5, "{c:?}");
+        // World +X is camera right for a camera looking along +Z (Unity's left-handed world).
+        let x = p.pose.world_to_camera.transform_vector3(Vec3::X);
+        assert!(x.x > 0.99, "{x:?}");
+        assert_eq!(
+            parse_look("1,2,3,4,5,6"),
+            Some((Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)))
+        );
+        assert_eq!(parse_look("1,2"), None);
+    }
+}

@@ -14,6 +14,7 @@ pub mod metal;
 pub mod msl;
 pub mod shader;
 pub mod tex;
+pub mod units;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -68,6 +69,8 @@ pub struct PackReport {
     pub transcoded_textures: Vec<String>,
     pub skipped: BTreeMap<String, u32>,
     pub timings_ms: BTreeMap<String, u128>,
+    /// The unit views baked in (`--units`).
+    pub units: Option<units::UnitsReport>,
 }
 
 /// One scene file's objects, indexed for the walk.
@@ -650,6 +653,7 @@ pub fn build(
     area: &str,
     out: &Path,
     metal_cache: &Path,
+    units: Option<(&crate::catalog::Locations, &wr_view::UnitsSpec)>,
 ) -> Result<PackReport> {
     let t_all = Instant::now();
     let mut t = Instant::now();
@@ -1067,6 +1071,13 @@ pub fn build(
         }
     }
     b.report.timings_ms.insert("renderers".into(), t.elapsed().as_millis());
+
+    // Units: the save's unit views, baked in their bind pose.
+    if let Some((locations, spec)) = units {
+        t = Instant::now();
+        b.report.units = Some(units::add(&mut b, locations, spec)?);
+        b.report.timings_ms.insert("units".into(), t.elapsed().as_millis());
+    }
 
     // Pipeline programs.
     t = Instant::now();

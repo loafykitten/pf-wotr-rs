@@ -56,6 +56,9 @@ struct Args {
     settle: u32,
     dwell: f64,
     point: Option<usize>,
+    /// `--look ex,ey,ez,tx,ty,tz`: one extra point looking from the eye at the target with
+    /// the route's first lens (for units, which the recorded route doesn't frame).
+    look: Option<(bevy::math::Vec3, bevy::math::Vec3)>,
     front_ccw: bool,
     /// Raise the frame's threads (render thread, compute pool) to user-interactive QoS.
     qos_interactive: bool,
@@ -96,6 +99,7 @@ impl Args {
             settle: opt(&a, "--settle").and_then(|v| v.parse().ok()).unwrap_or(10),
             dwell: opt(&a, "--dwell").and_then(|v| v.parse().ok()).unwrap_or(37.5),
             point: opt(&a, "--point").and_then(|v| v.parse().ok()),
+            look: opt(&a, "--look").and_then(route::parse_look),
             front_ccw: opt(&a, "--front").is_none_or(|v| v != "cw"),
             qos_interactive: opt(&a, "--qos").is_none_or(|v| v != "default"),
             latency: opt(&a, "--latency").and_then(|v| v.parse().ok()),
@@ -167,6 +171,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let mut points = points;
+    let mut args = args;
+    if let Some((eye, target)) = args.look {
+        points = vec![route::look_at(&points[0], eye, target)];
+        args.point = Some(0);
+    }
     let (w, h) = (points[0].pose.width, points[0].pose.height);
     let window = Window {
         title: "wr-game: Prologue_Caves_1 first light".into(),

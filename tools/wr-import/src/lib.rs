@@ -19,4 +19,5 @@ pub mod report;
 pub mod scene;
 pub mod texture;
 pub mod transform;
+pub mod tree;
 pub mod unity;

@@ -32,6 +32,7 @@ wr-nav = { path = "crates/wr-nav" }
 wr-los = { path = "crates/wr-los" }
 wr-phys = { path = "crates/wr-phys" }
 wr-text = { path = "crates/wr-text" }
+wr-view = { path = "crates/wr-view" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
