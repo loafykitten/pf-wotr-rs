@@ -6,7 +6,7 @@ anything**: it's the handoff, with the goal, the fidelity contract, decisions, f
 measured so far, and the proof-of-concept milestones. `docs/research/` holds the code
 survey and notes on other rewrites.
 
-- **Current status (2026-10-18, twenty-third session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
+- **Current status (2026-10-19, twenty-third session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
   certification) passed**. Ember's fixture saves exist: `Manual_18_WR_FirstBattle`,
   `Manual_19_WR_PreHorgus` and `Manual_20_WR_PreCamelia` (read-only copies in `fixtures/saves/`, gitignored).
   Where each workstream stands, with its handoff:
@@ -24,7 +24,7 @@ survey and notes on other rewrites.
     player input neutral at the source, physics phase pinned); `cert-20` certifies from this repo's layout.
   - POC-6 render round 3 (`docs/poc6/render-round3.md`): realtime shadows; FLIP 0.1246. Next: light probes.
   - POC-7 (`docs/poc7/characters.md`): stage 1 done (the save's units in the caves, composed as the game does, in rest
-    pose; `wr-game --look`). Next: animation (idle and walk), then the stages the doc lists.
+    pose; `wr-game --look`) and step 2 (`docs/poc7/animation.md`: idle animation, a walk demo). Next: the units driven by the sim, then the stages the doc lists.
   - Nav (`docs/poc0/extraction.md` §9, `crates/wr-nav`): every path query exact, smoothing included (the native
     math ported from `UnityPlayer.dylib` and checked against it, `native_check.rs`); turn-based paths too
     (`docs/poc5/paths.md`, observer `paths`, `poc5-tb-114`: every request exact). The sim's input is the area's nav

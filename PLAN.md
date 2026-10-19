@@ -48,7 +48,7 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     `ph_col`'s `wcenter`, `roam_init`, `los_geom`/`los_probe`, `bounds_init`/`bounds_tick`/`bounds_set`/`bounds_scene`,
     `vis_order` and `phys_sync`. `-139` is a partial development capture of the same plan (superseded by `-140`). Read
     by the sim so far: `wcenter` (the box centres, below), `los_geom`/`los_probe` (88 segments and 1,280 probes equal a
-    run) and, once stream corp merges, `bounds_tick`'s radii. Still unread: `roam_init`, `bounds_set`, `bounds_scene`,
+    run) and `bounds_tick`'s radii (stream corp, below). Still unread: `roam_init`, `bounds_set`, `bounds_scene`,
     `vis_order`, `phys_sync` (next: readers that replace the vision range's start hypotheses with them).
   - *Box centres* (stream xform, `docs/poc5/movement-review-integration.md`): the importer's `TransformPoint` is
     Unity's hierarchy walk (`wr_phys::boxes::transform_point`), checked bit for bit against `-140`'s 62 `wcenter`s;
@@ -62,10 +62,22 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   - *POC-7 stage 1* (stream chars, `docs/poc7/characters.md`, `crates/wr-view`, `crates/wr-visual`,
     `tools/wr-import/src/pack/units/`, `wr-game --look`): the save's 21 units in the caves at their saved positions in
     rest pose; characters composed as `Character.UpdateCharacter`/`BuildMesh`/`MergeOverlays` do, atlases from ports
-    of `CharacterAtlasGenerator` and `CharacterTextureRepaint`. Sol: 3 rounds. Next stage (stream anim, running): idle
-    and walk animation.
-  - **Valid on every run** after the merges of 2026-10-18 (sweep: 25 captures, 116 runs, `-140` included; `check.sh`
-    712 tests; POC-5 suites 40/40): all but `-122/tb-nearest` (the known tie).
+    of `CharacterAtlasGenerator` and `CharacterTextureRepaint`. Sol: 3 rounds.
+  - *POC-7 step 2* (stream anim, `docs/poc7/animation.md`, `crates/wr-anim`, `owlcat/skinning.rs`): the units animated,
+    skinned on the GPU: Unity's generic clips decoded (all 843 human clips, curves continuous), Mecanim controllers with
+    cross-fades, the human and monster locomotion as `UnitAnimationManager` plays it outside combat; pack format v3
+    (re-pack with `wr-import pack`); all 21 units idle, `--mode anim --walk` walks one in a straight line (a demo, not
+    the movement agent). Not compared with the original's poses (a rig-pose capture would be the reference). Sol: 4
+    rounds.
+  - *Corpulence* (stream corp, `docs/poc5/corpulence.md`, `combat/corpulence.rs`): `UnitEntityView.Corpulence`
+    computed (the prefab's `m_Corpulence` times the size scale; `OriginalSize` derived from the race or the current
+    blueprint; `SelectRace.Apply`'s `State.Size`; unknown with a counted cause for a rider, a polymorph, a doll or
+    dummy view not known, a pet). Every corp read equal (8,663,220 on 111 runs), `-140`'s 7,832 `bounds_tick` radii a
+    run inside the 0.05 band; the vision range takes it where the recording has no valid read. Unit prefabs table v2
+    and `cache/sim/doll-prefabs.json` (`wr-import unit-prefabs`, `wr-rules-data`; `scripts/scene-cache.sh` rebuilds
+    an older table). Sol: 3 rounds.
+  - **Valid on every run** after the merges of 2026-10-18/19 (sweep: 25 captures, 116 runs, `-140` included;
+    `check.sh` 808 tests; POC-5 suites 41/41, `poc5_corpulence` included): all but `-122/tb-nearest` (the known tie).
   - Open: a replay's window can start one frame apart (523B's `TimeToNextRoundTick`; `docs/poc5/tb-replay.md`, end);
     loot's proposed observers (`loot_drop`, `ent_created`, `prone_step`, `tt_prep` Duration, `awake_set`,
     `docs/poc5/loot-and-prone.md`); the stat mutations outside any rule span (`stat_value`, `stat_mod_add`,
@@ -1188,7 +1200,8 @@ and clear value, the shipped pipeline settings. Next: light probes, then the res
 - **Pass:** a scripted run (the same inputs, tape and deltas as an oracle run) ends in the
   same state as the original; a free play-through feels like Wrath (Ember's judgement).
 - **Status (2026-10-18):** stage 1 of `docs/poc7/characters.md` done (the save's units composed and placed, rest
-  pose); animation is next.
+  pose); step 2 (`docs/poc7/animation.md`) animates them (idle, a walk demo). Next: the units driven by the sim
+  (the movement agent, camera and click-to-move), then the stages `characters.md` lists.
 
 ### POC-8: what the rest would cost (alongside POC-2 to POC-7)
 
