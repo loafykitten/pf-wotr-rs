@@ -177,6 +177,9 @@ enum Cmd {
         /// bind pose at the saved positions.
         #[arg(long)]
         units: Option<PathBuf>,
+        /// Character atlas size in pixels (the game's High texture setting is 2048).
+        #[arg(long, default_value_t = 1024)]
+        atlas_size: usize,
     },
 }
 
@@ -456,7 +459,7 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&p.meta)?);
             Ok(())
         }
-        Cmd::Pack { area, out, units } => {
+        Cmd::Pack { area, out, units, atlas_size } => {
             let ctx = context()?;
             let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
             let cache = wr_paths::cache_root().join("poc6");
@@ -469,7 +472,7 @@ fn main() -> Result<()> {
                 &area,
                 &out,
                 &cache.join("metallib"),
-                spec.as_ref().map(|s| (&ctx.locations, s)),
+                spec.as_ref().map(|s| (&ctx.locations, s, atlas_size)),
             )?;
             eprintln!(
                 "pack: {} renderers, {} meshes, {} materials, {} textures, {} programs ({} metallibs), {} lights; {:.1} MiB in {} ms",

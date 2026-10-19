@@ -15,6 +15,9 @@
 //! scale)`), so one baked mesh serves every unit of a prefab. The pack keeps the skin
 //! channels, so a later stage can pose from the same streams.
 
+pub mod atlas;
+pub mod character;
+pub mod image;
 pub mod skin;
 
 use std::collections::HashMap;
@@ -102,6 +105,20 @@ impl UnitPrefab {
         self.sc.worlds.get(&self.root).map_or(Vec3::ONE, |w| Vec3::from_array(w.lossy_scale))
     }
 
+    /// The `Character` has a `BakedCharacter` asset.
+    fn baked_character(&self, b: &Builder<'_>) -> Result<bool> {
+        for o in self.sc.file.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR) {
+            let v = self.sc.file.read(o)?;
+            if b.universe.script_of(self.sc.file, &v)?.is_some_and(|s| s.class == "Character") {
+                return Ok(v
+                    .get("BakedCharacter")
+                    .and_then(Value::as_pptr)
+                    .is_some_and(|p| !p.is_null()));
+            }
+        }
+        Ok(false)
+    }
+
     fn has_script(&self, b: &Builder<'_>, class: &str) -> Result<bool> {
         for o in self.sc.file.objects.iter().filter(|o| o.class_id == class_id::MONO_BEHAVIOUR) {
             let v = self.sc.file.read(o)?;
@@ -133,10 +150,12 @@ pub(super) fn add(
     b: &mut Builder<'_>,
     locations: &Locations,
     spec: &UnitsSpec,
+    atlas_size: usize,
 ) -> Result<UnitsReport> {
     let mut rep = UnitsReport { spec_units: spec.units.len(), ..Default::default() };
     let mut prefabs: HashMap<String, std::rc::Rc<UnitPrefab>> = HashMap::new();
     let mut baked_meshes: HashMap<(String, i64), Option<u32>> = HashMap::new();
+    let mut characters = character::Cache::new(atlas_size);
     for u in &spec.units {
         let prefab = match prefabs.get(&u.prefab) {
             Some(p) => p.clone(),
@@ -152,12 +171,21 @@ pub(super) fn add(
                 }
             },
         };
-        let character = prefab.has_script(b, "Character")?;
-        let kind = if character { "character" } else { "plain" };
+        // A baked character's prefab already holds its finished skinned renderer under the
+        // animator (`Character.LoadBakedCharacter` takes it): drawn like a plain prefab.
+        let character = prefab.has_script(b, "Character")? && !prefab.baked_character(b)?;
+        let baked = !character && prefab.has_script(b, "Character")?;
+        let kind = if character {
+            "character"
+        } else if baked {
+            "baked"
+        } else {
+            "plain"
+        };
         *rep.kinds.entry(kind.to_owned()).or_default() += 1;
         let before = b.meta.renderers.len();
         let r = if character {
-            Err(anyhow::anyhow!("Character prefabs: not yet"))
+            character::add(b, locations, &mut characters, &prefab, u)
         } else {
             plain(b, &prefab, u, &mut baked_meshes)
         };
@@ -375,4 +403,87 @@ fn intern_baked(b: &mut Builder<'_>, d: pack_mesh::DecodedMesh, id: AssetId) -> 
         aabb: d.aabb,
     });
     Ok(u32::try_from(b.meta.meshes.len() - 1)?)
+}
+
+/// Pushes a renderer for a composed unit mesh (no object of its own in the prefab).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_renderer_for(
+    b: &mut Builder<'_>,
+    prefab: &UnitPrefab,
+    u: &UnitView,
+    label: &str,
+    mesh: u32,
+    materials: Vec<Option<u32>>,
+    matrix: Mat4,
+    layer: u32,
+) {
+    b.meta.renderers.push(Renderer {
+        renderer: AssetId { file: prefab.sc.file.name.clone(), path_id: 0 },
+        game_object: AssetId { file: prefab.sc.file.name.clone(), path_id: 0 },
+        scene: format!("unit:{}", u.id),
+        path: format!("unit:{}/{label}", u.id),
+        kind: RendererKind::Skinned,
+        enabled: true,
+        active: true,
+        layer,
+        matrix: matrix.to_cols_array(),
+        mesh,
+        materials,
+        lightmap_index: 65535,
+        lightmap_st: [1.0, 1.0, 0.0, 0.0],
+        cast_shadows: 1,
+        receive_shadows: true,
+        light_probe_usage: 1,
+        reflection_probe_usage: 1,
+        static_batch: (0, 0),
+        rendering_layer_mask: u32::MAX,
+        property_block: None,
+    });
+}
+
+impl Builder<'_> {
+    /// A copy of material `base` with textures, floats and keywords set, its shader variants
+    /// selected for the new keyword set (a `new Material(source)` the game then edits).
+    pub(super) fn derive_material(
+        &mut self,
+        base: u32,
+        name: &str,
+        textures: &[(String, u32)],
+        floats: &[(&str, f32)],
+        keywords: &[&str],
+    ) -> Result<u32> {
+        let mut m = self.meta.materials[base as usize].clone();
+        m.id =
+            AssetId { file: format!("derived:{name}"), path_id: self.meta.materials.len() as i64 };
+        m.name = name.to_owned();
+        m.variants.clear();
+        m.casters.clear();
+        for (n, t) in textures {
+            match m.textures.iter_mut().find(|p| &p.name == n) {
+                Some(p) => p.texture = Some(*t),
+                None => m.textures.push(wr_assets::TexProp {
+                    name: n.clone(),
+                    texture: Some(*t),
+                    scale: [1.0, 1.0],
+                    offset: [0.0, 0.0],
+                }),
+            }
+        }
+        for (n, v) in floats {
+            match m.floats.iter_mut().find(|(k, _)| k == n) {
+                Some(f) => f.1 = *v,
+                None => m.floats.push(((*n).to_owned(), *v)),
+            }
+        }
+        for k in keywords {
+            if !m.keywords.iter().any(|x| x == k) {
+                m.keywords.push((*k).to_owned());
+            }
+        }
+        self.meta.materials.push(m);
+        let mi = u32::try_from(self.meta.materials.len() - 1)?;
+        self.select_casters(mi)?;
+        self.select_variant(mi, &[])?;
+        Ok(mi)
+    }
 }

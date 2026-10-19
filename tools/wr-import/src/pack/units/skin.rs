@@ -66,6 +66,18 @@ fn attr(mesh: &DecodedMesh, ch: Channel, v: usize) -> Option<&[u8]> {
     data.get(o..o + len)
 }
 
+/// The first `n` components of vertex `v`'s attribute `ch` as floats (the rest zero).
+#[must_use]
+pub fn read_attr(mesh: &DecodedMesh, ch: Channel, v: usize, n: usize) -> Option<[f32; 4]> {
+    let b = attr(mesh, ch, v)?;
+    let sz = format_size(ch.format)? as usize;
+    let mut out = [0f32; 4];
+    for (k, o) in out.iter_mut().enumerate().take(n.min(usize::from(ch.dimension))) {
+        *o = read_component(ch.format, b.get(k * sz..)?)? as f32;
+    }
+    Some(out)
+}
+
 /// Bone indices and weights of every vertex (four slots each; unused slots weigh zero).
 fn skin_data(mesh: &DecodedMesh) -> Result<Vec<([u32; 4], [f32; 4])>> {
     let w = channel(mesh, BLEND_WEIGHTS).context("mesh has no blend weights")?;
