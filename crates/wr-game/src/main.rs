@@ -124,6 +124,13 @@ impl Args {
                 .filter(|n| (1..=100_000).contains(n))
                 .ok_or_else(|| format!("--frames {v}: want 1 to 100000"))?,
         };
+        // The last frame's time must be a time the clock can reach.
+        let last = f64::from(t0) + (frames - 1) as f64 / f64::from(fps);
+        if last > 100_000.0 {
+            return Err(format!(
+                "--frames {frames} at --fps {fps} from --t0 {t0} ends past 100000 s"
+            ));
+        }
         let walk = match opt(&a, "--walk") {
             None => None,
             Some(v) => Some(parse_walk(v).ok_or_else(|| {

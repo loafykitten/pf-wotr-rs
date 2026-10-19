@@ -131,14 +131,34 @@ impl Controller {
                 continue;
             }
             ensure!((l.default_state as usize) < l.states.len(), "{}: default state", l.name);
+            ensure!(l.default_weight.is_finite(), "{}: default weight", l.name);
             let trs = l.states.iter().flat_map(|s| &s.transitions).chain(&l.any_state);
             for t in trs {
                 ensure!((t.dest as usize) < l.states.len(), "{}: transition to {}", l.name, t.dest);
+                ensure!(
+                    t.duration.is_finite()
+                        && t.duration >= 0.0
+                        && t.offset.is_finite()
+                        && t.exit_time.is_finite(),
+                    "{}: transition to {} has a duration, offset or exit time that isn't a number",
+                    l.name,
+                    t.dest
+                );
+                ensure!(
+                    t.conditions.iter().all(|c| c.threshold.is_finite()),
+                    "{}: a condition threshold isn't a number",
+                    l.name
+                );
                 for c in &t.conditions {
                     ensure!(c.param < np, "{}: condition on parameter {}", l.name, c.param);
                 }
             }
             for s in &l.states {
+                ensure!(
+                    s.speed.is_finite() && s.cycle_offset.is_finite(),
+                    "{}: speed or cycle offset isn't a number",
+                    s.name
+                );
                 for p in s.speed_param.iter().chain(&s.cycle_param) {
                     ensure!(*p < np, "{}: parameter {p}", s.name);
                 }
@@ -251,14 +271,25 @@ impl Player {
         l.fade.as_ref().map_or(l.state, |f| f.dest)
     }
 
-    /// Whether `t` may fire at normalised state time `time`: its exit time has been reached (for a
-    /// looping state, reached again in the current cycle: a transition waiting on a condition fires
-    /// at the next cycle's exit point, not at once) and its conditions hold.
-    fn test(&self, t: &Transition, time: f32, looping: bool) -> bool {
+    /// Whether `t` may fire in an update that took the state's normalised time from `prev` to
+    /// `time`: its exit time was crossed in that update (a looping state crosses it again every
+    /// cycle when it is below one, so a transition waiting on a condition fires at the next
+    /// crossing, not at once) and its conditions hold. A one-shot state that has finished stays
+    /// past its exit time.
+    fn test(&self, t: &Transition, prev: f32, time: f32, looping: bool) -> bool {
         if t.has_exit_time {
-            let reached = time >= t.exit_time
-                && (!looping || time.rem_euclid(1.0) >= t.exit_time.rem_euclid(1.0));
-            if !reached {
+            let crossed = if looping && t.exit_time < 1.0 {
+                // Some cycle's exit point lies in (prev, time].
+                (prev.div_euclid(1.0) as i64..=time.div_euclid(1.0) as i64).any(|k| {
+                    let at = t.exit_time + k as f32;
+                    prev < at && at <= time
+                })
+            } else {
+                // Once (above one, or a state that doesn't loop): reached, and not before this
+                // update unless the state has run out (then it stays eligible).
+                time >= t.exit_time && (prev < t.exit_time || !looping)
+            };
+            if !crossed {
                 return false;
             }
         }
@@ -294,6 +325,7 @@ impl Player {
             let cur = &layer.states[ls.state as usize];
             let len = self.motion_length(clips, &cur.motion);
             let speed = self.speed(cur);
+            let mut prev_time = ls.time;
             let mut time = ls.time;
             if len > 0.0 {
                 time += dt * speed / len;
@@ -309,6 +341,8 @@ impl Player {
                 }
                 if f.elapsed >= f.duration {
                     state = f.dest;
+                    prev_time =
+                        f.dest_time - if dlen > 0.0 { dt * self.speed(dst) / dlen } else { 0.0 };
                     time = f.dest_time;
                     fade = None;
                 }
@@ -316,7 +350,8 @@ impl Player {
             if fade.is_none() {
                 let cur = &layer.states[state as usize];
                 let hit = layer.any_state.iter().chain(&cur.transitions).find(|t| {
-                    (t.dest != state || t.can_transition_to_self) && self.test(t, time, cur.looping)
+                    (t.dest != state || t.can_transition_to_self)
+                        && self.test(t, prev_time, time, cur.looping)
                 });
                 if let Some(t) = hit {
                     let duration = if t.fixed_duration {
@@ -603,14 +638,50 @@ mod tests {
         let bound: Vec<BoundClip<'_>> =
             clips.iter().zip(&binders).map(|(k, b)| BoundClip { clip: k, binder: b }).collect();
         let mut p = Player::new(&c);
-        // 2.2 s into the 2 s idle: cycle position 0.1, before the exit point.
-        p.update(&c, &bound, 2.2);
+        // 1.7 s into the 2 s idle: cycle position 0.85, past the exit point, which was crossed with
+        // the condition false. Raising WalkSpeed now changes nothing until the next crossing.
+        p.update(&c, &bound, 1.7);
         p.set(0, 1.0);
-        p.update(&c, &bound, 0.0);
+        p.update(&c, &bound, 0.2);
         assert_eq!(p.state(0), 0);
-        // At 1.75 cycles (3.5 s) the exit point comes round again.
-        p.update(&c, &bound, 1.3);
+        // The exit point comes round again at 1.75 cycles (3.5 s): not yet at 3.4 s, then crossed.
+        p.update(&c, &bound, 1.5);
+        assert_eq!(p.state(0), 0);
+        p.update(&c, &bound, 0.2);
         assert_eq!(p.state(0), 1);
+    }
+
+    #[test]
+    fn a_one_shot_state_stays_past_its_exit_time_and_numbers_must_be_numbers() {
+        let (mut c, r) = (controller(), rig());
+        c.layers[0].states[0].looping = false;
+        c.layers[0].states[0].transitions[0].has_exit_time = true;
+        c.layers[0].states[0].transitions[0].exit_time = 0.5;
+        let clips = [clip(1.0, 2.0), clip(3.0, 1.0)];
+        let binders: Vec<Binder> = clips.iter().map(|k| Binder::new(k, &r)).collect();
+        let bound: Vec<BoundClip<'_>> =
+            clips.iter().zip(&binders).map(|(k, b)| BoundClip { clip: k, binder: b }).collect();
+        let mut p = Player::new(&c);
+        p.update(&c, &bound, 1.5);
+        p.set(0, 1.0);
+        p.update(&c, &bound, 0.1);
+        assert_eq!(p.state(0), 1);
+        // Non-finite playback values are refused at validation.
+        for f in [
+            |c: &mut Controller| c.layers[0].states[0].transitions[0].duration = f32::NAN,
+            |c: &mut Controller| c.layers[0].states[0].transitions[0].duration = -1.0,
+            |c: &mut Controller| c.layers[0].states[0].transitions[0].exit_time = f32::INFINITY,
+            |c: &mut Controller| {
+                c.layers[0].states[0].transitions[0].conditions[0].threshold = f32::NAN
+            },
+            |c: &mut Controller| c.layers[0].states[0].speed = f32::NAN,
+            |c: &mut Controller| c.layers[0].states[0].cycle_offset = f32::NAN,
+            |c: &mut Controller| c.layers[0].default_weight = f32::NAN,
+        ] {
+            let mut bad = controller();
+            f(&mut bad);
+            assert!(bad.validate(2).is_err());
+        }
     }
 
     #[test]

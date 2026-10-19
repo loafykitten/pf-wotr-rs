@@ -1117,8 +1117,18 @@ pub(super) fn add(
         Some(p) => b.universe.resolve(prefab.sc.file, p)?.context("animation set not found")?,
         None => anim.human_set(b)?,
     };
-    let (loco, clips) = anim.locomotion(b, set)?;
-    let animation = anim.animation(b, &u.id, rig_index, loco, clips)?;
+    // A character whose animation can't be read is drawn in the rig's rest pose, not left out.
+    let animation = match anim
+        .locomotion(b, set)
+        .and_then(|(loco, clips)| anim.animation(b, &u.id, rig_index, loco, clips))
+    {
+        Ok(a) => Some(a),
+        Err(e) => {
+            anim.notes
+                .push(format!("{} {}: drawn in the rest pose, not animated: {e:#}", u.id, u.name));
+            None
+        }
+    };
     // Equipment: the prefab's saved entities and ramps, then the spec's.
     let mut eq = Equipment::default();
     if !u.replace_base_equipment {
@@ -1198,28 +1208,47 @@ pub(super) fn add(
     }
     anyhow::ensure!(!parts.is_empty(), "no skinned mesh");
     let mut merged = merge(&parts, &format!("Character_{}", u.id), &rig)?;
-    // Bounds that cover the unit's idle and walk poses.
-    let skin_blob = skin::skin_blob(&merged.mesh)?;
-    let skins: Vec<Vec<Mat4>> = bound_poses(b, &b.meta.animations[animation as usize], 8)
-        .iter()
-        .map(|w| {
-            merged
+    let (skin_blob, binding) = match animation {
+        Some(animation) => {
+            // Bounds that cover the unit's idle and walk poses.
+            let skin_blob = skin::skin_blob(&merged.mesh)?;
+            let skins: Vec<Vec<Mat4>> = bound_poses(b, &b.meta.animations[animation as usize], 8)
+                .iter()
+                .map(|w| {
+                    merged
+                        .bones
+                        .iter()
+                        .zip(&merged.bind)
+                        .map(|(rb, bind)| w[*rb as usize] * *bind)
+                        .collect()
+                })
+                .collect();
+            skin::animated_bounds(&mut merged.mesh, &skins)?;
+            let binding = SkinBinding {
+                animation,
+                bones: merged.bones.clone(),
+                bind_poses: merged.bind.iter().map(Mat4::to_cols_array).collect(),
+            };
+            (Some(skin_blob), Some(binding))
+        }
+        None => {
+            // Posed once in the rig's rest pose (the skeleton's overrides applied).
+            let mut worlds = Vec::new();
+            rig.rig.world_matrices(&rig.rig.posed_rest(), &mut worlds);
+            let skin_mats: Vec<Mat4> = merged
                 .bones
                 .iter()
                 .zip(&merged.bind)
-                .map(|(rb, bind)| w[*rb as usize] * *bind)
-                .collect()
-        })
-        .collect();
-    skin::animated_bounds(&mut merged.mesh, &skins)?;
+                .map(|(rb, bind)| worlds[*rb as usize] * *bind)
+                .collect();
+            skin::pose(&mut merged.mesh, &skin_mats)?;
+            skin::refresh_bounds(&mut merged.mesh)?;
+            (None, None)
+        }
+    };
     merged.mesh.streams.truncate(1);
     merged.mesh.channels[12] = None;
     merged.mesh.channels[13] = None;
-    let binding = SkinBinding {
-        animation,
-        bones: merged.bones.clone(),
-        bind_poses: merged.bind.iter().map(Mat4::to_cols_array).collect(),
-    };
     let merged = merged.mesh;
     let mesh_index = {
         let mut streams = Vec::new();
@@ -1229,8 +1258,8 @@ pub(super) fn add(
         }
         let indices = b.w.blob(&merged.indices)?;
         b.report.mesh_bytes += merged.indices.len() as u64;
-        let skin = b.w.blob(&skin_blob)?;
-        b.report.mesh_bytes += skin_blob.len() as u64;
+        let skin = skin_blob.as_ref().map(|s| b.w.blob(s)).transpose()?;
+        b.report.mesh_bytes += skin_blob.as_ref().map_or(0, |s| s.len() as u64);
         b.meta.meshes.push(PackMesh {
             id: AssetId { file: format!("character:{}", u.id), path_id: 0 },
             name: merged.name.clone(),
@@ -1241,7 +1270,7 @@ pub(super) fn add(
             indices,
             submeshes: merged.submeshes.clone(),
             aabb: merged.aabb,
-            skin: Some(skin),
+            skin,
         });
         u32::try_from(b.meta.meshes.len() - 1)?
     };
@@ -1284,17 +1313,7 @@ pub(super) fn add(
         &["_NORMALMAP", "_MASKSMAP"],
     )?;
     let matrix = placement(u, prefab.root_scale(), prefab.forbid_rotation);
-    push_renderer_for(
-        b,
-        prefab,
-        u,
-        "Character",
-        mesh_index,
-        vec![Some(mat)],
-        matrix,
-        9,
-        Some(binding),
-    );
+    push_renderer_for(b, prefab, u, "Character", mesh_index, vec![Some(mat)], matrix, 9, binding);
     Ok(())
 }
 

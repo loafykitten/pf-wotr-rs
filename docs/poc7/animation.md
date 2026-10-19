@@ -155,7 +155,9 @@ every locomotion clip, grown by a tenth and 0.1 m.
 machines (`m_StateConstantArray`, destinations indexing it; indices past it, which are exits, are dropped), states
 (blend tree node 0, speed and its multiplier parameter, cycle offset or its parameter, transitions), conditions
 (`If`, `IfNot`, `Greater`, `Less`, `Equals`, `NotEqual`). The player advances a state's clock by
-`dt * speed * param / motion length`; the first transition (any-state ones first) whose conditions hold starts a
+`dt * speed * param / motion length`; an exit time is a crossing (a looping state with an exit time below one crosses
+it every cycle, so a transition whose condition turns true after the crossing waits for the next one; a state
+that doesn't loop stays past it); the first transition (any-state ones first) whose conditions hold starts a
 cross-fade of its duration (seconds for a fixed duration, else a fraction of the source state's length) during
 which both states run and no other transition starts, then the destination becomes current. Layers blend over the
 rest pose in order by weight; the unit sets layer `m_DefaultLayerIndex` to one and the others to zero (the
