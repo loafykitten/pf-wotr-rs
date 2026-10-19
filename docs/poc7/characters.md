@@ -26,10 +26,10 @@ Seelah, Lann, Camelia, Wenduag). Every unit is in its rig's rest pose (a T-pose)
   filtering, linear normals, renderer check in body part selection, bounds after posing, index checks, panics, `ForbidRotation`,
   `--look` validation, the doc's re-import claim); three are recorded as stage-1 limits below (the doll prefab, `PriorityEquipment`,
   baked characters without an embedded renderer) and the size scale. Not done: the diffuse alpha mask is sampled without minification.
-- Screenshot: `/Volumes/Storage/Wrath-Rust/scratch-chars/route-units/point0.png` (the caves from route pose 0,
+- Screenshots (gitignored, `fixtures/captures/poc7/characters-stage1/`): `route-point0.png` (the caves from route pose 0,
   with the player; Seelah and Anevia are in the frame too, see "Differences from the original"). Close-ups from
-  a free camera (`wr-game --look ex,ey,ez,tx,ty,tz`): `/Volumes/Storage/Wrath-Rust/scratch-chars/shot-a/point0.png`
-  (Seelah, Anevia and the player), `.../shot-b/point0.png` (Lann), `.../close/sheet2.png` (four characters).
+  a free camera (`wr-game --look ex,ey,ez,tx,ty,tz`): `close-seelah-anevia-player.png`, `close-lann.png`,
+  `sheet-four.png` (four characters).
 
 How to rerun (from the repo root, with the game installed and the main caches present):
 
