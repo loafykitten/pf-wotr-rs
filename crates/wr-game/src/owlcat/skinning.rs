@@ -162,6 +162,53 @@ impl std::fmt::Debug for Skinning {
     }
 }
 
+/// The skinning compute pipeline and its bind group layout: parameters (uniform), the source
+/// stream, the skin, the palette (storage, read) and the destination stream (storage, write).
+fn skin_pipeline(device: &wgpu::Device) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("skin"),
+        source: wgpu::ShaderSource::Wgsl(WGSL.into()),
+    });
+    let entry = |binding: u32, read_only: bool, uniform: bool| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: if uniform {
+                wgpu::BufferBindingType::Uniform
+            } else {
+                wgpu::BufferBindingType::Storage { read_only }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("skin"),
+        entries: &[
+            entry(0, true, true),
+            entry(1, true, false),
+            entry(2, true, false),
+            entry(3, true, false),
+            entry(4, false, false),
+        ],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("skin"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("skin"),
+        layout: Some(&pl),
+        module: &module,
+        entry_point: Some("skin_vertices"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    (pipeline, layout)
+}
+
 /// A unit's start phase in `[0, 1)`: the game draws it with `Random.value`; the port takes a
 /// fixed value of the unit's id so a capture repeats.
 #[must_use]
@@ -197,47 +244,7 @@ impl Skinning {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("skin"),
-            source: wgpu::ShaderSource::Wgsl(WGSL.into()),
-        });
-        let entry = |binding: u32, read_only: bool, uniform: bool| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: if uniform {
-                    wgpu::BufferBindingType::Uniform
-                } else {
-                    wgpu::BufferBindingType::Storage { read_only }
-                },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("skin"),
-            entries: &[
-                entry(0, true, true),
-                entry(1, true, false),
-                entry(2, true, false),
-                entry(3, true, false),
-                entry(4, false, false),
-            ],
-        });
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("skin"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("skin"),
-            layout: Some(&pl),
-            module: &module,
-            entry_point: Some("skin_vertices"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let (pipeline, layout) = skin_pipeline(device);
         let mut units = Vec::new();
         for a in &m.animations {
             let rig = &m.rigs[a.rig as usize];
@@ -449,6 +456,134 @@ impl Skinning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(f: &[f32]) -> Vec<u8> {
+        f.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// Runs the skinning shader on a tiny mesh and returns the destination stream's floats.
+    /// `None` when the machine has no GPU adapter.
+    fn gpu_skin(
+        stream: &[f32],
+        stride_words: u32,
+        skin: &[u8],
+        palette: &[f32],
+        params: [u32; 8],
+    ) -> Option<Vec<f32>> {
+        let instance = wgpu::Instance::default();
+        let adapter = bevy::tasks::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let (device, queue) =
+            bevy::tasks::block_on(adapter.request_device(&Default::default())).ok()?;
+        let (pipeline, layout) = skin_pipeline(&device);
+        let buf = |data: &[u8], usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: data,
+                usage,
+            })
+        };
+        let size = (stream.len() * 4) as u64;
+        let dst = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let params_b = buf(
+            &params.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>(),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let src = buf(&words(stream), wgpu::BufferUsages::STORAGE);
+        let skin_b = buf(skin, wgpu::BufferUsages::STORAGE);
+        let pal = buf(&words(palette), wgpu::BufferUsages::STORAGE);
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: params_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: src.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: skin_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: pal.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: dst.as_entire_binding() },
+            ],
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(params[0].div_ceil(64), 1, 1);
+        }
+        enc.copy_buffer_to_buffer(&dst, 0, &read, 0, size);
+        queue.submit([enc.finish()]);
+        let slice = read.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        let data = slice.get_mapped_range().ok()?;
+        let _ = stride_words;
+        Some(data.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect())
+    }
+
+    /// The compute shader moves positions with the weighted palette, rotates normals and tangents by
+    /// its linear part, leaves the other attributes of the stream alone, and keeps a vertex with no
+    /// weight where it was.
+    #[test]
+    fn the_skin_shader_matches_the_cpu_formula() {
+        // Stream: position (3), normal (3), tangent (4), one UV pair (2): 12 words per vertex.
+        let verts: [[f32; 12]; 3] = [
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.25, 0.75],
+            [0.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0, 0.5, 0.5],
+            [5.0, 5.0, 5.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.9, 0.1],
+        ];
+        let stream: Vec<f32> = verts.iter().flatten().copied().collect();
+        // Bone 0 shifts up by 4; bone 1 turns a quarter about Z.
+        let up = Mat4::from_translation(Vec3::new(0.0, 4.0, 0.0));
+        let turn = Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let mut palette = up.to_cols_array().to_vec();
+        palette.extend(turn.to_cols_array());
+        // The skin: vertex 0 on bone 1; vertex 1 half bone 0, half bone 1; vertex 2 none.
+        let skin_rows: [([f32; 4], [u32; 4]); 3] = [
+            ([1.0, 0.0, 0.0, 0.0], [1, 0, 0, 0]),
+            ([0.5, 0.5, 0.0, 0.0], [0, 1, 0, 0]),
+            ([0.0; 4], [0; 4]),
+        ];
+        let skin: Vec<u8> = skin_rows
+            .iter()
+            .flat_map(|(w, i)| {
+                w.iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .chain(i.iter().flat_map(|x| x.to_le_bytes()))
+                    .collect::<Vec<u8>>()
+            })
+            .collect();
+        let params = [3, 12, 0, 3, 6, 0, 0, 0];
+        let Some(out) = gpu_skin(&stream, 12, &skin, &palette, params) else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let v = |i: usize, o: usize| {
+            Vec3::new(out[i * 12 + o], out[i * 12 + o + 1], out[i * 12 + o + 2])
+        };
+        // Vertex 0: (1,0,0) turned a quarter about Z is (0,1,0); its normal (0,1,0) becomes (-1,0,0).
+        assert!((v(0, 0) - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5, "{:?}", v(0, 0));
+        assert!((v(0, 3) - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5, "{:?}", v(0, 3));
+        // Vertex 1: half of (0,6,0) and half of (-2,0,0); the normal (0,0,1) is unchanged by both.
+        assert!((v(1, 0) - Vec3::new(-1.0, 3.0, 0.0)).length() < 1e-5, "{:?}", v(1, 0));
+        assert!((v(1, 3) - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+        // The tangent's w and the UVs are copied untouched.
+        assert_eq!(out[9], 1.0);
+        assert_eq!((out[10], out[11]), (0.25, 0.75));
+        assert_eq!(out[12 + 9], -1.0);
+        // No weight: the vertex stays put.
+        assert_eq!(v(2, 0), Vec3::new(5.0, 5.0, 5.0));
+        assert_eq!(v(2, 3), Vec3::new(1.0, 0.0, 0.0));
+    }
 
     #[test]
     fn phases_are_stable_and_in_range() {

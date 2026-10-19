@@ -606,3 +606,225 @@ pub(super) fn bound_poses(b: &Builder<'_>, anim: &UnitAnimation, samples: usize)
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obj(fields: &[(&str, Value)]) -> Value {
+        Value::Object(fields.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect())
+    }
+    fn int(i: i64) -> Value {
+        Value::Int(i)
+    }
+    fn arr(v: Vec<Value>) -> Value {
+        Value::Array(v)
+    }
+    fn data(v: Value) -> Value {
+        obj(&[("data", v)])
+    }
+
+    /// A blend tree constant: one leaf node playing `clip`, or a 1D tree over two clips.
+    fn tree(clips: &[i64]) -> Value {
+        let leaf = |c: i64| {
+            data(obj(&[
+                ("m_BlendType", int(0)),
+                ("m_ChildIndices", arr(vec![])),
+                ("m_ClipID", int(c)),
+                ("m_BlendEventID", int(4_294_967_295)),
+                ("m_Blend1dData", data(obj(&[("m_ChildThresholdArray", arr(vec![]))]))),
+            ]))
+        };
+        let mut nodes = Vec::new();
+        if clips.len() == 1 {
+            nodes.push(leaf(clips[0]));
+        } else {
+            nodes.push(data(obj(&[
+                ("m_BlendType", int(0)),
+                ("m_ChildIndices", arr((1..=clips.len() as i64).map(int).collect())),
+                ("m_ClipID", int(0)),
+                ("m_BlendEventID", int(10)),
+                (
+                    "m_Blend1dData",
+                    data(obj(&[(
+                        "m_ChildThresholdArray",
+                        arr((0..clips.len()).map(|i| Value::Float(i as f32)).collect()),
+                    )])),
+                ),
+            ])));
+            nodes.extend(clips.iter().map(|c| leaf(*c)));
+        }
+        data(obj(&[("m_NodeArray", arr(nodes))]))
+    }
+
+    fn transition(dest: i64, mode: i64, event: i64, threshold: f32) -> Value {
+        data(obj(&[
+            ("m_DestinationState", int(dest)),
+            (
+                "m_ConditionConstantArray",
+                arr(vec![data(obj(&[
+                    ("m_ConditionMode", int(mode)),
+                    ("m_EventID", int(event)),
+                    ("m_EventThreshold", Value::Float(threshold)),
+                ]))]),
+            ),
+            ("m_HasExitTime", Value::Bool(false)),
+            ("m_ExitTime", Value::Float(0.9)),
+            ("m_HasFixedDuration", Value::Bool(true)),
+            ("m_TransitionDuration", Value::Float(0.15)),
+            ("m_TransitionOffset", Value::Float(0.0)),
+            ("m_CanTransitionToSelf", Value::Bool(true)),
+        ]))
+    }
+
+    fn state(name: i64, clips: &[i64], speed_param: i64, trs: Vec<Value>) -> Value {
+        data(obj(&[
+            ("m_BlendTreeConstantArray", arr(vec![tree(clips)])),
+            ("m_BlendTreeConstantIndexArray", arr(vec![int(0)])),
+            ("m_Speed", Value::Float(1.5)),
+            ("m_SpeedParamID", int(speed_param)),
+            ("m_CycleOffset", Value::Float(0.0)),
+            ("m_CycleOffsetParamID", int(0)),
+            ("m_Loop", Value::Bool(true)),
+            ("m_NameID", int(name)),
+            ("m_PathID", int(name)),
+            ("m_TransitionConstantArray", arr(trs)),
+        ]))
+    }
+
+    fn controller_value() -> Value {
+        let names = |h: i64, n: &str| obj(&[("first", int(h)), ("second", Value::Str(n.into()))]);
+        obj(&[
+            ("m_Name", Value::Str("ctl".into())),
+            (
+                "m_TOS",
+                arr(vec![
+                    names(10, "WalkSpeed"),
+                    names(11, "MoveType"),
+                    names(20, "Idle"),
+                    names(21, "Walk"),
+                ]),
+            ),
+            (
+                "m_Controller",
+                obj(&[
+                    (
+                        "m_Values",
+                        data(obj(&[(
+                            "m_ValueArray",
+                            arr(vec![
+                                obj(&[("m_ID", int(10)), ("m_Index", int(0)), ("m_Type", int(1))]),
+                                obj(&[("m_ID", int(11)), ("m_Index", int(0)), ("m_Type", int(3))]),
+                                // A default position: not a parameter.
+                                obj(&[("m_ID", int(12)), ("m_Index", int(0)), ("m_Type", int(5))]),
+                            ]),
+                        )])),
+                    ),
+                    (
+                        "m_DefaultValues",
+                        data(obj(&[
+                            ("m_FloatValues", arr(vec![Value::Float(0.25)])),
+                            ("m_IntValues", arr(vec![int(2)])),
+                            ("m_BoolValues", arr(vec![])),
+                        ])),
+                    ),
+                    (
+                        "m_LayerArray",
+                        arr(vec![data(obj(&[
+                            ("m_StateMachineIndex", int(0)),
+                            ("m_DefaultWeight", Value::Float(0.0)),
+                            ("m_Binding", int(20)),
+                            ("(int&)m_LayerBlendingMode", int(0)),
+                        ]))]),
+                    ),
+                    (
+                        "m_StateMachineArray",
+                        arr(vec![data(obj(&[
+                            ("m_DefaultState", int(0)),
+                            ("m_AnyStateTransitionConstantArray", arr(vec![])),
+                            (
+                                "m_StateConstantArray",
+                                arr(vec![
+                                    state(
+                                        20,
+                                        &[0],
+                                        0,
+                                        vec![
+                                            transition(1, 3, 10, 0.0),
+                                            transition(30000, 3, 10, 1.0),
+                                        ],
+                                    ),
+                                    state(21, &[1, 2], 10, vec![transition(0, 4, 10, 0.01)]),
+                                ]),
+                            ),
+                        ]))]),
+                    ),
+                ]),
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_controller_constant_becomes_the_players_controller() {
+        let c = convert_controller(&controller_value(), vec![7, 8, 9]).unwrap();
+        c.validate(10).unwrap();
+        wr_anim::controller::check_supported(&c).unwrap();
+        // Parameters keep their types and defaults; the position default isn't one.
+        assert_eq!(c.params.len(), 2);
+        assert_eq!(c.params[0].name, "WalkSpeed");
+        assert_eq!((c.params[0].kind, c.params[0].default), (ParamKind::Float, 0.25));
+        assert_eq!((c.params[1].kind, c.params[1].default), (ParamKind::Int, 2.0));
+        let l = &c.layers[0];
+        assert_eq!(l.name, "Idle");
+        assert_eq!(l.states.len(), 2);
+        assert_eq!(l.states[0].name, "Idle");
+        assert_eq!(l.states[0].motion, Motion::Clip(0));
+        // Idle -> Walk on WalkSpeed > 0; the transition to state 30000 (an exit) is dropped.
+        assert_eq!(l.states[0].transitions.len(), 1);
+        let t = &l.states[0].transitions[0];
+        assert_eq!((t.dest, t.conditions[0].mode, t.conditions[0].param), (1, 3, 0));
+        assert!(t.fixed_duration && (t.duration - 0.15).abs() < 1e-6);
+        // The walk state multiplies its speed by WalkSpeed and blends two clips by it.
+        assert_eq!(l.states[1].speed_param, Some(0));
+        assert!((l.states[1].speed - 1.5).abs() < 1e-6);
+        match &l.states[1].motion {
+            Motion::Blend1D { param, children } => {
+                assert_eq!(*param, 0);
+                assert_eq!(children.len(), 2);
+                assert_eq!(children[1], (1.0, Motion::Clip(2)));
+            }
+            m => panic!("{m:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_parameters_and_blend_types_are_errors() {
+        assert!(convert_controller(&controller_value(), vec![0, 1, 2]).is_ok());
+        // A condition on a parameter the controller doesn't have.
+        let mut bad = controller_value();
+        replace_int(&mut bad, "m_EventID", 10, 99);
+        assert!(convert_controller(&bad, vec![0, 1, 2]).is_err());
+        let mut tree2d = controller_value();
+        replace_int(&mut tree2d, "m_BlendType", 0, 1);
+        // Only the multi-child node is a tree; leaves ignore the type, so this must still convert
+        // for leaves and fail for the blend node.
+        assert!(convert_controller(&tree2d, vec![0, 1, 2]).is_err());
+    }
+
+    /// Sets every integer field `key` equal to `from` to `to`, anywhere in the value.
+    fn replace_int(v: &mut Value, key: &str, from: i64, to: i64) {
+        match v {
+            Value::Object(f) => {
+                for (k, x) in f.iter_mut() {
+                    if k == key && x.as_i64() == Some(from) {
+                        *x = Value::Int(to);
+                    } else {
+                        replace_int(x, key, from, to);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(|x| replace_int(x, key, from, to)),
+            _ => {}
+        }
+    }
+}

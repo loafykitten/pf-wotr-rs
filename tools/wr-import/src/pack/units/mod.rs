@@ -1,5 +1,5 @@
-//! Units in the area pack (POC-7 stage 1): the unit views a save puts in the area, baked into
-//! the pack as renderers in their bind pose.
+//! Units in the area pack (POC-7 stages 1 and 2): the unit views a save puts in the area, written
+//! into the pack as skinned renderers with their rigs and animations.
 //!
 //! A unit prefab (`<guid>.unit`) is one of
 //!
@@ -10,11 +10,11 @@
 //!   equipment entities ([`character`]), and a **baked character** (`BakedCharacter`) names
 //!   its finished meshes and materials.
 //!
-//! Stage 1 poses every skinned mesh once on the CPU, in the rig's rest pose, in the unit's
-//! root space; the renderer carries the unit's placement (`T * R_y(orientation) * S(root
-//! scale)`), so one baked mesh serves every unit of a prefab. The pack holds the *posed* geometry
-//! only (no rig, no bind poses, composed meshes without skin): animation needs the importer to
-//! write the unposed meshes with their skin and the rigs (docs/poc7/characters.md, step 2).
+//! Each unit is a skinned renderer per mesh: the mesh is stored unposed with its skin and the renderer
+//! carries the unit's placement (`T * R_y(orientation) * S(root scale)`) and a `SkinBinding` naming the rig
+//! bones that pose it, so one mesh serves every unit of a prefab ([`anim`] reads the rig, the clips and the
+//! locomotion; the game poses and skins it). A unit whose animation can't be read is baked once in the
+//! rig's rest pose instead (stage 1's output) and the pack report says why.
 
 pub mod anim;
 pub mod atlas;

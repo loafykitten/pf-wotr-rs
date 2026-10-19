@@ -418,6 +418,135 @@ mod tests {
         assert!(unsafe { Pack::open(&path) }.is_err());
     }
 
+    /// A pack with one animated unit: a rig of two bones, a constant clip, a clip-based locomotion,
+    /// a skinned mesh of two vertices and the renderer that binds it.
+    fn animated(w: &mut PackWriter) -> PackMeta {
+        use wr_anim::clip::{ATTR_POSITION, Binding, TYPE_TRANSFORM};
+        use wr_anim::loco::{Locomotion, UnitAnimation};
+        use wr_anim::rig::{Bone, Rig, Trs};
+        let bone = |name: &str, parent| Bone {
+            name: name.into(),
+            hash: wr_anim::clip::path_hash(name),
+            parent,
+            rest: Trs::IDENTITY,
+        };
+        let mut meta = PackMeta { area: "anim".into(), ..Default::default() };
+        meta.rigs.push(Rig {
+            name: "rig".into(),
+            bones: vec![bone("", u32::MAX), bone("hip", 0)],
+            root: glam_identity(),
+            overrides: Vec::new(),
+        });
+        meta.clips.push(wr_anim::Clip {
+            name: "idle".into(),
+            stop: 1.0,
+            looping: true,
+            bindings: vec![Binding {
+                path: wr_anim::clip::path_hash("hip"),
+                attribute: ATTR_POSITION,
+                type_id: TYPE_TRANSFORM,
+            }],
+            constant: vec![0.0, 1.0, 0.0],
+            ..Default::default()
+        });
+        meta.animations.push(UnitAnimation {
+            unit: "u".into(),
+            rig: 0,
+            clips: vec![0],
+            loco: Locomotion::Clips { idle: 0, walk: vec![None, None], transition: 0.1 },
+        });
+        let skin = w.blob(&[0u8; 64]).unwrap();
+        meta.meshes.push(Mesh {
+            name: "m".into(),
+            vertex_count: 2,
+            skin: Some(skin),
+            ..Default::default()
+        });
+        meta.renderers.push(Renderer {
+            path: "unit:u/m".into(),
+            kind: RendererKind::Skinned,
+            skin: Some(SkinBinding {
+                animation: 0,
+                bones: vec![1, 0],
+                bind_poses: vec![glam_identity(), glam_identity()],
+            }),
+            ..Default::default()
+        });
+        meta
+    }
+
+    fn glam_identity() -> [f32; 16] {
+        let mut m = [0.0; 16];
+        for i in 0..4 {
+            m[i * 5] = 1.0;
+        }
+        m
+    }
+
+    fn write_and_open(name: &str, build: impl FnOnce(&mut PackWriter) -> PackMeta) -> Result<Pack> {
+        let path = tmpdir().join(name);
+        let mut w = PackWriter::create(&path).unwrap();
+        let meta = build(&mut w);
+        w.finish(&meta).unwrap();
+        // SAFETY: the test's own file, not modified while open.
+        unsafe { Pack::open(&path) }
+    }
+
+    #[test]
+    fn animated_units_round_trip() {
+        let p = write_and_open("d.wrpack", animated).unwrap();
+        let m = &p.meta;
+        assert_eq!(m.rigs[0].bones[1].name, "hip");
+        assert_eq!(m.clips[0].constant, vec![0.0, 1.0, 0.0]);
+        assert_eq!(m.animations[0].clips, vec![0]);
+        let skin = m.renderers[0].skin.as_ref().unwrap();
+        assert_eq!(skin.bones, vec![1, 0]);
+        assert_eq!(p.blob(m.meshes[0].skin.unwrap()).len() as u64, 2 * SKIN_STRIDE);
+    }
+
+    #[test]
+    fn broken_animation_references_are_rejected() {
+        let bad = |name: &str, f: fn(&mut PackMeta)| {
+            write_and_open(name, |w| {
+                let mut m = animated(w);
+                f(&mut m);
+                m
+            })
+            .is_err()
+        };
+        // A skin blob that isn't 32 bytes a vertex.
+        assert!(bad("e1.wrpack", |m| m.meshes[0].vertex_count = 3));
+        // A bone the rig doesn't have.
+        assert!(bad("e2.wrpack", |m| m.renderers[0].skin.as_mut().unwrap().bones[0] = 2));
+        // Bones and bind poses of different lengths.
+        assert!(bad("e3.wrpack", |m| {
+            m.renderers[0].skin.as_mut().unwrap().bind_poses.pop();
+        }));
+        // An animation that isn't there.
+        assert!(bad("e4.wrpack", |m| m.renderers[0].skin.as_mut().unwrap().animation = 1));
+        // A skinned renderer on a mesh without skin.
+        assert!(bad("e5.wrpack", |m| m.meshes[0].skin = None));
+        // A locomotion clip the unit doesn't list.
+        assert!(bad("e6.wrpack", |m| m.animations[0].clips.clear()));
+        // A rig whose parent comes after the child.
+        assert!(bad("e7.wrpack", |m| m.rigs[0].bones[1].parent = 1));
+    }
+
+    #[test]
+    fn packs_of_another_version_are_rejected() {
+        let path = tmpdir().join("f.wrpack");
+        let w = PackWriter::create(&path).unwrap();
+        w.finish(&PackMeta::default()).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        // The previous format generation (before rigs, clips and skins).
+        bytes[8..12].copy_from_slice(&(VERSION - 1).to_le_bytes());
+        let old = path.with_extension("old");
+        std::fs::write(&old, &bytes).unwrap();
+        // SAFETY: as above.
+        let err = unsafe { Pack::open(&old) }.unwrap_err().to_string();
+        assert!(err.contains("rebuild"), "{err}");
+    }
+
     #[test]
     fn fnv_known_value() {
         assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);

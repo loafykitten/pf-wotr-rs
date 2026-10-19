@@ -195,6 +195,29 @@ impl Clip {
         Ok(())
     }
 
+    /// How far the streamed curves are from being continuous: over every curve and every segment
+    /// between two keys, the distance between the value the segment's cubic reaches at the next key
+    /// and that key's own value. Unity's streamed clips store exact cubic Hermite segments, so a
+    /// right reading of the coefficients has an error at float rounding level; a wrong one does not.
+    /// Segments ending at a stepped key (zero cubic: held until the next key) are skipped.
+    #[must_use]
+    pub fn continuity_error(&self) -> f32 {
+        let mut worst = 0.0f32;
+        for keys in &self.streamed.curves {
+            for w in keys.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                if a.time < -1.0e30 || a.coeff[..3] == [0.0; 3] {
+                    continue;
+                }
+                let dt = b.time - a.time;
+                let c = a.coeff;
+                let end = ((c[0] * dt + c[1]) * dt + c[2]) * dt + c[3];
+                worst = worst.max((end - b.coeff[3]).abs());
+            }
+        }
+        worst
+    }
+
     /// Clip length in seconds.
     #[must_use]
     pub fn length(&self) -> f32 {
@@ -314,6 +337,21 @@ mod tests {
         assert!((s.eval(0, 0.999_999) - 4.0).abs() < 1e-4);
         assert_eq!(s.eval(0, 1.0), 4.0);
         assert_eq!(s.eval(0, 7.0), 4.0);
+    }
+
+    #[test]
+    fn continuity_error_flags_a_wrong_reading() {
+        let good = Clip {
+            name: "c".into(),
+            stop: 1.0,
+            streamed: decode_streamed(&words(), 1).unwrap(),
+            ..Clip::default()
+        };
+        assert!(good.continuity_error() < 1e-5, "{}", good.continuity_error());
+        // The same key with another cubic doesn't reach the next key's value.
+        let mut bad = good.clone();
+        bad.streamed.curves[0][1].coeff = [3.0, 0.0, 0.0, 5.0];
+        assert!(bad.continuity_error() > 1.0);
     }
 
     #[test]

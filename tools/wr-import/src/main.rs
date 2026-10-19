@@ -181,6 +181,11 @@ enum Cmd {
         #[arg(long, default_value_t = 3)]
         keys: usize,
     },
+    /// Decodes every `AnimationClip` of the given bundles and reports what the clip reader can
+    /// check without the engine: decoding errors, non-finite values, the streamed curves'
+    /// continuity (`Clip::continuity_error`), unit rotation quaternions, and the gap between a
+    /// looping clip's first and last pose.
+    AnimCheck { bundles: Vec<String> },
     /// Prints a pack's metadata as JSON (blobs as offsets).
     PackInfo { pack: PathBuf },
     /// Builds an area's runtime asset pack (meshes, BC textures, materials, Owlcat
@@ -509,6 +514,21 @@ fn main() -> Result<()> {
             for t in at {
                 clip.sample(t, &mut out);
                 println!("t {t}: {:?}", &out[..out.len().min(16)]);
+            }
+            Ok(())
+        }
+        Cmd::AnimCheck { bundles } => {
+            let ctx = context()?;
+            let universe = Universe::new(&ctx.paths.bundles(), ctx.cabs.clone());
+            for target in bundles {
+                let bundle = ctx.locations.guid_to_bundle.get(&target).cloned().unwrap_or(target);
+                let mut r = wr_import::anim::CheckReport::default();
+                for f in universe.files_of(&bundle)? {
+                    for o in f.objects.iter().filter(|o| o.class_id == class_id::ANIMATION_CLIP) {
+                        r.add(&f.read(o)?);
+                    }
+                }
+                println!("{bundle}: {}", serde_json::to_string_pretty(&r)?);
             }
             Ok(())
         }

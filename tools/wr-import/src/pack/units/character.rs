@@ -1,6 +1,6 @@
 //! Characters: a unit body composed from equipment entities, as Owlcat's `Character` does at run
-//! time (`Character.UpdateCharacter`, `BuildMesh`, `MergeOverlays`), baked once in the rig's rest
-//! pose.
+//! time (`Character.UpdateCharacter`, `BuildMesh`, `MergeOverlays`), with the merged mesh kept unposed
+//! and skinned to the rig at run time.
 //!
 //! The `Character` component names a rig (`AnimatorPrefab`, a skeleton hierarchy in `techart`), a
 //! `Skeleton` (per-bone scale and offset: the race and build), and the equipment entities the
