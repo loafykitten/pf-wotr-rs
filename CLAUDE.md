@@ -23,6 +23,8 @@ survey and notes on other rewrites.
   - Oracle (`docs/poc5/tb-replay.md`): turn-based replays are tick-exact, under load too (`poc5-tb-51`..`-53`,
     player input neutral at the source, physics phase pinned); `cert-20` certifies from this repo's layout.
   - POC-6 render round 3 (`docs/poc6/render-round3.md`): realtime shadows; FLIP 0.1246. Next: light probes.
+  - POC-7 (`docs/poc7/characters.md`): stage 1 done (the save's units in the caves, composed as the game does, in rest
+    pose; `wr-game --look`). Next: animation (idle and walk), then the stages the doc lists.
   - Nav (`docs/poc0/extraction.md` §9, `crates/wr-nav`): every path query exact, smoothing included (the native
     math ported from `UnityPlayer.dylib` and checked against it, `native_check.rs`); turn-based paths too
     (`docs/poc5/paths.md`, observer `paths`, `poc5-tb-114`: every request exact). The sim's input is the area's nav
@@ -31,7 +33,7 @@ survey and notes on other rewrites.
     terrain, boxes and triangle meshes exact against the player), paths, the AI's simulation steps, place-on-ground and
     facing (`docs/poc5/orientation.md`); memory (`docs/poc5/memory.md`), spells, the combat log with its tooltips and
     initiative ties are computed too. PLAN's "Where things stand" lists the twenty-second and twenty-third sessions' streams (line of sight, roaming, loot and prone, the view pin, the memory's leaves, the vision range), the
-    captures (`poc5-tb-111` to `-138`) and what's open (new observers awaiting a capture, among them the vision range's `bounds_*`, `vis_order` and `phys_sync`; a consumption audit of records inside undriven rule spans; a replay window's one-frame start offset).
+    captures (`poc5-tb-111` to `-140`; `-140` records the vision range's `bounds_*`, `vis_order` and `phys_sync`, partly read so far), the audit of records inside root rule spans, and what's open (readers for `-140`'s other observers; stat mutations outside rule spans; a replay window's one-frame start offset).
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in
     parallel (recordings, POC-6 render comparisons, Metal captures of the original), never timing. Setup, sync and
