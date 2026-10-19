@@ -87,6 +87,68 @@ pub(super) fn projected(open: &Open, r: &Rv) -> bool {
     }
 }
 
+/// The recording's handlers that the sim's bus dispatches, as the sim's log has them: each with
+/// the rule it was delivered to, identified by class, initiator and ordinal among that class and
+/// initiator's rules (`skip(i)`: records out of the comparison).
+pub(super) fn recorded_handlers(records: &[Rv], skip: impl Fn(usize) -> bool) -> Vec<HandlerRun> {
+    let mut rules: HashMap<i64, (String, (String, u64))> = HashMap::new();
+    let mut counts: HashMap<(String, String), u64> = HashMap::new();
+    let mut recorded = Vec::new();
+    for (i, r) in records.iter().enumerate() {
+        match r["k"].as_str() {
+            Some("rule") if !skip(i) => {
+                if let Some(id) = r["id"].as_i64() {
+                    let class = r["class"].as_str().unwrap_or("");
+                    let short = class.rsplit(['.', '+']).next().unwrap_or("").to_owned();
+                    // The initiator's id: a unit's, or an item's or other entity's.
+                    let initiator = r["initiator"]
+                        .as_object()
+                        .and_then(|o| o.values().find_map(|v| v.as_str()))
+                        .unwrap_or("")
+                        .to_owned();
+                    let n = counts.entry((short.clone(), initiator.clone())).or_default();
+                    rules.insert(id, (short, (initiator, *n)));
+                    *n += 1;
+                }
+            }
+            Some("h") if dispatched(r) && !skip(i) => {
+                let phase = match r["phase"].as_str() {
+                    Some("mod_before") => "mod_before",
+                    Some("about") => "about",
+                    Some("mod_after") => "mod_after",
+                    Some("did") => "did",
+                    _ => continue,
+                };
+                let kind = if r.get("component").is_some() {
+                    let owner = &r["owner"];
+                    let owner = match (owner["$unit"].as_str(), owner["$item"].as_str()) {
+                        (Some(id), _) => format!("unit:{id}"),
+                        (_, Some(id)) => {
+                            format!("item:{id}:{}", owner["blueprint"].as_str().unwrap_or_default())
+                        }
+                        _ => String::new(),
+                    };
+                    HandlerKind::Component {
+                        class: r["class"].as_str().unwrap_or("").to_owned(),
+                        name: r["component"].as_str().unwrap_or("").to_owned(),
+                        fact: r["fact"]["$fact"].as_str().unwrap_or("").to_owned(),
+                        blueprint: r["blueprint"].as_str().map(str::to_owned),
+                        fact_blueprint: r["fact"]["blueprint"].as_str().map(str::to_owned),
+                        owner,
+                    }
+                } else {
+                    HandlerKind::Fact("ActivatableAbility")
+                };
+                let (rule, instance) =
+                    r["rule"].as_i64().and_then(|id| rules.get(&id)).cloned().unwrap_or_default();
+                recorded.push(HandlerRun { phase, rule, instance, kind });
+            }
+            _ => {}
+        }
+    }
+    recorded
+}
+
 /// Whether the recording's `h` record is of a handler the sim's bus dispatches: a fact's
 /// component, or an `ActivatableAbility` (a fact that is its own handler).
 fn dispatched(r: &Rv) -> bool {
@@ -379,51 +441,14 @@ impl Driver<'_> {
     /// fact, blueprint and owner, phase and rule.
     pub(super) fn handlers_finish(&mut self, w: &mut World) {
         let Some(sim) = w.rulebook.handler_log.take() else { return };
+        w.rulebook.handler_instances.clear();
+        w.rulebook.handler_counts.clear();
         let trace = self.trace;
-        let mut rules: HashMap<i64, String> = HashMap::new();
-        let mut recorded: Vec<HandlerRun> = Vec::new();
         // (An echoed root, a presentation root without a call site in an old recording, is the
         // recording's by definition, not fired, and reported as such.)
-        let echoed = |i: usize| self.echoed.iter().any(|(s, e)| *s <= i && i <= *e);
-        for (i, r) in trace.records.iter().enumerate() {
-            match r["k"].as_str() {
-                Some("rule") => {
-                    if let Some(id) = r["id"].as_i64() {
-                        let class = r["class"].as_str().unwrap_or("");
-                        rules.insert(id, class.rsplit(['.', '+']).next().unwrap_or("").to_owned());
-                    }
-                }
-                Some("h") if dispatched(r) && !echoed(i) => {
-                    let phase = match r["phase"].as_str() {
-                        Some("mod_before") => "mod_before",
-                        Some("about") => "about",
-                        Some("mod_after") => "mod_after",
-                        Some("did") => "did",
-                        _ => continue,
-                    };
-                    let class = r["class"].as_str().unwrap_or("");
-                    let short = class.rsplit(['.', '+']).next().unwrap_or("");
-                    let kind = if r.get("component").is_some() {
-                        let owner = &r["owner"];
-                        HandlerKind::Component {
-                            class: short.to_owned(),
-                            name: r["component"].as_str().unwrap_or("").to_owned(),
-                            fact: r["fact"]["$fact"].as_str().unwrap_or("").to_owned(),
-                            blueprint: r["blueprint"].as_str().map(str::to_owned),
-                            owner: owner["$unit"]
-                                .as_str()
-                                .or_else(|| owner["$item"].as_str())
-                                .map(str::to_owned),
-                        }
-                    } else {
-                        HandlerKind::Fact("ActivatableAbility")
-                    };
-                    let rule = r["rule"].as_i64().and_then(|id| rules.get(&id)).cloned();
-                    recorded.push(HandlerRun { phase, rule: rule.unwrap_or_default(), kind });
-                }
-                _ => {}
-            }
-        }
+        let recorded = recorded_handlers(&trace.records, |i| {
+            self.echoed.iter().any(|(s, e)| *s <= i && i <= *e)
+        });
         self.out.spans.handlers = recorded.len();
         if recorded != sim {
             let at = recorded.iter().zip(&sim).position(|(a, b)| a != b);

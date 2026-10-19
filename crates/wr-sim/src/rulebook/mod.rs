@@ -82,19 +82,24 @@ pub struct HandlerRun {
     pub phase: &'static str,
     /// The rule's class (short).
     pub rule: String,
+    /// Which rule of that class: its initiator's id and the rule's ordinal among the window's
+    /// rules of that class and initiator (the recording's rules are counted the same way).
+    pub instance: (String, u64),
     pub kind: HandlerKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandlerKind {
-    /// A fact's component: its type (short class), name (`$Type$name`), the fact's id and
-    /// blueprint, and its owner's id.
+    /// A fact's component: its type (full class name), name (`$Type$name`), the fact's id and
+    /// blueprint (the record has it twice: the handler's and the fact's), and its owner, typed:
+    /// `unit:<id>` or `item:<id>:<blueprint>`.
     Component {
         class: String,
         name: String,
         fact: String,
         blueprint: Option<String>,
-        owner: Option<String>,
+        fact_blueprint: Option<String>,
+        owner: String,
     },
     /// A fact that is its own handler (`ActivatableAbility`): its class.
     Fact(&'static str),
@@ -114,6 +119,10 @@ pub struct Rulebook {
     pub pending_overflow: Option<RulesOverflow>,
     /// The handlers rules were delivered to, in order, while a replay keeps the log.
     pub handler_log: Option<Vec<HandlerRun>>,
+    /// With the log: each triggered rule's instance (by its `seq`), and the count of rules per
+    /// class and initiator so far.
+    pub handler_instances: std::collections::HashMap<u64, (String, u64)>,
+    pub handler_counts: std::collections::HashMap<(String, String), u64>,
 }
 
 /// `RulesOverflowException`.
@@ -144,6 +153,12 @@ pub fn trigger(w: &mut World, rule: &mut dyn RuleEvent) -> Result<(), RulesOverf
     w.rulebook.next_seq += 1;
     rule.base_mut().seq = seq;
     let name = rule.chain().first().copied().unwrap_or("?");
+    if w.rulebook.handler_log.is_some() {
+        let initiator = w.entity(rule.initiator()).unique_id.clone();
+        let n = w.rulebook.handler_counts.entry((name.to_owned(), initiator.clone())).or_default();
+        w.rulebook.handler_instances.insert(seq, (initiator, *n));
+        *n += 1;
+    }
     w.rulebook.stack.push((name, seq));
     if w.rulebook.stack.len() > 25 {
         let names: Vec<&'static str> = w.rulebook.stack.iter().map(|s| s.0).collect();

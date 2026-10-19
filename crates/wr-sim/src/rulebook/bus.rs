@@ -637,12 +637,25 @@ fn log_delivery(w: &mut World, s: Sub, rule: &dyn RuleEvent, step: RuleStep) {
         Sub::Component(c) => {
             let f = w.fact(c.fact);
             let Some(ty) = w.component(c).ty() else { return };
+            let blueprint = f.blueprint.map(|g| g.to_string());
+            // The owner typed as the recording writes it: a unit, or an item with its blueprint.
+            let owner = f.owner.map_or_else(String::new, |e| {
+                let id = &w.entity(e).unique_id;
+                match w.item(e) {
+                    None => format!("unit:{id}"),
+                    Some(item) => format!(
+                        "item:{id}:{}",
+                        item.blueprint.map(|g| g.to_string()).unwrap_or_default()
+                    ),
+                }
+            });
             HandlerKind::Component {
-                class: wr_content::schema::ty(ty).short.to_owned(),
+                class: wr_content::schema::ty(ty).name.to_owned(),
                 name: w.component(c).name.clone(),
                 fact: f.unique_id.clone(),
-                blueprint: f.blueprint.map(|g| g.to_string()),
-                owner: f.owner.map(|e| w.entity(e).unique_id.clone()),
+                blueprint: blueprint.clone(),
+                fact_blueprint: blueprint,
+                owner,
             }
         }
         Sub::Fact(f) => HandlerKind::Fact(w.fact(f).clr),
@@ -650,7 +663,8 @@ fn log_delivery(w: &mut World, s: Sub, rule: &dyn RuleEvent, step: RuleStep) {
         // class is checked against the game's code, not compared with a delivery.)
         Sub::Part(..) | Sub::Entity(_) | Sub::Runtime(_) | Sub::External(_) => return,
     };
-    let run = HandlerRun { phase, rule: rule.chain()[0].to_owned(), kind };
+    let instance = w.rulebook.handler_instances.get(&rule.base().seq).cloned().unwrap_or_default();
+    let run = HandlerRun { phase, rule: rule.chain()[0].to_owned(), instance, kind };
     if let Some(log) = &mut w.rulebook.handler_log {
         log.push(run);
     }

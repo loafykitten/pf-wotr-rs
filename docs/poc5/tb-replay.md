@@ -928,7 +928,11 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   deliveries** over the whole window (`spans::handlers_finish`): `Rulebook::handler_log` is kept by a replay and
   filled in `rulebook/bus.rs` as `RulebookEventBus` delivers (the rule's type chain, which is the contravariant
   matching, and the real subscription lists, which is the subscribed state): phase, rule, the component's class and
-  name, the fact's id and blueprint, the owner. [M] On the 111 runs 53,294 recorded handlers equal the sim's
+  name (the full class name, so a namespace counts), the fact's id and blueprint (both the handler's and the fact's), the
+  owner typed (a unit, or an item with its blueprint), and **the rule instance**: its class, its initiator and its
+  ordinal among the window's rules of that class and initiator (the sim counts the rules it triggers, the recording
+  its `rule` records, the same way; the rules line up on every valid run, as the T0 streams do), so a handler moved
+  into another roll of the same class passes no more than into another unit's. [M] On the 111 runs 53,294 recorded handlers equal the sim's
   deliveries, in order, with no difference (the 74 deliveries the load made before the window aren't in the log:
   it is turned on when the driver starts). No snapshot of the sim's facts is consulted, so there is no stale-state
   rejection (a buff attached by an earlier handler) or acceptance (a component detached earlier), and an attached
@@ -1008,7 +1012,8 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
 unit tests `a_root_attacks_launch_is_placed_like_a_commands`, `a_root_spans_provoke_is_placed_like_a_commands` and
 `a_root_spans_structure_follows_span_oks`, `a_root_spans_records_are_attributed_like_span_oks` and
 `a_nested_resolves_positions_must_agree_with_the_rolls` and `a_nested_resolve_needs_its_one_environment` and `the_singleton_handler_table_agrees_with_the_commands` and
-`an_environment_record_is_typed_and_a_position_has_three_coordinates` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
+`an_environment_record_is_typed_and_a_position_has_three_coordinates` and
+`a_recorded_handler_belongs_to_its_rule_instance` in `replay/tests.rs`): the initiative roll's event removed and doubled (the event numbering kept valid, so the report is
 the queue comparison's "events queued, the sim queued"), re-ruled and disabled; a recording that doesn't declare
 `combat_log` with its events in spans; a copy of an `imp_s`, `mem_q`, `eng_prov` (also with a unit the sim hasn't) and
 `proj_launch` record, an observation of no known family, and a `cmd`, `result`, `bonuses` and `env` record added to
@@ -1016,7 +1021,9 @@ the initiative roll's span, a root's `rule_end` of another frame, a `stat_value`
 `trig_end`, an `h_end` of another id, a `mod_after` handler after a `did` one, a `rule_bonus` to a rule never
 allocated and one to a rule already closed, a draw and a damage mutation of no rule the span has, a draw in no open
 handler, an initiative root with its `parent` or `handler` changed, and a tutorial fact attached, a handler renamed to a class that doesn't exist, a presentation draw at a
-simulation site, and a component handler lost, with another fact's id, or in another order; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
+simulation site, and a component handler lost, with another fact's id, two distinct deliveries of one rule's phase exchanged (the multiset kept,
+asserted), a fact blueprint that isn't the handler's, an owner of another type, and a component class of another
+namespace; an `invalid` note added to the first initiative roll and every presentation root, attack count and attack is
 accepted and counted (the run stays valid, `oracle_invalid` equal to the notes added). The phase-driven placing of a
 launch (every field, rule, roll, target, frame, `trig`/`trig_end`, handlers) and of a provoke (frame, handler class
 and phase, rule, unit, once per rule, the rule's stage: `trig_end` after the handler, or `did` before it, is rejected) is

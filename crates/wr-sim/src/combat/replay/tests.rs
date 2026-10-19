@@ -1802,3 +1802,65 @@ fn an_environment_record_is_typed_and_a_position_has_three_coordinates() {
     assert!(pos(&r(json!([1.0, 2.0, 3.0, 4.0]))).is_none(), "extra coordinates are not truncated");
     assert!(pos(&r(json!([1.0, 2.0]))).is_none());
 }
+
+/// A handler is delivered to a rule, not to a class of rules: the recorded handlers carry the rule's
+/// class, initiator and ordinal among that class and initiator's rules, as the sim's log does. A
+/// handler of one initiative roll moved into another's (the rule references updated), by another
+/// unit or by the same unit, changes the list; so does an owner of another type, a fact blueprint
+/// that isn't the handler's, a component class of another namespace.
+#[test]
+fn a_recorded_handler_belongs_to_its_rule_instance() {
+    use super::spans::recorded_handlers;
+    let class = "Kingmaker.RuleSystem.Rules.RuleInitiativeRoll";
+    let root = |id: i64, unit: &str| json!({"k": "rule", "id": id, "depth": 0, "class": class, "initiator": {"$unit": unit}});
+    let h = |id: i64, rule: i64, phase: &str| {
+        json!({"k": "h", "id": id, "rule": rule, "phase": phase,
+            "class": "Kingmaker.Designers.Mechanics.Facts.AddBuffOnCombatStart",
+            "component": "$AddBuffOnCombatStart$c1", "blueprint": "bp", "fact": {"$fact": "F1", "blueprint": "bp"},
+            "owner": {"$unit": "u1"}})
+    };
+    let end = |id: i64| json!({"k": "rule_end", "id": id});
+    let list = |v: Vec<J>| recorded_handlers(&rvs(&v), |_| false);
+    // Two rolls by two units, or by one: the handler in the first, or moved into the second.
+    let two = |units: (&str, &str), in_first: bool| {
+        let mut v = vec![root(1, units.0)];
+        if in_first {
+            v.push(h(10, 1, "about"));
+        }
+        v.extend([end(1), root(2, units.1)]);
+        if !in_first {
+            v.push(h(10, 2, "about"));
+        }
+        v.push(end(2));
+        v
+    };
+    assert_ne!(
+        list(two(("u1", "u2"), true)),
+        list(two(("u1", "u2"), false)),
+        "moved to another unit's roll"
+    );
+    assert_ne!(
+        list(two(("u1", "u1"), true)),
+        list(two(("u1", "u1"), false)),
+        "moved to the same unit's next roll"
+    );
+    assert_eq!(list(two(("u1", "u1"), true)), list(two(("u1", "u1"), true)));
+    // The identity fields.
+    let one = |edit: &dyn Fn(&mut J)| {
+        let mut x = h(10, 1, "about");
+        edit(&mut x);
+        list(vec![root(1, "u1"), x, end(1)])
+    };
+    let base = one(&|_| {});
+    assert_ne!(base, one(&|x| x["fact"]["blueprint"] = json!("other")), "the fact's blueprint");
+    assert_ne!(
+        base,
+        one(&|x| x["owner"] = json!({"$item": "u1", "blueprint": null})),
+        "an item as owner"
+    );
+    assert_ne!(
+        base,
+        one(&|x| x["class"] = json!("Other.Namespace.AddBuffOnCombatStart")),
+        "another namespace"
+    );
+}

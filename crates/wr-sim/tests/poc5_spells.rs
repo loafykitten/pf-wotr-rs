@@ -455,7 +455,7 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             }
         }
     }
-    let cases: [(&str, Change); 33] = [
+    let cases: [(&str, Change); 36] = [
         // The initiative's rule event, queued by the combat log's did hook: compared with the
         // sim's queue, the event numbering valid (a malformed record is not accepted as the report).
         ("events queued, the sim queued", |recs| {
@@ -680,30 +680,64 @@ fn records_inside_driven_root_spans_are_checked_or_reported() {
             recs[at]["fact"]["$fact"] = json!("FFFF");
         }),
         ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            // Two distinct deliveries of one rule's phase, their identities exchanged: the same
+            // multiset, in the other order.
+            let hs: Vec<usize> = (0..recs.len())
+                .filter(|&i| recs[i]["k"] == "h" && recs[i].get("component").is_some())
+                .collect();
+            let (a, b) = hs
+                .windows(2)
+                .map(|p| (p[0], p[1]))
+                .find(|&(a, b)| {
+                    recs[a]["rule"] == recs[b]["rule"]
+                        && recs[a]["phase"] == recs[b]["phase"]
+                        && recs[a]["fact"] != recs[b]["fact"]
+                })
+                .expect("two deliveries of one rule's phase");
+            const KEYS: [&str; 5] = ["class", "component", "fact", "blueprint", "owner"];
+            let ident = |r: &V| KEYS.map(|k| r[k].to_string());
+            let (ia, ib) = (ident(&recs[a]), ident(&recs[b]));
+            assert_ne!(ia, ib, "two distinct deliveries");
+            for k in KEYS {
+                let (x, y) = (recs[a][k].clone(), recs[b][k].clone());
+                recs[a][k] = y;
+                recs[b][k] = x;
+            }
+            let (na, nb) = (ident(&recs[a]), ident(&recs[b]));
+            let mut before = [ia.clone(), ib.clone()];
+            let mut after = [na.clone(), nb.clone()];
+            before.sort();
+            after.sort();
+            assert_eq!(before, after, "the multiset of deliveries is preserved");
+            assert_ne!(na, ia, "the order is not");
+        }),
+        // A component's identity in the fields the compared tuple has: the fact's blueprint (the
+        // record names it twice), the owner's type, the component class's namespace.
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
             let at = in_span(recs, "RuleInitiativeRoll", |r| {
                 r["k"] == "h" && r.get("component").is_some()
             });
-            let id = recs[at]["id"].clone();
-            let end = (at..recs.len())
-                .find(|&i| recs[i]["k"] == "h_end" && recs[i]["id"] == id)
-                .expect("its end");
-            // Swapped with the next handler: two components of one rule in the other order.
-            let next =
-                (end + 1..recs.len()).find(|&i| recs[i]["k"] == "h").expect("a later handler");
-            let nid = recs[next]["id"].clone();
-            let nend = (next..recs.len())
-                .find(|&i| recs[i]["k"] == "h_end" && recs[i]["id"] == nid)
-                .expect("its end");
-            let (a, b) = (recs[at..=end].to_vec(), recs[next..=nend].to_vec());
-            if recs[next].get("component").is_some()
-                && recs[next]["component"] != recs[at]["component"]
-            {
-                recs.splice(next..=nend, a);
-                recs.splice(at..=end, b);
-            } else {
-                recs[at]["component"] = json!("$AddBuffOnCombatStart$x");
-            }
-            renumber(recs);
+            recs[at]["fact"]["blueprint"] = json!("00000000000000000000000000000001");
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            let id = recs[at]["owner"]["$unit"].clone();
+            recs[at]["owner"] = json!({"$item": id, "blueprint": null});
+        }),
+        ("driven replay: handlers: the dispatched handlers differ", |recs| {
+            let at = in_span(recs, "RuleInitiativeRoll", |r| {
+                r["k"] == "h" && r.get("component").is_some()
+            });
+            let short = recs[at]["class"]
+                .as_str()
+                .unwrap_or("")
+                .rsplit('.')
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            recs[at]["class"] = json!(format!("Some.Other.Namespace.{short}"));
         }),
         // A mutation the T0 projection drops (stat values, modifiers) compares nowhere.
         ("driven replay: a stat_value mutation inside a root rule's span", |recs| {
