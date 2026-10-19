@@ -434,6 +434,17 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         "prone: UnitProneController unit ticks {}, falls {}, get-ups {}, last-frame units taken as asleep {}",
         p.ticks, p.falls, p.get_ups, p.assumed_asleep
     );
+    let st = &out.stats;
+    println!(
+        "stat mutations in the T0 stream (docs/poc5/stats.md): compared {} {:?}, equal {}, differing {}, sim's extra {}; gaps {} {:?}",
+        st.compared.values().sum::<usize>(),
+        st.compared,
+        st.equal,
+        st.differing,
+        st.extra,
+        st.gaps.values().sum::<usize>(),
+        st.gaps
+    );
     let sp = &out.spans;
     println!(
         "inside root rules' spans (the commands' own apart): combat log events {} (compared with the sim's queue), impatience handlers {}, memory additions {} (matched), provokes {} (matched at the engagement tick), projectile launches {} (equal to the sim's); the oracle's own invalid notes {}; fact and activatable handlers equal to the sim's deliveries, one to one: {}; reported {}",

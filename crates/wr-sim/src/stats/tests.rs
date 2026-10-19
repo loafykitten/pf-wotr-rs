@@ -236,3 +236,63 @@ fn cleanup_removes_every_entry_of_a_sourced_duplicate_group() {
     ops::cleanup_modifiers(&mut w, u, t);
     assert!(w.stats(u).v(t).modifier_list.get(&D::Luck).unwrap().items.is_empty());
 }
+
+/// The log's stat records as (kind, stat).
+fn stat_records(w: &World) -> Vec<(String, i64)> {
+    w.events
+        .records
+        .iter()
+        .filter(|e| e.k == "mut")
+        .map(|e| {
+            (
+                e.fields["what"].as_str().unwrap_or("").to_owned(),
+                e.fields["stat"].as_i64().unwrap_or(-1),
+            )
+        })
+        .collect()
+}
+
+/// WrathOracle's stat records: a changed value is reported by the stat's outermost update, after
+/// its dependents' (`Hooks.UpdateValuePostfix`), and a modifier by the add's or the removal's
+/// postfix, after the update; nothing while the log is off, and nothing for a removal that found
+/// no modifier or an update that changed nothing.
+#[test]
+fn stat_records_follow_the_oracles_hooks() {
+    let (mut w, u) = world_with_unit();
+    let ath = i64::from(S::SkillAthletics.0);
+    let strength = i64::from(S::Strength.0);
+    let rec = |what: &str, stat: i64| (what.to_owned(), stat);
+    let m = ops::add_modifier_value(&mut w, u, S::Strength, 2, D::UntypedStackable);
+    assert!(stat_records(&w).is_empty(), "the log is off");
+    w.events.on = true;
+    let m2 = ops::add_modifier_value(&mut w, u, S::Strength, 2, D::Morale);
+    // Strength 12 -> 14: the athletics skill (a dependent, +1 bonus) changes inside the update.
+    assert_eq!(
+        stat_records(&w),
+        [rec("stat_value", ath), rec("stat_value", strength), rec("stat_mod_add", strength)]
+    );
+    let f = &w.events.records[1].fields;
+    assert_eq!((f["old"].as_i64(), f["new"].as_i64()), (Some(12), Some(14)));
+    let f = &w.events.records[2].fields;
+    assert_eq!(f["modified"].as_i64(), Some(14));
+    assert_eq!(f["mod"]["descriptor"].as_i64(), Some(15));
+    assert_eq!(f["owner"].as_str(), Some("u"));
+    w.events.records.clear();
+    // Removed: the value changes back, then the removal is reported with the value after it.
+    assert!(ops::remove(&mut w, m2));
+    assert_eq!(
+        stat_records(&w),
+        [rec("stat_value", ath), rec("stat_value", strength), rec("stat_mod_remove", strength)]
+    );
+    assert_eq!(w.events.records[2].fields["modified"].as_i64(), Some(12));
+    w.events.records.clear();
+    // A second removal finds nothing: no record. A modifier that changes no value: only the add.
+    assert!(!ops::remove(&mut w, m2));
+    ops::add_modifier_value(&mut w, u, S::SaveWill, 0, D::Luck);
+    assert_eq!(stat_records(&w), [rec("stat_mod_add", i64::from(S::SaveWill.0))]);
+    w.events.records.clear();
+    // The bulk removals report the value only.
+    ops::remove_modifiers(&mut w, u, S::Strength, D::UntypedStackable);
+    assert_eq!(stat_records(&w), [rec("stat_value", ath), rec("stat_value", strength)]);
+    let _ = m;
+}

@@ -265,11 +265,29 @@ fn on_update(w: &mut World, u: EntityIdx, t: StatType) {
     }
 }
 
-/// `UpdateValue()` (virtual: the AC first rebuilds its self bonus).
+/// `UpdateValue()` (virtual: the AC first rebuilds its self bonus), and WrathOracle's hook on the
+/// base method: only a stat's outermost `UpdateValue` (the stat is in `Hooks.Updating` from its
+/// prefix to its postfix, dependents' updates included) reports a changed value, after the whole
+/// update.
 pub fn update_value(w: &mut World, u: EntityIdx, t: StatType) {
     if matches!(stat(w, u, t).kind, StatKind::ArmorClass(_)) {
         update_self_bonus(w, u);
     }
+    if stat(w, u, t).in_update {
+        update_value_base(w, u, t);
+        return;
+    }
+    let before = stat(w, u, t).modified_value;
+    stat_mut(w, u, t).in_update = true;
+    update_value_base(w, u, t);
+    stat_mut(w, u, t).in_update = false;
+    if stat(w, u, t).modified_value != before {
+        super::trace::value_changed(w, u, t, before);
+    }
+}
+
+/// `ModifiableValue.UpdateValue()`'s body.
+fn update_value_base(w: &mut World, u: EntityIdx, t: StatType) {
     if stat(w, u, t).updating_internal {
         return;
     }
@@ -413,6 +431,7 @@ pub fn add_modifier(w: &mut World, u: EntityIdx, t: StatType, m: ModIdx) -> ModI
     update_value(w, u, t);
     // `HandleModifierAdded`: `UnitPartNonStackBonuses` bookkeeping for the UI's
     // non-stacking warning; it changes no value (not modelled).
+    super::trace::modifier(w, "stat_mod_add", u, t, m);
     m
 }
 
@@ -540,6 +559,7 @@ pub fn remove_modifier(w: &mut World, u: EntityIdx, t: StatType, m: ModIdx) -> b
     }
     prepare_for_removal(w, m);
     update_value(w, u, t);
+    super::trace::modifier(w, "stat_mod_remove", u, t, m);
     true
 }
 
@@ -586,6 +606,7 @@ pub fn open_temporary_scope(
     if added > 0 {
         update_value(w, u, t);
     }
+    super::trace::scope(w, "stat_temp_scope_add", u, t, &mods);
     stat_mut(w, u, t).temporary_scopes += 1;
     mods
 }
@@ -597,6 +618,7 @@ pub fn close_temporary_scope(w: &mut World, u: EntityIdx, t: StatType, mods: &[M
     if mods.is_empty() {
         return;
     }
+    super::trace::scope(w, "stat_temp_scope_remove", u, t, mods);
     let mut removed = 0;
     for &m in mods {
         let d = w.mods[m.i()].desc;
