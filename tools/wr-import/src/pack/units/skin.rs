@@ -79,25 +79,40 @@ pub fn read_attr(mesh: &DecodedMesh, ch: Channel, v: usize, n: usize) -> Option<
 }
 
 /// Bone indices and weights of every vertex (four slots each; unused slots weigh zero).
+///
+/// Unity writes only as many slots per vertex as the mesh needs: indices `uint32 x N` in channel 13
+/// and, for N > 1, weights `float x N` in channel 12; a mesh bound one bone per vertex has no
+/// weight channel at all and every weight is one.
 fn skin_data(mesh: &DecodedMesh) -> Result<Vec<([u32; 4], [f32; 4])>> {
-    let w = channel(mesh, BLEND_WEIGHTS).context("mesh has no blend weights")?;
     let i = channel(mesh, BLEND_INDICES).context("mesh has no blend indices")?;
-    ensure!(w.dimension == 4 && i.dimension == 4, "skin channels must be four wide");
-    let (wsz, isz) = (
-        format_size(w.format).context("weight format")? as usize,
-        format_size(i.format).context("index format")? as usize,
-    );
+    let w = channel(mesh, BLEND_WEIGHTS);
+    ensure!((1..=4).contains(&i.dimension), "{} bone slots per vertex", i.dimension);
+    if let Some(w) = w {
+        ensure!(
+            w.dimension == i.dimension,
+            "weights x{} for indices x{}",
+            w.dimension,
+            i.dimension
+        );
+    }
+    let isz = format_size(i.format).context("index format")? as usize;
     let mut out = Vec::with_capacity(mesh.vertex_count as usize);
     for v in 0..mesh.vertex_count as usize {
-        let (wb, ib) = (
-            attr(mesh, w, v).context("weights out of range")?,
-            attr(mesh, i, v).context("indices out of range")?,
-        );
+        let ib = attr(mesh, i, v).context("indices out of range")?;
         let mut idx = [0u32; 4];
         let mut wt = [0f32; 4];
-        for k in 0..4 {
-            wt[k] = read_component(w.format, &wb[k * wsz..]).context("weight")? as f32;
+        for k in 0..usize::from(i.dimension) {
             idx[k] = read_component(i.format, &ib[k * isz..]).context("index")? as u32;
+        }
+        match w {
+            Some(w) => {
+                let wsz = format_size(w.format).context("weight format")? as usize;
+                let wb = attr(mesh, w, v).context("weights out of range")?;
+                for k in 0..usize::from(w.dimension) {
+                    wt[k] = read_component(w.format, &wb[k * wsz..]).context("weight")? as f32;
+                }
+            }
+            None => wt[0] = 1.0,
         }
         out.push((idx, wt));
     }
@@ -257,6 +272,24 @@ mod tests {
         // The normal of vertex 0 (+Y) turns to -X.
         let n0 = get3(&m, channel(&m, NORMAL).unwrap(), 0).unwrap();
         assert!((n0 - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5, "{n0:?}");
+    }
+
+    #[test]
+    fn rigid_and_two_bone_meshes_skin_too() {
+        // One bone per vertex: indices only, weight one.
+        let mut m = mesh([[1.0, 0.0, 0.0, 0.0]; 2], [[1, 0, 0, 0], [0, 0, 0, 0]]);
+        m.channels[12] = None;
+        m.channels[13] = Some(Channel { stream: 1, offset: 16, format: 10, dimension: 1 });
+        let up = Mat4::from_translation(Vec3::new(0.0, 4.0, 0.0));
+        pose(&mut m, &[Mat4::IDENTITY, up]).unwrap();
+        assert_eq!(pos(&m, 0), Vec3::new(1.0, 4.0, 0.0));
+        assert_eq!(pos(&m, 1), Vec3::new(0.0, 2.0, 0.0));
+        // Two slots: weights x2 and indices x2.
+        let mut two = mesh([[0.5, 0.5, 0.0, 0.0]; 2], [[0, 1, 0, 0]; 2]);
+        two.channels[12] = Some(Channel { stream: 1, offset: 0, format: 0, dimension: 2 });
+        two.channels[13] = Some(Channel { stream: 1, offset: 16, format: 10, dimension: 2 });
+        pose(&mut two, &[Mat4::IDENTITY, up]).unwrap();
+        assert_eq!(pos(&two, 0), Vec3::new(1.0, 2.0, 0.0));
     }
 
     #[test]

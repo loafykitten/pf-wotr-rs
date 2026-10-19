@@ -36,12 +36,14 @@ fn main() -> Result<()> {
             eprintln!("{} units -> {}", spec.units.len(), out.display());
             for u in &spec.units {
                 eprintln!(
-                    "  {} {} prefab {} at {:?} facing {:.1}, {} equipment entities",
+                    "  {} {} prefab {} at {:?} facing {:.1}, life {} prone {}, {} equipment entities",
                     u.id,
                     u.name,
                     u.prefab,
                     u.position,
                     u.orientation,
+                    u.life_state,
+                    u.prone,
                     u.equipment.len()
                 );
             }

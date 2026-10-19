@@ -48,6 +48,10 @@ pub struct UnitView {
     pub position: [f32; 3],
     pub orientation: f32,
     pub gender: Gender,
+    /// `State.LifeState` (0 conscious, 1 unconscious, 2 dead) and `State.Prone.Active`: the pose
+    /// the unit holds. Stage 1 draws every unit in the rig's rest pose whatever these say.
+    pub life_state: i32,
+    pub prone: bool,
     /// `Kingmaker.Blueprints.Race` of the unit's race (`BlueprintRace.RaceId`).
     pub race: i32,
     /// The prefab's own equipment entities are dropped first (`Character.RemoveAllEquipmentEntities`:
@@ -122,6 +126,8 @@ mod tests {
                 position: [110.5, 39.24, 132.76],
                 orientation: 126.38,
                 gender: Gender::Female,
+                life_state: 0,
+                prone: false,
                 race: 19,
                 replace_base_equipment: false,
                 equipment: vec![EquipmentView {

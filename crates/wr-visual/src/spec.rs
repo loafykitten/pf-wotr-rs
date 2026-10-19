@@ -320,6 +320,8 @@ pub fn build(save: &str) -> Result<UnitsSpec> {
             position: u.position,
             orientation: u.orientation,
             gender,
+            life_state: u.life_state,
+            prone: u.prone_active,
             race,
             replace_base_equipment: doll.is_some(),
             equipment: equipment(&w, &content, e, gender, race, doll)?,

@@ -713,7 +713,17 @@ fn pose_part(
         // authored: the rig's rest pose equals the authoring pose.
         skin_mats.push(name.and_then(|n| rig.bone(n)).map_or(Mat4::IDENTITY, |m| m * bind[i]));
     }
-    skin::pose(&mut mesh, &skin_mats)?;
+    if let Err(e) = skin::pose(&mut mesh, &skin_mats) {
+        let skin_len = mv.get("m_Skin").and_then(Value::as_array).map_or(0, <[Value]>::len);
+        let vbcw = mv
+            .path("m_VariableBoneCountWeights.m_Data")
+            .and_then(Value::as_array)
+            .map_or(0, <[Value]>::len);
+        bail!(
+            "{e:#}; channels {:?}, m_Skin {skin_len}, variable weights {vbcw}",
+            &mesh.channels[10..]
+        );
+    }
     Ok(Some(PosedPart { mesh }))
 }
 
