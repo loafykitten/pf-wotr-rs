@@ -73,6 +73,9 @@ pub struct Settings {
     pub idle_cutscenes: usize,
     /// `MovementType` ([`walk`]).
     pub movement_type: i64,
+    /// `Sleepless` (not read by the controller: `SleepingUnitsController` reads the unit's
+    /// retained flag).
+    pub sleepless: bool,
 }
 
 /// `UnitPartRoaming`.

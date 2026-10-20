@@ -445,13 +445,28 @@ Reviews (gpt-6.1-sol, high), four rounds:
 
 ### What's left
 
-- **Record at the window's start** (WrathOracle, `roam_init`; **added 2026-10-17 in the main session**, `CommandObsRoam.cs`,
-  declared as observer `roam_init` with the agent: one `roam_init` per unit with a part, then `roam_init_end` with the
-  count; parts read from `EntityPartsManager.m_Parts`, not `Get<T>`, which fills its cache. Not yet recorded, and the sim
-  doesn't read it yet; gpt-6.1-sol: two rounds, no findings left): each `UnitPartRoaming` as the window opens (next
-  point: kind, position, idle time and cutscene, waypoint id; `IdleEndTime`, `IdleCutscene`, `ReverseDirection`,
-  `OriginalPoint`, `m_Disabled`, the settings). The save's state stands in today, confirmed only by the running
-  roaming move (every capture here has one); a unit idle at the window's start would be reported.
+- **The state at the window's start, recorded** (WrathOracle `roam_init`, `CommandObsRoam.cs`, added 2026-10-17,
+  declared as observer `roam_init` with the agent; first recorded in `poc5-tb-140`): one `roam_init` per unit with a
+  `UnitPartRoaming` (`StateDump.AllUnits`, so in `UniqueId` order), then `roam_init_end` with the count; parts read
+  from `EntityPartsManager.m_Parts`, not `Get<T>`, which fills its cache. **Read since 2026-10-19**
+  (`replay/roaming.rs`, `roam_init_record`, `roam_establish_init`): each record is validated whole (exactly its
+  fields, the nested objects' too; finite vectors; the point's kind with its own fields; `next_id` consistent with
+  the point: a waypoint's id, else empty, any id with a null point, which `OnPostLoad` leaves when it doesn't find
+  the waypoint), in the window's first tick before the first roaming phase, once per unit, the end's count equal.
+  At the first roaming phase, every roaming unit of the sim's must have one, and every record must name one. What
+  only the scene and the actions set (the settings, `Sleepless` included, which `OnInitialize` copies from the spawner;
+  `OriginalPoint`, `m_Disabled`, the follow part) must equal the sim's (the spawner's and the save's); a difference is reported and the unit is unknown. What the controller
+  advances between the load and the window (the next point, `ReverseDirection`, `IdleEndTime`, `IdleCutscene`) is
+  taken from the record. Not read by the modelled controller, checked for their form only: `PreviousPosition` (the
+  waypoints' `Advance`) and the cutscenes' guids. A bad block is reported where it goes wrong and leaves every roaming unit unknown; so is a
+  record outside the window's first frame (after its `tick` record, before the first roaming phase), and a declared
+  `roam_init` without the roaming controller (the driven agent and `cutscene_progress`). [M] `-140`'s
+  five runs: the lizard (5052) established from it, advanced since the load (the save's `IdleEndTime`
+  434,784,460,000 cleared to 0 by `IsPlayingIdle` before the window; the point, direction and settings equal), every
+  run valid, its rolls, steps, `LookAt`s and moves checked as before. Older captures (without `roam_init`) keep the
+  inference below. `tests/poc5_roaming.rs`: 23 damaged copies of `-140`, each reported.
+- **Without `roam_init`** the save's state stands in, confirmed only by the running roaming move (every capture
+  before `-140` has one); a unit idle at the window's start would be reported.
 - **Scene waypoints** (`Patrol` mode: `SelectNextPoint`'s `WeightedRandom`, `SelectPrevPoint`, `SelectIdleTime`'s
   draw, with `roam_point` as their producer) and idle cutscenes: reported; no combat capture reaches them (the
   dialogue runner's Horgus fixture has waypoints).
