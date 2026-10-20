@@ -299,7 +299,10 @@ impl Driver<'_> {
                 )));
             }
             None => {
+                // A point the sim can't resolve: the recording's argument decides the facing,
+                // computed and checked below, but a recorded input all the same.
                 self.out.look.points_taken += 1;
+                self.timeline_taken(u);
                 rec.arg
             }
         };

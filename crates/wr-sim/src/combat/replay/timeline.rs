@@ -732,6 +732,44 @@ mod tests {
         }
     }
 
+    /// The commands' `TurnToTarget` in a synchronized turn-based frame with `look`: where the sim
+    /// knows the point the write is the sim's (not marked); where it doesn't (`None`, a class's own
+    /// `GetTargetPoint`) the recorded point is the argument, the write is computed and checked
+    /// as usual, and the unit is marked.
+    #[test]
+    fn a_driven_look_write_with_a_recorded_point_marks_the_unit() {
+        use crate::combat::commands::LookSite;
+        use crate::combat::orientation::{LookArg, LookFn, Orientation};
+        let site = LookSite::TickCommand;
+        let point = [4.0, 2.0, 9.0];
+        let run = |arg: Option<LookArg>| {
+            let (mut w, u) = world();
+            w.combat.turn_based = true;
+            let id = w.entity(u).unique_id.clone();
+            let unit = w.unit(u).expect("unit");
+            let before =
+                Orientation { value: unit.orientation, desired: unit.combat.desired_orientation };
+            let after = before
+                .write(LookFn::LookAt, LookArg::Point(point), unit.position)
+                .expect("a point");
+            assert_ne!(after.desired, before.desired, "the write changes the unit");
+            let t = records(vec![json!({"ev": "ag_look", "fn": "LookAt", "u": id, "p": point,
+                "v": null, "pos": unit.position, "rider": false,
+                "o0": before.value, "d0": before.desired, "o": after.value, "d": after.desired,
+                "origin": site.frames().join(" < ")})]);
+            let mut d = driver(&mut w, &t);
+            // (`Driver::start` resets the mode: set it after.)
+            w.combat.turn_based = true;
+            d.ags.look.on = true;
+            d.ags.synced = true;
+            d.look_write(&mut w, u, site, LookFn::LookAt, arg, false).expect("a driven write");
+            assert_eq!(w.unit(u).expect("unit").combat.desired_orientation, after.desired);
+            marked(&d, u)
+        };
+        assert!(!run(Some(LookArg::Point(point))), "the sim's point: the sim's write");
+        assert!(run(None), "the recording's point: marked");
+    }
+
     /// A span the replay takes from the recording (`ag_ctl_end`: position and orientation) marks
     /// its unit.
     #[test]

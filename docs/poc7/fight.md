@@ -53,7 +53,8 @@ inside `TickUnit` (`MoveInputs::place_on_ground` returns the recorded position a
 `ag_sync`: every unit's position and orientation at the window's start and where real time ends), a span the replay
 takes from the recording (`ag_ctl_end`, its `ag_rot` desired orientation), `UpdateSlowRotation`'s desired orientation
 where the recording's value is used (without the `look` observer, or where `look` differs and is reported), a write of orientation by code the sim
-doesn't run (`ag_look` taken: the angle is computed from a recorded point, or taken), and a roaming unit's step (its
+doesn't run (`ag_look` taken: the angle is computed from a recorded point, or taken), the commands' `TurnToTarget` where the sim can't resolve the
+point (a class's own `GetTargetPoint`) and the recorded point is the argument (computed and checked, but recorded input), and a roaming unit's step (its
 recorded vector). A frame can hold both kinds: on `poc5-tb-113` (agent_sync, no `ground_view`) a unit is the
 recording's among sim ones (`a_position_taken_from_the_recording_in_a_sim_frame_is_labelled_so`: 1,063 of its 1,873 frames since the place-on-ground step inside `TickUnit` is marked too (1 before)). Physics results
 the replay takes from the recording where it doesn't compute them (`phys_taken`, `phys_span` in the coverage line)
