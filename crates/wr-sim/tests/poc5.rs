@@ -6830,9 +6830,41 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
     // Records that stand where their frame says, one tick an entity a frame, writes after the last
     // frame's query, a collider destroyed twice, a relink of a collider the sim has not seen or
     // of one bound to another entity: each reported, and for the reason.
-    fn set_rec(t: &V, fun: &str, c: V, e0: V, e: V) -> V {
-        json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_set", "fn": fun, "v": null, "c": c,
-            "on0": null, "on": null, "pos0": null, "pos": null, "e0": e0, "e": e})
+    /// A `bounds_set` record before `recs[at]`, as the oracle writes it: the collider's state is
+    /// the last call's (or its root's) before `at`.
+    fn set_rec(recs: &[V], at: usize, fun: &str, c: V, e0: V, e: V) -> V {
+        let t = recs[at]["t"].clone();
+        let (on, pos) = recs[..at]
+            .iter()
+            .rev()
+            .find_map(|r| {
+                (ev(r, "bounds_tick") && r["c"] == c).then(|| (r["on"].clone(), r["pos"].clone()))
+            })
+            .or_else(|| {
+                recs.iter().find_map(|r| {
+                    (ev(r, "bounds_init") && r["id"] == c)
+                        .then(|| (r["on"].clone(), r["pos"].clone()))
+                })
+            })
+            .unwrap_or((json!(true), json!([0.0, 0.0, 0.0])));
+        let off = json!(!on.as_bool().unwrap_or(true));
+        let moved = {
+            let mut p = pos.clone();
+            if let Some(x) = p[0].as_f64() {
+                p[0] = json!(x + 1.0);
+            }
+            p
+        };
+        let (v, on0, on, pos0, pos, e0, e) = match fun {
+            "gone" => (e0.clone(), on, V::Null, pos, V::Null, e0, V::Null),
+            "pos" => (e.clone(), on.clone(), on, pos, moved, e0, e),
+            "active" => (e.clone(), on, off, pos.clone(), pos, e0, e),
+            "entity" => (V::Null, V::Null, json!(true), V::Null, json!([1.0, 2.0, 3.0]), e0, e),
+            _ if c.is_null() => (V::Null, V::Null, V::Null, V::Null, V::Null, V::Null, V::Null),
+            _ => (e.clone(), on.clone(), on, pos.clone(), pos, e0, e),
+        };
+        json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_set", "fn": fun, "v": v, "c": c,
+            "on0": on0, "on": on, "pos0": pos0, "pos": pos, "e0": e0, "e": e})
     }
     type Reasoned = (Change, &'static str);
     let reasoned: [Reasoned; 16] = [
@@ -6850,12 +6882,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let end = recs.len() - 1;
-                let t = recs[end]["t"].clone();
-                let mut g = set_rec(&t, "active", json!(-1), json!("558A"), json!("558A"));
-                g["on0"] = json!(true);
-                g["on"] = json!(false);
-                g["pos0"] = json!([0.0, 0.0, 0.0]);
-                g["pos"] = json!([0.0, 0.0, 0.0]);
+                let g = set_rec(recs, end, "active", json!(-1), json!("558A"), json!("558A"));
                 recs.insert(end, g);
                 renumber(recs);
             },
@@ -6874,8 +6901,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let g = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let g = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
                 recs.insert(at, g.clone());
                 recs.insert(at, g);
                 renumber(recs);
@@ -6885,8 +6911,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let l = set_rec(&t, "link", json!(-1), json!("558A"), json!("558A"));
+                let l = set_rec(recs, at, "link", json!(-1), json!("558A"), json!("558A"));
                 recs.insert(at, l);
                 renumber(recs);
             },
@@ -6895,12 +6920,11 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let l = set_rec(&t, "link", json!(-547_392), json!("558A"), json!("5671"));
+                let l = set_rec(recs, at, "link", json!(-547_392), json!("558A"), json!("5671"));
                 recs.insert(at, l);
                 renumber(recs);
             },
-            "a link record of collider -547392",
+            "a link record: `e`",
         ),
         // A link of a collider that was destroyed (the view's reference is gone), a position
         // write to one destroyed earlier in the frame, a call that makes a second collider
@@ -6908,9 +6932,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let g = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
-                let l = set_rec(&t, "link", json!(-547_392), json!("558A"), json!("558A"));
+                let g = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let l = set_rec(recs, at, "link", json!(-547_392), json!("558A"), json!("558A"));
                 recs.insert(at, l);
                 recs.insert(at, g);
                 renumber(recs);
@@ -6920,9 +6943,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let g = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
-                let mut p = set_rec(&t, "pos", json!(-547_392), json!("558A"), json!("558A"));
+                let g = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let mut p = set_rec(recs, at, "pos", json!(-547_392), json!("558A"), json!("558A"));
                 p["pos0"] = json!([0.0, 0.0, 0.0]);
                 p["pos"] = json!([1.0, 0.0, 0.0]);
                 recs.insert(at, p);
@@ -6946,7 +6968,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             |recs| {
                 let at = tick_of(recs, "558A", 300);
                 let t = recs[at]["t"].clone();
-                let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let link =
+                    set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
                 let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
                     "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
                     "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
@@ -6961,7 +6984,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             |recs| {
                 let at = tick_of(recs, "558A", 300);
                 let t = recs[at]["t"].clone();
-                let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let link =
+                    set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
                 let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
                     "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
                     "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
@@ -6974,13 +6998,12 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let mut l = set_rec(&t, "link", json!(null), json!(null), json!(null));
+                let mut l = set_rec(recs, at, "link", json!(null), json!(null), json!(null));
                 l["on"] = json!(true);
                 recs.insert(at, l);
                 renumber(recs);
             },
-            "a bounds_set record it can't read",
+            "a link record with no collider",
         ),
         // Sol's round 5: the link of a new collider written while the previous one is still the
         // view's (it is destroyed first); a unit's making that reuses a map object's id; a link
@@ -6988,9 +7011,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let link = set_rec(&t, "entity", json!(-998), json!(null), json!("558A"));
-                let gone = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let link = set_rec(recs, at, "entity", json!(-998), json!(null), json!("558A"));
+                let gone = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
                 recs[at]["made"] = json!(true);
                 recs[at]["r0"] = json!(null);
                 recs[at]["c"] = json!(-998);
@@ -7003,9 +7025,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let gone = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
-                let link = set_rec(&t, "entity", json!(-547_424), json!(null), json!("558A"));
+                let gone = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let link = set_rec(recs, at, "entity", json!(-547_424), json!(null), json!("558A"));
                 recs[at]["made"] = json!(true);
                 recs[at]["r0"] = json!(null);
                 recs[at]["c"] = json!(-547_424);
@@ -7018,8 +7039,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
-                let t = recs[at]["t"].clone();
-                let mut l = set_rec(&t, "link", json!(-547_392), json!("558A"), json!("558A"));
+                let mut l =
+                    set_rec(recs, at, "link", json!(-547_392), json!("558A"), json!("558A"));
                 l["on0"] = json!(false);
                 l["on"] = json!(false);
                 l["pos0"] = json!([99.0, 0.0, 0.0]);
@@ -7027,14 +7048,15 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(at, l);
                 renumber(recs);
             },
-            "a link record of collider -547392 shows enabled",
+            "a link record: `on0`",
         ),
         // A map object's collider made twice-linked in a later frame.
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
                 let t = recs[at]["t"].clone();
-                let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let link =
+                    set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
                 let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
                     "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
                     "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
@@ -7043,9 +7065,14 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 let later = (at + 3..recs.len())
                     .find(|&i| ev(&recs[i], "bounds_tick") && recs[i]["t"] != t)
                     .expect("a later tick");
-                let t2 = recs[later]["t"].clone();
-                let again =
-                    set_rec(&t2, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let again = set_rec(
+                    recs,
+                    later,
+                    "entity",
+                    json!(-5000),
+                    json!(null),
+                    json!("a-map-object"),
+                );
                 recs.insert(later, again);
                 renumber(recs);
             },
@@ -7072,13 +7099,12 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             .iter()
             .rposition(|r| ev(r, "bounds_tick") && r["e"] == "558A")
             .expect("a tick of 558A");
-        let t = recs[last]["t"].clone();
         let old = recs[last]["c"].clone();
-        let gone = set_rec(&t, "gone", old.clone(), json!("558A"), json!("558A"));
+        let gone = set_rec(recs, last, "gone", old.clone(), json!("558A"), json!("558A"));
         recs[last]["made"] = json!(true);
         recs[last]["r0"] = json!(null);
         recs[last]["c"] = json!(-999);
-        let link = set_rec(&t, "entity", json!(-999), json!(null), json!("558A"));
+        let link = set_rec(recs, last, "entity", json!(-999), json!(null), json!("558A"));
         recs.insert(last, link);
         recs.insert(last, gone);
         renumber(recs);
@@ -7097,8 +7123,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
     let changed = trace.edited(|recs| {
         let at = tick_of(recs, "558A", 300);
-        let t = recs[at]["t"].clone();
-        let mut l = set_rec(&t, "link", json!(null), json!(null), json!(null));
+        let mut l = set_rec(recs, at, "link", json!(null), json!(null), json!(null));
         l["v"] = json!("558A");
         recs[at]["made"] = json!(true);
         recs[at]["r0"] = json!(null);
@@ -7118,7 +7143,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
     let changed = trace.edited(|recs| {
         let at = tick_of(recs, "558A", 300);
         let t = recs[at]["t"].clone();
-        let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+        let link = set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
         let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
             "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
             "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
@@ -7151,8 +7176,8 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             }
         }
         let sync = json!({"seq": 0, "k": "obs", "t": t, "ev": "phys_sync", "src": "UnitPlaceOnGroundController.Tick"});
-        let gone = set_rec(&t, "gone", old, json!("558A"), json!("558A"));
-        let link = set_rec(&t, "entity", json!(-998), json!(null), json!("558A"));
+        let gone = set_rec(recs, at, "gone", old, json!("558A"), json!("558A"));
+        let link = set_rec(recs, at, "entity", json!(-998), json!(null), json!("558A"));
         for r in [link, gone, sync] {
             recs.insert(at, r);
         }

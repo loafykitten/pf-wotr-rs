@@ -42,12 +42,39 @@ pub(super) enum State {
 struct Life {
     state: State,
     kind: Option<Kind>,
+    /// The entity type's name, as the records write it.
+    kind_name: Option<String>,
     entity: Option<String>,
     on: bool,
     pos: V3,
     radius: f32,
     /// The `enabled` the creation's `entity` record showed: the making call's must equal it.
     link_on: Option<bool>,
+}
+
+/// Which `bounds_set` record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SetFn {
+    Active,
+    Pos,
+    Gone,
+    Link,
+    Entity,
+}
+
+/// A `bounds_set` record with every field it carries (docs/poc5/vision.md has the table of what
+/// each must be).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SetRec<'a> {
+    pub f: SetFn,
+    pub v: Option<&'a str>,
+    pub c: Option<i32>,
+    pub on0: Option<bool>,
+    pub on: Option<bool>,
+    pub pos0: Option<V3>,
+    pub pos: Option<V3>,
+    pub e0: Option<&'a str>,
+    pub e: Option<&'a str>,
 }
 
 /// A record, as the machine takes it.
@@ -57,23 +84,17 @@ pub(super) enum Ev<'a> {
     Root {
         id: i32,
         kind: Kind,
+        kind_name: &'a str,
         entity: Option<&'a str>,
         on: bool,
         radius: f32,
         pos: V3,
     },
-    /// `EntityDataLink.Entity`'s setter (`bounds_set` `entity`).
-    Entity {
-        c: i32,
-        e0: Option<&'a str>,
-        e: Option<&'a str>,
-        on: Option<bool>,
-        pos: Option<V3>,
-    },
     /// A `bounds_tick`.
     Tick {
         entity: &'a str,
         kind: Kind,
+        kind_name: &'a str,
         made: bool,
         c: Option<i32>,
         r0: Option<f32>,
@@ -81,34 +102,27 @@ pub(super) enum Ev<'a> {
         pos: Option<V3>,
         on: Option<bool>,
     },
-    Active {
-        c: i32,
-        on0: bool,
-        on: bool,
-    },
-    Pos {
-        c: i32,
-        pos0: V3,
-        pos: V3,
-    },
-    Gone {
-        c: i32,
-    },
-    /// `SetupSphereColliderEntityLink` (`bounds_set` `link`).
-    Link {
-        c: Option<i32>,
-        v: Option<&'a str>,
-        e0: Option<&'a str>,
-        e: Option<&'a str>,
-        on0: Option<bool>,
-        on: Option<bool>,
-        pos0: Option<V3>,
-        pos: Option<V3>,
-    },
+    /// A `bounds_set`.
+    Set(SetRec<'a>),
+    /// A `phys_sync`.
+    Sync,
 }
 
 fn bits(v: V3) -> [u32; 3] {
     v.map(f32::to_bits)
+}
+
+/// The collider fields of a view's collider as `ColliderOf` writes them, against the machine's.
+fn want<T: PartialEq + std::fmt::Debug>(
+    out: &mut Vec<String>,
+    what: &str,
+    field: &str,
+    got: Option<T>,
+    expected: Option<T>,
+) {
+    if got != expected {
+        out.push(format!("{what}: `{field}` is {got:?}, it must be {expected:?}"));
+    }
 }
 
 /// The colliders' lives.
@@ -116,12 +130,26 @@ fn bits(v: V3) -> [u32; 3] {
 pub(super) struct Lifecycle {
     cols: HashMap<i32, Life>,
     current: HashMap<String, i32>,
+    /// The collider being made: its `entity` record was written, its call's record has not been.
+    /// `TickEntity` calls are sequential and the creation's link is written inside the call, so
+    /// nothing else is written in between.
+    making: Option<i32>,
+    /// Each entity's type name, from the first record that names it (a type doesn't change).
+    types: HashMap<String, String>,
 }
 
 impl Lifecycle {
     /// The kind of a collider that has been made (`None`: unknown, or not made yet).
     pub(super) fn kind_of(&self, c: i32) -> Option<Kind> {
         self.cols.get(&c).and_then(|l| l.kind)
+    }
+
+    /// An entity's type, as the records write it: the same for every collider it ever has.
+    fn type_of(&mut self, entity: &str, kind_name: &str, out: &mut Vec<String>) {
+        let known = self.types.entry(entity.to_owned()).or_insert_with(|| kind_name.to_owned());
+        if known != kind_name {
+            out.push(format!("{entity} is a {known} and a {kind_name} in the records"));
+        }
     }
 
     /// How many colliders were ever seen.
@@ -147,6 +175,7 @@ impl Lifecycle {
                 _ => {}
             }
         }
+        self.making = None;
         self.current.retain(|_, c| !ended.contains(c));
     }
 
@@ -173,15 +202,23 @@ impl Lifecycle {
     }
 
     /// Takes a record at its place in the stream; what contradicts the machine is pushed to `out`.
-    #[allow(clippy::too_many_lines)]
     pub(super) fn apply(&mut self, ev: Ev<'_>, out: &mut Vec<String>) {
+        if let Some(m) = self.making {
+            let own = matches!(ev, Ev::Tick { made: true, c: Some(c), .. } if c == m);
+            if !own {
+                out.push(format!(
+                    "a record inside the making of collider {m} (its link is written inside the call, before the call's own record)"
+                ));
+            }
+        }
         match ev {
-            Ev::Root { id, kind, entity, on, radius, pos } => {
+            Ev::Root { id, kind, kind_name, entity, on, radius, pos } => {
                 if self.cols.contains_key(&id) {
                     out.push(format!("the root {id} names an instance id that is owned already"));
                     return;
                 }
                 if let Some(e) = entity {
+                    self.type_of(e, kind_name, out);
                     if let Some(cur) = self.current.get(e) {
                         out.push(format!("{e} has two colliders at the start: {cur} and {id}"));
                     }
@@ -192,6 +229,7 @@ impl Lifecycle {
                     Life {
                         state: State::Live,
                         kind: Some(kind),
+                        kind_name: Some(kind_name.to_owned()),
                         entity: entity.map(str::to_owned),
                         on,
                         pos,
@@ -200,180 +238,276 @@ impl Lifecycle {
                     },
                 );
             }
-            Ev::Entity { c, e0, e, on, pos } => match (self.cols.get(&c), e0, e) {
-                (None, None, Some(e)) => {
-                    // The creation's link: the previous view collider is cleared first.
-                    if let Some(cur) = self.current.get(e) {
-                        out.push(format!(
-                            "collider {c} is linked to {e} while collider {cur} is its view collider (the previous one is destroyed first)"
-                        ));
-                    }
-                    self.current.insert(e.to_owned(), c);
-                    self.cols.insert(
-                        c,
-                        Life {
-                            state: State::Linking,
-                            kind: None,
-                            entity: Some(e.to_owned()),
-                            on: false,
-                            pos: [0.0; 3],
-                            radius: 0.0,
-                            link_on: on,
-                        },
-                    );
-                }
-                (None, _, _) => out.push(format!(
-                    "an entity record of collider {c} from {e0:?} to {e:?}: no record made it"
-                )),
-                (Some(l), Some(a), Some(b))
-                    if a == b && l.state == State::Live && l.entity.as_deref() == Some(a) =>
-                {
-                    // (The setter set to what it holds.)
-                    if on.is_some_and(|x| x != l.on) || pos.is_some_and(|p| bits(p) != bits(l.pos))
-                    {
-                        out.push(format!(
-                            "an entity record of collider {c} shows enabled {on:?} at {pos:?}, the collider is {} at {:?}",
-                            l.on, l.pos
-                        ));
-                    }
-                }
-                (Some(l), _, _) => out.push(format!(
-                    "an entity record of collider {c} ({:?}, bound to {:?}) from {e0:?} to {e:?}: a second link, or an unlink or relink, not modelled",
+            Ev::Sync => {}
+            Ev::Tick { entity, kind, kind_name, made, c, r0, r, pos, on } => {
+                self.tick(entity, (kind, kind_name), made, c, r0, r, pos, on, out);
+            }
+            Ev::Set(r) => self.set(r, out),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tick(
+        &mut self,
+        entity: &str,
+        (kind, kind_name): (Kind, &str),
+        made: bool,
+        c: Option<i32>,
+        r0: Option<f32>,
+        r: Option<f32>,
+        pos: Option<V3>,
+        on: Option<bool>,
+        out: &mut Vec<String>,
+    ) {
+        let (Some(c), Some(r), Some(pos), Some(on)) = (c, r, pos, on) else {
+            // No collider after the call (the entity has no view, or the view has none).
+            if made || c.is_some() || r0.is_some() || r.is_some() || pos.is_some() || on.is_some() {
+                out.push(format!("a bounds_tick of {entity} with a collider in part"));
+            } else if let Some(cur) = self.current.get(entity) {
+                out.push(format!(
+                    "a bounds_tick of {entity} without a collider, but collider {cur} is its view collider"
+                ));
+            }
+            return;
+        };
+        if made {
+            self.making = None;
+            self.type_of(entity, kind_name, out);
+            let Some(l) = self.cols.get_mut(&c) else {
+                out.push(format!(
+                    "a bounds_tick of {entity} made collider {c}, which no entity record linked before the call"
+                ));
+                return;
+            };
+            if l.state != State::Linking || l.entity.as_deref() != Some(entity) {
+                out.push(format!(
+                    "a bounds_tick of {entity} made collider {c}, which is {:?} and bound to {:?}",
                     l.state, l.entity
-                )),
-            },
-            Ev::Tick { entity, kind, made, c, r0, r, pos, on } => {
-                let (Some(c), Some(r), Some(pos), Some(on)) = (c, r, pos, on) else {
-                    // No collider after the call (the entity has no view, or the view has none).
-                    if made || c.is_some() || r0.is_some() || r.is_some() || pos.is_some() || on.is_some()
-                    {
-                        out.push(format!("a bounds_tick of {entity} with a collider in part"));
-                    } else if let Some(cur) = self.current.get(entity) {
-                        out.push(format!(
-                            "a bounds_tick of {entity} without a collider, but collider {cur} is its view collider"
-                        ));
-                    }
-                    return;
-                };
-                if made {
-                    let Some(l) = self.cols.get_mut(&c) else {
-                        out.push(format!(
-                            "a bounds_tick of {entity} made collider {c}, which no entity record linked before the call"
-                        ));
-                        return;
-                    };
-                    if l.state != State::Linking || l.entity.as_deref() != Some(entity) {
-                        out.push(format!(
-                            "a bounds_tick of {entity} made collider {c}, which is {:?} and bound to {:?}",
-                            l.state, l.entity
-                        ));
-                        return;
-                    }
-                    if r0.is_some() {
-                        out.push(format!("a bounds_tick that made collider {c} has a radius before"));
-                    }
-                    if l.link_on.is_some_and(|x| x != on) {
-                        out.push(format!(
-                            "collider {c} was linked enabled {:?} and its making call shows {on}",
-                            l.link_on
-                        ));
-                    }
-                    (l.state, l.kind, l.on, l.pos, l.radius) = (State::Live, Some(kind), on, pos, r);
-                    return;
-                }
-                let Some(l) = self.cols.get(&c) else {
-                    out.push(format!("a bounds_tick of {entity} names collider {c}, which no record made"));
-                    return;
-                };
-                if l.state != State::Live
-                    || l.entity.as_deref() != Some(entity)
-                    || self.current.get(entity) != Some(&c)
-                    || l.kind != Some(kind)
-                {
-                    out.push(format!(
-                        "a bounds_tick of {entity} names collider {c}, which is {:?}, bound to {:?}, and {entity}'s view collider is {:?}",
-                        l.state,
-                        l.entity,
-                        self.current.get(entity)
-                    ));
-                    return;
-                }
-                if r0.map(f32::to_bits) != Some(l.radius.to_bits()) {
-                    out.push(format!(
-                        "a bounds_tick of collider {c} has radius before {r0:?}, the collider's is {}",
-                        l.radius
-                    ));
-                }
-                if l.on != on {
-                    out.push(format!("a bounds_tick of collider {c} shows enabled {on}, the collider is {}", l.on));
-                }
-                if let Some(l) = self.cols.get_mut(&c) {
-                    (l.radius, l.pos, l.on) = (r, pos, on);
-                }
+                ));
+                return;
             }
-            Ev::Active { c, on0, on } => {
-                if self.view_collider(c, "bounds_set active", out).is_some() {
-                    let Some(l) = self.cols.get_mut(&c) else { return };
-                    if l.on != on0 {
-                        out.push(format!(
-                            "bounds_set active of collider {c} says it was enabled {on0}, it is {}",
-                            l.on
-                        ));
-                    }
-                    l.on = on;
-                }
+            if r0.is_some() {
+                out.push(format!("a bounds_tick that made collider {c} has a radius before"));
             }
-            Ev::Pos { c, pos0, pos } => {
-                if self.view_collider(c, "bounds_set pos", out).is_some() {
-                    let Some(l) = self.cols.get_mut(&c) else { return };
-                    if bits(l.pos) != bits(pos0) {
-                        out.push(format!(
-                            "bounds_set pos of collider {c} says it was at {pos0:?}, it is at {:?}",
-                            l.pos
-                        ));
-                    }
-                    l.pos = pos;
-                }
+            // `SetupSphereBoundsCollider` adds an enabled collider of at least 0.05, and the call
+            // doesn't change `enabled` (a hidden entity's collider is enabled too).
+            if !on {
+                out.push(format!("a bounds_tick made collider {c} disabled"));
             }
-            Ev::Gone { c } => {
-                if self.view_collider(c, "bounds_set gone", out).is_some() {
-                    let Some(l) = self.cols.get_mut(&c) else { return };
-                    l.state = State::Dying;
-                    if let Some(e) = l.entity.clone() {
-                        self.current.remove(&e);
-                    }
-                }
+            if r < 0.05 {
+                out.push(format!(
+                    "a bounds_tick made collider {c} of radius {r}, under the 0.05 minimum"
+                ));
             }
-            Ev::Link { c: None, v, e0, e, .. } => {
+            if l.link_on.is_some_and(|x| x != on) {
+                out.push(format!(
+                    "collider {c} was linked enabled {:?} and its making call shows {on}",
+                    l.link_on
+                ));
+            }
+            (l.state, l.kind, l.on, l.pos, l.radius) = (State::Live, Some(kind), on, pos, r);
+            l.kind_name = Some(kind_name.to_owned());
+            return;
+        }
+        let Some(l) = self.cols.get(&c) else {
+            out.push(format!("a bounds_tick of {entity} names collider {c}, which no record made"));
+            return;
+        };
+        if l.state != State::Live
+            || l.entity.as_deref() != Some(entity)
+            || self.current.get(entity) != Some(&c)
+            || l.kind != Some(kind)
+            || l.kind_name.as_deref() != Some(kind_name)
+        {
+            out.push(format!(
+                "a bounds_tick of {entity} names collider {c}, which is {:?}, bound to {:?}, and {entity}'s view collider is {:?}",
+                l.state,
+                l.entity,
+                self.current.get(entity)
+            ));
+            return;
+        }
+        if r0.map(f32::to_bits) != Some(l.radius.to_bits()) {
+            out.push(format!(
+                "a bounds_tick of collider {c} has radius before {r0:?}, the collider's is {}",
+                l.radius
+            ));
+        }
+        if l.on != on {
+            out.push(format!(
+                "a bounds_tick of collider {c} shows enabled {on}, the collider is {}",
+                l.on
+            ));
+        }
+        // `TickEntity` moves and resizes a unit's collider only: any other kind's is left as it
+        // was made.
+        if kind == Kind::Other && (r.to_bits() != l.radius.to_bits() || bits(pos) != bits(l.pos)) {
+            out.push(format!(
+                "a bounds_tick of collider {c} (not a unit's) changed its radius to {r} or its transform to {pos:?}"
+            ));
+            return;
+        }
+        if let Some(l) = self.cols.get_mut(&c) {
+            (l.radius, l.pos) = (r, pos);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn set(&mut self, r: SetRec<'_>, out: &mut Vec<String>) {
+        let SetRec { f, v, c, on0, on, pos0, pos, e0, e } = r;
+        let n0 = out.len();
+        match f {
+            SetFn::Link if c.is_none() => {
                 // The view has no collider (a view attached or detached: the records can't tell
-                // which): nothing changes, and nothing is permitted by it.
-                if e0.is_some() || e.is_some() {
-                    out.push(format!("a link record with no collider from {e0:?} to {e:?}"));
+                // which): every collider field is null and nothing is permitted.
+                let what = "a link record with no collider";
+                for (field, null) in [
+                    ("on0", on0.is_none()),
+                    ("on", on.is_none()),
+                    ("pos0", pos0.is_none()),
+                    ("pos", pos.is_none()),
+                    ("e0", e0.is_none()),
+                    ("e", e.is_none()),
+                ] {
+                    if !null {
+                        out.push(format!("{what}: `{field}` must be null"));
+                    }
+                }
+                if v.is_none() {
+                    out.push(format!("{what}: `v` (the view's data) must be set"));
                 }
                 if let Some(cur) = v.and_then(|v| self.current.get(v)) {
                     out.push(format!(
-                        "a link record says {v:?}'s view has no collider, but collider {cur} is its view collider"
+                        "{what} says {v:?}'s view has none, but collider {cur} is its view collider"
                     ));
                 }
             }
-            Ev::Link { c: Some(c), e0, e, on0, on, pos0, pos, .. } => {
-                let Some(l) = self.view_collider(c, "a link record", out) else { return };
-                if e0 != e || e.is_none() || l.entity.as_deref() != e {
-                    out.push(format!(
-                        "a link record of collider {c} from {e0:?} to {e:?}: the collider is bound to {:?} (an unlink or relink, not modelled)",
-                        l.entity
-                    ));
+            SetFn::Entity => self.entity(r, out),
+            _ => {
+                let what = match f {
+                    SetFn::Active => "bounds_set active",
+                    SetFn::Pos => "bounds_set pos",
+                    SetFn::Gone => "bounds_set gone",
+                    _ => "a link record",
+                };
+                let Some(c) = c else {
+                    out.push(format!("{what} names no collider"));
+                    return;
+                };
+                let Some(l) = self.view_collider(c, what, out).cloned() else { return };
+                let ex = l.entity.as_deref();
+                // The view's data and the link's entity are the collider's entity throughout.
+                want(out, what, "v", v, ex);
+                want(out, what, "e0", e0, ex);
+                if f != SetFn::Gone {
+                    want(out, what, "e", e, ex);
+                } else {
+                    // (The view's collider is cleared: `ColliderOf` finds none after.)
+                    want(out, what, "e", e, None);
+                    want(out, what, "on", on, None);
+                    want(out, what, "pos", pos, None);
+                }
+                want(out, what, "on0", on0, Some(l.on));
+                want(out, what, "pos0", pos0.map(bits), Some(bits(l.pos)));
+                match f {
+                    // Written only when something changed.
+                    SetFn::Active => {
+                        want(out, what, "on", on, Some(!l.on));
+                        want(out, what, "pos", pos.map(bits), Some(bits(l.pos)));
+                    }
+                    SetFn::Pos => {
+                        want(out, what, "on", on, Some(l.on));
+                        if pos.is_none_or(|p| bits(p) == bits(l.pos)) {
+                            out.push(format!("{what}: `pos` must be a position that changed"));
+                        }
+                    }
+                    SetFn::Link => {
+                        want(out, what, "on", on, Some(l.on));
+                        want(out, what, "pos", pos.map(bits), Some(bits(l.pos)));
+                        if ex.is_none() {
+                            out.push(format!("{what}: the collider has no entity to relink"));
+                        }
+                    }
+                    _ => {}
+                }
+                if out.len() > n0 {
                     return;
                 }
-                // (A relink to what it holds: the collider's whole state is the record's.)
-                let (on_l, pos_l) = (Some(l.on), Some(bits(l.pos)));
-                if on0 != on_l || on != on_l || pos0.map(bits) != pos_l || pos.map(bits) != pos_l {
-                    out.push(format!(
-                        "a link record of collider {c} shows enabled {on0:?}/{on:?} at {pos0:?}/{pos:?}, the collider is {} at {:?}",
-                        l.on, l.pos
-                    ));
+                let Some(life) = self.cols.get_mut(&c) else { return };
+                match f {
+                    SetFn::Active => life.on = on.unwrap_or(life.on),
+                    SetFn::Pos => life.pos = pos.unwrap_or(life.pos),
+                    SetFn::Gone => {
+                        life.state = State::Dying;
+                        if let Some(e) = l.entity {
+                            self.current.remove(&e);
+                        }
+                    }
+                    _ => {}
                 }
             }
+        }
+    }
+
+    /// `EntityDataLink.Entity`'s setter: the link of a collider made (once, before the call's
+    /// record) or the setter set to what it holds.
+    fn entity(&mut self, r: SetRec<'_>, out: &mut Vec<String>) {
+        let SetRec { v, c, on0, on, pos0, pos, e0, e, .. } = r;
+        let what = "an entity record";
+        want(out, what, "v", v, None);
+        want(out, what, "on0", on0, None);
+        want(out, what, "pos0", pos0, None);
+        let Some(c) = c else {
+            out.push(format!("{what} names no collider"));
+            return;
+        };
+        let (Some(on), Some(pos)) = (on, pos) else {
+            out.push(format!("{what} of collider {c} lacks the collider's `enabled` or position"));
+            return;
+        };
+        match (self.cols.get(&c), e0, e) {
+            (None, None, Some(e)) => {
+                // The creation's link: the previous view collider is cleared first, and the new
+                // collider is enabled (its position is the view's, set before the call sets the
+                // transform: taken).
+                if !on {
+                    out.push(format!("collider {c} is linked disabled"));
+                }
+                if let Some(cur) = self.current.get(e) {
+                    out.push(format!(
+                        "collider {c} is linked to {e} while collider {cur} is its view collider (the previous one is destroyed first)"
+                    ));
+                }
+                self.current.insert(e.to_owned(), c);
+                self.making = Some(c);
+                self.cols.insert(
+                    c,
+                    Life {
+                        state: State::Linking,
+                        kind: None,
+                        kind_name: None,
+                        entity: Some(e.to_owned()),
+                        on: false,
+                        pos: [0.0; 3],
+                        radius: 0.0,
+                        link_on: Some(on),
+                    },
+                );
+            }
+            (None, _, _) => out.push(format!(
+                "an entity record of collider {c} from {e0:?} to {e:?}: no record made it"
+            )),
+            (Some(l), Some(a), Some(b))
+                if a == b && l.state == State::Live && l.entity.as_deref() == Some(a) =>
+            {
+                // (The setter set to what it holds.)
+                want(out, what, "on", Some(on), Some(l.on));
+                want(out, what, "pos", Some(bits(pos)), Some(bits(l.pos)));
+            }
+            (Some(l), _, _) => out.push(format!(
+                "an entity record of collider {c} ({:?}, bound to {:?}) from {e0:?} to {e:?}: a second link, or an unlink or relink, not modelled",
+                l.state, l.entity
+            )),
         }
     }
 }
@@ -383,6 +517,7 @@ mod tests {
     use super::*;
 
     const P: V3 = [1.0, 2.0, 3.0];
+    const Q: V3 = [5.0, 6.0, 7.0];
 
     fn run(m: &mut Lifecycle, evs: &[Ev<'_>]) -> Vec<String> {
         let mut out = Vec::new();
@@ -393,17 +528,63 @@ mod tests {
     }
 
     fn root(id: i32, kind: Kind, entity: Option<&str>) -> Ev<'_> {
-        Ev::Root { id, kind, entity, on: true, radius: 0.5, pos: P }
+        Ev::Root {
+            id,
+            kind,
+            kind_name: if kind == Kind::Unit { "UnitEntityData" } else { "MapObjectEntityData" },
+            entity,
+            on: true,
+            radius: 0.5,
+            pos: P,
+        }
+    }
+
+    /// A `bounds_set` of collider 7 (a unit's, "a", enabled at P) of kind `f` with the fields the
+    /// oracle writes for it.
+    fn set<'a>(f: SetFn, c: i32, e: &'a str) -> SetRec<'a> {
+        let base = SetRec {
+            f,
+            v: Some(e),
+            c: Some(c),
+            on0: Some(true),
+            on: Some(true),
+            pos0: Some(P),
+            pos: Some(P),
+            e0: Some(e),
+            e: Some(e),
+        };
+        match f {
+            SetFn::Active => SetRec { on: Some(false), ..base },
+            SetFn::Pos => SetRec { pos: Some(Q), ..base },
+            SetFn::Gone => SetRec { on: None, pos: None, e: None, ..base },
+            SetFn::Link => base,
+            SetFn::Entity => SetRec { v: None, on0: None, pos0: None, ..base },
+        }
     }
 
     fn entity<'a>(c: i32, e: &'a str) -> Ev<'a> {
-        Ev::Entity { c, e0: None, e: Some(e), on: Some(true), pos: Some([0.0; 3]) }
+        Ev::Set(SetRec {
+            f: SetFn::Entity,
+            v: None,
+            c: Some(c),
+            on0: None,
+            on: Some(true),
+            pos0: None,
+            pos: Some([0.0; 3]),
+            e0: None,
+            e: Some(e),
+        })
+    }
+
+    fn gone(c: i32, e: &str) -> Ev<'_> {
+        Ev::Set(set(SetFn::Gone, c, e))
     }
 
     fn making<'a>(c: i32, e: &'a str, kind: Kind) -> Ev<'a> {
         Ev::Tick {
             entity: e,
             kind,
+            kind_name: if kind == Kind::Unit { "UnitEntityData" } else { "MapObjectEntityData" },
             made: true,
             c: Some(c),
             r0: None,
@@ -417,6 +598,7 @@ mod tests {
         Ev::Tick {
             entity: e,
             kind: Kind::Unit,
+            kind_name: "UnitEntityData",
             made: false,
             c: Some(c),
             r0: Some(0.5),
@@ -437,13 +619,11 @@ mod tests {
     #[test]
     fn a_collider_is_destroyed_and_made_again_in_the_oracles_order() {
         let mut m = started();
-        let ok = run(
-            &mut m,
-            &[Ev::Gone { c: 7 }, entity(8, "a"), making(8, "a", Kind::Unit), tick(8, "a")],
-        );
+        let ok =
+            run(&mut m, &[gone(7, "a"), entity(8, "a"), making(8, "a", Kind::Unit), tick(8, "a")]);
         assert!(ok.is_empty(), "{ok:?}");
         // The destroyed one takes no view operation this frame, and is gone after it.
-        let bad = run(&mut m, &[Ev::Pos { c: 7, pos0: P, pos: P }, tick(7, "a")]);
+        let bad = run(&mut m, &[Ev::Set(set(SetFn::Pos, 7, "a")), tick(7, "a")]);
         assert_eq!(bad.len(), 2, "{bad:?}");
         let mut end = Vec::new();
         m.frame(&mut end);
@@ -454,53 +634,86 @@ mod tests {
     fn the_creation_needs_the_previous_collider_destroyed_before_its_link() {
         // Sol's round 5: `entity(c9), gone(c7), making(c9)` can't be written by the game.
         let mut m = started();
-        let bad = run(&mut m, &[entity(9, "a"), Ev::Gone { c: 7 }, making(9, "a", Kind::Unit)]);
+        let bad = run(&mut m, &[entity(9, "a"), gone(7, "a"), making(9, "a", Kind::Unit)]);
         assert!(bad.iter().any(|x| x.contains("is its view collider")), "{bad:?}");
         // A making with no link, a link with no making, a second link.
         let mut m = started();
-        let bad = run(&mut m, &[Ev::Gone { c: 7 }, making(8, "a", Kind::Unit)]);
+        let bad = run(&mut m, &[gone(7, "a"), making(8, "a", Kind::Unit)]);
         assert!(bad.iter().any(|x| x.contains("no entity record linked")), "{bad:?}");
         let mut m = started();
         let mut end = Vec::new();
-        let bad = run(&mut m, &[Ev::Gone { c: 7 }, entity(8, "a")]);
+        let bad = run(&mut m, &[gone(7, "a"), entity(8, "a")]);
         assert!(bad.is_empty());
         m.frame(&mut end);
         assert!(end.iter().any(|x| x.contains("no call made it")), "{end:?}");
         let mut m = started();
         let bad = run(
             &mut m,
-            &[Ev::Gone { c: 7 }, entity(8, "a"), entity(8, "a"), making(8, "a", Kind::Unit)],
+            &[gone(7, "a"), entity(8, "a"), entity(8, "a"), making(8, "a", Kind::Unit)],
         );
         assert!(bad.iter().any(|x| x.contains("a second link")), "{bad:?}");
-        // The link of the making and the call must agree on the entity and on `enabled`.
+        // The link of the making and the call must agree on the entity, and the collider is
+        // enabled whatever is written.
         let mut m = started();
-        let bad = run(&mut m, &[Ev::Gone { c: 7 }, entity(8, "b"), making(8, "a", Kind::Unit)]);
+        let bad = run(&mut m, &[gone(7, "a"), entity(8, "b"), making(8, "a", Kind::Unit)]);
         assert!(!bad.is_empty());
         let mut m = started();
         let mut call = making(8, "a", Kind::Unit);
         if let Ev::Tick { on, .. } = &mut call {
             *on = Some(false);
         }
-        let bad = run(&mut m, &[Ev::Gone { c: 7 }, entity(8, "a"), call]);
-        assert!(bad.iter().any(|x| x.contains("was linked enabled")), "{bad:?}");
+        let bad = run(&mut m, &[gone(7, "a"), entity(8, "a"), call]);
+        assert!(bad.iter().any(|x| x.contains("made collider 8 disabled")), "{bad:?}");
+        // (Sol's round 6: a disabled link and a matching disabled call agree with each other
+        // and with nothing the game writes.)
+        let mut m = started();
+        let mut link = set(SetFn::Entity, 8, "a");
+        (link.e0, link.on) = (None, Some(false));
+        let mut call = making(8, "a", Kind::Unit);
+        if let Ev::Tick { on, .. } = &mut call {
+            *on = Some(false);
+        }
+        let bad = run(&mut m, &[gone(7, "a"), Ev::Set(link), call]);
+        assert!(bad.iter().any(|x| x.contains("linked disabled")), "{bad:?}");
+    }
+
+    #[test]
+    fn making_intervals_do_not_interleave() {
+        // Sol's round 6: `entity(c7), entity(c8), made(c8), made(c7)` can't be written: the
+        // calls are sequential and each link is inside its own call.
+        let mut m = Lifecycle::default();
+        let bad = run(
+            &mut m,
+            &[
+                entity(7, "a"),
+                entity(8, "b"),
+                making(8, "b", Kind::Unit),
+                making(7, "a", Kind::Unit),
+            ],
+        );
+        assert!(bad.iter().any(|x| x.contains("inside the making of collider 7")), "{bad:?}");
+        // Anything written inside a making is reported, a sync included.
+        let mut m = started();
+        let bad =
+            run(&mut m, &[gone(7, "a"), entity(8, "a"), Ev::Sync, making(8, "a", Kind::Unit)]);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        let mut m = started();
+        let ok = run(&mut m, &[gone(7, "a"), entity(8, "a"), making(8, "a", Kind::Unit), Ev::Sync]);
+        assert!(ok.is_empty(), "{ok:?}");
     }
 
     #[test]
     fn an_instance_id_has_one_owner_for_good_across_kinds() {
         // Sol's round 5: a unit's making can't take a live map object's id; nor a gone one's.
         let mut m = started();
-        let bad = run(&mut m, &[Ev::Gone { c: 7 }, entity(50, "a")]);
-        assert!(
-            bad.iter().any(|x| x.contains("no record made it") || x.contains("second link")),
-            "{bad:?}"
-        );
+        let bad = run(&mut m, &[gone(7, "a"), entity(50, "a")]);
+        assert!(bad.iter().any(|x| x.contains("a second link")), "{bad:?}");
         let mut m = started();
         let bad = run(&mut m, &[root(50, Kind::Unit, Some("z"))]);
         assert!(bad.iter().any(|x| x.contains("owned already")), "{bad:?}");
         let mut m = started();
-        run(&mut m, &[Ev::Gone { c: 7 }]);
-        let mut end = Vec::new();
-        m.frame(&mut end);
+        run(&mut m, &[gone(7, "a")]);
+        m.frame(&mut Vec::new());
         let bad = run(&mut m, &[entity(7, "a")]);
         assert!(!bad.is_empty(), "a destroyed collider's id isn't reused");
         // A map object's creation link twice, across frames or late.
@@ -515,63 +728,143 @@ mod tests {
     }
 
     #[test]
+    fn a_map_objects_collider_keeps_its_radius_and_transform() {
+        // Sol's round 6: `TickEntity` resizes and moves a unit's collider only.
+        let mut m = started();
+        let other = |r: f32, pos: V3| Ev::Tick {
+            entity: "obj",
+            kind: Kind::Other,
+            kind_name: "MapObjectEntityData",
+            made: false,
+            c: Some(50),
+            r0: Some(0.5),
+            r: Some(r),
+            pos: Some(pos),
+            on: Some(true),
+        };
+        assert!(run(&mut m, &[other(0.5, P)]).is_empty());
+        assert_eq!(run(&mut m, &[other(99.0, P)]).len(), 1);
+        assert_eq!(run(&mut m, &[other(0.5, Q)]).len(), 1);
+        // (A unit's does change.)
+        let mut unit = tick(7, "a");
+        if let Ev::Tick { r, pos, .. } = &mut unit {
+            (*r, *pos) = (Some(0.9), Some(Q));
+        }
+        assert!(run(&mut m, &[unit]).is_empty());
+    }
+
+    #[test]
+    fn every_set_record_is_checked_in_all_its_fields() {
+        // Sol's round 6: `active`, `pos` and `gone` carry the collider's state and its link.
+        let mut m = started();
+        assert!(run(&mut m, &[Ev::Set(set(SetFn::Active, 7, "a"))]).is_empty());
+        let mut m = started();
+        assert!(run(&mut m, &[Ev::Set(set(SetFn::Pos, 7, "a"))]).is_empty());
+        let mut m = started();
+        assert!(run(&mut m, &[Ev::Set(set(SetFn::Link, 7, "a"))]).is_empty());
+        for f in [SetFn::Active, SetFn::Pos, SetFn::Gone, SetFn::Link] {
+            for (field, why) in [
+                ("v", "`v`"),
+                ("e0", "`e0`"),
+                ("on0", "`on0`"),
+                ("pos0", "`pos0`"),
+                ("on", "`on`"),
+                ("pos", "`pos`"),
+                ("e", "`e`"),
+            ] {
+                let mut r = set(f, 7, "a");
+                match field {
+                    "v" => r.v = Some("b"),
+                    "e0" => r.e0 = Some("b"),
+                    "e" => r.e = r.e.map_or(Some("b"), |_| None),
+                    "on0" => r.on0 = Some(false),
+                    "on" => r.on = r.on.map_or(Some(true), |x| Some(!x)),
+                    "pos0" => r.pos0 = Some([9.0; 3]),
+                    _ => r.pos = r.pos.map_or(Some([9.0; 3]), |_| None),
+                }
+                let mut m = started();
+                let out = run(&mut m, &[Ev::Set(r)]);
+                assert!(!out.is_empty(), "{f:?} {field} {why}: nothing reported");
+            }
+        }
+    }
+
+    #[test]
     fn a_link_record_is_checked_against_the_colliders_whole_state() {
-        let link = |on0, on, pos0, pos| Ev::Link {
-            c: Some(7),
+        let mut m = started();
+        let ok = run(&mut m, &[Ev::Set(set(SetFn::Link, 7, "a"))]);
+        assert!(ok.is_empty(), "{ok:?}");
+        // The view's data is the collider's entity (Sol's round 6).
+        let mut r = set(SetFn::Link, 7, "a");
+        r.v = Some("b");
+        assert_eq!(run(&mut m, &[Ev::Set(r)]).len(), 1);
+        // An unlink or relink is not modelled.
+        let mut r = set(SetFn::Link, 7, "a");
+        r.e = None;
+        assert!(!run(&mut m, &[Ev::Set(r)]).is_empty());
+        // A null-collider link says the view has none, with every field null and `v` set.
+        let none = SetRec {
+            f: SetFn::Link,
             v: Some("a"),
-            e0: Some("a"),
-            e: Some("a"),
-            on0,
-            on,
-            pos0,
-            pos,
+            c: None,
+            on0: None,
+            on: None,
+            pos0: None,
+            pos: None,
+            e0: None,
+            e: None,
+        };
+        assert_eq!(run(&mut m, &[Ev::Set(none)]).len(), 1);
+        let nobody = SetRec { v: Some("nobody"), ..none };
+        assert!(run(&mut m, &[Ev::Set(nobody)]).is_empty());
+        for bad in [
+            SetRec { on: Some(true), ..nobody },
+            SetRec { on0: Some(true), ..nobody },
+            SetRec { pos: Some(P), ..nobody },
+            SetRec { pos0: Some(P), ..nobody },
+            SetRec { e: Some("a"), ..nobody },
+            SetRec { e0: Some("a"), ..nobody },
+            SetRec { v: None, ..nobody },
+        ] {
+            assert_eq!(run(&mut m, &[Ev::Set(bad)]).len(), 1, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_entity_record_carries_the_colliders_state() {
+        // Sol's round 6: the same-to-same setter shows `enabled` and the position, not nulls.
+        let same = |on: Option<bool>, pos: Option<V3>| {
+            Ev::Set(SetRec { on, pos, ..set(SetFn::Entity, 7, "a") })
         };
         let mut m = started();
-        assert!(run(&mut m, &[link(Some(true), Some(true), Some(P), Some(P))]).is_empty());
-        // Sol's round 5: a disabled collider at [99,0,0] claimed for an enabled one at P.
+        assert!(run(&mut m, &[same(Some(true), Some(P))]).is_empty());
         for bad in [
-            link(Some(false), Some(false), Some([99.0, 0.0, 0.0]), Some([99.0, 0.0, 0.0])),
-            link(Some(true), Some(true), Some(P), Some([99.0, 0.0, 0.0])),
-            link(Some(true), Some(false), Some(P), Some(P)),
-            link(None, None, None, None),
+            same(None, Some(P)),
+            same(Some(true), None),
+            same(Some(false), Some(P)),
+            same(Some(true), Some(Q)),
         ] {
-            let out = run(&mut m, &[bad]);
-            assert_eq!(out.len(), 1, "{out:?}");
+            assert!(!run(&mut m, &[bad]).is_empty());
         }
-        // A relink or unlink is not modelled; a null-collider link says the view has none.
-        let unlink = Ev::Link {
-            c: Some(7),
-            v: Some("a"),
-            e0: Some("a"),
-            e: None,
-            on0: Some(true),
-            on: Some(true),
-            pos0: Some(P),
-            pos: Some(P),
+        // The creation's link needs both too, and `v`, `on0`, `pos0` null.
+        let mut m = started();
+        let create = |f: &dyn Fn(&mut SetRec<'_>)| {
+            let mut r = set(SetFn::Entity, 8, "a");
+            r.e0 = None;
+            f(&mut r);
+            r
         };
-        assert_eq!(run(&mut m, &[unlink]).len(), 1);
-        let none = Ev::Link {
-            c: None,
-            v: Some("a"),
-            e0: None,
-            e: None,
-            on0: None,
-            on: None,
-            pos0: None,
-            pos: None,
-        };
-        assert_eq!(run(&mut m, &[none]).len(), 1);
-        let other = Ev::Link {
-            c: None,
-            v: Some("nobody"),
-            e0: None,
-            e: None,
-            on0: None,
-            on: None,
-            pos0: None,
-            pos: None,
-        };
-        assert!(run(&mut m, &[other]).is_empty());
+        let bad = run(&mut m, &[gone(7, "a"), Ev::Set(create(&|r| r.pos = None))]);
+        assert!(!bad.is_empty());
+        for f in [
+            (&|r: &mut SetRec<'_>| r.v = Some("a")) as &dyn Fn(&mut SetRec<'_>),
+            &|r| r.on0 = Some(true),
+            &|r| r.pos0 = Some(P),
+            &|r| r.on = None,
+        ] {
+            let mut m = started();
+            assert!(!run(&mut m, &[gone(7, "a"), Ev::Set(create(f))]).is_empty());
+        }
     }
 
     #[test]
@@ -582,13 +875,19 @@ mod tests {
         if let Ev::Tick { r0, .. } = &mut wrong_r {
             *r0 = Some(0.9);
         }
+        let mut wrong_on = set(SetFn::Active, 7, "a");
+        wrong_on.on0 = Some(false);
+        let mut wrong_pos = set(SetFn::Pos, 7, "a");
+        wrong_pos.pos0 = Some([9.0; 3]);
+        let mut unknown = set(SetFn::Pos, 99, "a");
+        unknown.c = Some(99);
         for (bad, why) in [
             (tick(7, "b"), "bound to"),
             (tick(99, "a"), "no record made"),
             (wrong_r, "radius before"),
-            (Ev::Active { c: 7, on0: false, on: true }, "says it was enabled"),
-            (Ev::Pos { c: 7, pos0: [9.0; 3], pos: P }, "says it was at"),
-            (Ev::Pos { c: 99, pos0: P, pos: P }, "no record made"),
+            (Ev::Set(wrong_on), "`on0`"),
+            (Ev::Set(wrong_pos), "`pos0`"),
+            (Ev::Set(unknown), "no record made"),
         ] {
             let out = run(&mut m, &[bad]);
             assert!(out.iter().any(|x| x.contains(why)), "{why}: {out:?}");
@@ -597,6 +896,7 @@ mod tests {
         let none = Ev::Tick {
             entity: "a",
             kind: Kind::Unit,
+            kind_name: "UnitEntityData",
             made: false,
             c: None,
             r0: None,
@@ -608,6 +908,7 @@ mod tests {
         let free = Ev::Tick {
             entity: "free",
             kind: Kind::Unit,
+            kind_name: "UnitEntityData",
             made: false,
             c: None,
             r0: None,
@@ -617,43 +918,22 @@ mod tests {
         };
         assert!(run(&mut m, &[free]).is_empty());
         // The writes and calls of the live collider update its state.
-        assert!(
-            run(
-                &mut m,
-                &[
-                    Ev::Active { c: 7, on0: true, on: false },
-                    Ev::Pos { c: 7, pos0: P, pos: [5.0; 3] },
-                ]
-            )
-            .is_empty()
-        );
-        let mut off = tick(7, "a");
-        if let Ev::Tick { on, pos, .. } = &mut off {
-            (*on, *pos) = (Some(false), Some([5.0; 3]));
-        }
-        assert!(run(&mut m, &[off]).is_empty());
+        let mut pos = set(SetFn::Pos, 7, "a");
+        pos.on0 = Some(false);
+        pos.on = Some(false);
+        let out = run(&mut m, &[Ev::Set(set(SetFn::Active, 7, "a")), Ev::Set(pos)]);
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]
     fn a_collider_being_made_takes_nothing_until_its_call() {
         let mut m = started();
-        run(&mut m, &[Ev::Gone { c: 7 }, entity(8, "a")]);
-        // Linked, not made: a write, a call without a collider, a link, a second root all find it.
-        let none = Ev::Tick {
-            entity: "a",
-            kind: Kind::Unit,
-            made: false,
-            c: None,
-            r0: None,
-            r: None,
-            pos: None,
-            on: None,
-        };
+        run(&mut m, &[gone(7, "a"), entity(8, "a")]);
+        // Linked, not made: each write finds it Linking (and the making interval open).
         for (bad, why) in [
-            (Ev::Active { c: 8, on0: true, on: false }, "Linking"),
-            (Ev::Pos { c: 8, pos0: P, pos: P }, "Linking"),
-            (Ev::Gone { c: 8 }, "Linking"),
-            (none, "is its view collider"),
+            (Ev::Set(set(SetFn::Active, 8, "a")), "Linking"),
+            (Ev::Set(set(SetFn::Pos, 8, "a")), "Linking"),
+            (gone(8, "a"), "Linking"),
             (root(8, Kind::Unit, Some("a")), "owned already"),
         ] {
             let out = run(&mut m, &[bad]);
@@ -663,5 +943,16 @@ mod tests {
         let mut m = Lifecycle::default();
         let out = run(&mut m, &[root(1, Kind::Unit, Some("a")), root(2, Kind::Unit, Some("a"))]);
         assert_eq!(out.len(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn an_entity_keeps_its_type_in_the_records() {
+        let mut m = started();
+        let mut call = making(8, "a", Kind::Other);
+        if let Ev::Tick { kind_name, .. } = &mut call {
+            *kind_name = "MapObjectEntityData";
+        }
+        let bad = run(&mut m, &[gone(7, "a"), entity(8, "a"), call]);
+        assert!(bad.iter().any(|x| x.contains("is a UnitEntityData and a")), "{bad:?}");
     }
 }

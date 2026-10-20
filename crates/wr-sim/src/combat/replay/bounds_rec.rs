@@ -30,7 +30,7 @@ use crate::combat::vision::range::{
 use crate::world::{EntityIdx, World};
 
 use super::Driver;
-use super::bounds_life::{Ev, Kind, Lifecycle};
+use super::bounds_life::{Ev, Kind, Lifecycle, SetFn, SetRec};
 
 /// The observers installed together (WrathOracle's `BoundsOn`).
 const FAMILY: [&str; 5] = ["bounds_init", "bounds_tick", "bounds_set", "bounds_scene", "phys_sync"];
@@ -43,9 +43,20 @@ const RECORDS: [&str; 6] =
 const FAMILY_RECORDS: [&str; 5] =
     ["bounds_init", "bounds_init_end", "bounds_tick", "bounds_set", "phys_sync"];
 
+/// The callers of `Physics.SyncTransforms()` the oracle taps (CommandObsBounds.cs), and DollRoom's
+/// `Simulate`.
+const SYNC_SOURCES: [&str; 5] = [
+    "Polymorph.RestoreView",
+    "UnitPlaceOnGroundController.Tick",
+    "GameActionSetIsleState.RunAction",
+    "IsleStateControllerView.ResetAllIslands",
+    "DollRoom.Update",
+];
+
 const UNIT_KIND: &str = "UnitEntityData";
-/// `Layers.SphereBoundsUnit`.
+/// `Layers.SphereBoundsUnit`, and `Layers.SphereBoundsObject` of every other entity's.
 const UNIT_LAYER: i32 = 23;
+const OBJECT_LAYER: i32 = 24;
 
 /// One root of the entity-bounds scene at the window's first tick.
 #[derive(Debug, Clone)]
@@ -78,37 +89,17 @@ struct TickRaw {
 /// A record the replay reaches in stream order.
 #[derive(Debug, Clone, PartialEq)]
 enum Stream {
-    Active {
-        c: i32,
-        on0: bool,
-        on: bool,
-    },
-    Pos {
-        c: i32,
-        pos0: V3,
-        pos: V3,
-    },
-    Gone {
-        c: i32,
-    },
-    /// `SetupSphereColliderEntityLink`: the view's collider relinked (`c` null: the view has none).
-    Link {
-        c: Option<i32>,
+    /// A `bounds_set` with every field it carries.
+    Set {
+        f: SetFn,
         v: Option<String>,
-        e0: Option<String>,
-        e: Option<String>,
+        c: Option<i32>,
         on0: Option<bool>,
         on: Option<bool>,
         pos0: Option<V3>,
         pos: Option<V3>,
-    },
-    /// `EntityDataLink.Entity`'s setter (`on`, `pos`: the link's own collider).
-    Entity {
-        c: i32,
         e0: Option<String>,
         e: Option<String>,
-        on: Option<bool>,
-        pos: Option<V3>,
     },
     Sync,
 }
@@ -298,11 +289,14 @@ fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec
     // controllers).
     let mut vis_units: HashSet<String> = HashSet::new();
     let mut first_order: HashMap<i64, usize> = HashMap::new();
+    let mut first_vis: HashMap<i64, usize> = HashMap::new();
+    let mut vision_seen = false;
     let mut init_place: Option<(i64, usize)> = None;
     for (at, r) in records.iter().enumerate() {
         if r["k"] == "tick" {
             frame = r["t"].as_i64();
             order_seen = false;
+            vision_seen = false;
             vis_units.clear();
             continue;
         }
@@ -310,9 +304,14 @@ fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec
             continue;
         }
         let Some(ev) = r["ev"].as_str() else { continue };
-        if orders && ev == "vis" {
+        if (orders || family) && ev == "vis" {
+            // (The vision controller follows the bounds controller whatever is declared.)
             if let Some(u) = r["u"].as_str() {
                 vis_units.insert(u.to_owned());
+            }
+            vision_seen = true;
+            if let Some(f) = frame {
+                first_vis.entry(f).or_insert(at);
             }
             continue;
         }
@@ -337,9 +336,9 @@ fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec
                         "{prefix}: a bounds_tick (seq {seq:?}) before bounds_init_end"
                     ));
                 }
-                if order_seen {
+                if order_seen || vision_seen {
                     into.push(format!(
-                        "{prefix}: a bounds_tick (seq {seq:?}) after the frame's vis_order records (the bounds controller precedes the vision controller)"
+                        "{prefix}: a bounds_tick (seq {seq:?}) after the frame's vis or vis_order records (the bounds controller precedes the vision controller)"
                     ));
                 }
                 tick_seen = true;
@@ -368,12 +367,17 @@ fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec
             _ => {}
         }
     }
-    if let Some((f, end_at)) = init_place
-        && first_order.get(&f).is_some_and(|o| *o < end_at)
-    {
-        ord.push(format!(
-            "vis_order: a record of tick {f} stands before the bounds_init block (written at the frame's prefix, before the controllers)"
-        ));
+    if let Some((f, end_at)) = init_place {
+        if first_order.get(&f).is_some_and(|o| *o < end_at) {
+            ord.push(format!(
+                "vis_order: a record of tick {f} stands before the bounds_init block (written at the frame's prefix, before the controllers)"
+            ));
+        }
+        if first_vis.get(&f).is_some_and(|o| *o < end_at) {
+            fam.push(format!(
+                "bounds records: a vis record of tick {f} stands before the bounds_init block (written at the frame's prefix, before the controllers)"
+            ));
+        }
     }
     (fam, ord)
 }
@@ -458,26 +462,21 @@ fn parse_init(records: &[Rv], rec: &mut BoundsRec, out: &mut Parsed) {
                 if !ids.insert(root.id) {
                     bad(out, format!("two bounds_init roots with instance id {}", root.id));
                 }
-                if root.kind.as_deref() == Some(UNIT_KIND)
-                    && (root.e.is_none()
-                        || root.r.is_none_or(|r| r <= 0.0)
-                        || root.on.is_none()
-                        || root.layer != UNIT_LAYER)
+                // Every root of the scene is a collider `SetupSphereBoundsCollider` made: a radius of
+                // at least 0.05, an `enabled` flag, the units' layer for a unit's and the objects'
+                // for any other, and a unit's has its entity.
+                let unit = root.kind.as_deref() == Some(UNIT_KIND);
+                if root.kind.is_none()
+                    || root.r.is_none_or(|r| r < 0.05)
+                    || root.on.is_none()
+                    || (unit && root.e.is_none())
+                    || root.layer != if unit { UNIT_LAYER } else { OBJECT_LAYER }
                 {
                     bad(
                         out,
                         format!(
-                            "the bounds_init root {} of a unit lacks its entity, radius, enabled flag or has another layer",
-                            root.id
-                        ),
-                    );
-                }
-                if root.kind.as_deref() != Some(UNIT_KIND) && root.layer == UNIT_LAYER {
-                    bad(
-                        out,
-                        format!(
-                            "the bounds_init root {} is on the units' layer and no unit's",
-                            root.id
+                            "the bounds_init root {} isn't a collider the game makes (kind {:?}, radius {:?}, enabled {:?}, layer {}, entity {:?})",
+                            root.id, root.kind, root.r, root.on, root.layer, root.e
                         ),
                     );
                 }
@@ -611,8 +610,9 @@ fn parse_stream(records: &[Rv], rec: &mut BoundsRec, out: &mut Parsed) {
             continue;
         }
         let s = if ev == "phys_sync" {
-            (keys_are(r, &["seq", "k", "t", "ev", "src"], &[]) && r["src"].is_string())
-                .then_some(Stream::Sync)
+            (keys_are(r, &["seq", "k", "t", "ev", "src"], &[])
+                && r["src"].as_str().is_some_and(|x| SYNC_SOURCES.contains(&x)))
+            .then_some(Stream::Sync)
         } else {
             parse_set(r)
         };
@@ -628,7 +628,8 @@ fn parse_stream(records: &[Rv], rec: &mut BoundsRec, out: &mut Parsed) {
     }
 }
 
-/// A `bounds_set` record.
+/// A `bounds_set` record, every field kept (`fn` and the types are checked here, the values by
+/// the lifecycle machine).
 fn parse_set(r: &Rv) -> Option<Stream> {
     if !keys_are(
         r,
@@ -637,34 +638,25 @@ fn parse_set(r: &Rv) -> Option<Stream> {
     ) {
         return None;
     }
-    let v = nullable(&r["v"], string)?;
-    let c = nullable(&r["c"], int32)?;
-    let on0 = nullable(&r["on0"], |v| v.as_bool())?;
-    let on = nullable(&r["on"], |v| v.as_bool())?;
-    let pos0 = nullable(&r["pos0"], vec3)?;
-    let pos = nullable(&r["pos"], vec3)?;
-    let e0 = nullable(&r["e0"], string)?;
-    let e = nullable(&r["e"], string)?;
-    // `ColliderOf` writes a view's collider state: without a collider (`c` null) every field of
-    // it is null.
-    if c.is_none()
-        && (on0.is_some()
-            || on.is_some()
-            || pos0.is_some()
-            || pos.is_some()
-            || e0.is_some()
-            || e.is_some())
-    {
-        return None;
-    }
-    match r["fn"].as_str()? {
-        "active" => Some(Stream::Active { c: c?, on0: on0?, on: on? }),
-        "pos" => Some(Stream::Pos { c: c?, pos0: pos0?, pos: pos? }),
-        "gone" => Some(Stream::Gone { c: c? }),
-        "link" => Some(Stream::Link { c, v, e0, e, on0, on, pos0, pos }),
-        "entity" => Some(Stream::Entity { c: c?, e0, e, on, pos }),
-        _ => None,
-    }
+    let f = match r["fn"].as_str()? {
+        "active" => SetFn::Active,
+        "pos" => SetFn::Pos,
+        "gone" => SetFn::Gone,
+        "link" => SetFn::Link,
+        "entity" => SetFn::Entity,
+        _ => return None,
+    };
+    Some(Stream::Set {
+        f,
+        v: nullable(&r["v"], string)?,
+        c: nullable(&r["c"], int32)?,
+        on0: nullable(&r["on0"], |v| v.as_bool())?,
+        on: nullable(&r["on"], |v| v.as_bool())?,
+        pos0: nullable(&r["pos0"], vec3)?,
+        pos: nullable(&r["pos"], vec3)?,
+        e0: nullable(&r["e0"], string)?,
+        e: nullable(&r["e"], string)?,
+    })
 }
 
 /// The units whose collider is on a fade-hiding view in `roots` (`resolve`: the sim's unit of an id).
@@ -741,6 +733,52 @@ fn order_keys(order: &[EntityIdx], hits: &[Hit]) -> (Vec<Option<i32>>, Vec<Entit
         });
     }
     (keys, ambiguous)
+}
+
+/// A `bounds_init` root as the machine takes it.
+fn root_event(root: &Root) -> Ev<'_> {
+    Ev::Root {
+        id: root.id,
+        kind: if root.kind.as_deref() == Some(UNIT_KIND) { Kind::Unit } else { Kind::Other },
+        kind_name: root.kind.as_deref().unwrap_or(""),
+        entity: root.e.as_deref(),
+        on: root.on.unwrap_or(false),
+        radius: root.r.unwrap_or(0.0),
+        pos: root.pos,
+    }
+}
+
+/// A `bounds_tick` as the machine takes it.
+fn tick_event(t: &TickRaw) -> Ev<'_> {
+    Ev::Tick {
+        entity: &t.e,
+        kind: if t.kind == UNIT_KIND { Kind::Unit } else { Kind::Other },
+        kind_name: &t.kind,
+        made: t.made,
+        c: t.c,
+        r0: t.r0,
+        r: t.r,
+        pos: t.pos,
+        on: t.on,
+    }
+}
+
+/// A stream record as the machine takes it.
+fn stream_event(s: &Stream) -> Ev<'_> {
+    match s {
+        Stream::Sync => Ev::Sync,
+        Stream::Set { f, v, c, on0, on, pos0, pos, e0, e } => Ev::Set(SetRec {
+            f: *f,
+            v: v.as_deref(),
+            c: *c,
+            on0: *on0,
+            on: *on,
+            pos0: *pos0,
+            pos: *pos,
+            e0: e0.as_deref(),
+            e: e.as_deref(),
+        }),
+    }
 }
 
 impl Driver<'_> {
@@ -896,53 +934,25 @@ impl Driver<'_> {
         q: &Queued,
         late: bool,
     ) -> Option<Event> {
-        let s = |x: &Option<String>| x.clone();
-        let (c, write, ev) = match &q.s {
-            Stream::Active { c, on0, on } => (
-                *c,
-                Write::Active { id: *c, on0: *on0, on: *on },
-                Ev::Active { c: *c, on0: *on0, on: *on },
-            ),
-            Stream::Pos { c, pos0, pos } => (
-                *c,
-                Write::Pos { id: *c, pos0: *pos0, pos: *pos },
-                Ev::Pos { c: *c, pos0: *pos0, pos: *pos },
-            ),
-            Stream::Gone { c } => (*c, Write::Gone { id: *c }, Ev::Gone { c: *c }),
-            Stream::Sync => return Some(Event { seq: q.seq, write: Write::Sync, late }),
-            Stream::Link { c, v, e0, e, on0, on, pos0, pos } => {
-                let (v, e0, e) = (s(v), s(e0), s(e));
-                self.vis.counts.rec.links += 1;
-                self.bounds_rec_life(
-                    w,
-                    rec,
-                    Ev::Link {
-                        c: *c,
-                        v: v.as_deref(),
-                        e0: e0.as_deref(),
-                        e: e.as_deref(),
-                        on0: *on0,
-                        on: *on,
-                        pos0: *pos0,
-                        pos: *pos,
-                    },
-                );
-                return None;
-            }
-            Stream::Entity { c, e0, e, on, pos } => {
-                let (e0, e) = (s(e0), s(e));
-                self.vis.counts.rec.links += 1;
-                self.bounds_rec_life(
-                    w,
-                    rec,
-                    Ev::Entity { c: *c, e0: e0.as_deref(), e: e.as_deref(), on: *on, pos: *pos },
-                );
-                return None;
-            }
+        let Stream::Set { f, c, on0, on, pos0, pos, .. } = &q.s else {
+            self.bounds_rec_life(w, rec, stream_event(&q.s));
+            return Some(Event { seq: q.seq, write: Write::Sync, late });
         };
-        let ok = self.bounds_rec_life(w, rec, ev);
+        let ok = self.bounds_rec_life(w, rec, stream_event(&q.s));
+        if matches!(f, SetFn::Link | SetFn::Entity) {
+            self.vis.counts.rec.links += 1;
+            return None;
+        }
+        let c = (*c)?;
         match rec.life.kind_of(c) {
-            Some(Kind::Unit) if ok => Some(Event { seq: q.seq, write, late }),
+            Some(Kind::Unit) if ok => {
+                let write = match f {
+                    SetFn::Active => Write::Active { id: c, on0: (*on0)?, on: (*on)? },
+                    SetFn::Pos => Write::Pos { id: c, pos0: (*pos0)?, pos: (*pos)? },
+                    _ => Write::Gone { id: c },
+                };
+                Some(Event { seq: q.seq, write, late })
+            }
             Some(Kind::Other) => {
                 self.vis.counts.rec.other_writes += 1;
                 None
@@ -987,20 +997,7 @@ impl Driver<'_> {
         t: &TickRaw,
     ) -> Option<RecTick> {
         let kind = if t.kind == UNIT_KIND { Kind::Unit } else { Kind::Other };
-        let ok = self.bounds_rec_life(
-            w,
-            rec,
-            Ev::Tick {
-                entity: &t.e,
-                kind,
-                made: t.made,
-                c: t.c,
-                r0: t.r0,
-                r: t.r,
-                pos: t.pos,
-                on: t.on,
-            },
-        );
+        let ok = self.bounds_rec_life(w, rec, tick_event(t));
         if kind == Kind::Other {
             self.vis.counts.rec.other_ticks += 1;
             return None;
@@ -1051,18 +1048,7 @@ impl Driver<'_> {
             self.vis.consume_record(root.seq);
             let kind =
                 if root.kind.as_deref() == Some(UNIT_KIND) { Kind::Unit } else { Kind::Other };
-            ok &= self.bounds_rec_life(
-                w,
-                rec,
-                Ev::Root {
-                    id: root.id,
-                    kind,
-                    entity: root.e.as_deref(),
-                    on: root.on.unwrap_or(false),
-                    radius: root.r.unwrap_or(0.0),
-                    pos: root.pos,
-                },
-            );
+            ok &= self.bounds_rec_life(w, rec, root_event(&root));
             if kind == Kind::Other {
                 self.vis.counts.rec.other_roots += 1;
                 continue;
@@ -1373,11 +1359,11 @@ mod tests {
                 ],
             ),
             (
-                "a set that does not fit",
+                "a set of a function the oracle does not write",
                 vec![
                     init(0, 0, -8, "a"),
                     end(1, 1),
-                    rv(json!({"seq": 2, "k": "obs", "t": 5, "ev": "bounds_set", "fn": "active",
+                    rv(json!({"seq": 2, "k": "obs", "t": 5, "ev": "bounds_set", "fn": "teleport",
                     "v": "a", "c": null, "on0": true, "on": false, "pos0": null, "pos": null, "e0": "a", "e": "a"})),
                 ],
             ),
@@ -1454,7 +1440,7 @@ mod tests {
         let wrong = framed(vec![init(0, 0, -8, "a"), end(1, 1), order(2, 0), tick(3, 0)]);
         let p = parse(&wrong, &ALL);
         assert!(
-            p.problems.iter().any(|x| x.contains("after the frame's vis_order")),
+            p.problems.iter().any(|x| x.contains("after the frame's vis or vis_order")),
             "{:?}",
             p.problems
         );
@@ -1564,35 +1550,6 @@ mod tests {
         assert_eq!(g.add(&[1, 4]), Some((1, 4)));
     }
 
-    #[test]
-    fn a_link_with_no_collider_carries_no_collider_state() {
-        // `ColliderOf` writes null for every field without a collider.
-        let link = |c: serde_json::Value, extra: serde_json::Value| {
-            let mut v = json!({"seq": 1, "k": "obs", "t": 5, "ev": "bounds_set", "fn": "link",
-                "v": "a", "c": c, "on0": null, "on": null, "pos0": null, "pos": null,
-                "e0": null, "e": null});
-            for (k, x) in extra.as_object().unwrap() {
-                v[k] = x.clone();
-            }
-            rv(v)
-        };
-        assert!(parse_set(&link(json!(null), json!({}))).is_some());
-        for bad in [
-            json!({"on": true}),
-            json!({"on0": false}),
-            json!({"pos": [1.0, 2.0, 3.0]}),
-            json!({"pos0": [1.0, 2.0, 3.0]}),
-            json!({"e": "a"}),
-            json!({"e0": "a"}),
-        ] {
-            assert!(parse_set(&link(json!(null), bad.clone())).is_none(), "{bad}");
-        }
-        // With a collider they are its state.
-        let with = json!({"on": true, "on0": true, "pos": [1.0, 2.0, 3.0], "pos0": [1.0, 2.0, 3.0],
-            "e0": "a", "e": "a"});
-        assert!(parse_set(&link(json!(-8), with)).is_some());
-    }
-
     fn hit(unit: u32, id: i32, tri: Tri) -> Hit {
         Hit {
             unit: EntityIdx(unit),
@@ -1639,3 +1596,6 @@ mod tests {
         assert_eq!(g.add(&ids), Some((8, 9)));
     }
 }
+
+#[cfg(test)]
+mod table;

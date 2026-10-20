@@ -450,6 +450,63 @@ The recorded orders are derived from it: each frame, for each awake observer, it
 unit by the one collider the query may have hit (`Hit::id`), and the pairs must have no cycle, however far apart the records are;
 a unit with several colliders that may be hit can't be tied to one and is reported (counted), not dropped.
 
+**The fields: every record family, every field (`replay/bounds_life.rs`, `bounds_rec.rs`; the test
+`bounds_rec/table.rs` perturbs each field of a valid synthetic trace alone and requires a report, but for the rows marked taken).**
+What the oracle writes is from `CommandObsBounds.cs` (`ColliderOf` writes `enabled`/transform/link of a view's collider, null for
+all of them without one). "State" is the collider's state in the machine (`enabled`, transform, radius, entity).
+
+| record | field | the oracle writes | the checker |
+|---|---|---|---|
+| `bounds_init` | `i` | the root's index | contiguous from 0 |
+| | `id` | the GameObject's instance id | one owner for good, across kinds |
+| | `layer` | 23 for a unit's collider, 24 for any other's | required |
+| | `e`, `kind` | the linked entity's id and type name | a unit's has `e`; an entity keeps one type; later records agree |
+| | `r` | the collider's radius (at least 0.05) | required, finite, at least 0.05; becomes the state: the next call's `r0` must equal it |
+| | `on` | `enabled` | required; becomes the state |
+| | `pos` | the transform | a unit's: equal to the unit's position at the previous frame's end (the driver); another's: becomes the state, a later call must keep it |
+| | `fade` | the view's `m_IsFadeHide` | **taken**: marks a unit fade-hiding (no state of the sim to compare) |
+| `bounds_init_end` | `n`, `valid` | the roots' count, the scene's validity | equal to the count; true |
+| `bounds_tick` | `e`, `kind`, `c` | the entity, its type, the collider after the call | the entity's view collider, live, of that type |
+| | `made` | the call created the collider | needs the creation's link before it, after the previous collider's `gone` |
+| | `r0` | the radius before | null when made, else equal to the state |
+| | `r` | the radius after | making: at least 0.05 (a unit's also the sim's rule in `Bounds`); a unit's later call: the sim's rule; **another kind's: taken when made** (its bounds' extent), equal to the state after |
+| | `pos` | the transform after | a unit's: the sim's `Vector3 ==` rule (`Bounds`); another's: equal to the state; **taken when made** (the call sets the view's transform) |
+| | `on` | `enabled` after | making: true (`SetupSphereBoundsCollider` adds an enabled collider, a hidden entity's too) and equal to the link's; else equal to the state |
+| | `x` | an exception | absent |
+| `bounds_set` `active` | `v`, `e0`, `e` | the view's data and the link before and after | all the collider's entity |
+| | `c`, `on0`, `on` | the collider; `enabled` before and after | the view's collider, live; `on0` the state, `on` the other value (written only when changed) |
+| | `pos0`, `pos` | the transform before and after | both the state |
+| `bounds_set` `pos` | `v`, `e0`, `e`; `c`; `pos0`, `pos`; `on0`, `on` | likewise | entity as above; `pos0` the state and `pos` a changed position; `on0` and `on` the state |
+| `bounds_set` `gone` | `v`, `e0`; `c`; `on0`, `pos0` | the view, the link before; the collider; its state before | the entity; the view's live collider; the state |
+| | `e`, `on`, `pos` | null: the view's collider is cleared when `ColliderOf` reads it again | required null |
+| `bounds_set` `link` (a collider) | `v`, `e0`, `e` | the view's data, the link before and after | all the collider's entity (an unlink or relink is not modelled: reported) |
+| | `c`, `on0`, `on`, `pos0`, `pos` | the collider and its state | the view's collider; `on0` and `on` and `pos0` and `pos` the state |
+| `bounds_set` `link` (no collider) | `v` | the view's data | set; the entity must have no view collider |
+| | `c`, `on0`, `on`, `pos0`, `pos`, `e0`, `e` | null | required null |
+| `bounds_set` `entity`, creation | `c`, `e0`, `e` | the new collider, null, the entity | a new id; null; the entity, which has no view collider; inside the making interval |
+| | `on` | `enabled` | true |
+| | `pos` | the view's transform | **taken** (the call sets the transform right after) |
+| | `v`, `on0`, `pos0` | null | required null |
+| `bounds_set` `entity`, no change | `e0`, `e`; `on`, `pos` | the entity twice; the collider's state | equal to the collider's entity; both required, equal to the state |
+| `phys_sync` | `src` | the tapped caller | one of the five |
+| `vis_order` | `u`, `v` | the observer, its set's order | `u`: an awake unit with one record per frame (the driver); `v`: a permutation of its `vis` set (the driver), no cycle among the colliders' pairs |
+
+Placement, whichever optional observers are declared: every family record stands after the `tick` record of the frame it
+names; the init block comes first in its frame (a `vis` or `vis_order` before it is refused); a frame's `bounds_tick` calls come
+before its first `vis` or `vis_order` (the bounds controller precedes the vision controller); a making's `entity` record is
+inside the call, so nothing else (another creation, a call, a write, a sync) stands between it and the call's own record; making
+intervals therefore don't interleave; a unit's `vis_order` stands before its `vis`. Taken or checked outside the machine, as
+the table says: a root's `fade`, a unit's transform and radius after a call (the sim's rule), the making call's transform, a
+map object's radius at its making, the creation link's position.
+
+What building the table turned up (each now closed): a root's `kind` string was reduced to unit or not, so a map object's type could
+change unreported (an entity now keeps its type name across roots, calls and makings); a root with no radius or `enabled`, or a
+non-unit on the units' layer or a unit off it, was not refused for every kind; `phys_sync`'s `src` was any string (now one of the
+five callers the oracle taps); a non-unit collider's call could change its radius and transform (the game leaves them); a
+making could be disabled or under the 0.05 minimum; `active`, `pos`, `gone` and `link` records had fields discarded at parse
+(`v`, `e0`, `e`, `on0`, `pos0` and the changed value) and an `entity` record's `enabled` and position could be null; `vis`
+records weren't a phase boundary unless `vis_order` was declared; making intervals could interleave.
+
 **How the records are used [C]/[M].**
 - `bounds_init` (one root per `GameObject` of the scene at the first tick of the window, before any controller of the tick, then
   `bounds_init_end {n, valid}`): `r` is each unit collider's first radius (exact: no scale band, no corpulence), `on` its `enabled`,
