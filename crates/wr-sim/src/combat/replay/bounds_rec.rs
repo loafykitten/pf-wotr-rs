@@ -93,6 +93,7 @@ enum Stream {
     /// `SetupSphereColliderEntityLink`: the view's collider relinked (`c` null: the view has none).
     Link {
         c: Option<i32>,
+        v: Option<String>,
         e0: Option<String>,
         e: Option<String>,
     },
@@ -284,16 +285,30 @@ fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec
     let mut order_seen = false;
     let mut init_end = false;
     let mut tick_seen = false;
-    for r in records {
+    // The units whose `vis` record the frame has had (the oracle writes a unit's changed order
+    // just before its `vis`), and the first `vis_order` of each frame by stream place, against the
+    // block of `bounds_init` records (written at the window's first prefix, before the
+    // controllers).
+    let mut vis_units: HashSet<String> = HashSet::new();
+    let mut first_order: HashMap<i64, usize> = HashMap::new();
+    let mut init_place: Option<(i64, usize)> = None;
+    for (at, r) in records.iter().enumerate() {
         if r["k"] == "tick" {
             frame = r["t"].as_i64();
             order_seen = false;
+            vis_units.clear();
             continue;
         }
         if r["k"] != "obs" {
             continue;
         }
         let Some(ev) = r["ev"].as_str() else { continue };
+        if orders && ev == "vis" {
+            if let Some(u) = r["u"].as_str() {
+                vis_units.insert(u.to_owned());
+            }
+            continue;
+        }
         let is_order = ev == "vis_order";
         if !((family && RECORDS.contains(&ev)) || (orders && is_order)) {
             continue;
@@ -327,10 +342,31 @@ fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec
                     "{prefix}: a bounds_init (seq {seq:?}) after the window's first call or end"
                 ));
             }
-            "bounds_init_end" => init_end = true,
-            "vis_order" => order_seen = true,
+            "bounds_init_end" => {
+                init_end = true;
+                init_place = frame.map(|f| (f, at));
+            }
+            "vis_order" => {
+                order_seen = true;
+                if r["u"].as_str().is_some_and(|u| vis_units.contains(u)) {
+                    ord.push(format!(
+                        "vis_order: the order of {} (seq {seq:?}) stands after its unit's vis record (the oracle writes it just before)",
+                        r["u"]
+                    ));
+                }
+                if let Some(f) = frame {
+                    first_order.entry(f).or_insert(at);
+                }
+            }
             _ => {}
         }
+    }
+    if let Some((f, end_at)) = init_place
+        && first_order.get(&f).is_some_and(|o| *o < end_at)
+    {
+        ord.push(format!(
+            "vis_order: a record of tick {f} stands before the bounds_init block (written at the frame's prefix, before the controllers)"
+        ));
     }
     (fam, ord)
 }
@@ -594,7 +630,7 @@ fn parse_set(r: &Rv) -> Option<Stream> {
     ) {
         return None;
     }
-    nullable(&r["v"], string)?;
+    let v = nullable(&r["v"], string)?;
     let c = nullable(&r["c"], int32)?;
     let on0 = nullable(&r["on0"], |v| v.as_bool())?;
     let on = nullable(&r["on"], |v| v.as_bool())?;
@@ -606,7 +642,7 @@ fn parse_set(r: &Rv) -> Option<Stream> {
         "active" => Some(Stream::Active { c: c?, on0: on0?, on: on? }),
         "pos" => Some(Stream::Pos { c: c?, pos0: pos0?, pos: pos? }),
         "gone" => Some(Stream::Gone { c: c? }),
-        "link" => Some(Stream::Link { c, e0, e }),
+        "link" => Some(Stream::Link { c, v, e0, e }),
         "entity" => Some(Stream::Entity { c: c?, e0, e }),
         _ => None,
     }
@@ -665,7 +701,10 @@ impl Driver<'_> {
 
     /// `EntityBoundsController.Tick`'s records of the frame (and of the frames the sim didn't
     /// follow before it), applied to the colliders; at the window's first frame they are made
-    /// from `bounds_init`.
+    /// from `bounds_init`. Each frame is replayed whole, its `bounds_tick` calls and the queued
+    /// writes in the stream's order; a frame the sim didn't follow has no step known and no
+    /// units to check, and the writes that came after an earlier frame's query open the next
+    /// frame's call.
     pub(super) fn bounds_rec_tick(
         &mut self,
         w: &mut World,
@@ -681,36 +720,60 @@ impl Driver<'_> {
             self.vis.forget_records(&FAMILY_RECORDS);
             return;
         }
-        // The frames before this one the phase didn't run in (not followed), then this frame.
+        let mut frames: BTreeMap<i64, (Vec<TickRaw>, Vec<Queued>)> = BTreeMap::new();
         let due: Vec<i64> = rec.ticks.range(..=tick).map(|(t, _)| *t).collect();
-        let mut skipped: Vec<RecTick> = Vec::new();
-        let mut now: Vec<RecTick> = Vec::new();
-        let mut made_now: Vec<(i32, EntityIdx)> = Vec::new();
         for t in due {
-            let raws = rec.ticks.remove(&t).unwrap_or_default();
-            for raw in raws {
-                self.vis.consume_record(raw.seq);
-                let Some(tr) = self.bounds_rec_unit(w, &mut rec, &raw) else { continue };
-                if tr.made
-                    && t == tick
-                    && let Some(c) = tr.id
-                {
-                    made_now.push((c, tr.unit));
-                }
-                if t == tick { now.push(tr) } else { skipped.push(tr) }
+            frames.entry(t).or_default().0 = rec.ticks.remove(&t).unwrap_or_default();
+        }
+        for q in std::mem::take(&mut rec.queue) {
+            frames.entry(q.t).or_default().1.push(q);
+        }
+        frames.entry(tick).or_default();
+        let mut carry: Vec<Event> = Vec::new();
+        let mut sync_now = false;
+        for (f, (raws, queued)) in frames {
+            let current = f == tick;
+            let (late_q, early_q): (Vec<Queued>, Vec<Queued>) =
+                queued.into_iter().partition(|q| q.late);
+            if !current && raws.is_empty() && early_q.is_empty() {
+                // A frame whose phase ran: its late writes open the next call.
+                carry.extend(self.bounds_rec_writes(w, &mut rec, late_q, &[], true));
+                continue;
             }
-        }
-        let (late, early) = self.bounds_rec_events(w, &mut rec, tick, &made_now);
-        let sync_now = early.iter().chain(&late).any(|e| e.write == Write::Sync);
-        if !skipped.is_empty() {
-            let out = w.combat.vision.bounds.tick_recorded(Step::Unknown, &[], &skipped, &[]);
+            // The colliders this frame's calls make (an `entity` record is a link of one).
+            let made: Vec<(i32, EntityIdx)> = raws
+                .iter()
+                .filter(|t| t.made && t.kind == UNIT_KIND)
+                .filter_map(|t| Some((t.c?, *w.by_id.get(&t.e)?)))
+                .collect();
+            // The calls and the writes in the stream's order.
+            let mut items: Vec<(i64, Result<TickRaw, Queued>)> = raws
+                .into_iter()
+                .map(|t| (t.seq, Ok(t)))
+                .chain(early_q.into_iter().map(|q| (q.seq, Err(q))))
+                .collect();
+            items.sort_by_key(|(seq, _)| *seq);
+            let mut ticks: Vec<RecTick> = Vec::new();
+            let mut events: Vec<Event> = std::mem::take(&mut carry);
+            for (_, item) in items {
+                match item {
+                    Ok(raw) => {
+                        self.vis.consume_record(raw.seq);
+                        ticks.extend(self.bounds_rec_unit(w, &mut rec, &raw));
+                    }
+                    Err(q) => {
+                        events.extend(self.bounds_rec_writes(w, &mut rec, vec![q], &made, false));
+                    }
+                }
+            }
+            sync_now |= events.iter().any(|e| e.write == Write::Sync);
+            let (step, units) = if current { (step, list) } else { (Step::Unknown, &[][..]) };
+            let out = w.combat.vision.bounds.tick_recorded(step, &events, &ticks, units);
             self.bounds_rec_out(w, out);
+            carry = self.bounds_rec_writes(w, &mut rec, late_q, &made, true);
         }
-        let units: &[BoundsUnit] = list;
-        let mut events = late;
-        events.extend(early);
-        let out = w.combat.vision.bounds.tick_recorded(step, &events, &now, units);
-        self.bounds_rec_out(w, out);
+        // (What came after this frame's own phase isn't queued yet.)
+        debug_assert!(carry.is_empty());
         let c = &mut self.vis.counts.rec;
         let flagged = std::mem::take(&mut w.combat.vision.explicit_sync);
         c.sync_frames += usize::from(sync_now);
@@ -721,22 +784,20 @@ impl Driver<'_> {
         self.vis.range.rec = Some(rec);
     }
 
-    /// The queued stream records as writes to the colliders: those of earlier frames and those
-    /// that came after their frame's phase are `late`, the others `early`. `made_now`: the
-    /// colliders the frame's calls made, with their units (an `entity` record must be one's link).
-    /// Returns (late, early).
-    fn bounds_rec_events(
+    /// Queued stream records as writes to the colliders, in order (`late`: they came after
+    /// their frame's phase). Links are checked here against the collider bindings, which follow
+    /// the colliders' lives: made by a call, gone when destroyed. `made`: the colliders the
+    /// frame's calls made, with their units (an `entity` record must be one's link).
+    fn bounds_rec_writes(
         &mut self,
         w: &mut World,
         rec: &mut BoundsRec,
-        tick: i64,
-        made_now: &[(i32, EntityIdx)],
-    ) -> (Vec<Event>, Vec<Event>) {
-        let mut late: Vec<Event> = Vec::new();
-        let mut early: Vec<Event> = Vec::new();
-        let mut entity_events: Vec<Queued> = Vec::new();
-        for q in std::mem::take(&mut rec.queue) {
-            let is_late = q.late || q.t < tick;
+        queued: Vec<Queued>,
+        made: &[(i32, EntityIdx)],
+        late: bool,
+    ) -> Vec<Event> {
+        let mut out = Vec::new();
+        for q in queued {
             let write = match &q.s {
                 Stream::Active { c, on0, on } => {
                     Some((*c, Write::Active { id: *c, on0: *on0, on: *on }))
@@ -744,22 +805,32 @@ impl Driver<'_> {
                 Stream::Pos { c, pos0, pos } => {
                     Some((*c, Write::Pos { id: *c, pos0: *pos0, pos: *pos }))
                 }
-                Stream::Gone { c } => Some((*c, Write::Gone { id: *c })),
+                Stream::Gone { c } => {
+                    // (The view's reference is cleared at once: no link names it from here on.)
+                    rec.bound.remove(c);
+                    Some((*c, Write::Gone { id: *c }))
+                }
                 Stream::Sync => {
-                    let e = Event { seq: q.seq, write: Write::Sync, late: is_late };
-                    if is_late {
-                        late.push(e)
-                    } else {
-                        early.push(e)
-                    }
+                    out.push(Event { seq: q.seq, write: Write::Sync, late });
                     continue;
                 }
-                Stream::Link { c, e0, e } => {
+                Stream::Link { c, v, e0, e } => {
                     // The view's collider relinked to the view's new data. With no collider
-                    // (the view has none) nothing changes; with one, it must exist and be bound
-                    // to the entity named, whether the relink changes it or not.
+                    // the view has none (a replaced view: the unit may get a new one); with
+                    // one, it must be live and bound to the entity named, whether the relink
+                    // changes it or not.
                     match c {
-                        None => self.vis.counts.rec.links += 1,
+                        None => {
+                            self.vis.counts.rec.links += 1;
+                            let unit = v.as_ref().and_then(|v| w.by_id.get(v).copied());
+                            if let Some(unit) = unit.filter(|u| w.unit(*u).is_some()) {
+                                out.push(Event {
+                                    seq: q.seq,
+                                    write: Write::ViewLink { unit },
+                                    late,
+                                });
+                            }
+                        }
                         Some(c) if rec.other_ids.contains(c) && e0 != e => {
                             self.vis.counts.rec.other_writes += 1;
                         }
@@ -769,15 +840,29 @@ impl Driver<'_> {
                         Some(c) => Self::vis_report(
                             w,
                             &format!(
-                                "bounds records: a link record of collider {c} from {e0:?} to {e:?}: the collider is bound to {:?} (an unknown collider, a contradictory binding or a relink, not modelled)",
+                                "bounds records: a link record of collider {c} from {e0:?} to {e:?}: the collider is bound to {:?} (an unknown, destroyed or contradictory binding, or a relink, not modelled)",
                                 rec.bound.get(c)
                             ),
                         ),
                     }
                     continue;
                 }
-                Stream::Entity { .. } => {
-                    entity_events.push(q);
+                Stream::Entity { c, e0, e } => {
+                    // The link of a collider the frame's tick made: the entity of its unit.
+                    let unit = made.iter().find(|(id, _)| id == c).map(|(_, u)| *u);
+                    if rec.other_ids.contains(c) {
+                        self.vis.counts.rec.other_writes += 1;
+                    } else if e0.is_none()
+                        && unit
+                            .is_some_and(|u| e.as_deref() == Some(w.entity(u).unique_id.as_str()))
+                    {
+                        self.vis.counts.rec.links += 1;
+                    } else {
+                        Self::vis_report(
+                            w,
+                            &format!("a collider {c} linked from {e0:?} to {e:?}: not modelled"),
+                        );
+                    }
                     continue;
                 }
             };
@@ -786,34 +871,18 @@ impl Driver<'_> {
                 self.vis.counts.rec.other_writes += 1;
                 continue;
             }
-            let e = Event { seq: q.seq, write, late: is_late };
-            if is_late { late.push(e) } else { early.push(e) }
+            out.push(Event { seq: q.seq, write, late });
         }
-        for q in entity_events {
-            let Stream::Entity { c, e0, e } = &q.s else { continue };
-            // The link of a collider the frame's tick made: the entity of its unit.
-            let made = made_now.iter().find(|(id, _)| id == c);
-            let unit_id = made.map(|(_, u)| w.entity(*u).unique_id.as_str());
-            if rec.other_ids.contains(c) {
-                self.vis.counts.rec.other_writes += 1;
-            } else if e0.is_none() && made.is_some() && e.as_deref() == unit_id {
-                self.vis.counts.rec.links += 1;
-            } else {
-                Self::vis_report(
-                    w,
-                    &format!("a collider {c} linked from {e0:?} to {e:?}: not modelled"),
-                );
-            }
-        }
-        (late, early)
+        out
     }
 
     /// The run's end: the writes queued after the last frame's phase have no controller tick
     /// after them; they are checked against the colliders as they stand.
     pub(super) fn bounds_rec_finish(&mut self, w: &mut World) {
         let Some(mut rec) = self.vis.range.rec.take() else { return };
-        let (late, early) = self.bounds_rec_events(w, &mut rec, i64::MAX, &[]);
-        debug_assert!(early.is_empty());
+        let mut queued = std::mem::take(&mut rec.queue);
+        queued.sort_by_key(|q| q.seq);
+        let late = self.bounds_rec_writes(w, &mut rec, queued, &[], true);
         let out = w.combat.vision.bounds.finish_recorded(&late);
         self.bounds_rec_out(w, out);
         self.vis.range.rec = Some(rec);
@@ -1326,5 +1395,43 @@ mod tests {
         let mut all = roots.clone();
         all[1].kind = Some("MapObjectEntityData".into());
         assert!(faded_units(&all, resolve).is_empty());
+    }
+
+    #[test]
+    fn the_orders_of_a_frame_stand_where_the_oracle_writes_them() {
+        let order = |seq: i64, t: i64, u: &str| {
+            rv(json!({"seq": seq, "k": "obs", "t": t, "ev": "vis_order", "u": u, "v": [u]}))
+        };
+        let vis = |seq: i64, t: i64, u: &str| {
+            rv(json!({"seq": seq, "k": "obs", "t": t, "ev": "vis", "u": u, "add": [u], "rem": []}))
+        };
+        // A unit's order just before its `vis`: fine; after it: refused (the oracle writes the
+        // order first), the other units' being no matter.
+        let ok = framed(vec![order(0, 3, "a"), vis(1, 3, "a"), order(2, 3, "b")]);
+        assert!(parse(&ok, &["vis_order"]).problems.is_empty());
+        let moved = framed(vec![vis(0, 3, "a"), order(1, 3, "a")]);
+        let p = parse(&moved, &["vis_order"]);
+        assert!(
+            p.problems.iter().any(|x| x.contains("after its unit's vis record")),
+            "{:?}",
+            p.problems
+        );
+        // The next frame's `vis` of the unit doesn't count.
+        let next = framed(vec![vis(0, 3, "a"), order(1, 4, "a")]);
+        assert!(parse(&next, &["vis_order"]).problems.is_empty());
+        // In the window's first frame the initial block comes first, with no calls in the
+        // frame to show it.
+        let block = |recs: Vec<Rv>| {
+            let p = parse(&framed(recs), &ALL);
+            (p.rec.is_some(), p.problems)
+        };
+        let (ok, problems) = block(vec![init(0, 0, -8, "a"), end(1, 1), order(2, 0, "a")]);
+        assert!(ok && problems.is_empty(), "{problems:?}");
+        let (ok, problems) = block(vec![order(0, 0, "a"), init(1, 0, -8, "a"), end(2, 1)]);
+        assert!(ok, "(a refused order doesn't refuse the family)");
+        assert!(
+            problems.iter().any(|x| x.contains("before the bounds_init block")),
+            "{problems:?}"
+        );
     }
 }

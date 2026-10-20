@@ -229,8 +229,13 @@ impl Driver<'_> {
         let Some(hits) = self.vis.range.expect.remove(&u) else { return };
         // The set's enumeration order: the overlap's (the colliders' order), the set's units that
         // have no collider after it.
-        let mut order: Vec<EntityIdx> =
-            hits.iter().map(|h| h.unit).filter(|x| set.contains(x)).collect();
+        let mut order: Vec<EntityIdx> = Vec::new();
+        for h in &hits {
+            // (A unit with two colliders enters the set once, at its first.)
+            if set.contains(&h.unit) && !order.contains(&h.unit) {
+                order.push(h.unit);
+            }
+        }
         let mut rest: Vec<EntityIdx> = set.iter().copied().filter(|x| !order.contains(x)).collect();
         rest.sort();
         let no_rest = rest.is_empty();

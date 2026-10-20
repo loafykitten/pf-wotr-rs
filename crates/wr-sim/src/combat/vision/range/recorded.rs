@@ -61,6 +61,9 @@ pub enum Write {
     Gone { id: i32 },
     /// `Physics.SyncTransforms()` (or DollRoom's `Simulate`): every transform reaches PhysX.
     Sync,
+    /// `SetupSphereColliderEntityLink` for a unit whose new view has no collider: the unit's view
+    /// was replaced, and a collider of the old view may outlive the swap until it is destroyed.
+    ViewLink { unit: EntityIdx },
 }
 
 /// A write and whether it came after the frame's vision phase.
@@ -243,6 +246,27 @@ impl Bounds {
         out
     }
 
+    /// The collider a view-owned operation names: one the records made and the view still holds.
+    /// `DestroySphereBoundsCollider` clears the view's reference at once, so a collider destroyed
+    /// earlier in the frame (still in the physics scene until the frame's end) is not one.
+    fn view_collider(&self, id: i32, what: &str, out: &mut RecOut) -> Option<usize> {
+        let Some(i) = self.index_of(id) else {
+            out.problem(
+                None,
+                format!("{what} names collider {id}, which the sim has not seen made"),
+            );
+            return None;
+        };
+        if self.dying.contains(&id) {
+            out.problem(
+                Some(self.colliders[i].unit),
+                format!("{what} names collider {id}, which was destroyed earlier in this frame (its view's reference is cleared)"),
+            );
+            return None;
+        }
+        Some(i)
+    }
+
     /// The writes that came after the last frame's query, with no controller tick after them to
     /// check them: applied to the colliders as they stand, so one that contradicts them is reported.
     pub fn finish_recorded(&mut self, events: &[Event]) -> RecOut {
@@ -270,15 +294,7 @@ impl Bounds {
                 }
             }
             Write::Active { id, on0, on } => {
-                let Some(i) = self.index_of(id) else {
-                    out.problem(
-                        None,
-                        format!(
-                            "bounds_set active names collider {id}, which the sim has not seen made"
-                        ),
-                    );
-                    return;
-                };
+                let Some(i) = self.view_collider(id, "bounds_set active", out) else { return };
                 let c = &mut self.colliders[i];
                 if (c.enabled == Enabled::Yes) != on0 {
                     out.problem(
@@ -290,15 +306,7 @@ impl Bounds {
                 out.counts.active += 1;
             }
             Write::Pos { id, pos0, pos } => {
-                let Some(i) = self.index_of(id) else {
-                    out.problem(
-                        None,
-                        format!(
-                            "bounds_set pos names collider {id}, which the sim has not seen made"
-                        ),
-                    );
-                    return;
-                };
+                let Some(i) = self.view_collider(id, "bounds_set pos", out) else { return };
                 let c = &mut self.colliders[i];
                 if c.transform.map(bits) != Some(bits(pos0)) {
                     out.problem(
@@ -308,6 +316,9 @@ impl Bounds {
                 }
                 c.transform = Some(pos);
                 out.counts.moved += 1;
+            }
+            Write::ViewLink { unit } => {
+                self.relinked.insert(unit);
             }
             Write::Gone { id } => {
                 let Some(i) = self.index_of(id) else {
@@ -345,7 +356,12 @@ impl Bounds {
             // `TickEntity` returned early (the entity has no view) or the view has no collider.
             if t.made || t.r.is_some() || t.pos.is_some() || t.on.is_some() || t.id.is_some() {
                 out.problem(Some(t.unit), "a bounds_tick with a collider only in part");
-            } else if self.colliders.iter().any(|c| c.unit == t.unit && c.rec_id.is_some()) {
+            } else if self
+                .colliders
+                .iter()
+                .any(|c| c.unit == t.unit && c.rec_id.is_some_and(|id| !self.dying.contains(&id)))
+                && !self.relinked.contains(&t.unit)
+            {
                 out.problem(
                     Some(t.unit),
                     "a bounds_tick with no collider, but the unit's collider is made",
@@ -356,6 +372,16 @@ impl Bounds {
         out.counts.ticks += 1;
         let existing = self.index_of(id);
         let prev = if t.made {
+            // A unit has one collider: the previous one must have been relinquished (destroyed,
+            // or its view replaced: a `ViewLink`) before the call makes another.
+            let live = self
+                .colliders
+                .iter()
+                .any(|c| c.unit == t.unit && c.rec_id.is_some_and(|id| !self.dying.contains(&id)));
+            if live && !self.relinked.contains(&t.unit) {
+                out.problem(Some(t.unit), format!("a bounds_tick that made collider {id} while the unit's previous collider is live: no destruction or view replacement before it"));
+            }
+            self.relinked.remove(&t.unit);
             if existing.is_some() || t.r0.is_some() {
                 out.problem(Some(t.unit), format!("a bounds_tick that made collider {id} when the sim has it or the record has a radius before"));
             }
@@ -372,6 +398,13 @@ impl Bounds {
                 ));
                 return;
             };
+            if self.dying.contains(&id) {
+                out.problem(
+                    Some(t.unit),
+                    format!("a bounds_tick of collider {id}, which was destroyed earlier in this frame (its view's reference is cleared)"),
+                );
+                return;
+            }
             let c = &self.colliders[i];
             if c.unit != t.unit {
                 out.problem(
@@ -439,7 +472,8 @@ impl Bounds {
     /// The update list and `enabled` against the sim's model, and the model's start state for the
     /// next frame.
     fn check_unit(&mut self, u: &BoundsUnit, ticked: bool, out: &mut RecOut) {
-        let Some(c) = self.colliders.iter_mut().find(|c| c.unit == u.unit && c.rec_id.is_some())
+        let Some(c) =
+            self.colliders.iter_mut().rev().find(|c| c.unit == u.unit && c.rec_id.is_some())
         else {
             return;
         };
@@ -490,7 +524,9 @@ impl Bounds {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Cause, Tri};
+    use std::collections::HashSet;
+
+    use super::super::{Cause, Difference, Tri, by_unit, differences};
     use super::*;
 
     const A: EntityIdx = EntityIdx(1);
@@ -602,7 +638,7 @@ mod tests {
         assert_eq!(b.made_later, 1);
         // A second making of the same collider contradicts the record.
         let again = b.tick_recorded(RAN, &[], &[made], &[]);
-        assert_eq!(again.problems.len(), 1);
+        assert!(!again.problems.is_empty());
     }
 
     #[test]
@@ -780,6 +816,111 @@ mod tests {
         let out = b.tick_recorded(RAN, &[], &[], &[a]);
         assert!(out.problems.is_empty());
         assert_eq!(out.counts.enabled_unknown, 1);
+    }
+
+    fn gone(seq: i64, id: i32, late: bool) -> Event {
+        Event { seq, write: Write::Gone { id }, late }
+    }
+
+    #[test]
+    fn a_destroyed_collider_takes_no_view_operations_for_the_rest_of_the_frame() {
+        // Sol's round 2: the view's reference is cleared at once; the physics collider stays
+        // queryable until the frame's end.
+        let pos = Event {
+            seq: 2,
+            write: Write::Pos { id: 7, pos0: [0.0; 3], pos: [5.0, 0.0, 0.0] },
+            late: false,
+        };
+        let off =
+            Event { seq: 2, write: Write::Active { id: 7, on0: true, on: false }, late: false };
+        for write in [pos, off] {
+            let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+            b.tick_recorded(RAN, &[], &[], &[]);
+            let out = b.tick_recorded(RAN, &[gone(1, 7, false), write], &[], &[]);
+            assert_eq!(about(&out, "destroyed earlier in this frame"), 1, "{:?}", out.problems);
+            assert_eq!(tris(&b, [0.0; 3], 1.0).len(), 1);
+        }
+        // A call of it (not making) too, and the writes queued after the last query.
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        let call = RecTick { seq: 2, ..tick(A, 7, 0.5, 0.5, [0.0; 3]) };
+        let out = b.tick_recorded(RAN, &[gone(1, 7, false)], &[call], &[]);
+        assert_eq!(about(&out, "destroyed earlier in this frame"), 1, "{:?}", out.problems);
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[gone(1, 7, false)], &[], &[]);
+        let out = b.finish_recorded(&[Event { late: true, ..pos }]);
+        assert_eq!(about(&out, "destroyed earlier in this frame"), 1, "{:?}", out.problems);
+    }
+
+    #[test]
+    fn a_unit_has_one_live_collider_until_its_view_is_replaced_or_it_is_destroyed() {
+        let make = |seq: i64, id: i32| RecTick {
+            seq,
+            unit: A,
+            made: true,
+            r0: None,
+            r: Some(0.5),
+            pos: Some([0.0; 3]),
+            on: Some(true),
+            id: Some(id),
+        };
+        // A call that makes a second collider while the first is live: reported.
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        let out = b.tick_recorded(RAN, &[], &[make(1, 8)], &[]);
+        assert_eq!(about(&out, "previous collider is live"), 1, "{:?}", out.problems);
+        // After a destruction (the same frame or an earlier one), or a view replacement, it is
+        // the unit's next collider.
+        for events in [
+            vec![gone(1, 7, false)],
+            vec![Event { seq: 1, write: Write::ViewLink { unit: A }, late: false }],
+        ] {
+            let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+            b.tick_recorded(RAN, &[], &[], &[]);
+            let out = b.tick_recorded(RAN, &events, &[make(2, 8)], &[]);
+            assert!(out.problems.is_empty(), "{:?}", out.problems);
+        }
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        b.tick_recorded(RAN, &[gone(1, 7, true)], &[], &[]);
+        assert!(b.tick_recorded(RAN, &[], &[make(2, 8)], &[]).problems.is_empty());
+        // A replacement is for one making only.
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        let link = Event { seq: 1, write: Write::ViewLink { unit: A }, late: false };
+        b.tick_recorded(RAN, &[link], &[make(2, 8)], &[]);
+        let out = b.tick_recorded(RAN, &[], &[make(3, 9)], &[]);
+        assert_eq!(about(&out, "previous collider is live"), 1, "{:?}", out.problems);
+    }
+
+    #[test]
+    fn a_unit_with_two_colliders_is_in_the_set_if_either_is_hit() {
+        // Sol's round 2: the old collider (destroyed this frame) is out of reach, the new one in.
+        let mut b = started(&[root(A, 7, 0.5, [50.0, 0.0, 0.0])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        let made = RecTick {
+            seq: 2,
+            unit: A,
+            made: true,
+            r0: None,
+            r: Some(0.5),
+            pos: Some([0.0; 3]),
+            on: Some(true),
+            id: Some(8),
+        };
+        b.tick_recorded(RAN, &[gone(1, 7, false)], &[made], &[]);
+        // (Both are in this frame's query; the new one is made at the origin.)
+        let hits = b.overlap([0.0; 3], 1.0);
+        assert_eq!(hits.len(), 2);
+        let set: HashSet<EntityIdx> = [A].into_iter().collect();
+        let d = differences(&hits, &set);
+        assert!(d.diffs.is_empty() && d.decided == 1, "{d:?}");
+        let d = differences(&hits, &HashSet::new());
+        assert_eq!(d.diffs, vec![Difference::Missing(A)]);
+        // Far from both: out, and a set holding it is an extra.
+        let d = differences(&b.overlap([200.0, 0.0, 0.0], 1.0), &set);
+        assert_eq!(d.diffs, vec![Difference::Extra(A)]);
+        // The enumeration holds the unit once, at its first hit.
+        assert_eq!(by_unit(&hits).len(), 1);
     }
 
     impl Bounds {

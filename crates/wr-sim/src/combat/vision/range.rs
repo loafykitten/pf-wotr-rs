@@ -318,6 +318,9 @@ pub struct Bounds {
     /// Colliders (by id) a `bounds_set` destroyed in a frame whose query still saw them: they
     /// leave the scene at the frame's end ([`Bounds::tick_recorded`]).
     dying: Vec<i32>,
+    /// Units whose view was replaced (a `ViewLink`) and whose next collider-making call is the
+    /// new view's: the old view's collider may outlive it until its destruction.
+    relinked: HashSet<EntityIdx>,
 }
 
 fn sub(a: V3, b: V3) -> V3 {
@@ -687,6 +690,34 @@ pub enum Difference {
     Count(usize),
 }
 
+/// The pairs by unit: a unit's colliders merged into the first, which is in if any is, else open
+/// if any is, else out. The order is the first hit's (the set enumerates a unit once).
+#[must_use]
+pub fn by_unit(hits: &[Hit]) -> Vec<Hit> {
+    let mut out: Vec<Hit> = Vec::with_capacity(hits.len());
+    for h in hits {
+        let Some(first) = out.iter_mut().find(|x| x.unit == h.unit) else {
+            out.push(*h);
+            continue;
+        };
+        first.extra_slots += h.extra_slots;
+        if h.capped == Some(Tri::In) {
+            first.capped = Some(Tri::In);
+        }
+        first.order_known &= h.order_known;
+        let rank = |t: Tri| match t {
+            Tri::In => 2,
+            Tri::Maybe => 1,
+            Tri::Out => 0,
+        };
+        if rank(h.tri) > rank(first.tri) {
+            first.tri = h.tri;
+            first.cause = h.cause;
+        }
+    }
+    out
+}
+
 /// What [`differences`] found.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Differences {
@@ -703,7 +734,11 @@ pub struct Differences {
 
 /// The differences between a query's hits and a recorded set, and the pairs the recording decided.
 #[must_use]
-pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
+pub fn differences(colliders: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
+    // A unit with two colliders at once (its view replaced: the old one lives until the frame's
+    // end) is in the set if either is hit; the buffer counts both.
+    let hits = &by_unit(colliders);
+    let duplicates = colliders.len() - hits.len();
     let mut out = Differences::default();
     let mut seen = HashSet::new();
     for h in hits {
@@ -735,7 +770,7 @@ pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
     // holds every hit that surely overlaps; only a full buffer may leave some out.
     if recorded.len() > RESULT_BUFFER {
         out.diffs.push(Difference::Count(recorded.len()));
-    } else if recorded.len() + extra_slots(hits) < RESULT_BUFFER {
+    } else if recorded.len() + extra_slots(hits) + duplicates < RESULT_BUFFER {
         // (Old colliders of replaced views may have taken slots and been dropped after.)
         out.diffs.extend(
             hits.iter()

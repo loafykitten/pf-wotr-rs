@@ -6835,7 +6835,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             "on0": null, "on": null, "pos0": null, "pos": null, "e0": e0, "e": e})
     }
     type Reasoned = (Change, &'static str);
-    let reasoned: [Reasoned; 6] = [
+    let reasoned: [Reasoned; 9] = [
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
@@ -6902,6 +6902,44 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             },
             "a link record of collider -547392",
         ),
+        // A link of a collider that was destroyed (the view's reference is gone), a position
+        // write to one destroyed earlier in the frame, a call that makes a second collider
+        // for a unit whose first is live.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let g = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let l = set_rec(&t, "link", json!(-547_392), json!("558A"), json!("558A"));
+                recs.insert(at, l);
+                recs.insert(at, g);
+                renumber(recs);
+            },
+            "the collider is bound to None",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let g = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let mut p = set_rec(&t, "pos", json!(-547_392), json!("558A"), json!("558A"));
+                p["pos0"] = json!([0.0, 0.0, 0.0]);
+                p["pos"] = json!([1.0, 0.0, 0.0]);
+                recs.insert(at, p);
+                recs.insert(at, g);
+                renumber(recs);
+            },
+            "destroyed earlier in this frame",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                recs[at]["made"] = json!(true);
+                recs[at]["r0"] = json!(null);
+                recs[at]["c"] = json!(-998);
+            },
+            "previous collider is live",
+        ),
     ];
     for (i, (change, why)) in reasoned.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
@@ -6940,6 +6978,61 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
     assert!(reported.is_empty(), "{reported:?}");
     let b = out.vision.as_ref().map(|v| (v.rec.rec.made, v.rec.rec.gone));
     assert_eq!(b, Some((1, 1)));
+    // (The unit is in its sets through the old collider, which lives to the frame's end.)
+    assert_eq!(out.vision.as_ref().map(|v| v.range_differences), Some(0));
+    // A view replacement the records show (`link` with no collider), then a call that makes the
+    // unit's new collider while the old one lives: accepted.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = tick_of(recs, "558A", 300);
+        let t = recs[at]["t"].clone();
+        let mut l = set_rec(&t, "link", json!(null), json!(null), json!(null));
+        l["v"] = json!("558A");
+        recs[at]["made"] = json!(true);
+        recs[at]["r0"] = json!(null);
+        recs[at]["c"] = json!(-998);
+        recs.insert(at, l);
+        renumber(recs);
+    });
+    let _ = replay::run_with_tape(&mut w, &changed, &trace);
+    let live: Vec<_> =
+        w.coverage.unsupported.keys().filter(|k| k.contains("previous collider is live")).collect();
+    assert!(live.is_empty(), "{live:?}");
+    // A frame the sim doesn't follow (a game mode it doesn't model: no vision phase) holding a
+    // sync, a destruction, the new collider's `entity` link (written before its call) and the
+    // call that makes it: replayed in the stream's order in the next frame's phase.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = tick_of(recs, "558A", 300);
+        let t = recs[at]["t"].clone();
+        let t_n = t.as_i64().unwrap();
+        let old = recs[at]["c"].clone();
+        let frame = pos(recs, |r| r["k"] == "tick" && r["t"].as_i64() == Some(t_n));
+        recs[frame]["mode"] = json!(99);
+        recs[at]["made"] = json!(true);
+        recs[at]["r0"] = json!(null);
+        recs[at]["c"] = json!(-998);
+        for r in recs[at + 1..].iter_mut() {
+            if r["c"] == old && (ev(r, "bounds_tick") || ev(r, "bounds_set")) {
+                r["c"] = json!(-998);
+            }
+        }
+        let sync = json!({"seq": 0, "k": "obs", "t": t, "ev": "phys_sync", "src": "UnitPlaceOnGroundController.Tick"});
+        let gone = set_rec(&t, "gone", old, json!("558A"), json!("558A"));
+        let link = set_rec(&t, "entity", json!(-998), json!(null), json!("558A"));
+        for r in [link, gone, sync] {
+            recs.insert(at, r);
+        }
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    let reported: Vec<_> =
+        w.coverage.unsupported.keys().filter(|k| k.contains("bounds records:")).collect();
+    assert!(reported.is_empty(), "{reported:?}");
+    let v = out.vision.as_ref().expect("line of sight");
+    assert_eq!((v.rec.rec.made, v.rec.rec.gone, v.rec.rec.syncs), (1, 1, 1));
+    assert!(v.range_frames_lost >= 1, "the frame was not followed");
+    assert_eq!(v.records_unconsumed, 0);
     // A sync the game made (the shape `phys_sync` has) is a candidate set for the colliders'
     // positions, not a contradiction: valid, counted.
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
