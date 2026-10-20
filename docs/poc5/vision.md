@@ -439,7 +439,10 @@ replaces them with the game's own state, read by `replay/bounds_rec.rs` into `ra
   whether a hidden unit owns a collider (the unknown history of units hidden at the start is ended: `-140` has none hidden, so it
   isn't exercised on data), and `i` the creation order: the sim creates the colliders in `i` order and **compares it with the
   pool's** (`State.Units`' order of the units that have a root): equal for all 21 units on all five runs; a disagreement is reported.
-  A record is refused (reported, the hypotheses used) unless `valid` is true, `n` is the count, the roots are numbered from 0 in
+  Every family record (and `vis_order`) must stand in the frame it names: after the `tick` record of the frame whose `t` it
+  carries (the last one before it in the stream), the roots before the first call and the calls before the frame's `vis_order`
+  records, so a record moved across a frame boundary with its `t` kept is refused; an entity is ticked once a frame (the update list
+  is a set). A record is refused (reported, the hypotheses used) unless `valid` is true, `n` is the count, the roots are numbered from 0 in
   order, their instance ids differ, a unit root has its entity, a positive radius, `on` and the units' layer (23), no other root is on
   that layer, and every field is present with its type and finite.
 - The window's first `TickEntity` pass is **not** `m_UpdateAll` [M]: the controller had ticked before the window, so at tick 0 the
@@ -460,14 +463,19 @@ replaces them with the game's own state, read by `replay/bounds_rec.rs` into `ra
   when it came before the frame's vision phase and before the next one's when after it. `-140` has 4 `active` (units leaving the
   game: the collider's `enabled` is the sim's `IsInGame` in 235,473 of 235,473 unit-frames, a unit with a fade-hiding view being
   the unknown case) and 2 `link` with no collider (a view without one). A write that names a collider the sim hasn't seen made, or
-  contradicts its state (`on0`, `pos0`), is reported; a relink that changes the entity, and an `entity` record that isn't the link of
-  a collider the frame's tick made, are reported as not modelled.
+  contradicts its state (`on0`, `pos0`), is reported, as is a second destruction of a collider; a `link` with a collider must name a
+  collider the records made and the entity it is bound to (an unknown or contradictory binding is reported); a relink that
+  changes the entity, and an `entity` record that isn't the link of a collider the frame's tick made, are reported as not modelled.
+  The writes still queued when the run ends (after the last frame's query, with no controller tick after them) are applied to the
+  colliders at the end and reported if they contradict them. A fade-hiding view in `bounds_init` is marked before the first list of
+  units is built, so its collider's `enabled` is not checked against `IsInGame`.
 - `bounds_scene` (the scene remade: every collider destroyed unseen) in a window refuses the family, as does an `x`. None in `-140`.
-- `phys_sync` (every `Physics.SyncTransforms()`, and DollRoom's `Simulate`): replaces the "possible explicit sync" guess. A recorded
-  sync in a frame gives each collider both transforms it can have (the one before the frame's tick and the one after: the order
-  inside the frame isn't known) as PhysX's candidates; one after the frame's query gives the transform as it stands. The sim's own
-  flag (`Polymorph` ended, the place-on-ground controller started) is only counted against it. None in `-140`'s five runs, so this is
-  unit-tested only (`recorded.rs`).
+- `phys_sync` (every `Physics.SyncTransforms()`, and DollRoom's `Simulate`): replaces the "possible explicit sync" guess. The
+  sync flushes every collider's transform *as it stands at its place in the stream*: the frame's `bounds_tick` and `bounds_set`
+  records carry their stream order, so a sync before a collider's call in the frame leaves PhysX the transform before it, one after
+  the transform after it, and a write after the sync (`pos` A to B, sync, B to C) leaves B. One after the frame's query flushes the
+  transforms as they stand. The sim's own flag (`Polymorph` ended, the place-on-ground controller started) is only counted against
+  it. None in `-140`'s five runs, so this is unit-tested only (`recorded.rs`).
 - `vis_order` (a unit's `CanBeInVisionRange` enumeration order, whenever it changes; the first of a unit is always written): the order
   of a unit's set is the recorded one. It must be a permutation of the unit's `vis` set; every pair it orders must agree with
   every earlier record's (one static order of the colliders, a conflict is reported: a swapped record is found if the pair was
@@ -611,11 +619,11 @@ prefix rows; 7,832 radii inside the sim's rule (259 exactly `Max(0.05, Corpulenc
 physics clock" (the line is shared with the captures that have no records, and `vision bounds records:` /
 `vision_order:` lines follow it).
 
-Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 18 cases, each reported):
+Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 24 cases, each reported, six of them for a named reason):
 a `bounds_init` root without a field, with a wrong count, a wrong radius, missing, swapped with another (the creation order), disabled,
 or moved; a `bounds_tick` that threw, with a radius or transform the sim's rule can't give, a wrong radius before, or a collider
 nobody made; a `bounds_scene` mid-window; a `bounds_set` the collider contradicts (`on0`) or that names an unknown collider; a
-`vis_order` swapped or a unit's first one missing; and a deleted `bounds_tick`. A `phys_sync` inserted mid-window is valid and counted.
+`vis_order` swapped or a unit's first one missing; a deleted `bounds_tick`; a `bounds_tick` moved across a frame boundary with its `t` kept, a duplicated one, a final-frame write naming a collider nobody made, a collider destroyed twice, and a `link` of an unknown collider or of one bound to another entity. A `phys_sync` inserted mid-window is valid and counted, and a collider destroyed and made again mid-window (`gone`, a making `bounds_tick`, its `entity` link) is accepted without a bounds report.
 
 ### What stays recorded
 

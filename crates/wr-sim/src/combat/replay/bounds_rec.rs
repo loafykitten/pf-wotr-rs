@@ -131,6 +131,9 @@ pub(super) struct BoundsRec {
     /// a write to the latter is not the bounds model's.
     unit_ids: HashSet<i32>,
     other_ids: HashSet<i32>,
+    /// The entity each collider is linked to (`EntityDataLink`), from `bounds_init` and the calls
+    /// that made colliders.
+    bound: HashMap<i32, String>,
 }
 
 /// `vis_order`: the order of a unit's set, by frame and unit.
@@ -239,6 +242,10 @@ pub(super) fn parse(records: &[Rv], declared: &[&str]) -> Parsed {
     if !declared.contains(&"vis_order") && order_records {
         bad(&mut out, "vis_order records without their declaration".into());
     }
+    let family_on = n_declared == FAMILY.len();
+    let (fam_frames, ord_frames) =
+        check_frames(records, family_on, declared.contains(&"vis_order"));
+    out.problems.extend(ord_frames);
     if declared.contains(&"vis_order") {
         parse_orders(records, &mut out);
     }
@@ -257,6 +264,7 @@ pub(super) fn parse(records: &[Rv], declared: &[&str]) -> Parsed {
     }
     let mut rec = BoundsRec::default();
     let before = out.problems.len();
+    out.problems.extend(fam_frames);
     parse_init(records, &mut rec, &mut out);
     parse_ticks(records, &mut rec, &mut out);
     parse_stream(records, &mut rec, &mut out);
@@ -265,6 +273,66 @@ pub(super) fn parse(records: &[Rv], declared: &[&str]) -> Parsed {
         out.rec = Some(rec);
     }
     out
+}
+
+/// Each record is where its frame says: after the `tick` record of the frame it names (the last
+/// one before it in the stream), the roots before the first call, the calls before the frame's
+/// `vis_order` records. Returns the findings about the family's records and about `vis_order`'s.
+fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec<String>) {
+    let (mut fam, mut ord) = (Vec::new(), Vec::new());
+    let mut frame: Option<i64> = None;
+    let mut order_seen = false;
+    let mut init_end = false;
+    let mut tick_seen = false;
+    for r in records {
+        if r["k"] == "tick" {
+            frame = r["t"].as_i64();
+            order_seen = false;
+            continue;
+        }
+        if r["k"] != "obs" {
+            continue;
+        }
+        let Some(ev) = r["ev"].as_str() else { continue };
+        let is_order = ev == "vis_order";
+        if !((family && RECORDS.contains(&ev)) || (orders && is_order)) {
+            continue;
+        }
+        let seq = r["seq"].as_i64();
+        let into = if is_order { &mut ord } else { &mut fam };
+        let prefix = if is_order { "vis_order" } else { "bounds records" };
+        if frame.is_none() || r["t"].as_i64() != frame {
+            into.push(format!(
+                "{prefix}: a {ev} record (seq {seq:?}) claims tick {:?} and stands in the stream in tick {frame:?}",
+                r["t"].as_i64()
+            ));
+            continue;
+        }
+        match ev {
+            "bounds_tick" => {
+                if !init_end {
+                    into.push(format!(
+                        "{prefix}: a bounds_tick (seq {seq:?}) before bounds_init_end"
+                    ));
+                }
+                if order_seen {
+                    into.push(format!(
+                        "{prefix}: a bounds_tick (seq {seq:?}) after the frame's vis_order records (the bounds controller precedes the vision controller)"
+                    ));
+                }
+                tick_seen = true;
+            }
+            "bounds_init" if tick_seen || init_end => {
+                into.push(format!(
+                    "{prefix}: a bounds_init (seq {seq:?}) after the window's first call or end"
+                ));
+            }
+            "bounds_init_end" => init_end = true,
+            "vis_order" => order_seen = true,
+            _ => {}
+        }
+    }
+    (fam, ord)
 }
 
 fn parse_orders(records: &[Rv], out: &mut Parsed) {
@@ -419,6 +487,8 @@ fn parse_init(records: &[Rv], rec: &mut BoundsRec, out: &mut Parsed) {
 
 fn parse_ticks(records: &[Rv], rec: &mut BoundsRec, out: &mut Parsed) {
     let bad = |out: &mut Parsed, what: String| out.problems.push(format!("bounds records: {what}"));
+    // (The update list is a set: an entity is ticked once a frame.)
+    let mut ticked: HashSet<(i64, String)> = HashSet::new();
     for r in records {
         if r["k"] != "obs" || r["ev"] != "bounds_tick" {
             continue;
@@ -458,6 +528,9 @@ fn parse_ticks(records: &[Rv], rec: &mut BoundsRec, out: &mut Parsed) {
                     r["x"], tick.e
                 ),
             );
+        }
+        if !ticked.insert((t, tick.e.clone())) {
+            bad(out, format!("two bounds_tick records of {} in tick {t}", tick.e));
         }
         if t < rec.init_t {
             bad(
@@ -539,6 +612,15 @@ fn parse_set(r: &Rv) -> Option<Stream> {
     }
 }
 
+/// The units whose collider is on a fade-hiding view in `roots` (`resolve`: the sim's unit of an id).
+fn faded_units(roots: &[Root], resolve: impl Fn(&str) -> Option<EntityIdx>) -> Vec<EntityIdx> {
+    roots
+        .iter()
+        .filter(|r| r.kind.as_deref() == Some(UNIT_KIND) && r.fade == Some(true))
+        .filter_map(|r| r.e.as_deref().and_then(&resolve))
+        .collect()
+}
+
 impl Driver<'_> {
     /// The window's start: the bounds records and `vis_order` of the recording, validated.
     pub(super) fn bounds_rec_start(&mut self, w: &mut World, declared: &[&str]) {
@@ -618,6 +700,38 @@ impl Driver<'_> {
                 if t == tick { now.push(tr) } else { skipped.push(tr) }
             }
         }
+        let (late, early) = self.bounds_rec_events(w, &mut rec, tick, &made_now);
+        let sync_now = early.iter().chain(&late).any(|e| e.write == Write::Sync);
+        if !skipped.is_empty() {
+            let out = w.combat.vision.bounds.tick_recorded(Step::Unknown, &[], &skipped, &[]);
+            self.bounds_rec_out(w, out);
+        }
+        let units: &[BoundsUnit] = list;
+        let mut events = late;
+        events.extend(early);
+        let out = w.combat.vision.bounds.tick_recorded(step, &events, &now, units);
+        self.bounds_rec_out(w, out);
+        let c = &mut self.vis.counts.rec;
+        let flagged = std::mem::take(&mut w.combat.vision.explicit_sync);
+        c.sync_frames += usize::from(sync_now);
+        c.sync_flagged += usize::from(sync_now && flagged);
+        c.sync_unflagged += usize::from(sync_now && !flagged);
+        c.sync_flag_only += usize::from(flagged && !sync_now);
+        c.views_replaced += std::mem::take(&mut w.combat.vision.views_replaced).len();
+        self.vis.range.rec = Some(rec);
+    }
+
+    /// The queued stream records as writes to the colliders: those of earlier frames and those
+    /// that came after their frame's phase are `late`, the others `early`. `made_now`: the
+    /// colliders the frame's calls made, with their units (an `entity` record must be one's link).
+    /// Returns (late, early).
+    fn bounds_rec_events(
+        &mut self,
+        w: &mut World,
+        rec: &mut BoundsRec,
+        tick: i64,
+        made_now: &[(i32, EntityIdx)],
+    ) -> (Vec<Event>, Vec<Event>) {
         let mut late: Vec<Event> = Vec::new();
         let mut early: Vec<Event> = Vec::new();
         let mut entity_events: Vec<Queued> = Vec::new();
@@ -641,17 +755,24 @@ impl Driver<'_> {
                     continue;
                 }
                 Stream::Link { c, e0, e } => {
-                    // The view's collider relinked to the view's new data: nothing changes
-                    // when it is the same entity, or when the view has no collider.
-                    if c.is_none() || e0 == e {
-                        self.vis.counts.rec.links += 1;
-                    } else if c.is_some_and(|c| rec.other_ids.contains(&c)) {
-                        self.vis.counts.rec.other_writes += 1;
-                    } else {
-                        Self::vis_report(
+                    // The view's collider relinked to the view's new data. With no collider
+                    // (the view has none) nothing changes; with one, it must exist and be bound
+                    // to the entity named, whether the relink changes it or not.
+                    match c {
+                        None => self.vis.counts.rec.links += 1,
+                        Some(c) if rec.other_ids.contains(c) && e0 != e => {
+                            self.vis.counts.rec.other_writes += 1;
+                        }
+                        Some(c) if e0 == e && e.is_some() && rec.bound.get(c) == e.as_ref() => {
+                            self.vis.counts.rec.links += 1;
+                        }
+                        Some(c) => Self::vis_report(
                             w,
-                            &format!("a collider relinked from {e0:?} to {e:?}: not modelled"),
-                        );
+                            &format!(
+                                "bounds records: a link record of collider {c} from {e0:?} to {e:?}: the collider is bound to {:?} (an unknown collider, a contradictory binding or a relink, not modelled)",
+                                rec.bound.get(c)
+                            ),
+                        ),
                     }
                     continue;
                 }
@@ -684,23 +805,17 @@ impl Driver<'_> {
                 );
             }
         }
-        let sync_now = early.iter().chain(&late).any(|e| e.write == Write::Sync);
-        if !skipped.is_empty() {
-            let out = w.combat.vision.bounds.tick_recorded(Step::Unknown, &[], &skipped, &[]);
-            self.bounds_rec_out(w, out);
-        }
-        let units: &[BoundsUnit] = list;
-        let mut events = late;
-        events.extend(early);
-        let out = w.combat.vision.bounds.tick_recorded(step, &events, &now, units);
+        (late, early)
+    }
+
+    /// The run's end: the writes queued after the last frame's phase have no controller tick
+    /// after them; they are checked against the colliders as they stand.
+    pub(super) fn bounds_rec_finish(&mut self, w: &mut World) {
+        let Some(mut rec) = self.vis.range.rec.take() else { return };
+        let (late, early) = self.bounds_rec_events(w, &mut rec, i64::MAX, &[]);
+        debug_assert!(early.is_empty());
+        let out = w.combat.vision.bounds.finish_recorded(&late);
         self.bounds_rec_out(w, out);
-        let c = &mut self.vis.counts.rec;
-        let flagged = std::mem::take(&mut w.combat.vision.explicit_sync);
-        c.sync_frames += usize::from(sync_now);
-        c.sync_flagged += usize::from(sync_now && flagged);
-        c.sync_unflagged += usize::from(sync_now && !flagged);
-        c.sync_flag_only += usize::from(flagged && !sync_now);
-        c.views_replaced += std::mem::take(&mut w.combat.vision.views_replaced).len();
         self.vis.range.rec = Some(rec);
     }
 
@@ -721,6 +836,11 @@ impl Driver<'_> {
         rec: &mut BoundsRec,
         t: &TickRaw,
     ) -> Option<RecTick> {
+        if t.made
+            && let Some(c) = t.c
+        {
+            rec.bound.insert(c, t.e.clone());
+        }
         if t.kind != UNIT_KIND {
             self.vis.counts.rec.other_ticks += 1;
             if t.made
@@ -751,6 +871,16 @@ impl Driver<'_> {
         })
     }
 
+    /// The units the recording's `bounds_init` shows with a fade-hiding view: marked before the
+    /// frame's first list of units is built, so their `enabled` is unknown there as it is in the
+    /// game.
+    pub(super) fn bounds_rec_fade_marks(&mut self, w: &mut World) {
+        let Some(rec) = self.vis.range.rec.as_ref() else { return };
+        let resolve = |e: &str| w.by_id.get(e).copied().filter(|u| w.unit(*u).is_some());
+        let marked = faded_units(&rec.roots, resolve);
+        w.combat.vision.fade_hidden.extend(marked);
+    }
+
     /// The window's first frame: the colliders from `bounds_init`, in the scene's order. `false`
     /// (reported) when the records don't fit the run.
     fn bounds_rec_init(&mut self, w: &mut World, rec: &mut BoundsRec, list: &[BoundsUnit]) -> bool {
@@ -769,6 +899,9 @@ impl Driver<'_> {
         let mut seen: HashSet<EntityIdx> = HashSet::new();
         for root in &rec.roots {
             self.vis.consume_record(root.seq);
+            if let Some(e) = &root.e {
+                rec.bound.insert(root.id, e.clone());
+            }
             if root.kind.as_deref() != Some(UNIT_KIND) {
                 rec.other_ids.insert(root.id);
                 self.vis.counts.rec.other_roots += 1;
@@ -800,9 +933,6 @@ impl Driver<'_> {
             }
             rec.unit_ids.insert(root.id);
             self.vis.counts.rec.roots += 1;
-            if root.fade == Some(true) {
-                w.combat.vision.fade_hidden.insert(u);
-            }
             // The collider stands where the unit stood at the end of the previous frame.
             match list.iter().find(|x| x.unit == u).and_then(|x| x.prefix) {
                 Some(p) if p.map(f32::to_bits) == root.pos.map(f32::to_bits) => {
@@ -953,6 +1083,21 @@ mod tests {
     const ALL: [&str; 6] =
         ["bounds_init", "bounds_tick", "bounds_set", "bounds_scene", "phys_sync", "vis_order"];
 
+    /// The records with the `tick` record of each frame before its first (the stream's frames).
+    fn framed(recs: Vec<Rv>) -> Vec<Rv> {
+        let mut out = Vec::new();
+        let mut cur = None;
+        for r in recs {
+            let t = r["t"].as_i64();
+            if r["k"] == "obs" && t != cur {
+                out.push(rv(json!({"seq": -1, "k": "tick", "t": t})));
+                cur = t;
+            }
+            out.push(r);
+        }
+        out
+    }
+
     fn init(seq: i64, i: i64, id: i64, e: &str) -> Rv {
         rv(
             json!({"seq": seq, "k": "obs", "t": 0, "ev": "bounds_init", "i": i, "id": id, "layer": 23,
@@ -973,7 +1118,7 @@ mod tests {
 
     #[test]
     fn a_whole_family_is_indexed_and_a_part_of_it_is_refused() {
-        let recs = vec![init(0, 0, -8, "a"), end(1, 1), tick(2, 0), tick(3, 1)];
+        let recs = framed(vec![init(0, 0, -8, "a"), end(1, 1), tick(2, 0), tick(3, 1)]);
         let p = parse(&recs, &ALL);
         assert!(p.problems.is_empty(), "{:?}", p.problems);
         let rec = p.rec.expect("the family");
@@ -1076,7 +1221,7 @@ mod tests {
             ),
         ];
         for (name, recs) in cases {
-            let p = parse(&recs, &ALL);
+            let p = parse(&framed(recs), &ALL);
             assert!(p.rec.is_none() && !p.problems.is_empty(), "{name}: {:?}", p.problems);
         }
     }
@@ -1086,15 +1231,100 @@ mod tests {
         let rec = |seq: i64, t: i64, u: &str, v: serde_json::Value| {
             rv(json!({"seq": seq, "k": "obs", "t": t, "ev": "vis_order", "u": u, "v": v}))
         };
-        let recs = vec![rec(0, 0, "a", json!(["a", "b"])), rec(1, 3, "a", json!(["b", "a"]))];
+        let recs =
+            framed(vec![rec(0, 0, "a", json!(["a", "b"])), rec(1, 3, "a", json!(["b", "a"]))]);
         let p = parse(&recs, &["vis_order"]);
         assert!(p.problems.is_empty(), "{:?}", p.problems);
         let o = p.orders.expect("orders");
         assert_eq!(o.records.len(), 2);
         // Two records of one unit in one frame, an id that isn't a string, undeclared.
-        let dup = vec![rec(0, 0, "a", json!([])), rec(1, 0, "a", json!([]))];
+        let dup = framed(vec![rec(0, 0, "a", json!([])), rec(1, 0, "a", json!([]))]);
         assert!(!parse(&dup, &["vis_order"]).problems.is_empty());
-        assert!(!parse(&[rec(0, 0, "a", json!([1]))], &["vis_order"]).problems.is_empty());
+        assert!(
+            !parse(&framed(vec![rec(0, 0, "a", json!([1]))]), &["vis_order"]).problems.is_empty()
+        );
         assert!(!parse(&recs, &[]).problems.is_empty());
+    }
+
+    #[test]
+    fn a_record_must_stand_in_the_frame_it_names() {
+        let ok = framed(vec![init(0, 0, -8, "a"), end(1, 1), tick(2, 0), tick(3, 1)]);
+        assert!(parse(&ok, &ALL).problems.is_empty());
+        // The call of tick 1 moved before tick 1's `tick` record, its `t` kept (seq renumbered).
+        let mut moved = ok.clone();
+        let call = moved.len() - 1;
+        moved.swap(call, call - 1);
+        let p = parse(&moved, &ALL);
+        assert!(
+            p.rec.is_none() && p.problems.iter().any(|x| x.contains("claims tick")),
+            "{:?}",
+            p.problems
+        );
+        // The init block after the window's first call, or the calls before its end.
+        let late_init = framed(vec![tick(0, 0), init(1, 0, -8, "a"), end(2, 1)]);
+        assert!(parse(&late_init, &ALL).problems.iter().any(|x| x.contains("bounds_init")));
+        let early_call = framed(vec![init(0, 0, -8, "a"), tick(1, 0), end(2, 1)]);
+        assert!(
+            parse(&early_call, &ALL).problems.iter().any(|x| x.contains("before bounds_init_end"))
+        );
+        // A frame's calls after its vis_order records (the bounds controller comes first), and a
+        // vis_order moved across a frame boundary.
+        let order = |seq: i64, t: i64| {
+            rv(json!({"seq": seq, "k": "obs", "t": t, "ev": "vis_order", "u": "a", "v": ["a"]}))
+        };
+        let wrong = framed(vec![init(0, 0, -8, "a"), end(1, 1), order(2, 0), tick(3, 0)]);
+        let p = parse(&wrong, &ALL);
+        assert!(
+            p.problems.iter().any(|x| x.contains("after the frame's vis_order")),
+            "{:?}",
+            p.problems
+        );
+        let mut crossed = framed(vec![order(0, 0), order(1, 1)]);
+        crossed.swap(1, 2);
+        let p = parse(&crossed, &["vis_order"]);
+        assert!(
+            !p.problems.is_empty() && p.problems.iter().all(|x| x.starts_with("vis_order")),
+            "{:?}",
+            p.problems
+        );
+        // (A frame problem of vis_order alone doesn't refuse the family.)
+        let mut both = framed(vec![init(0, 0, -8, "a"), end(1, 1), order(2, 0)]);
+        both.push(rv(json!({"seq": 9, "k": "tick", "t": 1})));
+        both.push(order(10, 0));
+        let p = parse(&both, &ALL);
+        assert!(p.rec.is_some() && !p.problems.is_empty());
+    }
+
+    #[test]
+    fn an_entity_is_ticked_once_a_frame() {
+        let dup = framed(vec![init(0, 0, -8, "a"), end(1, 1), tick(2, 1), tick(3, 1)]);
+        let p = parse(&dup, &ALL);
+        assert!(
+            p.rec.is_none() && p.problems.iter().any(|x| x.contains("two bounds_tick")),
+            "{:?}",
+            p.problems
+        );
+    }
+
+    #[test]
+    fn a_fade_hiding_unit_is_marked_from_its_root() {
+        let roots: Vec<Root> = (0..3)
+            .map(|i| Root {
+                seq: i,
+                id: -8 - i as i32,
+                layer: 23,
+                e: Some(["a", "b", "c"][i as usize].to_owned()),
+                kind: Some(UNIT_KIND.into()),
+                r: Some(0.5),
+                on: Some(true),
+                pos: [0.0; 3],
+                fade: Some(i == 1),
+            })
+            .collect();
+        let resolve = |e: &str| (e != "c").then(|| EntityIdx(e.as_bytes()[0] as u32));
+        assert_eq!(faded_units(&roots, resolve), vec![EntityIdx(u32::from(b'b'))]);
+        let mut all = roots.clone();
+        all[1].kind = Some("MapObjectEntityData".into());
+        assert!(faded_units(&all, resolve).is_empty());
     }
 }

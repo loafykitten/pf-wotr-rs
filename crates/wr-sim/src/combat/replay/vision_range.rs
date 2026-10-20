@@ -452,6 +452,10 @@ impl Driver<'_> {
         let pool = crate::scene::units_with_bounds(w);
         let mut list = Vec::with_capacity(pool.len());
         let mut rec_on = self.bounds_rec_on();
+        if rec_on && first {
+            // (Before the list: a hidden unit with a fade-hiding view has its `enabled` unknown.)
+            self.bounds_rec_fade_marks(w);
+        }
         for &u in &pool {
             let known = self.vis_pos_known(w, u);
             let pos = known.unwrap_or_else(|| self.vis_pos(w, u, true));

@@ -623,6 +623,7 @@ impl Driver<'_> {
         if !self.vis.on {
             return;
         }
+        self.bounds_rec_finish(w);
         let c = w.combat.vision.counts;
         let k = &mut self.vis.counts;
         k.misses = c.misses;

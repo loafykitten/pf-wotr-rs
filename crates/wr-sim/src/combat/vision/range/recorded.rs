@@ -7,7 +7,7 @@
 //! and `phys_sync` (every explicit `Physics.SyncTransforms()`), a collider's radius, transform,
 //! `enabled`, creation order and history are the game's own, not the sim's hypotheses: nothing
 //! about them is left to the recording but PhysX's copy of the transform, which follows the
-//! physics steps (the clock, still inferred) and the recorded syncs. What the sim models of the
+//! physics steps (the clock, still inferred) and the recorded syncs, each at its place in the stream. What the sim models of the
 //! bounds controller (the radius rule, the update list, the transform rule, `UpdateViewActive`)
 //! is then a check on the records, counted and reported where it contradicts them.
 //!
@@ -203,7 +203,7 @@ impl Bounds {
     /// the last frame's end destroyed is gone; the writes that came after the last query
     /// happened; the physics step the frame ran flushed the transforms; the writes before the
     /// bounds controller; its `TickEntity` calls (`ticks`, in order); a recorded sync flushes the
-    /// transforms again (before or after the calls: both candidates). `units` are the sim's
+    /// transforms as they stand at its place among the calls (the stream's order). `units` are the sim's
     /// (empty for a frame it didn't follow): the update model is checked against the records.
     pub fn tick_recorded(
         &mut self,
@@ -221,13 +221,8 @@ impl Bounds {
             self.apply_write(e, &mut out);
         }
         self.take_step(step);
-        // Where the transforms stood before this frame's writes: a sync may have flushed them.
-        let before: Vec<(Option<i32>, Option<V3>)> =
-            self.colliders.iter().map(|c| (c.rec_id, c.transform)).collect();
-        let mut synced = false;
-        let mut made = Vec::new();
         // The writes before the frame's query and the bounds controller's calls, in the stream's
-        // order.
+        // order (a sync flushes the transforms as they stand at its place in it).
         let mut items: Vec<(i64, Result<&Event, &RecTick>)> = events
             .iter()
             .filter(|e| !e.late)
@@ -237,33 +232,23 @@ impl Bounds {
         items.sort_by_key(|(seq, _)| *seq);
         for (_, item) in items {
             match item {
-                Ok(e) => {
-                    synced |= e.write == Write::Sync;
-                    self.apply_write(e, &mut out);
-                }
-                Err(t) => self.apply_tick(t, units, &mut out, &mut made),
+                Ok(e) => self.apply_write(e, &mut out),
+                Err(t) => self.apply_tick(t, units, &mut out),
             }
         }
         let ticked = |u: EntityIdx| ticks.iter().any(|t| t.unit == u);
         for u in units {
             self.check_unit(u, ticked(u.unit), &mut out);
         }
-        if synced {
-            for c in &mut self.colliders {
-                let was = match before.iter().find(|(id, _)| *id == c.rec_id) {
-                    Some(&(_, t)) => t,
-                    None if c.rec_id.is_some_and(|id| made.contains(&id)) => Some([0.0; 3]),
-                    None => None,
-                };
-                match (was, c.transform) {
-                    (Some(b), Some(a)) => {
-                        c.phys = if bits(a) == bits(b) { vec![a] } else { vec![b, a] };
-                        c.phys_unknown = false;
-                        c.phys_fuzzy = false;
-                    }
-                    _ => c.phys_unknown = true,
-                }
-            }
+        out
+    }
+
+    /// The writes that came after the last frame's query, with no controller tick after them to
+    /// check them: applied to the colliders as they stand, so one that contradicts them is reported.
+    pub fn finish_recorded(&mut self, events: &[Event]) -> RecOut {
+        let mut out = RecOut::default();
+        for e in events {
+            self.apply_write(e, &mut out);
         }
         out
     }
@@ -272,17 +257,15 @@ impl Bounds {
         match e.write {
             Write::Sync => {
                 out.counts.syncs += 1;
-                if e.late {
-                    // After the last query: the transforms as they stand reach PhysX.
-                    for c in &mut self.colliders {
-                        match c.transform {
-                            Some(t) => {
-                                c.phys = vec![t];
-                                c.phys_unknown = false;
-                                c.phys_fuzzy = false;
-                            }
-                            None => c.phys_unknown = true,
+                // Every transform, as it stands here in the stream, reaches PhysX.
+                for c in &mut self.colliders {
+                    match c.transform {
+                        Some(t) => {
+                            c.phys = vec![t];
+                            c.phys_unknown = false;
+                            c.phys_fuzzy = false;
                         }
+                        None => c.phys_unknown = true,
                     }
                 }
             }
@@ -337,6 +320,15 @@ impl Bounds {
                     return;
                 };
                 out.counts.gone += 1;
+                if self.dying.contains(&id) {
+                    out.problem(
+                        Some(self.colliders[i].unit),
+                        format!(
+                            "bounds_set gone: collider {id} was already destroyed in this frame"
+                        ),
+                    );
+                    return;
+                }
                 if e.late {
                     self.colliders.remove(i);
                 } else {
@@ -347,13 +339,7 @@ impl Bounds {
         }
     }
 
-    fn apply_tick(
-        &mut self,
-        t: &RecTick,
-        units: &[BoundsUnit],
-        out: &mut RecOut,
-        made: &mut Vec<i32>,
-    ) {
+    fn apply_tick(&mut self, t: &RecTick, units: &[BoundsUnit], out: &mut RecOut) {
         let u = units.iter().find(|u| u.unit == t.unit);
         let (Some(r), Some(pos), Some(on), Some(id)) = (t.r, t.pos, t.on, t.id) else {
             // `TickEntity` returned early (the entity has no view) or the view has no collider.
@@ -441,7 +427,6 @@ impl Bounds {
             c.made_hidden = u.is_some_and(|u| !u.in_game);
             self.colliders.push(c);
             self.made_later += 1;
-            made.push(id);
         } else if let Some(i) = existing {
             let c = &mut self.colliders[i];
             c.radius = RadiusIv::exact(r);
@@ -663,28 +648,70 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_sync_gives_both_transforms_and_a_late_one_the_current() {
-        let sync = Event { seq: 0, write: Write::Sync, late: false };
-        // No step this frame, a sync somewhere in it: PhysX has the transform from before the
-        // frame's tick or the one after it.
-        let mut b = started(&[root(A, 7, 0.5, [10.4, 0.0, 0.0])]);
-        b.tick_recorded(RAN, &[], &[], &[]);
-        let out =
-            b.tick_recorded(Step::NotRan, &[sync], &[tick(A, 7, 0.5, 0.5, [20.0, 0.0, 0.0])], &[]);
+    fn a_recorded_sync_flushes_the_transforms_as_they_stand_at_its_place_in_the_stream() {
+        let ev = |seq: i64, write: Write, late: bool| Event { seq, write, late };
+        let at = |seq: i64, x: f32| RecTick { seq, ..tick(A, 7, 0.5, 0.5, [x, 0.0, 0.0]) };
+        let moved = |b: &mut Bounds, events: &[Event], ticks: &[RecTick]| {
+            let mut b0 = started(&[root(A, 7, 0.5, [10.4, 0.0, 0.0])]);
+            b0.tick_recorded(RAN, &[], &[], &[]);
+            std::mem::swap(b, &mut b0);
+            b.tick_recorded(Step::NotRan, events, ticks, &[])
+        };
+        // No step this frame. A sync before the frame's tick flushes the old transform, one
+        // after it the new.
+        let mut b = Bounds::default();
+        let out = moved(&mut b, &[ev(1, Write::Sync, false)], &[at(2, 20.0)]);
         assert_eq!(out.counts.syncs, 1);
-        let h = b.overlap([0.0; 3], 10.0)[0];
-        assert_eq!((h.tri, h.cause), (Tri::Maybe, Some(Cause::Position)));
-        // Far from both, or in reach of both, it is decided.
-        assert_eq!(tris(&b, [100.0, 0.0, 0.0], 1.0), vec![(A, Tri::Out, None)]);
-        assert_eq!(tris(&b, [15.0, 0.0, 0.0], 6.0), vec![(A, Tri::In, None)]);
-        // After the query (late) it is the transform as it stands.
-        b.tick_recorded(Step::NotRan, &[Event { late: true, ..sync }], &[], &[]);
-        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::Out, None)]);
-        // Without the sync a frame with no step keeps the older copy.
-        let mut b = started(&[root(A, 7, 0.5, [10.4, 0.0, 0.0])]);
-        b.tick_recorded(RAN, &[], &[], &[]);
-        b.tick_recorded(Step::NotRan, &[], &[tick(A, 7, 0.5, 0.5, [20.0, 0.0, 0.0])], &[]);
         assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::In, None)]);
+        let mut b = Bounds::default();
+        moved(&mut b, &[ev(3, Write::Sync, false)], &[at(2, 20.0)]);
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::Out, None)]);
+        // Without the sync the frame with no step keeps the older copy.
+        let mut b = Bounds::default();
+        moved(&mut b, &[], &[at(2, 20.0)]);
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::In, None)]);
+        // Sol's round 1: a write A to B, a sync, a write B to C: PhysX has B, and nothing is
+        // decided as though it had A or C.
+        let mut b = Bounds::default();
+        let pos = |seq, pos0: f32, pos: f32| {
+            ev(seq, Write::Pos { id: 7, pos0: [pos0, 0.0, 0.0], pos: [pos, 0.0, 0.0] }, false)
+        };
+        let out = moved(
+            &mut b,
+            &[pos(1, 10.4, 30.0), ev(2, Write::Sync, false), pos(3, 30.0, 50.0)],
+            &[],
+        );
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        assert_eq!(tris(&b, [30.0, 0.0, 0.0], 1.0), vec![(A, Tri::In, None)]);
+        assert_eq!(tris(&b, [10.0, 0.0, 0.0], 1.0), vec![(A, Tri::Out, None)]);
+        assert_eq!(tris(&b, [50.0, 0.0, 0.0], 1.0), vec![(A, Tri::Out, None)]);
+        // After the query (late) it is the transform as it stands.
+        let mut b = Bounds::default();
+        moved(&mut b, &[], &[at(2, 20.0)]);
+        b.tick_recorded(Step::NotRan, &[ev(4, Write::Sync, true)], &[], &[]);
+        assert_eq!(tris(&b, [0.0; 3], 10.0), vec![(A, Tri::Out, None)]);
+    }
+
+    #[test]
+    fn a_collider_is_destroyed_once() {
+        let gone = |seq, late| Event { seq, write: Write::Gone { id: 7 }, late };
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        let out = b.tick_recorded(RAN, &[gone(1, false), gone(2, false)], &[], &[]);
+        assert_eq!(about(&out, "already destroyed"), 1, "{:?}", out.problems);
+        // The frame's end took it: a destruction in the next frame names nothing.
+        let out = b.tick_recorded(RAN, &[gone(3, true)], &[], &[]);
+        assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+    }
+
+    #[test]
+    fn writes_after_the_last_query_are_checked_at_the_end() {
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        let off =
+            |id| Event { seq: 1, write: Write::Active { id, on0: true, on: false }, late: true };
+        assert!(b.finish_recorded(&[off(7)]).problems.is_empty());
+        assert_eq!(b.finish_recorded(&[off(9)]).problems.len(), 1);
     }
 
     #[test]
