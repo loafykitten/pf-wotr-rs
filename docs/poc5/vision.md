@@ -1,5 +1,16 @@
 # POC-5: line of sight (stream "vision")
 
+Status (2026-10-19, stream "bstart"): **the vision range's start state is the recording's** where a recording has WrathOracle's
+`bounds_*` observers (`poc5-tb-140`, five runs): `bounds_init` (the entity-bounds scene's 64 roots before the window's first tick),
+`bounds_tick` (every `TickEntity` call), `bounds_set` (collider writes outside it), `bounds_scene`, `phys_sync`, and `vis_order`
+(each unit's set order). The colliders' radii, transforms, `enabled` flags, creation order and history are then the game's own, not
+hypotheses, and the sim's model of the bounds controller (the radius rule, the update list, the transform rule, `IsInGame` against
+`enabled`) is a check on them: it agrees with every record (7,832 calls a run). On `-140`'s five runs the pairs decided rise from
+6,774,380 to 6,795,850 and the pairs left to the recording fall from 21,470 (all of them the view-scale band) to 0, with 0 differences
+in 367,840 sets and every record consumed. What stays hypothesized is PhysX's copy of the transforms (the physics-clock inference), and
+PhysX's result order, which the recording shows is **not always the creation order** (one of 162 order records, 34 frames of `-140`).
+Older captures replay with the hypotheses unchanged (sweep below). See "The window's start, from the records".
+
 Status (2026-10-18, stream "xform"): **the geometry is compared with the game's own** (`poc5-tb-140`'s `los_geom` and
 `los_probe`, all five runs): the 8 caves blockers' 88 segments and the grid are equal bit for bit, and so are the
 1,280 `HasObstacle` probes. The blockers' points are Unity's `Transform.TransformPoint` (its hierarchy walk, ported from the
@@ -230,6 +241,10 @@ test can take an earlier unmodelled miss on the same pair for a later member's r
 
 ### What the sim does
 
+(The model below is the sim's for a recording without the `bounds_*` records. With them (`poc5-tb-140`) the colliders' radii,
+transforms, `enabled` flags, creation order and history are the recorded ones, nothing is left for the corpulence, the view-scale
+band, the history or the fade, and this model runs as a check on the records; see "The window's start, from the records".)
+
 A pair (an awake unit's capsule and a collider) is answered by the sim only when the things the sim doesn't know (the
 view's scale, a corpulence not read, a physics step that may not have run, a fade it saw begin) cannot change the answer;
 otherwise it is left to the recording (`Tri::Maybe`), counted by cause, and the recording's answer is the run's. What the
@@ -406,51 +421,101 @@ The hypotheses and their results (the first by a script on the party's 5,010 obs
    below. (Why PhysX returns the colliders in creation order for this scene isn't established; it holds for every capture
    here, which have at most 21 colliders.)
 
-### Hypotheses about the window's start, checked against the recording
+### The window's start, from the records (`poc5-tb-140`), else hypothesized
 
-The recording opens mid-session. The sim hypothesizes the colliders' state at the first tick of the window, and everything
-it decides rests on these. They are hypotheses, not checks: a wrong one is caught only when it makes the sim decide a pair
-differently from the recording, and one that the recorded sets can't tell from the truth (every pair the two states
-answer alike) passes unnoticed. `bounds_init` and `vis_order` (below) are the records that settle them:
-- **The creation order of the colliders made before the window is the pool's** (`State.Units`' order, fakes included). A
-  unit hidden when its collider was first made and revealed before the window would have been created later than the pool
-  says. Checked by the memory's `near` leaves: 385,005 equal in the record runs (1,218,083 in all 109 runs).
-- **No fade is in progress at the first tick for a unit that is in the game** (`HideUnit` with `Fade` before the window leaves
-  a view with `m_IsFadeHide` and a collider that keeps its `enabled`): the sim only knows the fades it saw begin. A unit
-  *not* in the game at the first tick is treated as possibly fade-hiding: its collider's `enabled` is unknown until the sim
-  sees it in the game again (its pairs in reach are the recording's, cause `enabled`).
-- **The positions PhysX has at the window's first frame** are the observation rows at the frame's prefix, when the
-  frame ran a step (the previous tick's transform); a first frame without a known step leaves the colliders' pairs to
-  the recording.
-- **The radii at the first tick** come from the first `TickEntity` of the window (`m_UpdateAll`) with the corpulence
-  the recording shows then: none yet in these captures, so they are unbounded until the unit's next update.
-- **The physics clock** `Time.time - Time.fixedTime` is `fixed_phase0` of the begin record advanced by each tick's scaled
-  `delta` (the begin record's phase is measured after the begin frame's steps): an inference checked by the decided pairs
-  (109 runs equal; a step in every frame, or the fixed frame time instead, don't), not recorded.
-- **Units hidden at the first tick** may already own a disabled collider: handled as unknown (lost, order unknown), not
-  hypothesized. **Pool order for colliders made later** (the update list's insertion order): 0 such colliders.
+The recording opens mid-session. Without the `bounds_*` records the sim hypothesizes the colliders' state at the first tick of the
+window (the list below), and everything it decides rests on these: they are hypotheses, not checks, and a wrong one is caught only
+when it makes the sim decide a pair differently from the recording (one the recorded sets can't tell from the truth passes). A
+recording that declares the observers `bounds_init`, `bounds_tick`, `bounds_set`, `bounds_scene` and `phys_sync` (installed together:
+a part of the family, or its records without the declaration, is reported and the hypotheses are used) and optionally `vis_order`
+replaces them with the game's own state, read by `replay/bounds_rec.rs` into `range::Bounds::start_recorded` / `tick_recorded`
+(`combat/vision/range/recorded.rs`).
 
-What WrathOracle will record to replace them (poc `0fe4003`, in no capture yet) and what the sim would read:
-- `bounds_init`, one per root `GameObject` of the entity-bounds scene (`GetRootGameObjects`) at the window's first tick:
-  `i` the root's index, `id` its instance id, `layer`, `e` the entity's `UniqueId` (null for a root that isn't an
-  entity's), `kind`, `r` the collider's radius, `on` its `enabled`, `pos` the transform's position (Unity's, **not**
-  PhysX's synced copy, which can't be read passively), `fade` the view's `m_IsFadeHide` (or null); then
-  `bounds_init_end {n, valid}`. Observer `bounds_init` (declared with `memory`). The sim would take: `r` as the first
-  radius (an exact radius at the first tick instead of the band, until a size change), `on` and the presence of the root as
-  whether a hidden unit owns a collider (ending the unknown history), `fade` as the initial `fade_hidden`, `pos` as the
-  transform (the PhysX copy stays the hypothesis above: the prefix row if the last step synced it), and `i` as the
-  creation order. The root order is evidence for the creation history, not a guarantee of it (the scene's root list
-  order); it replaces the pool-order hypothesis only where the two agree, and a disagreement is reported. A record
-  whose `valid` is false is refused.
-- `vis_order {u, v}`, whenever a unit's `CanBeInVisionRange` enumeration order differs from its last (observer `vis_order`):
-  the ids in the set's order, which is the overlap's filtered result order (Mono's `HashSet` enumerates in insertion order
-  after `Clear`). The sim would check its own order per unit (`near_order`) against it, not only the union the memory's
-  `near` leaf shows, and the unknown-order case of the hidden units would be settled by it.
-No reader is implemented yet.
+**How the records are used [C]/[M].**
+- `bounds_init` (one root per `GameObject` of the scene at the first tick of the window, before any controller of the tick, then
+  `bounds_init_end {n, valid}`): `r` is each unit collider's first radius (exact: no scale band, no corpulence), `on` its `enabled`,
+  `pos` its transform (the previous frame's end: **equal bit for bit to the unit's prefix row for all 21 units** of `-140`),
+  `fade` the initial fade mark (an init collider with `fade` true marks the unit fade-hidden; none in `-140`). A root's presence is
+  whether a hidden unit owns a collider (the unknown history of units hidden at the start is ended: `-140` has none hidden, so it
+  isn't exercised on data), and `i` the creation order: the sim creates the colliders in `i` order and **compares it with the
+  pool's** (`State.Units`' order of the units that have a root): equal for all 21 units on all five runs; a disagreement is reported.
+  A record is refused (reported, the hypotheses used) unless `valid` is true, `n` is the count, the roots are numbered from 0 in
+  order, their instance ids differ, a unit root has its entity, a positive radius, `on` and the units' layer (23), no other root is on
+  that layer, and every field is present with its type and finite.
+- The window's first `TickEntity` pass is **not** `m_UpdateAll` [M]: the controller had ticked before the window, so at tick 0 the
+  update list holds the units that moved (`5052` alone in `-140`). The hypotheses' first-tick model (every unit in the game is
+  updated at the first tick) was wrong in kind, harmless where nothing moved.
+- `bounds_tick` (one per `TickEntity` call: the radius before and after, the transform and `enabled` after, the collider's id, whether
+  the call made it): applied in the stream's order. The collider's radius, transform and (for a made collider) existence are the
+  record's; the sim's rule is checked against each: the radius after is inside the interval `next_radius` gives from the radius
+  before and the sim's corpulence (7,832 of 7,832: 259 exactly `Max(0.05, Corpulence)`, 7,573 within the hysteresis band of it), the
+  radius before is the one the last record left, `on` is the collider's state, and the transform after is the sim's
+  `Vector3 ==` rule applied to the unit's position (7,832 of 7,832). A call that threw (`x`) refuses the family.
+- The update list is checked the same way: a unit in the game that the sim's model puts on the list (it moved, changed size, came
+  back) must have a `bounds_tick`, and one that has a `bounds_tick` must be on the sim's list: **205,465 of 205,465 unit-frames in the
+  game agree** on a run (0 disagreeing; 30,008 unit-frames out of the game are not checked, as an update queued before may still
+  run). A disagreement is reported, so a dropped or invented `bounds_tick` is found.
+- `bounds_set` (`active`: `UpdateViewActive` changed `enabled`; `pos`; `gone`: destroyed at the frame's end; `link`/`entity`): queued
+  as the replay reaches each record (so a death's `active` is where the sim's `IsInGame` changes), applied before the frame's query
+  when it came before the frame's vision phase and before the next one's when after it. `-140` has 4 `active` (units leaving the
+  game: the collider's `enabled` is the sim's `IsInGame` in 235,473 of 235,473 unit-frames, a unit with a fade-hiding view being
+  the unknown case) and 2 `link` with no collider (a view without one). A write that names a collider the sim hasn't seen made, or
+  contradicts its state (`on0`, `pos0`), is reported; a relink that changes the entity, and an `entity` record that isn't the link of
+  a collider the frame's tick made, are reported as not modelled.
+- `bounds_scene` (the scene remade: every collider destroyed unseen) in a window refuses the family, as does an `x`. None in `-140`.
+- `phys_sync` (every `Physics.SyncTransforms()`, and DollRoom's `Simulate`): replaces the "possible explicit sync" guess. A recorded
+  sync in a frame gives each collider both transforms it can have (the one before the frame's tick and the one after: the order
+  inside the frame isn't known) as PhysX's candidates; one after the frame's query gives the transform as it stands. The sim's own
+  flag (`Polymorph` ended, the place-on-ground controller started) is only counted against it. None in `-140`'s five runs, so this is
+  unit-tested only (`recorded.rs`).
+- `vis_order` (a unit's `CanBeInVisionRange` enumeration order, whenever it changes; the first of a unit is always written): the order
+  of a unit's set is the recorded one. It must be a permutation of the unit's `vis` set; every pair it orders must agree with
+  every earlier record's (one static order of the colliders, a conflict is reported: a swapped record is found if the pair was
+  seen before); and the sim's own (the overlap in the colliders' creation order) is compared: **equal in 73,534 of 73,568 sets of
+  `-140`; 34 differ**, all one record: at tick 8019 `558A`'s set, which held `527A` (collider 62), gained `529A` (collider 63) and
+  enumerates **`529A` before `527A`**, and keeps that order for 34 frames. So PhysX's result order is **not** always the colliders'
+  creation order: the sim takes the recorded order (counted, not reported: the sim doesn't port PhysX's pruner) and the sets whose
+  order the sim couldn't give (a collider of unknown place) are settled by it (none in `-140`). The memory's `near` unions are
+  built from the recorded orders.
+
+**What each hypothesis became.**
+- *The creation order is the pool's*: the recorded `i`, equal to the pool's for the 21 units (the order the sim now uses is the
+  recording's). Not a hypothesis any more; the *result order = creation order* assumption behind it is contradicted once (above).
+- *No fade at the first tick for a unit in the game; a unit not in the game is possibly fade-hiding*: replaced by `fade` and by the
+  `enabled` flags themselves. The collider's `enabled` is the recorded state, and the sim's `IsInGame` (with its fade marks) is checked
+  against it.
+- *The positions PhysX has at the window's first frame are the prefix rows when the frame ran a step*: the collider's transform is
+  `bounds_init`'s `pos` (equal to the prefix rows for all 21 units); PhysX's copy of it is still the step model: the transform at the
+  frame's start if the frame ran a step, unknown if it didn't, **still hypothesized (the clock)**.
+- *The radii at the first tick come from a first `TickEntity` pass (`m_UpdateAll`)*: `bounds_init`'s `r`, exact. Every `bounds_tick`
+  after it has `r0 == r` in `-140` (no radius ever changed), which the sim's rule gives.
+- *The physics clock `Time.time - Time.fixedTime`* (`fixed_phase0` plus each tick's scaled `delta`): **still an inference** (109 runs
+  equal; nothing records the steps a frame ran). It decides which frames' PhysX copies are the previous tick's transforms.
+- *Units hidden at the first tick*: ended by presence in `bounds_init` (not exercised on data). *Pool order for colliders made
+  later*: the order of the `made` `bounds_tick`s, a collider at the origin until a step (unit-tested only: no run makes one).
+
+**Hypothesized when a recording lacks the family** (every capture before `-140`; the text of the sections above and below is for
+this case, and for the checks of the recorded one):
+- the creation order of the colliders made before the window is the pool's (checked by the memory's `near` leaves: 385,005 equal in
+  the record runs of `-111` and later, 1,218,083 in all 109 runs);
+- no fade is in progress at the first tick for a unit that is in the game (a unit *not* in the game is treated as possibly
+  fade-hiding: its `enabled` is unknown until the sim sees it in the game again, cause `enabled`);
+- the positions PhysX has at the first frame are the observation rows at the frame's prefix, when the frame ran a step;
+- the radii at the first tick come from a first `TickEntity` pass with the corpulence the recording shows then (none in these
+  captures: unbounded until the unit's next update);
+- the physics clock (above);
+- units hidden at the first tick may already own a disabled collider (lost, order unknown); pool order for colliders made later.
 
 ### What the sim leaves to the recording, by cause
 
-Every item is a pair left to the recording (counted in the run's line). In the 36 record runs the sim decided 5,256,776
+**With the `bounds_*` records (`poc5-tb-140`) nothing is left for the corpulence, the view-scale band, the history of hidden units,
+the fade or the position of a collider's transform**: the radii and transforms are exact, so every pair is decided but where PhysX's
+copy of a transform is unknown (cause position: a frame with no known step, or a capsule whose position the sim doesn't have). On
+`-140`'s five runs all 6,795,850 pairs are decided (21,470 were the scale band's), 0 left for any cause, and no set has a pair left.
+What the sim still takes from the recording there is the awake units, the unit positions (the driven agent's), the physics clock
+and, for the `near` unions, the sets' orders (the recorded `vis_order`).
+
+Without them, every item is a pair left to the recording (counted in the run's line). In the 36 record runs the sim decided 5,256,776
 pairs (given the hypotheses; each equal to the recording's) and left 14,388,100 to the recording:
 - **Corpulence unknown, or a collider radius not updated since** (no valid read at the collider's last update, or a read made
   stale by an event the sim saw, or a unit with a producer it can't follow: `AddUnitScale`, a polymorph, a rider): 14,373,775 pairs. Every set has some (the units nobody
@@ -524,17 +589,50 @@ Damaged records (`computed_line_of_sight_replays_are_valid_and_damage_is_reporte
 each reported): the 14 above (a `vis` record missing a unit or removing one that wasn't there are now reported by the
 overlap too) and a change with no record (a `vis` record deleted), a unit of known corpulence more than 14 m away added to a set, a `vis` record inside a driven root span (unconsumed).
 
+**`poc5-tb-140` (tb-lizard, the `bounds_*` records and `vis_order`), the same sweep before and after this stream** (five runs, all
+valid both times; per run the counts are the same to the pair for the four replays, which have the record run's length):
+
+| `-140`, five runs | before (hypotheses) | after (the records) |
+|---|---|---|
+| sets compared / differences | 367,840 / 0 | 367,840 / 0 |
+| sets with a pair left to the recording | 21,420 | 0 |
+| pairs decided, each equal to the recording's | 6,774,380 | 6,795,850 |
+| left: corpulence / position / enabled / result buffer | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| left: view-scale band (scale-1 answer equal / differing) | 21,470 (21,470 / 0) | 0 |
+| vision records unconsumed | 0 | 0 |
+
+The record run alone: 1,354,876 pairs decided and 4,294 for the band before, 1,359,170 and 0 after. The records of a run (each
+consumed once): 64 `bounds_init` roots and their end, 7,832 `bounds_tick`, 6 `bounds_set` (4 `active`, 2 `link`), 162 `vis_order`;
+no `bounds_scene` and no `phys_sync`. Checks (a run): 21 unit colliders in the pool's creation order; 21 start transforms equal to the
+prefix rows; 7,832 radii inside the sim's rule (259 exactly `Max(0.05, Corpulence)`) and 7,832 transforms equal to its
+`Vector3 ==` rule; the update list in agreement in 205,465 unit-frames (0 disagreeing); the collider's `enabled` equal to the sim's in
+235,473 unit-frames; 73,534 set orders equal to the creation order and 34 not (the one record above).
+`-140`'s `vision range:` line says "decided given the window's start hypotheses": with the records read "given the records and the
+physics clock" (the line is shared with the captures that have no records, and `vision bounds records:` /
+`vision_order:` lines follow it).
+
+Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 17 cases, each reported):
+a `bounds_init` root without a field, with a wrong count, a wrong radius, missing, swapped with another (the creation order), disabled,
+or moved; a `bounds_tick` that threw, with a radius or transform the sim's rule can't give, a wrong radius before, or a collider
+nobody made; a `bounds_scene` mid-window; a `bounds_set` the collider contradicts (`on0`) or that names an unknown collider; a
+`vis_order` swapped or a unit's first one missing; and a deleted `bounds_tick`. A `phys_sync` inserted mid-window is valid and counted.
+
 ### What stays recorded
 
 - The awake units (`aa_awake`; `-95` and `-96` have none: the sim's own, with the units it can't establish settled by
   the `vis` records' observers), as everywhere.
-- Each unit's `Corpulence` (the `corp` reads) and the physics clock (`fixed_phase0` of the begin record, each tick's
-  `delta`, `fixed_delta_time`); the colliders' positions at the window's first frame (the prefix rows).
+- The physics clock (`fixed_phase0` of the begin record, each tick's `delta`, `fixed_delta_time`), which decides which frames' PhysX
+  copies are the previous tick's transforms: **the number of fixed steps each frame ran** is not recorded (see below).
 - Unit positions: the recording's rows without the driven agent, as before.
-- Observer requests (to remove the inferences; none is needed for these captures to be valid): a `bounds` record at the
-  window's start and on change, one per collider (`SphereBoundsCollider.radius`, `transform.position`, `enabled`, the
-  creation order, the view's `lossyScale`), the number of fixed steps each frame ran, and the corpulence of every unit with
-  a collider, not only the units the fights read.
+- Without the `bounds_*` records (every capture before `-140`): the colliders' state at the window's start (the hypotheses above),
+  each unit's `Corpulence` (the `corp` reads, now also the sim's) and the colliders' positions at the first frame (the prefix rows).
+- With them: nothing of the colliders but what is listed above. The orders of the sets are the recorded ones; PhysX's result order
+  is not the sim's.
+- Observer request, not yet made (none is needed for these captures to be valid): in WrathOracle's physics phase (`PhysicsPhase`)
+  one record per tick, `phys_steps {n}`: the number of fixed steps (`FixedUpdate` rounds) that ran before the tick's controllers.
+  It would replace the clock inference, the last hypothesis under the decided pairs, and end the frames whose PhysX copy is unknown.
+  A second, to settle PhysX's result order: `OverlapCapsule`'s raw hit order (the colliders' ids as the buffer returns them) before the
+  controller's filter, for one unit per tick, would show whether the pruner's order is a function of the structure's history.
 
 ## Observer changes requested
 
