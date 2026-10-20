@@ -180,8 +180,10 @@ impl Bounds {
             c.seen = units.iter().find(|u| u.unit == r.unit).map(|u| Seen {
                 pos: r.pos,
                 in_game: u.in_game,
-                size_gen: 0,
-                in_game_gen: 0,
+                // (What the sim counted before the first tick is its own set-up, not the game's
+                // update list.)
+                size_gen: u.size_gen,
+                in_game_gen: u.in_game_gen,
             });
             self.colliders.push(c);
         }
@@ -476,7 +478,7 @@ impl Bounds {
             size_gen: u.size_gen,
             in_game_gen: u.in_game_gen,
         };
-        match (u.pos_known, c.seen) {
+        match (u.pos_known && u.in_game, c.seen) {
             (true, Some(s)) => {
                 let listed = !s.in_game
                     || !orientation::vec3_eq(s.pos, u.pos)
@@ -484,10 +486,17 @@ impl Bounds {
                     || s.in_game_gen != u.in_game_gen;
                 match (listed, ticked) {
                     (true, true) | (false, false) => out.counts.listed_agree += 1,
-                    (true, false) => out.counts.listed_sim_only += 1,
-                    (false, true) => out.counts.listed_rec_only += 1,
+                    (true, false) => {
+                        out.counts.listed_sim_only += 1;
+                        out.problem(Some(u.unit), "the sim's update list has the unit (it moved, changed size or came back) and the recording has no bounds_tick of it");
+                    }
+                    (false, true) => {
+                        out.counts.listed_rec_only += 1;
+                        out.problem(Some(u.unit), "a bounds_tick of a unit the sim's update list doesn't have (it didn't move, change size or come back)");
+                    }
                 }
             }
+            // (Out of the game the update list takes nobody, and one queued before may still run.)
             _ => out.counts.listed_unchecked += 1,
         }
         c.seen = u.pos_known.then_some(seen);
@@ -532,6 +541,11 @@ mod tests {
             on: Some(true),
             id: Some(id),
         }
+    }
+
+    /// The problems that mention `word`.
+    fn about(out: &RecOut, word: &str) -> usize {
+        out.problems.iter().filter(|(_, p)| p.contains(word)).count()
     }
 
     fn started(roots: &[RecCollider]) -> Bounds {
@@ -691,10 +705,10 @@ mod tests {
             &[tick(A, 7, 0.9, 0.5, [0.0; 3])],
             &[su(A, [0.0; 3], Some(0.9))],
         );
-        assert_eq!(bad.problems.len(), 1, "{:?}", bad.problems);
+        assert_eq!(about(&bad, "radius"), 1, "{:?}", bad.problems);
         // A radius before that isn't the one the last record left.
         let bad = b.tick_recorded(RAN, &[], &[tick(A, 7, 0.4, 0.5, [0.0; 3])], &[]);
-        assert!(!bad.problems.is_empty());
+        assert_eq!(about(&bad, "radius before"), 1, "{:?}", bad.problems);
         // The transform: the unit is at 5, the record says it stayed at 0.
         let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
         let bad = b.tick_recorded(
@@ -703,7 +717,7 @@ mod tests {
             &[tick(A, 7, 0.5, 0.5, [0.0; 3])],
             &[su(A, [5.0, 0.0, 0.0], Some(0.5))],
         );
-        assert_eq!(bad.problems.len(), 1, "{:?}", bad.problems);
+        assert_eq!(about(&bad, "transform"), 1, "{:?}", bad.problems);
         // The update list: a unit that moved without a tick is the sim's only; the collider's
         // enabled flag against the unit's state.
         let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
@@ -712,6 +726,24 @@ mod tests {
         a.pos = [3.0, 0.0, 0.0];
         let out = b.tick_recorded(RAN, &[], &[], &[a]);
         assert_eq!((out.counts.listed_sim_only, out.counts.listed_agree), (1, 0));
+        assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+        // The same unit with a tick for its move agrees; a tick of a unit that stood still doesn't.
+        let mut b2 = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b2.start_check(&[su(A, [0.0; 3], Some(0.5))]);
+        let out = b2.tick_recorded(
+            RAN,
+            &[],
+            &[tick(A, 7, 0.5, 0.5, [3.0, 0.0, 0.0])],
+            &[su(A, [3.0, 0.0, 0.0], Some(0.5))],
+        );
+        assert_eq!((out.counts.listed_agree, out.problems.len()), (1, 0), "{:?}", out.problems);
+        let out = b2.tick_recorded(
+            RAN,
+            &[],
+            &[tick(A, 7, 0.5, 0.5, [3.0, 0.0, 0.0])],
+            &[su(A, [3.0, 0.0, 0.0], Some(0.5))],
+        );
+        assert_eq!((out.counts.listed_rec_only, out.problems.len()), (1, 1));
         a.in_game = false;
         a.enabled = Enabled::No;
         let out = b.tick_recorded(RAN, &[], &[], &[a]);

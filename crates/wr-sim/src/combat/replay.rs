@@ -3292,6 +3292,15 @@ impl Driver<'_> {
                 self.vis_record(w, r);
             }
             Some("obs")
+                if self.bounds_rec_on()
+                    && matches!(
+                        r["ev"].as_str(),
+                        Some("bounds_set" | "phys_sync" | "bounds_scene")
+                    ) =>
+            {
+                self.bounds_stream(w, r);
+            }
+            Some("obs")
                 if self.mem.on
                     && matches!(
                         r["ev"].as_str(),
@@ -4845,6 +4854,7 @@ fn pos_pair(at: &Rv) -> Option<([f32; 3], [f32; 3])> {
 
 mod agent;
 mod ai;
+mod bounds_rec;
 mod commands;
 mod corp;
 mod engage;

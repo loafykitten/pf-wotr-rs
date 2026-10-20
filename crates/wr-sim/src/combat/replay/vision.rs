@@ -62,6 +62,23 @@ pub(super) struct VisDriver {
     pub counts: VisCounts,
 }
 
+impl VisDriver {
+    /// A record (by `seq`) some handler must consume before the run ends.
+    pub(super) fn expect_record(&mut self, seq: i64, ev: &str) {
+        self.unconsumed.insert(seq, ev.to_owned());
+    }
+
+    /// The run gives up the records of these kinds (reported as a whole): none is expected.
+    pub(super) fn forget_records(&mut self, evs: &[&str]) {
+        self.unconsumed.retain(|_, ev| !evs.contains(&ev.as_str()));
+    }
+
+    /// A handler consumes the record; `false` when it was not expected or already consumed.
+    pub(super) fn consume_record(&mut self, seq: i64) -> bool {
+        self.unconsumed.remove(&seq).is_some()
+    }
+}
+
 /// What a run computed, by reader.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct VisCounts {
@@ -167,6 +184,9 @@ pub struct VisCounts {
     /// Reads and fills in the recording's last frame without the driven agent (positions as of
     /// the last prefix, see [`Driver::note_last_frame`]).
     pub last_frame_reads: usize,
+    /// The records of the entity-bounds colliders and of the sets' order, when the recording has
+    /// them (`replay/bounds_rec.rs`).
+    pub rec: super::bounds_rec::BoundsRecCounts,
 }
 
 /// The model's view of the world during one read.
@@ -289,6 +309,7 @@ impl Driver<'_> {
             }
         }
         self.vis.range.start(trace);
+        self.bounds_rec_start(w, declared);
     }
 
     fn vis_world<'a>(&'a self, w: &'a World, after_move: bool) -> Vw<'a> {

@@ -775,6 +775,10 @@ impl<'t> MemWorld<'_, 't> {
                     self.d.vis_record(self.w, r);
                 }
             }
+            // A collider write or a sync inside the tick (a death in a group's handler).
+            (Some("obs"), Some("bounds_set" | "phys_sync")) if self.d.bounds_rec_on() => {
+                self.d.bounds_stream(self.w, r);
+            }
             _ => {
                 return Err(Desync(format!("a record inside the memory tick ({})", describe(r))));
             }

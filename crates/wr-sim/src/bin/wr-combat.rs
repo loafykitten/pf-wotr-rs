@@ -397,6 +397,54 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
         }
         (None, None) => println!("vision: not computed (no engage observer or no vis records)"),
     }
+    if let Some(v) = &out.vision {
+        let b = &v.rec;
+        if b.used {
+            let r = &b.rec;
+            println!(
+                "vision bounds records: colliders from bounds_init (the window's start): units' {} (others' {}), creation order of {} units equal to the pool's, hidden units with a collider {}, units in the game without {}, start transforms equal to the previous frame's end {} (within the tolerance {}, not checked {}); bounds_tick: unit calls {} (made {}, other entities' {}), radii against the sim's rule: exact {}, within the band {}, corpulence unknown {}; transforms equal to the sim's rule {} (not checked {}); update list, unit-frames: agree {}, the sim's only {}, the recording's only {}, not checked {}; enabled against the sim's: equal {}, not known to the sim {}; bounds_set writes: active {}, moved {}, destroyed {}, other entities' {}, links {}; phys_sync: syncs {}, frames {} (the sim had flagged {}, had not {}), frames the sim flagged with none recorded {}; views the sim thought replaced {}",
+                b.roots,
+                b.other_roots,
+                b.order_units,
+                b.hidden_with_collider,
+                b.in_game_without,
+                b.start_equal,
+                b.start_near,
+                b.start_unchecked,
+                r.ticks,
+                r.made,
+                b.other_ticks,
+                r.radius_exact,
+                r.radius_band,
+                r.radius_unchecked,
+                r.pos_equal,
+                r.pos_unchecked,
+                r.listed_agree,
+                r.listed_sim_only,
+                r.listed_rec_only,
+                r.listed_unchecked,
+                r.enabled_checked,
+                r.enabled_unknown,
+                r.active,
+                r.moved,
+                r.gone,
+                b.other_writes,
+                b.links,
+                r.syncs,
+                b.sync_frames,
+                b.sync_flagged,
+                b.sync_unflagged,
+                b.sync_flag_only,
+                b.views_replaced
+            );
+        }
+        if b.order_records > 0 {
+            println!(
+                "vision_order: records {}; sets whose order the sim's colliders give: equal {}, differing {}; sets whose order the sim could not give (taken) {}",
+                b.order_records, b.order_equal, b.order_differ, b.order_taken
+            );
+        }
+    }
     println!(
         "agent: entries {}, commands' calls {}, states checked {}, units ticked {}, requests checked {}, draws {}, synchronizations {}, getters checked {}, rows checked {}; inputs {:?}",
         out.ag_entries,
