@@ -2,6 +2,7 @@
 
 pub mod modifier;
 pub mod ops;
+mod trace;
 pub mod types;
 pub mod value;
 
