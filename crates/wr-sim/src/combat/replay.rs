@@ -203,6 +203,8 @@ pub struct Outcome {
     pub roam: roaming::RoamCounts,
     /// The prone controller (`replay/prone.rs`).
     pub prone: prone::ProneCounts,
+    /// The stat mutations in the T0 stream (`replay/stats.rs`).
+    pub stats: stats::StatCounts,
     /// The observation records inside root rules' spans (`replay/spans.rs`).
     pub spans: spans::SpanCounts,
     /// The combat log (a recording with WrathOracle's `combat_log`): the sim's events, ticks and
@@ -728,7 +730,13 @@ fn sim_stream_without(w: &World, skip: &[(usize, usize)]) -> Vec<J> {
                         json!({"k": "mut", "what": what, "owner": m["owner"],
                         "blueprint": m["fact"]["blueprint"], "class": m["class"]})
                     }
-                    _ => continue,
+                    _ => {
+                        m.insert("t".into(), json!(e.t));
+                        match project::stat_record(&J::Object(m)) {
+                            Some(r) => r,
+                            None => continue,
+                        }
+                    }
                 }
             }
             _ => continue,
@@ -1678,6 +1686,11 @@ impl<'t> Driver<'t> {
         let mut out = self.out;
         out.oracle = oracle_stream(trace, &self.echo_spans, &self.unverified, &mut out);
         out.sim = sim_stream_without(w, &self.sim_skip);
+        out.stats = stats::settle(w, &mut out.oracle, &out.sim);
+        if !out.stats.agrees() {
+            w.coverage
+                .unsupported("driven replay: the sim's stat mutations differ from the recording's");
+        }
         out.diff = project::diff(&out.oracle, &out.sim);
         out
     }
@@ -3220,6 +3233,7 @@ impl Driver<'_> {
                 self.frame_at = Some(i);
                 self.tick = r["t"].as_i64().unwrap_or(-1);
                 w.game_log.frame = self.tick;
+                w.events.tick = self.tick;
                 self.time_seen = false;
                 if self.turn_begin.take().is_some() {
                     w.coverage
@@ -4868,6 +4882,7 @@ mod prone;
 mod roaming;
 mod spans;
 mod spells;
+mod stats;
 mod targets;
 mod vision;
 mod vision_range;

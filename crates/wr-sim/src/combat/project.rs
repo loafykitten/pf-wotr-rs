@@ -11,6 +11,7 @@
 //! | `bonuses` | a rule's `rule_end` bonuses and its `rule_bonus` additions, when it has any | class, each bonus's and addition's value, descriptor, type, stat and source fact |
 //! | `draw` | `draw` made inside a rule (`rule != 0`), sim class | call-site key, value |
 //! | `mut` | `mut` of kind `damage`, `xp`, `fact_attach`, `fact_detach` | kind, unit, values, fact blueprint |
+//! | `mut` | `mut` of kind `stat_value`, `stat_mod_add`, `stat_mod_remove`, `stat_temp_scope_add`, `stat_temp_scope_remove` | [`stat_record`] |
 //! | `tb` | `tb` (turn-based controller) | event, round, unit; for orders, the unit ids and initiatives |
 //! | `cmd` | `cmd` `start`/`end` | event, command class, unit, target, result |
 //! | `input` | `input` | the step text (positions left out) |
@@ -94,6 +95,62 @@ fn reduce(v: &J) -> J {
         }
         _ => v.clone(),
     }
+}
+
+/// Whether `what` is one of a stat's mutation records (`stats::trace`).
+#[must_use]
+pub fn is_stat_mut(what: &str) -> bool {
+    matches!(
+        what,
+        "stat_value"
+            | "stat_mod_add"
+            | "stat_mod_remove"
+            | "stat_temp_scope_add"
+            | "stat_temp_scope_remove"
+    )
+}
+
+/// A stat modifier as compared: its descriptor, value and stack mode, the fact that added it (its
+/// unique id and blueprint), the component, the item's id and blueprint.
+fn stat_mod(m: &J) -> J {
+    if m.is_null() {
+        return J::Null;
+    }
+    json!([
+        m["descriptor"],
+        m["value"],
+        m["stack_mode"],
+        m["stacks"],
+        m["source"],
+        m["source_component"],
+        m["item"]
+    ])
+}
+
+/// A stat mutation record (`r`: a recorded or a simulated one) as compared: its frame, the stat and its
+/// owner, then the value change (`old`, `new`, `permanent`), or the modifier and the stat's value
+/// after it (`modified`), or a scope's modifiers. `None` for a record that is none of them.
+#[must_use]
+pub fn stat_record(r: &J) -> Option<J> {
+    let what = r["what"].as_str().filter(|w| is_stat_mut(w))?;
+    let mut o =
+        json!({"k": "mut", "what": what, "t": r["t"], "stat": r["stat"], "owner": r["owner"]});
+    match what {
+        "stat_value" => {
+            for f in ["old", "new", "permanent"] {
+                o[f] = r[f].clone();
+            }
+        }
+        "stat_mod_add" | "stat_mod_remove" => {
+            o["mod"] = stat_mod(&r["mod"]);
+            o["modified"] = r["modified"].clone();
+        }
+        _ => {
+            o["mods"] =
+                J::Array(r["mods"].as_array().into_iter().flatten().map(stat_mod).collect());
+        }
+    }
+    Some(o)
 }
 
 /// Projects an oracle trace.
@@ -194,6 +251,7 @@ pub fn project_records<'r>(t: &Trace, records: impl IntoIterator<Item = &'r Rv>)
                         "blueprint": r["fact"]["blueprint"], "class": r["class"]})),
                     // An addition to a rule's bonuses (`RuleBonusPostfix`), for its rule's
                     // `bonuses` record; one to an untracked rule (`target_rule` 0) is left out.
+                    w if is_stat_mut(w) => out.extend(stat_record(&r.to_json())),
                     "rule_bonus" => {
                         if let Some(t) = r["target_rule"].as_i64().filter(|t| *t > 0) {
                                                         adds.entry(t).or_default().push(json!([r["value"], r["descriptor"], r["type"],
@@ -287,6 +345,52 @@ pub fn diff(oracle: &[J], sim: &[J]) -> Diff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stat mutation projects to the same record from the oracle's form and the sim's: the
+    /// descriptor's name and the fields the oracle adds are not compared; a changed value, modifier,
+    /// source fact (its id too), frame or the other kind is.
+    #[test]
+    fn stat_mutations_project_alike_from_both_sides() {
+        let rec = json!({"seq": 9, "k": "mut", "t": 4, "what": "stat_mod_add", "rule": 0, "h": 0,
+            "stat": 11, "owner": "51DD", "modified": 4,
+            "mod": {"descriptor": 40, "descriptor_name": "Helpless", "value": -9, "stack_mode": 0,
+                "stacks": false, "source": {"$fact": "1", "blueprint": "ab"},
+                "source_component": "$c", "item": null}});
+        let t = Trace {
+            records: [
+                rec.clone(),
+                json!({"k": "mut", "t": 4, "what": "stat_value", "stat": 11,
+                "owner": "51DD", "old": 13, "new": 4, "permanent": 10, "rule": 0, "h": 0}),
+            ]
+            .iter()
+            .map(Rv::from_json)
+            .collect(),
+            sites: Default::default(),
+        };
+        let out = project_oracle(&t);
+        assert_eq!(out.len(), 2);
+        let mut sim = rec.clone();
+        sim["mod"]["descriptor_name"] = json!("x");
+        sim["seq"] = json!(0);
+        assert_eq!(stat_record(&sim), Some(out[0].clone()));
+        for (path, v) in
+            [("t", json!(5)), ("modified", json!(5)), ("stat", json!(12)), ("owner", json!("x"))]
+        {
+            let mut other = rec.clone();
+            other[path] = v;
+            assert_ne!(stat_record(&other), Some(out[0].clone()), "{path}");
+        }
+        let mut other = rec.clone();
+        other["mod"]["source"]["$fact"] = json!("2");
+        assert_ne!(stat_record(&other), Some(out[0].clone()), "the source fact's id");
+        other = rec.clone();
+        other["mod"]["value"] = json!(-8);
+        assert_ne!(stat_record(&other), Some(out[0].clone()));
+        other = rec.clone();
+        other["what"] = json!("stat_mod_remove");
+        assert_ne!(stat_record(&other), Some(out[0].clone()));
+        assert_eq!(stat_record(&json!({"what": "damage"})), None);
+    }
 
     /// A handler's `h_end` changes (`rule` = the rule id) reach the rule's result, as do the
     /// `about` and `trig` changes: the oracle's running snapshot already includes them, so

@@ -33,6 +33,17 @@ fn item_ref(w: &World, e: Option<EntityIdx>) -> J {
     }
 }
 
+/// A stat modifier in WrathOracle's form (`Snap.Modifier`).
+pub(crate) fn modifier_json(w: &World, m: crate::world::ModIdx) -> J {
+    let md = &w.mods[m.i()];
+    json!({
+        "descriptor": md.desc.0, "descriptor_name": md.desc.name(), "value": md.value,
+        "stack_mode": md.stack_mode.0, "stacks": md.stacks(),
+        "source": fact_ref(w, md.source), "source_component": md.source_component,
+        "item": item_ref(w, md.item_source),
+    })
+}
+
 fn stat_class(k: &StatKind) -> &'static str {
     match k {
         StatKind::Plain => "ModifiableValue",
@@ -55,13 +66,7 @@ fn stat_json(w: &World, u: EntityIdx, t: StatType) -> J {
     let mut mods = Vec::new();
     for d in keys {
         for &m in &s.modifier_list.get(&d).expect("key").items {
-            let md = &w.mods[m.i()];
-            mods.push(json!({
-                "descriptor": md.desc.0, "descriptor_name": md.desc.name(), "value": md.value,
-                "stack_mode": md.stack_mode.0, "stacks": md.stacks(),
-                "source": fact_ref(w, md.source), "source_component": md.source_component,
-                "item": item_ref(w, md.item_source),
-            }));
+            mods.push(modifier_json(w, m));
         }
     }
     let mut extra = serde_json::Map::new();

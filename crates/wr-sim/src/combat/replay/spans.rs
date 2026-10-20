@@ -76,6 +76,9 @@ pub struct SpanCounts {
 /// experience, facts attached and detached, and a bonus added to a rule it tracks, which it buffers
 /// and emits at that rule's `rule_end`: so the rule must be open on `open`'s stack at the mutation),
 /// less what `oracle_stream` then drops (the tutorial's facts: [`super::stream_drops_fact`]).
+/// The stat mutations (`project::is_stat_mut`) are in the stream too, but a span doesn't accept
+/// one: the sweep's captures have none inside a root span, and the sim writes none there, so one
+/// would be a record nothing explains (`docs/poc5/stats.md`).
 pub(super) fn projected(open: &Open, r: &Rv) -> bool {
     match r["what"].as_str() {
         Some("damage" | "xp") => true,
