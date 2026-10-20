@@ -356,6 +356,7 @@ fn plain(
             animation: *animation,
             bones: mesh.bones.clone(),
             bind_poses: mesh.bind.clone(),
+            forbid_rotation: prefab.forbid_rotation,
         });
         push_renderer(b, sc, o, &v, go, mesh.mesh, mats, matrix, u, skin);
     }
@@ -582,6 +583,7 @@ pub(super) fn push_renderer_for(
     layer: u32,
     skin: Option<SkinBinding>,
 ) {
+    let skin = skin.map(|s| SkinBinding { forbid_rotation: prefab.forbid_rotation, ..s });
     b.meta.renderers.push(Renderer {
         renderer: AssetId { file: prefab.sc.file.name.clone(), path_id: 0 },
         game_object: AssetId { file: prefab.sc.file.name.clone(), path_id: 0 },

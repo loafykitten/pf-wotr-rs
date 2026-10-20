@@ -148,9 +148,10 @@ pub struct Drive {
 impl Drive {
     fn pose(&self, track: usize, frame: usize) -> Option<&DrivePose> {
         let t = &self.tracks[track];
-        let last = t.first + t.poses.len();
-        // Before its first sample a unit stands where it first was; after the last it stays.
-        t.poses.get(frame.clamp(t.first, last.saturating_sub(1)).checked_sub(t.first)?)
+        // Before its first sample a unit stands where it first was; after the last it stays; a track
+        // with no poses has none.
+        let last = t.first.checked_add(t.poses.len().checked_sub(1)?)?;
+        t.poses.get(frame.clamp(t.first, last).checked_sub(t.first)?)
     }
 }
 
@@ -269,6 +270,20 @@ fn skin_pipeline(device: &wgpu::Device) -> (wgpu::ComputePipeline, wgpu::BindGro
 #[must_use]
 pub fn phase_of(id: &str) -> f32 {
     (wr_assets::fnv1a64(id.as_bytes()) >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// The centre of the points' box and the radius of their extent in the ground plane (x and z).
+fn centre_and_radius(pts: &[Vec3]) -> Option<(Vec3, f32)> {
+    if pts.is_empty() {
+        return None;
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in pts {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let d = hi - lo;
+    Some(((lo + hi) * 0.5, d.x.hypot(d.z) * 0.5))
 }
 
 /// The axis-aligned box of `lo..hi` moved by `m`.
@@ -452,6 +467,7 @@ impl Skinning {
         self.palette_used += bones;
         let unit = sk.animation as usize;
         self.units[unit].placement = mat(&r.matrix);
+        self.units[unit].turns = !sk.forbid_rotation;
         self.draws.push(SkinDraw {
             unit,
             bones: sk.bones.clone(),
@@ -488,16 +504,9 @@ impl Skinning {
                 continue;
             };
             u.track = Some(ti);
-            // A view that forbids rotation keeps its prefab's facing whatever the unit's: its
-            // placement doesn't turn with the first pose.
-            if let Some(p) = t.poses.first() {
-                let (_, rot, _) = u.placement.to_scale_rotation_translation();
-                let yaw = rot.to_euler(bevy::math::EulerRot::YXZ).0.to_degrees();
-                let diff = (yaw - p.yaw + 180.0).rem_euclid(360.0) - 180.0;
-                u.turns = diff.abs() < 1.0;
-                if !u.turns {
-                    eprintln!("fight: {} keeps its prefab's facing (ForbidRotation?)", u.id);
-                }
+            // (`turns` is the pack's: a view with `ForbidRotation` keeps the identity rotation.)
+            if !u.turns {
+                eprintln!("fight: {} keeps its prefab's facing (the view's ForbidRotation)", u.id);
             }
         }
         self.drive = Some(drive);
@@ -527,15 +536,7 @@ impl Skinning {
         if pts.is_empty() {
             pts = pick(&|_| true);
         }
-        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for p in &pts {
-            lo = lo.min(*p);
-            hi = hi.max(*p);
-        }
-        (!pts.is_empty()).then(|| {
-            let c = (lo + hi) * 0.5;
-            (c, (hi - lo).truncate().length() * 0.5)
-        })
+        centre_and_radius(&pts)
     }
 
     fn walk_speed(&self, unit: &UnitRt) -> f32 {
@@ -835,11 +836,30 @@ mod tests {
             [x(0), x(2), x(3), x(5), x(999)],
             [Some(1.0), Some(1.0), Some(2.0), Some(2.0), Some(2.0)]
         );
-        let empty = Drive {
-            frames: 1,
-            tracks: vec![DriveTrack { unit: "u".into(), first: 0, poses: vec![] }],
-        };
-        assert!(empty.pose(0, 0).is_none());
+        // A track with no poses has none, whatever its start (and doesn't panic in the clamp).
+        for first in [0, 1, usize::MAX] {
+            let empty = Drive {
+                frames: 1,
+                tracks: vec![DriveTrack { unit: "u".into(), first, poses: vec![] }],
+            };
+            assert!(empty.pose(0, 0).is_none() && empty.pose(0, usize::MAX).is_none());
+        }
+    }
+
+    /// The radius of a group is its extent on the ground: fighters apart along Z only (or X only)
+    /// still make a wide group, and height doesn't widen it.
+    #[test]
+    fn the_framing_radius_is_the_extent_in_x_and_z() {
+        let z = [Vec3::new(5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 10.0)];
+        let (c, r) = centre_and_radius(&z).expect("points");
+        assert_eq!((c, r), (Vec3::new(5.0, 0.0, 5.0), 5.0));
+        let x = [Vec3::new(0.0, 0.0, 3.0), Vec3::new(8.0, 0.0, 3.0)];
+        assert_eq!(centre_and_radius(&x).expect("points").1, 4.0);
+        let up = [Vec3::new(1.0, 0.0, 1.0), Vec3::new(1.0, 30.0, 1.0)];
+        assert_eq!(centre_and_radius(&up).expect("points").1, 0.0);
+        let diag = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(3.0, 9.0, 4.0)];
+        assert_eq!(centre_and_radius(&diag).expect("points").1, 2.5);
+        assert!(centre_and_radius(&[]).is_none());
     }
 
     /// A box turned a quarter about Y covers the turned corners.

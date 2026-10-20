@@ -168,3 +168,44 @@ fn a_run_that_is_not_valid_has_no_timeline() {
     assert!(!w.valid());
     assert!(e.unsupported.iter().any(|k| k.contains("observation row's position")), "{e}");
 }
+
+/// A recording without the movement agent's records (the older captures): nothing computes or
+/// takes the units' positions, so there is no timeline, whatever else is valid.
+#[test]
+#[ignore = "needs the game's blueprint pack, the unit prefab table, Manual_18 and the poc5-tb-95 capture"]
+fn a_recording_without_agent_records_has_no_timeline() {
+    let Some(dir) = fixture_in("poc5-tb-95", "tb-nearest") else {
+        eprintln!("poc5-tb-95 not present: skipped");
+        return;
+    };
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let (_, tl) = replay::timeline::run_timeline(&mut w, &trace);
+    let e = tl.expect_err("no agent records, no timeline");
+    assert!(e.unsupported.iter().any(|k| k.contains("movement agent")), "{e}");
+}
+
+/// A capture with the agents' synchronization but without the place-on-ground controller's rays
+/// (`ground_view`): that controller's steps outside `TickUnit` are taken from the recording, so a
+/// unit's position is the recording's in a frame the rest of the world is the sim's. Those samples
+/// are labelled as the recording's, per unit (a frame can hold both).
+#[test]
+#[ignore = "needs the game's blueprint pack, the unit prefab table, Manual_18 and the poc5-tb-113 capture"]
+fn a_position_taken_from_the_recording_in_a_sim_frame_is_labelled_so() {
+    let Some(dir) = fixture_in("poc5-tb-113", "tb-nearest") else {
+        eprintln!("poc5-tb-113 not present: skipped");
+        return;
+    };
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let (_, tl) = replay::timeline::run_timeline(&mut w, &trace);
+    let tl = tl.expect("the record run is valid");
+    let mut mixed = 0usize;
+    for f in 0..tl.ticks.len() {
+        let src: Vec<Source> =
+            tl.tracks.iter().filter_map(|t| tl.sample(&t.id, f)).map(|s| s.source).collect();
+        if src.contains(&Source::Sim) && src.contains(&Source::Recording) {
+            mixed += 1;
+        }
+    }
+    eprintln!("{mixed} of {} frames hold sim and recorded samples", tl.ticks.len());
+    assert!(mixed > 0, "no frame has a unit taken from the recording among sim ones");
+}

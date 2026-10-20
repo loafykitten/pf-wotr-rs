@@ -110,10 +110,8 @@ pub fn load(fixture: &Path, run: &str, save: Option<&str>) -> Result<Fight> {
         out.roots,
         out.diff.equal
     );
-    let frames: Vec<i64> = timeline.ticks.windows(2).map(|w| w[1] - w[0]).collect();
-    if frames.iter().any(|d| *d != 1) {
-        bail!("{}: the recording's frames are not consecutive", fixture.display());
-    }
+    // (A file is checked as it is read; a replay's timeline gets the same checks.)
+    timeline.check()?;
     Ok(Fight { drive: to_drive(&timeline) })
 }
 

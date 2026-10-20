@@ -13,7 +13,7 @@
 //! physics and orientation writers (turn-based combat, once the agents are synchronized), or the
 //! recording's observation rows (real time, which the sim doesn't compute).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
@@ -31,8 +31,10 @@ pub enum Source {
     /// The sim's own: turn-based combat with the movement agents synchronized (the agent, the
     /// physics, the paths and the orientation writers are ported).
     Sim,
-    /// The recording's observation rows: real time (the walk-up before a fight), which the sim
-    /// doesn't compute.
+    /// The recording's: real time (the walk-up before a fight), which the sim doesn't compute, or
+    /// a position or orientation the replay wrote from a recorded input in this frame (a
+    /// place-on-ground step by another controller, a write by code the sim doesn't run, the
+    /// agents' snapshots, a roaming step's recorded vector).
     Recording,
 }
 
@@ -107,9 +109,10 @@ impl Timeline {
     ///
     /// # Errors
     ///
-    /// I/O.
+    /// I/O, or a timeline that is not consistent ([`Self::check`]).
     pub fn write(&self, path: &Path) -> Result<()> {
         use std::io::Write as _;
+        self.check()?;
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d)?;
         }
@@ -124,31 +127,64 @@ impl Timeline {
         Ok(())
     }
 
-    /// Reads a file [`Self::write`] made, and checks that its frames, tracks and command indices
-    /// fit together and its numbers are finite.
+    /// Reads a file [`Self::write`] made. The file is not trusted: the decompressed JSON is
+    /// limited to [`MAX_BYTES`] before it is parsed, and the timeline must pass [`Self::check`].
     ///
     /// # Errors
     ///
-    /// I/O, malformed JSON, another schema or an inconsistent timeline.
+    /// I/O, malformed JSON, more than the limits allow, another schema or an inconsistent timeline.
     pub fn read(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-        let f: File = serde_json::from_reader(std::io::BufReader::new(
-            flate2::read::GzDecoder::new(std::io::BufReader::new(file)),
-        ))
+        let unzipped = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+        let f: File = serde_json::from_reader(std::io::BufReader::new(Limited {
+            inner: unzipped,
+            left: MAX_BYTES,
+        }))
         .with_context(|| format!("parse {}", path.display()))?;
         ensure!(f.schema == SCHEMA, "{}: schema {} (want {SCHEMA})", path.display(), f.schema);
         f.timeline.check().with_context(|| path.display().to_string())?;
         Ok(f.timeline)
     }
 
-    fn check(&self) -> Result<()> {
-        ensure!(self.ticks.windows(2).all(|w| w[0] < w[1]), "frames out of order");
+    /// Whether the frames, tracks and command indices fit together: at most [`MAX_FRAMES`] frames,
+    /// [`MAX_TRACKS`] tracks and [`MAX_SAMPLES`] samples; the frames consecutive (the game steps
+    /// one per 1/60 s, and a viewer plays them by index); each track non-empty, inside the frames
+    /// and finite; every command index in the table.
+    ///
+    /// # Errors
+    ///
+    /// The first thing that doesn't fit.
+    pub fn check(&self) -> Result<()> {
+        ensure!(
+            self.ticks.len() <= MAX_FRAMES,
+            "{} frames (at most {MAX_FRAMES})",
+            self.ticks.len()
+        );
+        ensure!(
+            self.tracks.len() <= MAX_TRACKS,
+            "{} tracks (at most {MAX_TRACKS})",
+            self.tracks.len()
+        );
+        ensure!(
+            self.commands.len() < usize::from(u16::MAX),
+            "{} command classes",
+            self.commands.len()
+        );
+        ensure!(
+            self.ticks.windows(2).all(|w| w[0].checked_add(1) == Some(w[1])),
+            "the frames are not consecutive"
+        );
+        let mut samples = 0usize;
         for t in &self.tracks {
+            ensure!(!t.samples.is_empty(), "{}: a track without samples", t.id);
+            let end = t.first.checked_add(t.samples.len());
             ensure!(
-                t.first + t.samples.len() <= self.ticks.len(),
-                "{}: more samples than frames",
+                end.is_some_and(|e| e <= self.ticks.len()),
+                "{}: samples outside the frames",
                 t.id
             );
+            samples += t.samples.len();
+            ensure!(samples <= MAX_SAMPLES, "more than {MAX_SAMPLES} samples");
             for s in &t.samples {
                 let finite = s
                     .position
@@ -175,6 +211,28 @@ impl Timeline {
 
 /// Schema tag of a timeline file.
 pub const SCHEMA: &str = "wr-sim/timeline/1";
+/// What a timeline file may hold: decompressed bytes (a 3 hour fight of 21 units is about 0.3
+/// GiB), frames (19 hours), tracks and samples.
+pub const MAX_BYTES: u64 = 1 << 30;
+pub const MAX_FRAMES: usize = 4_000_000;
+pub const MAX_TRACKS: usize = 65_536;
+pub const MAX_SAMPLES: usize = 8_000_000;
+
+/// A reader that fails once `left` bytes have been read.
+struct Limited<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for Limited<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.left = self.left.checked_sub(n as u64).ok_or_else(|| {
+            std::io::Error::other(format!("more than {MAX_BYTES} bytes after decompression"))
+        })?;
+        Ok(n)
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct File {
@@ -214,6 +272,9 @@ pub(super) struct Collector {
     /// Track of each unit entity.
     track_of: HashMap<EntityIdx, usize>,
     class_of: HashMap<String, u16>,
+    /// The units whose position or orientation the replay wrote from a recorded input in the
+    /// frame so far (cleared at each sample).
+    taken: HashSet<EntityIdx>,
 }
 
 impl Collector {
@@ -245,6 +306,7 @@ impl Collector {
         self.refresh(w);
         let frame = self.out.ticks.len();
         self.out.ticks.push(tick);
+        let taken = std::mem::take(&mut self.taken);
         for &e in &self.units.clone() {
             let ent = w.entity(e);
             let Some(u) = w.unit(e) else { continue };
@@ -291,13 +353,21 @@ impl Collector {
                 speed,
                 agent_speed: u.combat.agent.speed,
                 command,
-                source,
+                source: if taken.contains(&e) { Source::Recording } else { source },
             });
         }
     }
 }
 
 impl Driver<'_> {
+    /// The replay wrote unit `u`'s position or orientation from a recorded input: its sample of
+    /// this frame is the recording's. Reads nothing, changes nothing the replay uses.
+    pub(super) fn timeline_taken(&mut self, u: EntityIdx) {
+        if let Some(c) = self.timeline.as_mut() {
+            c.taken.insert(u);
+        }
+    }
+
     /// A frame's end (when the next `tick` record arrives, or the recording ends): the units'
     /// state in it. Reads the world only.
     pub(super) fn timeline_sample(&mut self, w: &World) {
@@ -314,7 +384,8 @@ impl Driver<'_> {
 }
 
 /// [`super::run`] collecting the units' timeline. The outcome is the replay's, unchanged; the
-/// timeline is there only when the run is valid.
+/// timeline is there only when the run is valid and the sim computes or takes the units' positions
+/// from the recording's agent records.
 pub fn run_timeline(w: &mut World, trace: &Trace) -> (Outcome, Result<Timeline, Invalid>) {
     let mut d = Driver::start(w, trace, trace);
     d.timeline = Some(Collector::default());
@@ -322,16 +393,29 @@ pub fn run_timeline(w: &mut World, trace: &Trace) -> (Outcome, Result<Timeline, 
         let i = d.i;
         d.i = d.record(w, i);
     }
+    let agents = d.ag;
     let (out, collected) = d.finish(w);
-    let timeline = if w.valid() {
+    (out, conclude(w, collected, agents))
+}
+
+/// The timeline of a finished run, or why there is none: the run is not valid, or the replay
+/// didn't drive the movement agents (a recording without the `agent` observer and its
+/// synchronization: its observation rows are kept apart from the units, so their positions are
+/// the save's and a timeline of them would be wrong).
+fn conclude(w: &World, collected: Option<Collector>, agents: bool) -> Result<Timeline, Invalid> {
+    let mut unsupported: Vec<String> = w.coverage.unsupported.keys().cloned().collect();
+    if !agents {
+        unsupported.push(
+            "the recording has no movement agent records (observer `agent` with `agent_sync`): \
+             the units' positions are neither computed nor taken"
+                .to_owned(),
+        );
+    }
+    if w.valid() && agents {
         Ok(collected.map(|c| c.out).unwrap_or_default())
     } else {
-        Err(Invalid {
-            unsupported: w.coverage.unsupported.keys().cloned().collect(),
-            rng_failures: w.rng.failures().len(),
-        })
-    };
-    (out, timeline)
+        Err(Invalid { unsupported, rng_failures: w.rng.failures().len() })
+    }
 }
 
 /// [`super::run_fixture`] collecting the units' timeline.
@@ -382,26 +466,32 @@ mod tests {
         (w, u)
     }
 
-    /// One sample per frame, from the world's state at the frame's end, and the replay's own outputs
-    /// the same with and without collecting.
+    /// The collector's samples are the world's state at each frame's end, and a run without
+    /// the movement agent has no timeline however the world looks (its observation rows aren't in
+    /// the units, so the positions are stale).
     #[test]
-    fn a_valid_run_has_a_sample_per_frame_and_the_same_outcome() {
+    fn samples_are_the_worlds_and_a_run_without_agents_has_no_timeline() {
         let (mut w, u) = world();
         let id = w.entity(u).unique_id.clone();
-        let (out, tl) = run_timeline(&mut w, &trace(3));
-        let tl = tl.expect("a valid run");
+        let mut c = Collector::default();
+        for t in 0..3 {
+            c.sample(&w, t, Source::Sim);
+        }
+        let tl = conclude(&w, Some(c), true).expect("a valid run with agents");
         assert_eq!(tl.ticks, [0, 1, 2]);
         let t = tl.track(&id).expect("the unit's track");
         assert_eq!((t.first, t.samples.len()), (0, 3));
         let s = tl.sample(&id, 2).expect("last frame");
         assert_eq!(s.position, [1.0, 2.0, 3.0]);
         assert_eq!((s.orientation, s.desired_orientation, s.speed), (90.0, 45.0, 0.0));
-        assert_eq!(
-            (s.life_state, s.prone, s.in_game, s.source),
-            (0, false, true, Source::Recording)
-        );
+        assert_eq!((s.life_state, s.prone, s.in_game, s.source), (0, false, true, Source::Sim));
         assert!(tl.sample(&id, 3).is_none() && tl.sample("nobody", 0).is_none());
 
+        // The same recording through the replay: no agent records, so no timeline; and the replay's
+        // own outputs are those of `run`.
+        let (out, tl) = run_timeline(&mut w, &trace(3));
+        let e = tl.expect_err("no agent records");
+        assert!(e.unsupported.iter().any(|k| k.contains("movement agent")), "{e}");
         let (mut w2, _) = world();
         let plain = super::super::run(&mut w2, &trace(3));
         assert_eq!(format!("{:?}", plain.diff), format!("{:?}", out.diff));
@@ -410,6 +500,24 @@ mod tests {
             w.coverage.unsupported.keys().collect::<Vec<_>>(),
             w2.coverage.unsupported.keys().collect::<Vec<_>>()
         );
+    }
+
+    /// A unit whose position or orientation was written from a recorded input in a frame is the
+    /// recording's in that frame, and only that unit and frame.
+    #[test]
+    fn a_unit_written_from_a_recorded_input_is_the_recordings_for_that_frame() {
+        let (w, u) = world();
+        let id = w.entity(u).unique_id.clone();
+        let mut c = Collector::default();
+        c.sample(&w, 0, Source::Sim);
+        c.taken.insert(u);
+        c.sample(&w, 1, Source::Sim);
+        c.sample(&w, 2, Source::Sim);
+        // (A frame the whole replay takes stays the recording's.)
+        c.sample(&w, 3, Source::Recording);
+        let t = c.out.track(&id).expect("track");
+        let src: Vec<Source> = t.samples.iter().map(|s| s.source).collect();
+        assert_eq!(src, [Source::Sim, Source::Recording, Source::Sim, Source::Recording]);
     }
 
     /// A unit's speed is its horizontal displacement between frames, 60 to the second.
@@ -429,25 +537,111 @@ mod tests {
         assert_eq!(t.samples[1].source, Source::Sim);
     }
 
-    /// A timeline round-trips through its file, and a file that doesn't fit together is refused.
+    fn timeline() -> Timeline {
+        let (w, _) = world();
+        let mut c = Collector::default();
+        for t in 0..3 {
+            c.sample(&w, t, Source::Sim);
+        }
+        conclude(&w, Some(c), true).expect("valid")
+    }
+
+    /// A timeline round-trips through its file.
     #[test]
-    fn a_timeline_file_round_trips_and_is_checked() {
-        let (mut w, _) = world();
-        let (_, tl) = run_timeline(&mut w, &trace(3));
-        let tl = tl.expect("valid");
+    fn a_timeline_file_round_trips() {
+        let tl = timeline();
         let dir = std::env::temp_dir().join(format!("wr-timeline-test-{}", std::process::id()));
         let path = dir.join("t.json.gz");
         tl.write(&path).expect("write");
         assert_eq!(Timeline::read(&path).expect("read"), tl);
-        let mut bad = tl.clone();
-        bad.tracks[0].first = 2;
-        bad.write(&path).expect("write");
-        assert!(Timeline::read(&path).is_err());
-        let mut bad = tl.clone();
-        bad.tracks[0].samples[1].position[0] = f32::NAN;
-        bad.write(&path).expect("write");
-        assert!(Timeline::read(&path).is_err(), "NaN serializes as null and fails to parse");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// What `check` refuses, on write and on read: tracks outside the frames (a start near
+    /// `usize::MAX` must not overflow), empty tracks, frames that aren't consecutive, numbers
+    /// that aren't finite, command indices past the table.
+    #[test]
+    fn an_inconsistent_timeline_is_refused() {
+        let tl = timeline();
+        assert!(tl.check().is_ok());
+        let bad = |change: &dyn Fn(&mut Timeline)| {
+            let mut t = tl.clone();
+            change(&mut t);
+            t.check().expect_err("refused")
+        };
+        let e = bad(&|t| t.tracks[0].first = 2);
+        assert!(e.to_string().contains("outside the frames"), "{e}");
+        let e = bad(&|t| t.tracks[0].first = usize::MAX);
+        assert!(e.to_string().contains("outside the frames"), "{e}");
+        let e = bad(&|t| {
+            t.tracks[0].first = 1;
+            t.tracks[0].samples.clear();
+        });
+        assert!(e.to_string().contains("without samples"), "{e}");
+        let e = bad(&|t| t.ticks = vec![0, 60, 61]);
+        assert!(e.to_string().contains("consecutive"), "{e}");
+        let e = bad(&|t| t.ticks = vec![0, 60]);
+        assert!(e.to_string().contains("consecutive"), "{e}");
+        let e = bad(&|t| t.ticks = vec![0, 0, 1]);
+        assert!(e.to_string().contains("consecutive"), "{e}");
+        let e = bad(&|t| t.tracks[0].samples[1].position[0] = f32::NAN);
+        assert!(e.to_string().contains("not finite"), "{e}");
+        let e = bad(&|t| t.tracks[0].samples[1].command = 1);
+        assert!(e.to_string().contains("command"), "{e}");
+        // A file is refused the same way, and so is writing one.
+        let dir = std::env::temp_dir().join(format!("wr-timeline-bad-{}", std::process::id()));
+        let path = dir.join("t.json.gz");
+        let mut t = tl.clone();
+        t.ticks = vec![0, 60, 61];
+        assert!(t.write(&path).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file that fits the schema but not itself is refused when it is read (the checks aren't
+    /// only on the writer's side): frames 0 and 60, and a track that starts at `usize::MAX`.
+    #[test]
+    fn a_file_is_checked_when_it_is_read() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("wr-timeline-raw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let raw = |name: &str, t: &Timeline| {
+            let path = dir.join(name);
+            let mut z = flate2::write::GzEncoder::new(
+                std::fs::File::create(&path).expect("create"),
+                flate2::Compression::fast(),
+            );
+            serde_json::to_writer(&mut z, &File { schema: SCHEMA.to_owned(), timeline: t.clone() })
+                .expect("json");
+            z.finish().expect("finish").flush().expect("flush");
+            path
+        };
+        let mut gap = timeline();
+        gap.ticks = vec![0, 60];
+        gap.tracks[0].samples.truncate(2);
+        let e = Timeline::read(&raw("gap.json.gz", &gap)).expect_err("gap");
+        assert!(format!("{e:#}").contains("consecutive"), "{e:#}");
+        let mut far = timeline();
+        far.tracks[0].first = usize::MAX;
+        let e = Timeline::read(&raw("far.json.gz", &far)).expect_err("far");
+        assert!(format!("{e:#}").contains("outside the frames"), "{e:#}");
+        let mut other = timeline();
+        other.tracks.clear();
+        assert!(Timeline::read(&raw("ok.json.gz", &other)).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The decompressed size is bounded before parsing.
+    #[test]
+    fn a_reader_stops_at_its_limit() {
+        use std::io::Read as _;
+        let mut r = Limited { inner: std::io::repeat(b'x'), left: 100 };
+        let mut buf = vec![0u8; 64];
+        assert_eq!(r.read(&mut buf).expect("first"), 64);
+        let e = r.read(&mut buf).expect_err("past the limit");
+        assert!(e.to_string().contains("after decompression"), "{e}");
+        let mut exact = Limited { inner: &[1u8, 2, 3][..], left: 3 };
+        let mut all = Vec::new();
+        assert_eq!(exact.read_to_end(&mut all).expect("exactly the limit"), 3);
     }
 
     /// A run that reported something unsupported (or failed a draw) has no timeline.
@@ -455,8 +649,9 @@ mod tests {
     fn an_invalid_run_has_none() {
         let (mut w, _) = world();
         w.coverage.unsupported("a feature the replay can't do");
-        let (_, tl) = run_timeline(&mut w, &trace(2));
-        let e = tl.expect_err("invalid");
+        let mut c = Collector::default();
+        c.sample(&w, 0, Source::Sim);
+        let e = conclude(&w, Some(c), true).expect_err("invalid");
         assert!(e.unsupported.iter().any(|k| k.contains("a feature")), "{e}");
         assert!(e.to_string().contains("not valid"));
     }

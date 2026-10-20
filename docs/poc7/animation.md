@@ -12,7 +12,7 @@ combat, skinned on the GPU through Owlcat's own G-buffer and shadow draws. One u
 straight line with its walk cycle (an offline demo, not gameplay): the player (human clip locomotion) and the
 monitor lizard (controller locomotion) are captured.
 
-- **Pack format v3** (`wr-assets`; `Pack::open` also checks that every skin weight is a number and every weighted bone index is one of the renderer's bones, and that a skinned mesh's position channel is a float32x3 inside a stream that holds every vertex, so the skinning pass cannot index out of range): `PackMeta` gains `rigs`, `clips`, `controllers` and `animations` (one
+- **Pack format v3** (v4 since `docs/poc7/fight.md`, which adds `SkinBinding::forbid_rotation`) (`wr-assets`; `Pack::open` also checks that every skin weight is a number and every weighted bone index is one of the renderer's bones, and that a skinned mesh's position channel is a float32x3 inside a stream that holds every vertex, so the skinning pass cannot index out of range): `PackMeta` gains `rigs`, `clips`, `controllers` and `animations` (one
   `UnitAnimation` per animated unit); a skinned `Mesh` keeps its unposed vertex streams plus `skin` (32 bytes a
   vertex: four weights, four bone indices); a skinned `Renderer` carries a `SkinBinding` (the unit's animation,
   the rig bone of each mesh bone, the bind poses). Opening a v2 pack fails with "rebuild it"; tests cover the

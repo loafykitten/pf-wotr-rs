@@ -39,21 +39,39 @@ One `Sample` per unit per frame, the end state of the frame in the replay's worl
 | `command` | the class of `GetCommand(Move) ?? Standard`, an index into `Timeline::commands` | the sim's commands model |
 | `source` | `Sim` or `Recording` | below |
 
-`source` is `Sim` when the frame is turn-based combat with the movement agents synchronized
-(`w.combat.turn_based && ags.synced`): the agent (`TickMovement`), the physics (ground height), the paths and the
-orientation writers are ports checked against the recording, so position and orientation are the sim's [C, M: every
-observation row the recording writes in those frames equals the sample bit for bit, below]. Otherwise it is
-`Recording`: the real-time stretches (the player's walk-up before each fight, the pauses between fights) that the sim
-doesn't compute; the position is the recording's observation row (`obs u`) and the orientation is what the replay
-took from the recording's writes. A viewer should show the difference; the fight itself is all `Sim`.
+`source` is per unit and frame. It is `Sim` when the frame is turn-based combat with the movement agents
+synchronized (`w.combat.turn_based && ags.synced`) and the replay wrote nothing of the unit's position or orientation
+from a recorded input in it: the agent (`TickMovement`), the physics (ground height), the paths and the orientation
+writers are ports checked against the recording, so position and orientation are the sim's [C, M: every observation
+row the recording writes in those frames equals the sample bit for bit, below]. Otherwise it is `Recording`: the
+real-time stretches (the player's walk-up before each fight, the pauses between fights) that the sim doesn't compute,
+where the position is the recording's observation row and the orientation what the replay took from the recording's
+writes; and, inside a turn-based frame, the unit whose position or orientation the replay *took* from the recording
+this frame. The driver marks those (`Driver::timeline_taken`, a set the collector owns; no replay decision reads it):
+a place-on-ground step by the controller itself on a capture without `ground_view` (`ag_ground`, `ag_input("ground
+(outside TickUnit)")`), a position written by code the sim doesn't run (`ag_pos`), the agents' snapshots (`ag_init`,
+`ag_sync`: every unit's position and orientation at the window's start and where real time ends), a span the replay
+takes from the recording (`ag_ctl_end`, its `ag_rot` desired orientation), a write of orientation by code the sim
+doesn't run (`ag_look` taken: the angle is computed from a recorded point, or taken), and a roaming unit's step (its
+recorded vector). A frame can hold both kinds: on `poc5-tb-113` (agent_sync, no `ground_view`) a unit is the
+recording's among sim ones (`a_position_taken_from_the_recording_in_a_sim_frame_is_labelled_so`: 1 of its 1,873 frames). Physics results
+the replay takes from the recording where it doesn't compute them (`phys_taken`, `phys_span` in the coverage line)
+set a unit's ground height; they are not marked per sample [I: the heights they give are the recording's, in frames
+labelled `Sim`; the counts are 0 to a few hundred per run].
 
+**A recording without the driven agents has no timeline.** The replay of a capture with no `agent` observer and
+`agent_sync` (poc5-tb-95 and -96, the oldest) keeps the observation rows apart from the units
+(`Driver::pos.last` is not `Unit::position`), so the units' positions would be the save's, still; `run_timeline` then
+returns `Invalid` with "no movement agent records" whatever else is valid
+(`a_recording_without_agent_records_has_no_timeline`). Filling samples from the rows in collector-owned state would
+be possible; it isn't done: those captures predate the agent and aren't fights the sim moves.
 
 ## Collecting changes nothing [M]
 
 The collector reads the world and is read by nothing: `&World` in, no decision of the replay consults it. Proof on
 `poc5-tb-140` (`tb-lizard`, record run, `Manual_18_WR_FirstBattle`):
 
-- `wr-combat replay ... --out-dir A` and `... --out-dir B --timeline`: the four outputs (`.oracle.t0.jsonl`,
+- `& `... --out-dir B --timeline`: the four outputs (`.oracle.t0.jsonl`,
   `.sim.t0.jsonl`, `.state-end.json`, `.compare-end.json`) are byte-identical (`cmp`), and stdout is identical but for
   the wall-clock milliseconds on its first line; it is also identical to the stdout of the binary built before this
   change (same capture, `valid=true`, equal=true, 1,673 records each side).
@@ -73,15 +91,18 @@ The collector reads the world and is read by nothing: `&World` in, no decision o
   position, so the timeline carries the checked values;
 - units end dead and prone as the recording's end state says (the replay's own `compare` reports the end state at 21 of
   21, flags and postures with no difference), none of them dead at the start;
-- 9,061 of the 11,213 frames are `Sim`, the rest `Recording` (the walk-ups: the player's real-time walk to each fight,
+- 9,057 of the 11,213 frames are `Sim` for the first unit (9,061 before the per-unit marking: the agents' snapshots at the window's start and each synchronization are taken), the rest `Recording` (the walk-ups: the player's real-time walk to each fight,
   the pause between fights).
 
 `a_run_that_is_not_valid_has_no_timeline`: one of those rows, in a frame the sim computed, moved by a metre: the
 replay reports "an observation row's position differs from the sim's", `World::valid` is false and `run_timeline`
-gives `Err(Invalid)` with that reason, no timeline. Four unit tests in `timeline.rs` cover the rest without captures
-(a valid synthetic run gives a sample per frame equal to the world's and the same outcome as `run`; speed is the
-displacement per frame; an invalid world gives none; the gzip file round-trips and an inconsistent or non-finite
-one is refused).
+gives `Err(Invalid)` with that reason, no timeline. Unit tests in `timeline.rs` cover the rest without captures: the
+samples are the world's and a recording without agent records has none; a unit written from a recorded input is
+the recording's for that frame only; speed is the displacement per frame; an invalid world gives none; the file
+round-trips; `check` refuses a track outside the frames (a start of `usize::MAX` doesn't overflow), an empty
+track, frames [0, 60] or [0, 0, 1], a NaN and a command past the table, on write and on read; the decompressed size is
+limited. In `wr-game`: a track of no poses with any start has none (no clamp panic), and the framing radius is the
+extent in x and z.
 
 ## What was learned about the data [M]
 
@@ -97,7 +118,7 @@ one is refused).
 
 ## Running it
 
-Pack with the save's units (the fight is in `Prologue_Caves_1`, the area of Manual_13, so only the units
+Pack (format v4) with the save's units (the fight is in `Prologue_Caves_1`, the area of Manual_13, so only the units
 differ; the spec's ids are the sim's `UniqueId`s, which the timeline uses):
 
 ```sh
@@ -121,7 +142,10 @@ scripts/heavy.sh lockf -k builds/.oracle-run.lock target/release/wr-game --windo
 `--save NAME` overrides the capture's save (`run.json`), `--rate X` scales live playback, `--cam-yaw DEGREES` turns the
 camera, `--look ex,ey,ez,tx,ty,tz` fixes it. The replay can be done once and kept:
 `wr-combat replay FIXTURE --save S --run record --out-dir D --timeline-out F.json.gz` (under `heavy.sh`), then
-`wr-game --fight F.json.gz ...` needs no replay and no memory. The file is gzip JSON, 0.3 MiB for this fight.
+`wr-game --fight F.json.gz ...` needs no replay and no memory. The file is gzip JSON, 0.3 MiB for this fight; it is not trusted when read: at most 1 GiB decompressed (checked while
+reading, before parsing), 4,000,000 frames, 65,536 tracks and 8,000,000 samples, frames consecutive, every track non-empty
+and inside the frames, numbers finite, command indices in the table (`Timeline::check`, also run on a replay's timeline
+and on write).
 
 ## What the game side does
 
@@ -130,8 +154,17 @@ camera, `--look ex,ey,ez,tx,ty,tz` fixes it. The replay can be done once and kep
   into its skin matrices as `placement⁻¹ · now`, and its shadow casters' boxes are moved by the same transform
   (the box of the moved corners). This is the walk demo's mechanism with rotation added; the same limits hold
   (anything reading the object's world position in a shader would not follow; nothing used here does).
-  A view that forbids rotation (`ForbidRotation`: its placement's yaw differs from its first pose's) keeps its
-  prefab's facing [I: detected from the pack, which doesn't carry the flag]; `wr-game` prints the units it keeps turned.
+  A view that forbids rotation keeps the identity rotation: `UnitEntityView.ForbidRotation` is a field of the unit's
+  *prefab* (`UnitEntityData.InstantiateView_Internal` and `UnitMoveController.TickUnit` set the view's rotation only
+  `if (!ForbidRotation)`) [C]. The importer reads it (`UnitPrefab::forbid_rotation`, already used for the placement)
+  and the pack carries it now: `SkinBinding::forbid_rotation`, **pack format v4** (re-pack with `wr-import pack`; a v3
+  pack is refused). `wr-game` doesn't turn such a unit and prints its id. **This is not the `ForbidRotation` fact
+  component** (`Features.RotationForbidden`, also set by grapples and a cutscene command): that one only gates
+  `UnitState.CanRotate`, which decides whether the sim writes the unit's orientation at all (a port, checked), so
+  it is already in the timeline's orientation and no view rotation depends on it; the timeline doesn't carry it
+  [C: `rg RotationForbidden decompiled/`: `UnitState.CanRotate` is its only reader]. None of the 21 units has the
+  prefab flag [M: `wr-game` prints nothing for this pack]; an earlier version of this stage took the monitor lizard
+  for one from its placement, which was wrong.
 - **Locomotion**: `UnitAnimationManager.Speed` is fed the sample's `speed` (displacement per second), so the human clip
   locomotion and the monsters' controllers pick idle or walk exactly as in the walk demo. [I] The game's
   `GetSpeedAnimationCoeff` (race animation settings, size scale) is taken as 1, its walk type as Normal.
@@ -206,9 +239,5 @@ World:
   takes input.
 - A whole run is replayed before the first frame (about 15 s of the machine's time and 2 GB for this fight; the file
   option avoids it).
-- The monitor lizard (`5052`) is found to keep its prefab's facing: its placement's rotation differs from the saved
-  orientation (probably `ForbidRotation`, not read from the prefab again here), so it moves without turning [I,
-  unchecked]; the other 20 turn with the sim.
-
 Tests that need the captures are ignored by default (`.config/nextest.toml` puts `poc7_timeline` in the capture
 group).
