@@ -13,8 +13,8 @@ else read them. A wrong stat change outside a rule passed unnoticed. They are no
 
 | | Result |
 |---|---|
-| The sweep (25 captures, 116 runs) | @SWEEP@ |
-| Stat mutations compared [M] | @COUNTS@ |
+| The sweep (25 captures, 116 runs) | `scripts/sweep.sh`, 116 runs: 113 `ok` (valid, T0 equal, end state equal), 3 NOT (`poc5-tb-122` tb-nearest, the known tie; its 36 stat mutations are equal too) [M] |
+| Stat mutations compared [M] | 5,202 compared (2,616 `stat_value`, 2,580 `stat_mod_add`, 6 `stat_mod_remove`), 5,202 equal, 0 differing, 0 extra, 0 gaps; T0 equal on all 116 runs |
 | Producers [M] | the helpless condition's penalties added (426 events) and cleared (3), a buff's modifiers (3: Enlarge Person); every recorded mutation has a producer the sim ports, so there is **no gap** (below) |
 | Damage tests | 23 damaged recordings of `poc5-tb-120/tb-cast`, each reported (stream unequal, mutations differing, run invalid) |
 
@@ -118,7 +118,17 @@ record shows as differing from there on (the stream's first difference names it)
 
 ## Results [M]
 
-@RESULTS@
+- The sweep after the change (`scripts/sweep.sh`, release build, merged with `poc` at 6bf8fef): 113 of 116 runs `ok`; the
+  three not are `poc5-tb-122` tb-nearest (30 unsupported kinds of the initiative tie and its graph events, as before; the
+  stat line of its record is 36 compared, 36 equal).
+- Compared, summed over the 116 runs: 5,202 stat mutations, all equal at their place, frame included; no gap, no extra
+  sim mutation. By producer (the survey's table): the helpless condition added 5,112 (426 groups of 12), cleared 18, the
+  buff 72 (3 groups of 24).
+- `scripts/check.sh` (fmt, clippy `-D warnings`, nextest): 810 tests passed. The POC-5 capture suites (`poc5`,
+  `poc5_agent`, `poc5_corpulence`, `poc5_log`, `poc5_look`, `poc5_loot`, `poc5_roaming`, `poc5_spells`, `poc5_ties`,
+  `poc5_stats`): 46 of 46.
+- Before the change the run summaries had no such line and a wrong stat change passed: the damaged recordings of
+  `poc5_stats` are the proof the comparison now fails on one.
 
 ## Tests
 
