@@ -80,7 +80,7 @@ fn first(recs: &[V], what: &str) -> usize {
     *of_kind(recs, what).first().expect("a record")
 }
 
-const CASES: [(&str, Change); 23] = [
+const CASES: [(&str, Change); 25] = [
     // A mutation dropped.
     ("a modifier added, dropped", |recs| {
         recs.remove(first(recs, "stat_mod_add"));
@@ -158,6 +158,27 @@ const CASES: [(&str, Change); 23] = [
     ("a record's frame", |recs| {
         let at = first(recs, "stat_mod_add");
         recs[at]["t"] = json!(recs[at]["t"].as_i64().expect("int") + 1);
+    }),
+    // Moved across another record (the stat mutations alone keep their order).
+    ("a stat mutation moved across a fact attached", |recs| {
+        let at = *of_kind(recs, "stat_mod_add")
+            .iter()
+            .find(|&&i| {
+                (i..recs.len()).find(|&j| !is_stat(&recs[j])).is_some_and(|j| {
+                    recs[j]["what"] == "fact_attach" && recs[(i + 1)..j].iter().all(is_stat)
+                })
+            })
+            .expect("a group of stat mutations just before a fact_attach");
+        let next = (at..recs.len()).find(|&j| !is_stat(&recs[j])).expect("the fact attached");
+        let x = recs.remove(next);
+        recs.insert(at, x);
+    }),
+    ("a stat mutation moved across a damage mutation", |recs| {
+        let d = recs.iter().position(|r| r["k"] == "mut" && r["what"] == "damage").expect("damage");
+        // The next stat mutation after it moves back before it.
+        let s = (d..recs.len()).find(|&j| is_stat(&recs[j])).expect("a later stat mutation");
+        let x = recs.remove(s);
+        recs.insert(d, x);
     }),
     // Two exchanged.
     ("a value change and its modifier, exchanged", |recs| {

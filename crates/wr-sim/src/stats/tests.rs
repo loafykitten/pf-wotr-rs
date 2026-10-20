@@ -200,6 +200,27 @@ fn integer_overflow_wraps() {
     assert_eq!(val(&w, u, t), i32::MIN);
 }
 
+/// An outermost update from `int.MinValue` is WrathOracle's "not outermost" sentinel: the game's
+/// hook writes nothing and leaves the stat in `Updating` for good. The sim reports the update as
+/// unverifiable, writes nothing, and the stat reports no more, as in the game.
+#[test]
+fn an_update_from_int_min_value_is_unverifiable() {
+    let (mut w, u) = world_with_unit();
+    let t = S::Reach;
+    ops::add_modifier_value(&mut w, u, t, i32::MAX, D::None);
+    ops::add_modifier_value(&mut w, u, t, 1, D::UntypedStackable);
+    assert_eq!(val(&w, u, t), i32::MIN);
+    assert!(w.valid(), "the log was off");
+    w.events.on = true;
+    ops::add_modifier_value(&mut w, u, t, 1, D::Dodge);
+    assert!(!w.valid());
+    assert!(w.coverage.unsupported.keys().any(|k| k.contains("int.MinValue")));
+    // The add's own record is written (its hook has no sentinel); no `stat_value` is, now or later.
+    assert_eq!(stat_records(&w), [("stat_mod_add".to_owned(), i64::from(t.0))]);
+    ops::add_modifier_value(&mut w, u, t, -1, D::Luck);
+    assert!(stat_records(&w).iter().all(|r| r.0 != "stat_value"));
+}
+
 #[test]
 fn modifier_lists_keep_monos_sort_order() {
     let (mut w, u) = world_with_unit();

@@ -280,6 +280,16 @@ pub fn update_value(w: &mut World, u: EntityIdx, t: StatType) {
     let before = stat(w, u, t).modified_value;
     stat_mut(w, u, t).in_update = true;
     update_value_base(w, u, t);
+    if before == i32::MIN && w.events.on {
+        // `Hooks.UpdateValuePrefix` uses `int.MinValue` as its "not outermost" state: the game's
+        // hook reports nothing for this update and never takes the stat out of `Updating`, so the
+        // stat reports no more. The sim can't write what the oracle can't: `in_update` stays set,
+        // as in the game, and the run is not valid.
+        w.coverage.unsupported(
+            "ModifiableValue.UpdateValue: an outermost update from int.MinValue (WrathOracle's hook can't report it)",
+        );
+        return;
+    }
     stat_mut(w, u, t).in_update = false;
     if stat(w, u, t).modified_value != before {
         super::trace::value_changed(w, u, t, before);

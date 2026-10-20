@@ -11,10 +11,10 @@
 //!   gap exists: a producer the sim doesn't port shows as a difference (the recorded mutations
 //!   missing from the sim's stream), never as a gap.
 //! - **Counts.** The recorded mutations compared, by kind, and how many have an equal sim record
-//!   at the same place among the stat mutations; the rest are differences, which make the run
+//!   at the same place among the stat mutations and between the same other records; the rest are differences, which make the run
 //!   invalid as well as the stream unequal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value as J;
 
@@ -40,32 +40,62 @@ fn is_stat(r: &J) -> bool {
     r["k"] == "mut" && r["what"].as_str().is_some_and(is_stat_mut)
 }
 
-/// Why the sim couldn't write the recorded mutation, if so: the owner's id.
-fn gap(w: &World, r: &J) -> Option<&'static str> {
+/// Why the sim couldn't write the recorded mutation, if so. `units`: the ids of the units the sim
+/// made during the run, disposed ones included (`World::by_id` forgets a unit at its disposal).
+fn gap(units: &HashSet<&str>, r: &J) -> Option<&'static str> {
     match r["owner"].as_str() {
         None => Some("the stat's owner is not a unit"),
-        Some(id) if !w.by_id.contains_key(id) => {
-            Some("the stat's owner is a unit the sim hasn't made")
-        }
+        Some(id) if !units.contains(id) => Some("the stat's owner is a unit the sim hasn't made"),
         Some(_) => None,
     }
 }
 
+/// A stat mutation with its place in the stream: the nearest other (non-stat) record before it and
+/// after it. A mutation moved across a fact attached or a damage differs in a neighbour; a
+/// difference elsewhere in the stream is no stat mutation's.
+type Placed<'a> = (&'a J, Option<&'a J>, Option<&'a J>);
+
+fn placed(stream: &[J]) -> Vec<Placed<'_>> {
+    let mut next: Vec<Option<&J>> = vec![None; stream.len()];
+    let mut after = None;
+    for (i, r) in stream.iter().enumerate().rev() {
+        next[i] = after;
+        if !is_stat(r) {
+            after = Some(r);
+        }
+    }
+    let mut before = None;
+    let mut out = Vec::new();
+    for (i, r) in stream.iter().enumerate() {
+        if is_stat(r) {
+            out.push((r, before, next[i]));
+        } else {
+            before = Some(r);
+        }
+    }
+    out
+}
+
 /// Removes the gaps from the recorded stream, then counts the two streams' stat mutations against
-/// each other.
+/// each other, each with its place among the other records.
 pub(super) fn settle(w: &World, oracle: &mut Vec<J>, sim: &[J]) -> StatCounts {
     let mut c = StatCounts::default();
+    let units: HashSet<&str> = (0..w.entities.len())
+        .map(|i| crate::world::EntityIdx(u32::try_from(i).unwrap_or(0)))
+        .filter(|e| w.unit(*e).is_some())
+        .map(|e| w.entity(e).unique_id.as_str())
+        .collect();
     oracle.retain(|r| {
-        let g = if is_stat(r) { gap(w, r) } else { None };
+        let g = if is_stat(r) { gap(&units, r) } else { None };
         if let Some(g) = g {
             *c.gaps.entry(g).or_default() += 1;
         }
         g.is_none()
     });
-    let rec: Vec<&J> = oracle.iter().filter(|r| is_stat(r)).collect();
-    let got: Vec<&J> = sim.iter().filter(|r| is_stat(r)).collect();
+    let rec = placed(oracle);
+    let got = placed(sim);
     for (i, r) in rec.iter().enumerate() {
-        *c.compared.entry(r["what"].as_str().unwrap_or("?").to_owned()).or_default() += 1;
+        *c.compared.entry(r.0["what"].as_str().unwrap_or("?").to_owned()).or_default() += 1;
         if got.get(i) == Some(r) {
             c.equal += 1;
         } else {
@@ -81,5 +111,72 @@ impl StatCounts {
     #[must_use]
     pub fn agrees(&self) -> bool {
         self.differing == 0 && self.extra == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::stats::tests::world_with_unit;
+
+    fn stat(owner: &str, new: i64) -> J {
+        json!({"k": "mut", "what": "stat_value", "t": 3, "stat": 11, "owner": owner,
+            "old": 1, "new": new, "permanent": 1})
+    }
+
+    fn damage() -> J {
+        json!({"k": "mut", "what": "damage", "unit": "u", "old": 0, "new": 1})
+    }
+
+    /// A stat mutation moved across another record is a difference, though the stat mutations
+    /// alone are in the same order; one far from the difference is not blamed.
+    #[test]
+    fn a_stat_mutation_moved_across_another_record_differs() {
+        let (w, _) = world_with_unit();
+        let fact = json!({"k": "mut", "what": "fact_attach", "owner": "u"});
+        let rec = vec![stat("u", 2), damage(), stat("u", 3), fact.clone()];
+        let run = |mut oracle: Vec<J>, sim: &[J]| settle(&w, &mut oracle, sim);
+        let same = run(rec.clone(), &rec);
+        assert!(same.agrees() && same.equal == 2, "{same:?}");
+        // The first moved after the damage.
+        let moved = [damage(), stat("u", 2), stat("u", 3), fact.clone()];
+        let c = run(rec.clone(), &moved);
+        assert!(!c.agrees() && c.differing == 1, "{c:?}");
+        // The second moved after the fact attached.
+        let moved = [stat("u", 2), damage(), fact.clone(), stat("u", 3)];
+        let c = run(rec.clone(), &moved);
+        assert!(!c.agrees() && c.differing == 1, "{c:?}");
+        // A different record elsewhere is no stat mutation's.
+        let mut far = rec.clone();
+        far.push(damage());
+        far.push(damage());
+        let mut sim = far.clone();
+        sim[4] = json!({"k": "mut", "what": "damage", "unit": "u", "old": 5, "new": 6});
+        let c = run(far, &sim);
+        assert!(c.agrees(), "{c:?}");
+    }
+
+    /// A unit that mutated a stat and was disposed later is still a unit the sim made: its
+    /// recorded mutations are compared, not excused as gaps.
+    #[test]
+    fn a_disposed_units_mutations_are_not_gaps() {
+        let (mut w, u) = world_with_unit();
+        crate::entity::dispose(&mut w, u);
+        assert!(!w.by_id.contains_key("u"), "the registry forgets it");
+        let rec = vec![stat("u", 2)];
+        let mut oracle = rec.clone();
+        let c = settle(&w, &mut oracle, &rec);
+        assert!(c.gaps.is_empty() && c.agrees() && c.equal == 1, "{c:?}");
+        // Without the sim's own record it is an unmatched recorded mutation, not a gap.
+        let mut oracle = rec.clone();
+        let c = settle(&w, &mut oracle, &[]);
+        assert!(c.gaps.is_empty() && !c.agrees() && c.differing == 1, "{c:?}");
+        // An id of no entity is a gap.
+        let mut oracle = vec![stat("nobody", 2)];
+        let c = settle(&w, &mut oracle, &[]);
+        assert_eq!(c.gaps.values().sum::<usize>(), 1);
+        assert!(c.agrees());
     }
 }
