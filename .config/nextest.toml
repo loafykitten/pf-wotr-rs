@@ -7,7 +7,7 @@ captures = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = '''
-binary_id(/^wr-sim::(poc4|poc5|poc5_agent|poc5_corpulence|poc5_log|poc5_look|poc5_loot|poc5_roaming|poc5_spells|poc5_stats|poc5_ties|manual13)$/)
+binary_id(/^wr-sim::(poc4|poc5|poc5_agent|poc5_corpulence|poc5_log|poc5_look|poc5_loot|poc5_roaming|poc5_spells|poc5_stats|poc5_ties|poc7_timeline|manual13)$/)
 | binary_id(wr-save::fixtures)
 | (package(wr-sim) & kind(lib) & test(/^combat::[a-z_]+::(tests|tick_tests)::(every_|a_damaged|damaged_|recorded_)/))
 | (package(wr-sim) & kind(lib) & test(/^scene_tests::real_zone/))

@@ -31,7 +31,7 @@ pub use model::*;
 /// File magic: `WRPACK`, then a NUL and the format generation.
 pub const MAGIC: [u8; 8] = *b"WRPACK\x001";
 /// Bumped whenever [`PackMeta`] or the layout changes incompatibly.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// Where blob data starts.
 pub const DATA_START: u64 = 4096;
 /// Alignment of every blob (and of the metadata).
@@ -546,6 +546,7 @@ mod tests {
                 animation: 0,
                 bones: vec![1, 0],
                 bind_poses: vec![glam_identity(), glam_identity()],
+                forbid_rotation: false,
             }),
             ..Default::default()
         });

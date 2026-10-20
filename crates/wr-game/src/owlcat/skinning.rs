@@ -11,7 +11,7 @@
 //! Units that share a mesh (the four centipedes) skin it into a buffer each.
 
 use anyhow::{Result, ensure};
-use bevy::math::{Mat4, Vec3};
+use bevy::math::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 use wr_anim::loco::UnitPlayer;
 use wr_assets::{Pack, Renderer};
@@ -97,6 +97,9 @@ fn skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// sees the same cadence whatever the capture rate.
 pub const STEP: f32 = 1.0 / 60.0;
 
+/// Metres per second above which a unit counts as moving (for framing).
+pub const MOVING: f32 = 0.1;
+
 /// A unit walking a straight line: a demonstration script, not the movement agent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Walk {
@@ -109,6 +112,49 @@ pub struct Walk {
     pub distance: f32,
 }
 
+/// What a driver (the sim's timeline) says one unit is doing at one frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrivePose {
+    /// World position (metres) and facing (degrees about +Y, Unity's convention).
+    pub position: Vec3,
+    pub yaw: f32,
+    /// Metres per second it is seen to move: what `UnitAnimationManager.Speed` is fed.
+    pub speed: f32,
+    /// The unit is in the game: a unit that is not is not drawn.
+    pub in_game: bool,
+    /// Conscious and not prone. The player has no clip for anything else yet, so a unit that is
+    /// down keeps the pose it had (its clock stops).
+    pub up: bool,
+    /// In combat (the focus of a following camera).
+    pub in_combat: bool,
+}
+
+/// One unit's poses, frame by frame, from frame `first`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DriveTrack {
+    /// The unit's id in the spec.
+    pub unit: String,
+    pub first: usize,
+    pub poses: Vec<DrivePose>,
+}
+
+/// The units driven from outside: one pose per unit per frame of 1/60 s.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Drive {
+    pub frames: usize,
+    pub tracks: Vec<DriveTrack>,
+}
+
+impl Drive {
+    fn pose(&self, track: usize, frame: usize) -> Option<&DrivePose> {
+        let t = &self.tracks[track];
+        // Before its first sample a unit stands where it first was; after the last it stays; a track
+        // with no poses has none.
+        let last = t.first.checked_add(t.poses.len().checked_sub(1)?)?;
+        t.poses.get(frame.clamp(t.first, last).checked_sub(t.first)?)
+    }
+}
+
 struct UnitRt {
     id: String,
     player: UnitPlayer,
@@ -119,6 +165,12 @@ struct UnitRt {
     worlds: Vec<[f32; 16]>,
     /// Metres walked along the unit's forward so far.
     walked: f32,
+    /// Its track in the drive, if it has one.
+    track: Option<usize>,
+    /// The placement turns with the driver's facing (not for a view that forbids rotation).
+    turns: bool,
+    /// Its placement now: the delta from `placement` is folded into the skin matrices.
+    now: Mat4,
 }
 
 /// A caster slot of a skinned renderer: its index and bounds at the start.
@@ -152,6 +204,7 @@ pub struct Skinning {
     max_groups: u32,
     max_binding: u64,
     walk: Option<Walk>,
+    drive: Option<Drive>,
     scratch: Vec<f32>,
 }
 
@@ -219,6 +272,36 @@ pub fn phase_of(id: &str) -> f32 {
     (wr_assets::fnv1a64(id.as_bytes()) >> 40) as f32 / (1u64 << 24) as f32
 }
 
+/// The centre of the points' box and the radius of their extent in the ground plane (x and z).
+fn centre_and_radius(pts: &[Vec3]) -> Option<(Vec3, f32)> {
+    if pts.is_empty() {
+        return None;
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in pts {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let d = hi - lo;
+    Some(((lo + hi) * 0.5, d.x.hypot(d.z) * 0.5))
+}
+
+/// The axis-aligned box of `lo..hi` moved by `m`.
+fn transform_box(m: &Mat4, lo: Vec3, hi: Vec3) -> (Vec3, Vec3) {
+    let (mut a, mut b) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for i in 0..8 {
+        let corner = Vec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        );
+        let p = m.transform_point3(corner);
+        a = a.min(p);
+        b = b.max(p);
+    }
+    (a, b)
+}
+
 fn mat(m: &[f32; 16]) -> Mat4 {
     Mat4::from_cols_array(m)
 }
@@ -267,6 +350,9 @@ impl Skinning {
                 placement: Mat4::IDENTITY,
                 worlds: Vec::new(),
                 walked: 0.0,
+                track: None,
+                turns: true,
+                now: Mat4::IDENTITY,
             });
         }
         Ok(Some(Self {
@@ -281,6 +367,7 @@ impl Skinning {
             max_groups: limits.max_compute_workgroups_per_dimension,
             max_binding: limits.max_storage_buffer_binding_size,
             walk: None,
+            drive: None,
             scratch: Vec::new(),
         }))
     }
@@ -380,6 +467,7 @@ impl Skinning {
         self.palette_used += bones;
         let unit = sk.animation as usize;
         self.units[unit].placement = mat(&r.matrix);
+        self.units[unit].turns = !sk.forbid_rotation;
         self.draws.push(SkinDraw {
             unit,
             bones: sk.bones.clone(),
@@ -402,12 +490,90 @@ impl Skinning {
         self.walk = walk;
     }
 
+    /// Hands the units' motion to a driver (the sim's timeline): each unit with a track in `drive`
+    /// goes where its poses say, facing as they say, its locomotion fed the speed they give.
+    /// Returns the ids of tracks that have no unit in the pack.
+    pub fn set_drive(&mut self, drive: Drive) -> Vec<String> {
+        let mut missing = Vec::new();
+        for u in &mut self.units {
+            u.track = None;
+        }
+        for (ti, t) in drive.tracks.iter().enumerate() {
+            let Some(u) = self.units.iter_mut().find(|u| u.id == t.unit) else {
+                missing.push(t.unit.clone());
+                continue;
+            };
+            u.track = Some(ti);
+            // (`turns` is the pack's: a view with `ForbidRotation` keeps the identity rotation.)
+            if !u.turns {
+                eprintln!("fight: {} keeps its prefab's facing (the view's ForbidRotation)", u.id);
+            }
+        }
+        self.drive = Some(drive);
+        missing
+    }
+
+    /// Where the driven units are at the animation clock's frame: the centre and radius (metres,
+    /// in the plane) of the units a camera should frame: those in combat and up, else those that
+    /// are up and moving, else every unit that is up. `None` without a drive or a unit.
+    #[must_use]
+    pub fn focus(&self) -> Option<(Vec3, f32)> {
+        let d = self.drive.as_ref()?;
+        let frame = usize::try_from(self.tick).ok()?;
+        let up: Vec<&DrivePose> = self
+            .units
+            .iter()
+            .filter_map(|u| d.pose(u.track?, frame))
+            .filter(|p| p.in_game && p.up)
+            .collect();
+        let pick = |f: &dyn Fn(&DrivePose) -> bool| -> Vec<Vec3> {
+            up.iter().filter(|p| f(p)).map(|p| p.position).collect()
+        };
+        let mut pts = pick(&|p| p.in_combat);
+        if pts.is_empty() {
+            pts = pick(&|p| p.speed > MOVING);
+        }
+        if pts.is_empty() {
+            pts = pick(&|_| true);
+        }
+        centre_and_radius(&pts)
+    }
+
     fn walk_speed(&self, unit: &UnitRt) -> f32 {
         let time = self.tick as f32 * STEP;
         match &self.walk {
             Some(w) if w.unit == unit.id && time >= w.start && unit.walked < w.distance => w.speed,
             _ => 0.0,
         }
+    }
+
+    /// The speed a unit's locomotion is fed at the clock's frame, and whether its clock runs: the
+    /// driver's pose, else the walk script.
+    fn drive_speed(&self, u: &UnitRt) -> (f32, bool) {
+        match (&self.drive, u.track) {
+            (Some(d), Some(t)) => {
+                let frame = usize::try_from(self.tick).unwrap_or(usize::MAX);
+                match d.pose(t, frame) {
+                    Some(p) if p.in_game && p.up => (p.speed, true),
+                    Some(_) => (0.0, false),
+                    None => (0.0, true),
+                }
+            }
+            _ => (self.walk_speed(u), true),
+        }
+    }
+
+    /// A driven unit's placement at the clock's frame (`T R S` of the driver's pose, the scale of
+    /// the unit's own placement): `None` when it is not in the game.
+    fn driven_placement(&self, u: &UnitRt) -> Option<Mat4> {
+        let (Some(d), Some(t)) = (&self.drive, u.track) else { return Some(u.placement) };
+        let p = d.pose(t, usize::try_from(self.tick).ok()?)?;
+        if !p.in_game {
+            return None;
+        }
+        let (scale, rot, _) = u.placement.to_scale_rotation_translation();
+        let rot = if u.turns { Quat::from_rotation_y(p.yaw.to_radians()) } else { rot };
+        Some(Mat4::from_scale_rotation_translation(scale, rot, p.position))
     }
 
     /// Advances the animation to time `t`, snapped to the nearest tick of the 60 Hz grid the game
@@ -424,17 +590,26 @@ impl Skinning {
         let target = if t.is_finite() { (t.clamp(0.0, 1.0e6) * 60.0).round() as u64 } else { 0 };
         while self.tick < target {
             for i in 0..self.units.len() {
-                let speed = self.walk_speed(&self.units[i]);
+                let (speed, runs) = self.drive_speed(&self.units[i]);
                 let remaining =
                     self.walk.as_ref().map_or(0.0, |w| w.distance - self.units[i].walked);
                 let u = &mut self.units[i];
+                if !runs {
+                    continue;
+                }
                 u.player.set_speed(speed);
                 u.player.update(&m.clips, STEP);
-                if speed > 0.0 {
+                if speed > 0.0 && u.track.is_none() {
                     u.walked += (speed * STEP).min(remaining.max(0.0));
                 }
             }
             self.tick += 1;
+        }
+        // Where the driven units stand now.
+        for i in 0..self.units.len() {
+            if self.units[i].track.is_some() {
+                self.units[i].now = self.driven_placement(&self.units[i]).unwrap_or(Mat4::ZERO);
+            }
         }
         // Poses.
         for u in &mut self.units {
@@ -447,6 +622,24 @@ impl Skinning {
         let mut moved = Vec::new();
         for d in &self.draws {
             let u = &self.units[d.unit];
+            if u.track.is_some() {
+                // The unit's root space goes where the driver puts it: the skin matrices carry
+                // the change from the placement the draw constants still hold. A unit that
+                // is out of the game collapses to nothing.
+                let to = u.now;
+                let pre = if to == Mat4::ZERO { Mat4::ZERO } else { u.placement.inverse() * to };
+                wr_anim::palette(&u.worlds, &d.bones, &d.bind, &pre.to_cols_array(), &mut data);
+                let delta = to * u.placement.inverse();
+                for c in &d.casters {
+                    let (lo, hi) = if to == Mat4::ZERO {
+                        (Vec3::ZERO, Vec3::ZERO)
+                    } else {
+                        transform_box(&delta, c.lo, c.hi)
+                    };
+                    moved.push((c.index, lo, hi));
+                }
+                continue;
+            }
             // The unit has walked `walked` metres along its forward: in its root space that is a
             // shift of the same vector through the inverse placement.
             let forward = u.placement.transform_vector3(Vec3::Z).normalize_or_zero();
@@ -613,6 +806,70 @@ mod tests {
         // No weight: the vertex stays put.
         assert_eq!(v(2, 0), Vec3::new(5.0, 5.0, 5.0));
         assert_eq!(v(2, 3), Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    fn pose(x: f32) -> DrivePose {
+        DrivePose {
+            position: Vec3::new(x, 0.0, 0.0),
+            yaw: 0.0,
+            speed: 0.0,
+            in_game: true,
+            up: true,
+            in_combat: false,
+        }
+    }
+
+    /// A unit that comes into the game late stands at its first pose before it, and at its last
+    /// after the timeline's end.
+    #[test]
+    fn a_drive_holds_the_first_and_last_poses_outside_a_track() {
+        let d = Drive {
+            frames: 6,
+            tracks: vec![DriveTrack {
+                unit: "u".into(),
+                first: 2,
+                poses: vec![pose(1.0), pose(2.0)],
+            }],
+        };
+        let x = |f| d.pose(0, f).map(|p| p.position.x);
+        assert_eq!(
+            [x(0), x(2), x(3), x(5), x(999)],
+            [Some(1.0), Some(1.0), Some(2.0), Some(2.0), Some(2.0)]
+        );
+        // A track with no poses has none, whatever its start (and doesn't panic in the clamp).
+        for first in [0, 1, usize::MAX] {
+            let empty = Drive {
+                frames: 1,
+                tracks: vec![DriveTrack { unit: "u".into(), first, poses: vec![] }],
+            };
+            assert!(empty.pose(0, 0).is_none() && empty.pose(0, usize::MAX).is_none());
+        }
+    }
+
+    /// The radius of a group is its extent on the ground: fighters apart along Z only (or X only)
+    /// still make a wide group, and height doesn't widen it.
+    #[test]
+    fn the_framing_radius_is_the_extent_in_x_and_z() {
+        let z = [Vec3::new(5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 10.0)];
+        let (c, r) = centre_and_radius(&z).expect("points");
+        assert_eq!((c, r), (Vec3::new(5.0, 0.0, 5.0), 5.0));
+        let x = [Vec3::new(0.0, 0.0, 3.0), Vec3::new(8.0, 0.0, 3.0)];
+        assert_eq!(centre_and_radius(&x).expect("points").1, 4.0);
+        let up = [Vec3::new(1.0, 0.0, 1.0), Vec3::new(1.0, 30.0, 1.0)];
+        assert_eq!(centre_and_radius(&up).expect("points").1, 0.0);
+        let diag = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(3.0, 9.0, 4.0)];
+        assert_eq!(centre_and_radius(&diag).expect("points").1, 2.5);
+        assert!(centre_and_radius(&[]).is_none());
+    }
+
+    /// A box turned a quarter about Y covers the turned corners.
+    #[test]
+    fn a_moved_box_is_the_box_of_its_moved_corners() {
+        let m = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0))
+            * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let (lo, hi) = transform_box(&m, Vec3::new(-1.0, 0.0, -2.0), Vec3::new(1.0, 3.0, 2.0));
+        assert!((lo - Vec3::new(8.0, 0.0, -1.0)).length() < 1e-5, "{lo:?}");
+        assert!((hi - Vec3::new(12.0, 3.0, 1.0)).length() < 1e-5, "{hi:?}");
     }
 
     #[test]

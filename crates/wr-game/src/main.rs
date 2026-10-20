@@ -15,7 +15,17 @@
 //! point or `--look`: `--frames N --fps F [--t0 SECONDS]` frames at `t0 + k / F` seconds of
 //! animation time, and `--walk UNIT[,SPEED[,START[,DISTANCE]]]` sends one unit (by its id in the
 //! spec) on a straight walk (default 3.3 m/s from t = 1 s for 6 m).
+//!
+//! `--fight FIXTURE [--run record] [--save NAME]` (POC-7, the units driven by the sim) replays a
+//! recorded turn-based fight in `wr-sim`, collects where every unit stands and faces at each frame
+//! (`docs/poc7/fight.md`) and plays that on the pack's units at 60 frames a second, a camera
+//! following the fighters (`--look` fixes it instead). It plays live, or with `--frames N --fps F
+//! [--t0 SECONDS]` or `--at TICK,TICK,...` captures images; `--cam-yaw DEGREES` turns the camera. The pack must hold the save's units
+//! (`wr-visual spec` of the save, then `wr-import pack --units`). Run it under `scripts/heavy.sh`,
+//! or give `--fight` the timeline file `wr-combat replay --timeline-out` wrote instead of the
+//! fixture directory, which skips the replay (and its memory).
 
+mod fight;
 mod frames;
 mod owlcat;
 mod route;
@@ -49,6 +59,7 @@ enum Mode {
     Bench,
     View,
     Anim,
+    Fight,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +86,51 @@ struct Args {
     fps: f32,
     t0: f32,
     walk: Option<owlcat::skinning::Walk>,
+    /// `--fight FIXTURE`: the fight to replay and play; `--run`, `--save` choose the run and the
+    /// save (else the capture's), `--frames` was given, `--at` lists the ticks to capture, `--rate`
+    /// scales live playback.
+    fight: Option<PathBuf>,
+    run: String,
+    save: Option<String>,
+    frames_given: bool,
+    at: Option<Vec<u32>>,
+    rate: f32,
+    /// `--cam-yaw DEGREES`: the direction the following camera looks in (else the route's first
+    /// pose's).
+    cam_yaw: Option<f32>,
+}
+
+impl Args {
+    /// A fight plays live (a window, wall-clock time) unless images are asked for.
+    fn live(&self) -> bool {
+        self.mode == Mode::Fight && !self.frames_given && self.at.is_none()
+    }
+
+    /// Images `--mode anim` or `--fight` captures.
+    fn capture_count(&self) -> usize {
+        self.at.as_ref().map_or(self.frames, Vec::len)
+    }
+
+    /// The animation time of capture `k`: `--at`'s tick, else `t0 + k / fps`.
+    fn capture_time(&self, k: usize) -> f32 {
+        match &self.at {
+            Some(a) => a[k] as f32 / 60.0,
+            None => self.t0 + k as f32 / self.fps,
+        }
+    }
+
+    fn capture_name(&self, k: usize) -> String {
+        match &self.at {
+            Some(a) => format!("tick{:05}.png", a[k]),
+            None => format!("frame{k:03}.png"),
+        }
+    }
+}
+
+/// `--at`: ascending ticks.
+fn parse_at(s: &str) -> Option<Vec<u32>> {
+    let v: Vec<u32> = s.split(',').map(|x| x.trim().parse().ok()).collect::<Option<_>>()?;
+    (!v.is_empty() && v.len() <= 100_000 && v.windows(2).all(|w| w[0] <= w[1])).then_some(v)
 }
 
 /// `UNIT[,SPEED[,START[,DISTANCE]]]`.
@@ -137,6 +193,17 @@ impl Args {
                 format!("--walk {v}: want UNIT[,SPEED[,START[,DISTANCE]]] with finite, non-negative numbers")
             })?),
         };
+        let at = match opt(&a, "--at") {
+            None => None,
+            Some(v) => Some(parse_at(v).ok_or_else(|| {
+                format!("--at {v}: want ascending tick numbers, comma separated")
+            })?),
+        };
+        let rate = number("--rate", 1.0)?;
+        if !(0.01..=100.0).contains(&rate) {
+            return Err(format!("--rate {rate}: want 0.01 to 100"));
+        }
+        let fight = opt(&a, "--fight").map(PathBuf::from);
         Ok(Self {
             pack: opt(&a, "--pack").map_or_else(
                 || root.join("cache/poc6/packs/prologue_caves_1.wrpack"),
@@ -148,11 +215,13 @@ impl Args {
             ),
             out: opt(&a, "--out")
                 .map_or_else(|| root.join("fixtures/captures/poc6/first-light"), PathBuf::from),
-            mode: match opt(&a, "--mode").unwrap_or("shots") {
+            mode: match opt(&a, "--mode").unwrap_or(if fight.is_some() { "fight" } else { "shots" })
+            {
                 "shots" => Mode::Shots,
                 "bench" => Mode::Bench,
                 "view" => Mode::View,
                 "anim" => Mode::Anim,
+                "fight" => Mode::Fight,
                 m => return Err(format!("unknown mode {m}")),
             },
             windowed: a.iter().any(|x| x == "--windowed"),
@@ -171,6 +240,16 @@ impl Args {
             fps,
             t0,
             walk,
+            fight,
+            run: opt(&a, "--run").unwrap_or("record").to_owned(),
+            save: opt(&a, "--save").map(str::to_owned),
+            frames_given: opt(&a, "--frames").is_some(),
+            at,
+            rate,
+            cam_yaw: match opt(&a, "--cam-yaw") {
+                None => None,
+                Some(_) => Some(number("--cam-yaw", 0.0)?),
+            },
         })
     }
 }
@@ -212,6 +291,8 @@ struct Run {
     waiting_capture: bool,
     /// `--mode anim`: frames captured so far.
     anim_step: usize,
+    /// `--fight`: the frames the timeline covers.
+    fight_frames: usize,
 }
 
 /// Render-world state.
@@ -225,6 +306,10 @@ struct RenderSide {
     frames: u64,
     /// Linear view of the display image (made once).
     display_view: Option<bevy::render::render_resource::TextureView>,
+    /// `--fight` without `--look`: the camera that follows the fighters, and when it last moved.
+    follow: Option<fight::Follow>,
+    followed_at: Option<Instant>,
+    live: bool,
 }
 
 fn main() {
@@ -249,6 +334,21 @@ fn main() {
         points = vec![route::look_at(&points[0], eye, target)];
         args.point = Some(0);
     }
+    if args.mode == Mode::Fight && args.fight.is_none() {
+        eprintln!("--mode fight wants --fight FIXTURE");
+        std::process::exit(2);
+    }
+    // The replay runs (and frees its memory) before the window and the renderer exist.
+    let fight = match &args.fight {
+        Some(dir) => match fight::load(dir, &args.run, args.save.as_deref()) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("fight: {e:#}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
     let (w, h) = (points[0].pose.width, points[0].pose.height);
     let window = Window {
         title: "wr-game: Prologue_Caves_1 first light".into(),
@@ -306,10 +406,11 @@ fn main() {
         last_frame: None,
         waiting_capture: false,
         anim_step: 0,
+        fight_frames: fight.as_ref().map_or(0, |f| f.drive.frames),
     })
     .add_systems(Startup, setup)
     .add_systems(Update, drive);
-    app.add_plugins(OwlcatPlugin { shared, args, points });
+    app.add_plugins(OwlcatPlugin { shared, args, points, drive: fight.map(|f| f.drive) });
     app.run();
 }
 
@@ -421,6 +522,7 @@ fn finish(run: &Run, shared: &Shared) {
         Mode::Bench => "run-bench.json",
         Mode::View => "run-view.json",
         Mode::Anim => "run-anim.json",
+        Mode::Fight => "run-fight.json",
     };
     let _ = std::fs::write(
         run.args.out.join(name),
@@ -509,20 +611,30 @@ fn drive(mut run: ResMut<Run>, shared: Res<SharedRes>, mut exit: MessageWriter<A
                 run.waiting_capture = true;
             }
         }
-        Mode::Anim => {
+        Mode::Anim | Mode::Fight if run.args.live() => {
+            // Wall-clock playback at `--rate`, from `--t0`; the fight ends with its last frame.
+            let started = *run.point_started.get_or_insert(now);
+            let t = run.args.t0 + now.duration_since(started).as_secs_f32() * run.args.rate;
+            sh.anim_time = Some(t);
+            if t * 60.0 >= run.fight_frames as f32 {
+                finish(&run, &sh);
+                exit.write(AppExit::Success);
+            }
+        }
+        Mode::Anim | Mode::Fight => {
             if run.waiting_capture {
                 if sh.captured.len() > run.anim_step {
                     run.waiting_capture = false;
                     run.anim_step += 1;
                     run.frames_here = 0;
-                    if run.anim_step >= run.args.frames {
+                    if run.anim_step >= run.args.capture_count() {
                         finish(&run, &sh);
                         exit.write(AppExit::Success);
                     }
                 }
             } else if run.frames_here >= run.args.settle.min(3) {
-                let t = run.args.t0 + run.anim_step as f32 / run.args.fps;
-                let path = run.args.out.join(format!("frame{:03}.png", run.anim_step));
+                let t = run.args.capture_time(run.anim_step);
+                let path = run.args.out.join(run.args.capture_name(run.anim_step));
                 sh.anim_time = Some(t);
                 sh.capture = Some((run.idx, path));
                 run.waiting_capture = true;
@@ -548,6 +660,8 @@ struct OwlcatPlugin {
     shared: SharedRes,
     args: Args,
     points: Vec<RoutePoint>,
+    /// `--fight`: the sim's timeline as the units' motion.
+    drive: Option<owlcat::skinning::Drive>,
 }
 
 impl Plugin for OwlcatPlugin {
@@ -591,6 +705,16 @@ impl Plugin for OwlcatPlugin {
                 eprintln!("animated units: {}", ids.join(" "));
             }
             r.set_walk(self.args.walk.clone());
+            if let Some(d) = &self.drive {
+                let missing = r.set_drive(d.clone());
+                if !missing.is_empty() {
+                    eprintln!(
+                        "fight: {} units of the timeline are not in the pack and stay unseen: {}",
+                        missing.len(),
+                        missing.join(" ")
+                    );
+                }
+            }
         }
         if let (Some(r), Ok(mut s)) = (&renderer, self.shared.0.lock()) {
             let st = &r.stats;
@@ -619,6 +743,10 @@ impl Plugin for OwlcatPlugin {
                 current: None,
                 frames: 0,
                 display_view: None,
+                follow: (self.drive.is_some() && self.args.look.is_none())
+                    .then(|| fight::Follow::from_pose(&self.points[0], self.args.cam_yaw)),
+                followed_at: None,
+                live: self.args.live(),
             })
             .add_systems(RenderGraph, record.in_set(RenderGraphSystems::Begin));
         frames::add_render_marks(render_app);
@@ -655,7 +783,14 @@ fn record(
         // Animation capture: pose the units at `t`, then plan the frame's shadows again (a walking
         // unit's casters moved).
         r.animate(&queue, t);
-        let pose = side.points[point.min(side.points.len() - 1)].pose;
+        let base = &side.points[point.min(side.points.len() - 1)];
+        let mut pose = base.pose;
+        if let (Some(follow), Some((centre, radius))) = (side.follow.as_mut(), r.focus()) {
+            // A live camera eases between framings; a capture frames its tick exactly.
+            let now = Instant::now();
+            let dt = side.followed_at.replace(now).map(|p| now.duration_since(p).as_secs_f32());
+            pose = follow.pose(base, centre, radius, side.live.then_some(dt.unwrap_or(0.0))).pose;
+        }
         r.set_camera(&queue, &pose, 100.0 + t);
     }
     let dev = device.wgpu_device();
@@ -713,6 +848,15 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_ticks_are_ascending_numbers() {
+        assert_eq!(parse_at("0, 600,1200"), Some(vec![0, 600, 1200]));
+        assert_eq!(parse_at("7"), Some(vec![7]));
+        for bad in ["", "1,x", "-1", "5,3", "1.5", ",1"] {
+            assert!(parse_at(bad).is_none(), "{bad}");
+        }
+    }
 
     #[test]
     fn walks_parse_with_defaults_and_reject_nonsense() {

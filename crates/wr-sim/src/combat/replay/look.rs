@@ -299,7 +299,10 @@ impl Driver<'_> {
                 )));
             }
             None => {
+                // A point the sim can't resolve: the recording's argument decides the facing,
+                // computed and checked below, but a recorded input all the same.
                 self.out.look.points_taken += 1;
+                self.timeline_taken(u);
                 rec.arg
             }
         };
@@ -308,6 +311,7 @@ impl Driver<'_> {
         }
         if !self.look_driven(w) {
             // Real time: the positions and orientations aren't the sim's; the write is taken.
+            self.timeline_taken(u);
             let unit = w.unit_mut(u).expect("a unit");
             unit.orientation = rec.after.value;
             unit.combat.desired_orientation = rec.after.desired;
@@ -351,6 +355,9 @@ impl Driver<'_> {
             );
             return;
         };
+        // Code the sim doesn't run wrote it: the orientation is the recording's (or computed from its
+        // point), whichever case below takes it.
+        self.timeline_taken(u);
         let take = |w: &mut World| {
             let unit = w.unit_mut(u).expect("a unit");
             unit.orientation = rec.after.value;

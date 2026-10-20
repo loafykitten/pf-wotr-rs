@@ -1200,8 +1200,10 @@ and clear value, the shipped pipeline settings. Next: light probes, then the res
 - **Pass:** a scripted run (the same inputs, tape and deltas as an oracle run) ends in the
   same state as the original; a free play-through feels like Wrath (Ember's judgement).
 - **Status (2026-10-18):** stage 1 of `docs/poc7/characters.md` done (the save's units composed and placed, rest
-  pose); step 2 (`docs/poc7/animation.md`) animates them (idle, a walk demo). Next: the units driven by the sim
-  (the movement agent, camera and click-to-move), then the stages `characters.md` lists.
+  pose); step 2 (`docs/poc7/animation.md`) animates them (idle, a walk demo); step 3, first part (stream drive,
+  `docs/poc7/fight.md`): the units driven by the sim, `wr-game --fight` plays a recorded fight from the driven replay's
+  per-frame timeline (`replay::timeline`), locomotion only (no combat animations, no original camera rig). Next:
+  the combat animations, the camera rig and click-to-move, then the stages `characters.md` lists.
 
 ### POC-8: what the rest would cost (alongside POC-2 to POC-7)
 

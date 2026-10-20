@@ -1222,6 +1222,8 @@ pub(super) fn add(
                 animation,
                 bones: merged.bones.clone(),
                 bind_poses: merged.bind.iter().map(Mat4::to_cols_array).collect(),
+                // (`push_renderer_for` sets it from the prefab.)
+                forbid_rotation: false,
             };
             (Some(skin_blob), Some(binding))
         }

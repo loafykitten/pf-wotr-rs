@@ -1065,6 +1065,8 @@ struct Driver<'t> {
     /// The `env` records the current root's code looked up (rule class, initiator, target): the
     /// ones `span_records` accepts.
     env_reads: Vec<(&'static str, String, String)>,
+    /// The units' timeline, when the caller asks for it (`timeline::run_timeline`); read-only.
+    timeline: Option<timeline::Collector>,
     out: Outcome,
 }
 
@@ -1163,7 +1165,7 @@ pub fn run_with_tape(w: &mut World, trace: &Trace, tape_trace: &Trace) -> Outcom
         let i = d.i;
         d.i = d.record(w, i);
     }
-    d.finish(w)
+    d.finish(w).0
 }
 
 impl<'t> Driver<'t> {
@@ -1322,6 +1324,7 @@ impl<'t> Driver<'t> {
             prone_visit: HashMap::new(),
             launches_checked: None,
             env_reads: Vec::new(),
+            timeline: None,
             out,
         };
         let mut d = d;
@@ -1640,7 +1643,7 @@ impl<'t> Driver<'t> {
     }
 
     /// The last frame's remaining phases, then the comparison.
-    fn finish(mut self, w: &mut World) -> Outcome {
+    fn finish(mut self, w: &mut World) -> (Outcome, Option<timeline::Collector>) {
         self.cd_frame_end(w);
         self.uc_frame_end(w);
         self.tgt_frame_end(w);
@@ -1665,6 +1668,7 @@ impl<'t> Driver<'t> {
         if self.tt {
             self.tt_close(w);
         }
+        self.timeline_sample(w);
         if self.eng {
             self.eng_finish(w);
         }
@@ -1692,7 +1696,7 @@ impl<'t> Driver<'t> {
                 .unsupported("driven replay: the sim's stat mutations differ from the recording's");
         }
         out.diff = project::diff(&out.oracle, &out.sim);
-        out
+        (out, self.timeline)
     }
 }
 
@@ -3216,6 +3220,7 @@ impl Driver<'_> {
                 if self.tt {
                     self.tt_close(w);
                 }
+                self.timeline_sample(w);
                 if self.port {
                     self.frame_leftovers(w);
                     let t = r["t"].as_i64().unwrap_or(-1);
@@ -4884,6 +4889,7 @@ mod spans;
 mod spells;
 mod stats;
 mod targets;
+pub mod timeline;
 mod vision;
 mod vision_range;
 

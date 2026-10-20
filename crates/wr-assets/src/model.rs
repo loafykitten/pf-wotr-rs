@@ -488,6 +488,10 @@ pub struct SkinBinding {
     /// `rig_world[bones[i]] * bind_poses[i]`, in the unit's root space (the renderer's matrix
     /// places that space in the world).
     pub bind_poses: Vec<[f32; 16]>,
+    /// The unit prefab's `UnitEntityView.ForbidRotation`: the view's rotation stays the identity
+    /// whatever the unit's orientation (`UnitMoveController.TickUnit`, `InstantiateView_Internal`),
+    /// so a driver must not turn the unit.
+    pub forbid_rotation: bool,
 }
 
 /// A `MaterialPropertyBlock`: per-renderer overrides of material properties.

@@ -50,6 +50,16 @@ enum Cmd {
         /// Which run of the fixture (`record`, `replay-1`…).
         #[arg(long, default_value = "record")]
         run: String,
+        /// Write the outputs here instead of `cache/poc5/`.
+        #[arg(long)]
+        out_dir: Option<std::path::PathBuf>,
+        /// Also collect the units' presentation timeline (`replay::timeline`) and summarize it on
+        /// stderr; stdout and the outputs are the same as without.
+        #[arg(long)]
+        timeline: bool,
+        /// Collect the timeline and write it here (gzip JSON), for `wr-game --fight --timeline`.
+        #[arg(long)]
+        timeline_out: Option<std::path::PathBuf>,
     },
     /// Names a blueprint (type, name, its components' types).
     Bp { guid: String },
@@ -61,6 +71,70 @@ fn out_dir() -> std::path::PathBuf {
     d
 }
 
+/// One line per unit: its frames, the distance it walked, where its samples come from, the life
+/// state at the end. With `WR_TL_CSV=DIR`, each unit's samples as `DIR/<id>.csv`.
+fn timeline_summary(tl: &wr_sim::combat::replay::timeline::Timeline) {
+    use wr_sim::combat::replay::timeline::Source;
+    let sim = |t: &wr_sim::combat::replay::timeline::Track| {
+        t.samples.iter().filter(|s| s.source == Source::Sim).count()
+    };
+    eprintln!(
+        "timeline: {} frames ({}..={}), {} units, commands {:?}",
+        tl.ticks.len(),
+        tl.ticks.first().copied().unwrap_or(0),
+        tl.ticks.last().copied().unwrap_or(0),
+        tl.tracks.len(),
+        tl.commands
+    );
+    if let Some(dir) = std::env::var_os("WR_TL_CSV") {
+        let _ = std::fs::create_dir_all(&dir);
+        for t in &tl.tracks {
+            let mut text = String::from(
+                "tick,x,y,z,o,d,ingame,life,prone,combat,moving,speed,aspeed,cmd,src\n",
+            );
+            for (i, s) in t.samples.iter().enumerate() {
+                text.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:?}\n",
+                    tl.ticks[t.first + i],
+                    s.position[0],
+                    s.position[1],
+                    s.position[2],
+                    s.orientation,
+                    s.desired_orientation,
+                    s.in_game as u8,
+                    s.life_state,
+                    s.prone as u8,
+                    s.in_combat as u8,
+                    s.moving as u8,
+                    s.speed,
+                    s.agent_speed,
+                    tl.command(s).unwrap_or("-"),
+                    s.source
+                ));
+            }
+            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{}.csv", t.id)), text);
+        }
+    }
+    for t in &tl.tracks {
+        let walked: f32 = t
+            .samples
+            .windows(2)
+            .map(|p| {
+                (p[1].position[0] - p[0].position[0]).hypot(p[1].position[2] - p[0].position[2])
+            })
+            .sum();
+        let last = t.samples.last();
+        eprintln!(
+            "  {} frames {} (sim {}), walked {walked:.1} m, end life {} prone {}",
+            t.id,
+            t.samples.len(),
+            sim(t),
+            last.map_or(-1, |s| s.life_state),
+            last.is_some_and(|s| s.prone)
+        );
+    }
+}
+
 fn read_json(p: &std::path::Path) -> Result<serde_json::Value> {
     let b = std::fs::read(p)?;
     Ok(serde_json::from_slice(&b)?)
@@ -69,7 +143,16 @@ fn read_json(p: &std::path::Path) -> Result<serde_json::Value> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Replay { fixture, save, run } => replay(&fixture, &save, &run)?,
+        Cmd::Replay { fixture, save, run, out_dir, timeline, timeline_out } => {
+            replay(
+                &fixture,
+                &save,
+                &run,
+                out_dir,
+                timeline || timeline_out.is_some(),
+                timeline_out.as_deref(),
+            )?;
+        }
         Cmd::Bp { guid } => {
             let content = wr_sim::content::Content::open_default()?;
             let g = wr_content::Guid::parse(&guid).ok_or_else(|| anyhow::anyhow!("bad guid"))?;
@@ -198,11 +281,37 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
+fn replay(
+    fixture: &std::path::Path,
+    save: &str,
+    run: &str,
+    out_dir_arg: Option<std::path::PathBuf>,
+    timeline: bool,
+    timeline_out: Option<&std::path::Path>,
+) -> Result<()> {
     let t0 = Instant::now();
-    let (out, w) = wr_sim::combat::replay::run_fixture(save, fixture, run)?;
+    let (out, w) = if timeline {
+        let (out, w, tl) =
+            wr_sim::combat::replay::timeline::run_fixture_timeline(save, fixture, run)?;
+        match tl {
+            Ok(tl) => {
+                timeline_summary(&tl);
+                if let Some(p) = timeline_out {
+                    tl.write(p)?;
+                    eprintln!("timeline: written to {}", p.display());
+                }
+            }
+            Err(e) => eprintln!("timeline: none: {e}"),
+        }
+        (out, w)
+    } else {
+        wr_sim::combat::replay::run_fixture(save, fixture, run)?
+    };
     let load_unsupported = out.load_unsupported;
-    let dir = out_dir();
+    let dir = out_dir_arg.map_or_else(out_dir, |d| {
+        let _ = std::fs::create_dir_all(&d);
+        d
+    });
     let name = format!(
         "{}-{run}",
         fixture.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()

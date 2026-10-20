@@ -4820,6 +4820,7 @@ dependencies = [
  "wr-anim",
  "wr-assets",
  "wr-paths",
+ "wr-sim",
 ]
 
 [[package]]

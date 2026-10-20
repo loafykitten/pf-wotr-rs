@@ -798,6 +798,7 @@ impl RoamInputs for Io<'_, '_> {
             )));
         }
         // The recorded position carries on.
+        self.d.timeline_taken(u);
         let after = roam::stepped(before, v);
         if let Some(x) = w.unit_mut(u) {
             x.position = after;
