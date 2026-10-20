@@ -110,8 +110,8 @@ pub fn is_stat_mut(what: &str) -> bool {
     )
 }
 
-/// A stat modifier as compared: its descriptor, value and stack mode, the blueprint of the fact
-/// that added it (the fact's unique id is the run's own), the component, the item's id and blueprint.
+/// A stat modifier as compared: its descriptor, value and stack mode, the fact that added it (its
+/// unique id and blueprint), the component, the item's id and blueprint.
 fn stat_mod(m: &J) -> J {
     if m.is_null() {
         return J::Null;
@@ -121,7 +121,7 @@ fn stat_mod(m: &J) -> J {
         m["value"],
         m["stack_mode"],
         m["stacks"],
-        m["source"]["blueprint"],
+        m["source"],
         m["source_component"],
         m["item"]
     ])
@@ -347,8 +347,8 @@ mod tests {
     use super::*;
 
     /// A stat mutation projects to the same record from the oracle's form and the sim's: the
-    /// descriptor's name, the fact's unique id and the fields the oracle adds are not compared; a
-    /// changed value, modifier, frame or the other kind is.
+    /// descriptor's name and the fields the oracle adds are not compared; a changed value, modifier,
+    /// source fact (its id too), frame or the other kind is.
     #[test]
     fn stat_mutations_project_alike_from_both_sides() {
         let rec = json!({"seq": 9, "k": "mut", "t": 4, "what": "stat_mod_add", "rule": 0, "h": 0,
@@ -371,7 +371,6 @@ mod tests {
         assert_eq!(out.len(), 2);
         let mut sim = rec.clone();
         sim["mod"]["descriptor_name"] = json!("x");
-        sim["mod"]["source"]["$fact"] = json!("2");
         sim["seq"] = json!(0);
         assert_eq!(stat_record(&sim), Some(out[0].clone()));
         for (path, v) in
@@ -382,6 +381,9 @@ mod tests {
             assert_ne!(stat_record(&other), Some(out[0].clone()), "{path}");
         }
         let mut other = rec.clone();
+        other["mod"]["source"]["$fact"] = json!("2");
+        assert_ne!(stat_record(&other), Some(out[0].clone()), "the source fact's id");
+        other = rec.clone();
         other["mod"]["value"] = json!(-8);
         assert_ne!(stat_record(&other), Some(out[0].clone()));
         other = rec.clone();

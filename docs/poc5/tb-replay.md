@@ -978,14 +978,15 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   tick 443 (111,442 records). The trace is the game's actual run, and the sim reproduces it: 20 roots driven, T0
   equal, no report. "Valid" says the sim agrees with the game's trace; whether the game's replay stayed on its
   recording is the oracle's own verdict, the note.
-- `mut`: compared only if `project::project_records` keeps it: `damage`, `xp`, `fact_attach`, `fact_detach` and a
-  `rule_bonus` to a tracked rule (`target_rule` > 0); it drops every other `what` (`stat_value`, `stat_mod_add`,
-  `stat_mod_remove`, `rule_temp_mod`, ...), and no other checker of the replay reads those kinds. [M] Surveyed on
-  the sweep's 111 runs and `-137` to `-140`: inside root spans there are only `damage` (685), `fact_attach` (509)
-  and `rule_bonus` (4,749, every one tracked); the unprojected kinds are all outside spans (`stat_value` 2,406,
-  `stat_mod_add` 2,370, `stat_mod_remove` 6 in the sweep's captures). So a span now reports any other `mut`
-  (`spans::projected`). **Open, not the spans':** the mutations outside spans that nothing compares (the sim doesn't emit
-  them, T0 doesn't project them); the fix is for the sim to emit them and T0 to compare them, a piece of work of its own.
+- `mut`: compared only if `project::project_records` keeps it: `damage`, `xp`, `fact_attach`, `fact_detach`, a
+  `rule_bonus` to a tracked rule (`target_rule` > 0) and, since stream stats, the stat mutations (`stat_value`,
+  `stat_mod_add`, `stat_mod_remove`, `stat_temp_scope_*`: `docs/poc5/stats.md`); it drops every other `what`
+  (`rule_temp_mod`, ...), and no other checker of the replay reads those kinds. [M] Surveyed on the sweep's 116 runs:
+  inside root spans there are only `damage`, `fact_attach` and `rule_bonus` (every one tracked); the stat mutations
+  (2,616 `stat_value`, 2,580 `stat_mod_add`, 6 `stat_mod_remove`) are all outside spans, and the sim now writes them from
+  its own `ModifiableValue` port and the T0 stream compares them (with their frame). A span still reports any `mut` that
+  `spans::projected` doesn't accept, a stat mutation included (`spans::projected` says no to them: none lies inside a
+  span, and the sim writes none there).
 - Structure: one state machine, `replay/life.rs` (`Life`), shared by `span_ok` (the commands' attack spans, which check
   every field besides) and the audit of the other root spans (`spans::Open`), so the two cannot drift. A nested rule is
   pushed by the innermost rule in its `OnTrigger` or one of its handlers (its `parent`, `depth`, open `handler` and
