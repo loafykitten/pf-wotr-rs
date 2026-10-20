@@ -17,6 +17,8 @@
 //! frame's query.
 
 use super::Bounds;
+use std::collections::HashSet;
+
 use super::{
     BoundsUnit, Collider, Enabled, EntityIdx, RadiusIv, Seen, Step, V3, next_radius, orientation,
 };
@@ -61,9 +63,6 @@ pub enum Write {
     Gone { id: i32 },
     /// `Physics.SyncTransforms()` (or DollRoom's `Simulate`): every transform reaches PhysX.
     Sync,
-    /// `SetupSphereColliderEntityLink` for a unit whose new view has no collider: the unit's view
-    /// was replaced, and a collider of the old view may outlive the swap until it is destroyed.
-    ViewLink { unit: EntityIdx },
 }
 
 /// A write and whether it came after the frame's vision phase.
@@ -192,6 +191,21 @@ impl Bounds {
         }
     }
 
+    /// The units that have more than one collider now (a destroyed one counts until the frame's
+    /// end): their colliders' places in the result order differ, which a unit-level order can't
+    /// tell.
+    #[must_use]
+    pub fn units_with_several_colliders(&self) -> HashSet<EntityIdx> {
+        let mut seen = HashSet::new();
+        let mut out = HashSet::new();
+        for c in self.colliders.iter().filter(|c| c.rec_id.is_some()) {
+            if !seen.insert(c.unit) {
+                out.insert(c.unit);
+            }
+        }
+        out
+    }
+
     /// Whether the colliders are the recording's ([`Bounds::start_recorded`]).
     #[must_use]
     pub fn is_recorded(&self) -> bool {
@@ -317,9 +331,6 @@ impl Bounds {
                 c.transform = Some(pos);
                 out.counts.moved += 1;
             }
-            Write::ViewLink { unit } => {
-                self.relinked.insert(unit);
-            }
             Write::Gone { id } => {
                 let Some(i) = self.index_of(id) else {
                     out.problem(
@@ -360,7 +371,6 @@ impl Bounds {
                 .colliders
                 .iter()
                 .any(|c| c.unit == t.unit && c.rec_id.is_some_and(|id| !self.dying.contains(&id)))
-                && !self.relinked.contains(&t.unit)
             {
                 out.problem(
                     Some(t.unit),
@@ -372,16 +382,16 @@ impl Bounds {
         out.counts.ticks += 1;
         let existing = self.index_of(id);
         let prev = if t.made {
-            // A unit has one collider: the previous one must have been relinquished (destroyed,
-            // or its view replaced: a `ViewLink`) before the call makes another.
+            // A unit has one view collider: the previous one must have been destroyed before the
+            // call makes another. (A view replaced is a detach and an attach whose records the
+            // sim doesn't tell apart from a unit's view being cleared: ambiguous, so reported.)
             let live = self
                 .colliders
                 .iter()
                 .any(|c| c.unit == t.unit && c.rec_id.is_some_and(|id| !self.dying.contains(&id)));
-            if live && !self.relinked.contains(&t.unit) {
-                out.problem(Some(t.unit), format!("a bounds_tick that made collider {id} while the unit's previous collider is live: no destruction or view replacement before it"));
+            if live {
+                out.problem(Some(t.unit), format!("a bounds_tick that made collider {id} while the unit's previous collider is live: no destruction before it"));
             }
-            self.relinked.remove(&t.unit);
             if existing.is_some() || t.r0.is_some() {
                 out.problem(Some(t.unit), format!("a bounds_tick that made collider {id} when the sim has it or the record has a radius before"));
             }
@@ -404,6 +414,17 @@ impl Bounds {
                     format!("a bounds_tick of collider {id}, which was destroyed earlier in this frame (its view's reference is cleared)"),
                 );
                 return;
+            }
+            // `TickEntity` works on the unit's view collider: its newest live one.
+            let current =
+                self.colliders.iter().rev().find(|c| {
+                    c.unit == t.unit && c.rec_id.is_some_and(|id| !self.dying.contains(&id))
+                });
+            if current.and_then(|c| c.rec_id) != Some(id) {
+                out.problem(
+                    Some(t.unit),
+                    format!("a bounds_tick of collider {id}, which isn't the unit's current view collider"),
+                );
             }
             let c = &self.colliders[i];
             if c.unit != t.unit {
@@ -526,7 +547,7 @@ impl Bounds {
 mod tests {
     use std::collections::HashSet;
 
-    use super::super::{Cause, Difference, Tri, by_unit, differences};
+    use super::super::{Cause, Difference, Hit, Tri, by_unit, cap, differences};
     use super::*;
 
     const A: EntityIdx = EntityIdx(1);
@@ -853,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_has_one_live_collider_until_its_view_is_replaced_or_it_is_destroyed() {
+    fn a_unit_has_one_view_collider_until_it_is_destroyed() {
         let make = |seq: i64, id: i32| RecTick {
             seq,
             unit: A,
@@ -864,32 +885,62 @@ mod tests {
             on: Some(true),
             id: Some(id),
         };
-        // A call that makes a second collider while the first is live: reported.
+        // A call that makes a second collider while the first is live: reported (a view
+        // replaced is ambiguous in the records, and no permission is taken from it).
         let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
         b.tick_recorded(RAN, &[], &[], &[]);
         let out = b.tick_recorded(RAN, &[], &[make(1, 8)], &[]);
         assert_eq!(about(&out, "previous collider is live"), 1, "{:?}", out.problems);
-        // After a destruction (the same frame or an earlier one), or a view replacement, it is
-        // the unit's next collider.
-        for events in [
-            vec![gone(1, 7, false)],
-            vec![Event { seq: 1, write: Write::ViewLink { unit: A }, late: false }],
-        ] {
-            let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
-            b.tick_recorded(RAN, &[], &[], &[]);
-            let out = b.tick_recorded(RAN, &events, &[make(2, 8)], &[]);
-            assert!(out.problems.is_empty(), "{:?}", out.problems);
-        }
+        // Sol's round 3: a later call on the obsolete collider isn't the view's.
+        let old = RecTick { seq: 2, ..tick(A, 7, 0.5, 0.5, [0.0; 3]) };
+        let out = b.tick_recorded(RAN, &[], &[old], &[]);
+        assert_eq!(about(&out, "current view collider"), 1, "{:?}", out.problems);
+        assert_eq!(b.units_with_several_colliders(), HashSet::from([A]));
+        // After a destruction (the same frame or an earlier one) it is the unit's next collider.
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        let out = b.tick_recorded(RAN, &[gone(1, 7, false)], &[make(2, 8)], &[]);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        // (The destroyed one counts until the frame's end.)
+        assert_eq!(b.units_with_several_colliders(), HashSet::from([A]));
+        b.tick_recorded(RAN, &[], &[], &[]);
+        assert!(b.units_with_several_colliders().is_empty());
         let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
         b.tick_recorded(RAN, &[], &[], &[]);
         b.tick_recorded(RAN, &[gone(1, 7, true)], &[], &[]);
         assert!(b.tick_recorded(RAN, &[], &[make(2, 8)], &[]).problems.is_empty());
-        // A replacement is for one making only.
-        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
-        let link = Event { seq: 1, write: Write::ViewLink { unit: A }, late: false };
-        b.tick_recorded(RAN, &[link], &[make(2, 8)], &[]);
-        let out = b.tick_recorded(RAN, &[], &[make(3, 9)], &[]);
-        assert_eq!(about(&out, "previous collider is live"), 1, "{:?}", out.problems);
+    }
+
+    #[test]
+    fn the_buffer_allowance_counts_only_duplicates_that_may_be_hit() {
+        // Sol's round 3: 513 surely-in units, so the buffer is full and holds 512 distinct
+        // units. A recorded set of 511 is impossible, and a duplicate collider that is surely
+        // out (or of a unit not in the set) can't change that.
+        let hit = |u: u32, tri: Tri| Hit {
+            unit: EntityIdx(u),
+            tri,
+            cause: None,
+            margin: None,
+            rounding: false,
+            guess: None,
+            order_known: true,
+            capped: None,
+            extra_slots: 0,
+            lost: false,
+        };
+        let mut hits: Vec<Hit> = (0..513).map(|i| hit(i, Tri::In)).collect();
+        hits.push(hit(0, Tri::Out));
+        cap(&mut hits);
+        let set: HashSet<EntityIdx> = (1..512).map(EntityIdx).collect();
+        let d = differences(&hits, &set);
+        assert!(d.diffs.contains(&Difference::Missing(EntityIdx(512))), "{:?}", d.diffs);
+        // A duplicate that may be hit (and whose unit is in the set) can take a slot: 511 units
+        // and one more collider fill the buffer.
+        let mut hits: Vec<Hit> = (0..513).map(|i| hit(i, Tri::In)).collect();
+        hits.push(hit(1, Tri::In));
+        cap(&mut hits);
+        let d = differences(&hits, &set);
+        assert!(d.diffs.is_empty(), "{:?}", d.diffs);
     }
 
     #[test]

@@ -6980,8 +6980,9 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
     assert_eq!(b, Some((1, 1)));
     // (The unit is in its sets through the old collider, which lives to the frame's end.)
     assert_eq!(out.vision.as_ref().map(|v| v.range_differences), Some(0));
-    // A view replacement the records show (`link` with no collider), then a call that makes the
-    // unit's new collider while the old one lives: accepted.
+    // A `link` with no collider (a view attached or detached: the records can't tell which)
+    // permits nothing: a call that makes a second collider while the first is live is still
+    // reported.
     let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
     let changed = trace.edited(|recs| {
         let at = tick_of(recs, "558A", 300);
@@ -6995,9 +6996,30 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         renumber(recs);
     });
     let _ = replay::run_with_tape(&mut w, &changed, &trace);
-    let live: Vec<_> =
-        w.coverage.unsupported.keys().filter(|k| k.contains("previous collider is live")).collect();
-    assert!(live.is_empty(), "{live:?}");
+    assert!(
+        w.coverage.unsupported.keys().any(|k| k.contains("previous collider is live")),
+        "{:?}",
+        w.coverage.unsupported.keys().collect::<Vec<_>>()
+    );
+    // A map object's collider made in a frame, its `entity` record written inside the making
+    // (before the call's `bounds_tick`, the oracle's order): not a unit's, nothing to report.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = tick_of(recs, "558A", 300);
+        let t = recs[at]["t"].clone();
+        let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+        let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+            "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+            "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+        recs.insert(at, made);
+        recs.insert(at, link);
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    let reported: Vec<_> =
+        w.coverage.unsupported.keys().filter(|k| k.contains("bounds records:")).collect();
+    assert!(reported.is_empty(), "{reported:?}");
+    assert_eq!(out.vision.as_ref().map(|v| v.rec.other_ticks), Some(1));
     // A frame the sim doesn't follow (a game mode it doesn't model: no vision phase) holding a
     // sync, a destruction, the new collider's `entity` link (written before its call) and the
     // call that makes it: replayed in the stream's order in the next frame's phase.

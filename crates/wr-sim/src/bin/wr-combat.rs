@@ -549,8 +549,8 @@ fn replay(
         }
         if b.order_records > 0 {
             println!(
-                "vision_order: records {}; sets whose order the sim's colliders give: equal {}, differing {}; sets whose order the sim could not give (taken) {}",
-                b.order_records, b.order_equal, b.order_differ, b.order_taken
+                "vision_order: records {}; sets whose order the sim's colliders give: equal {}, differing {}; sets whose order the sim could not give (taken) {}; units with several colliders whose order constraints were suspended {:?}",
+                b.order_records, b.order_equal, b.order_differ, b.order_taken, b.order_suspended
             );
         }
     }

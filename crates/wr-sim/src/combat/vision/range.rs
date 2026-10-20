@@ -60,7 +60,7 @@
 //! centre to the capsule's segment against the squared sum of the radii, in `f32`
 //! (`Gu::distancePointSegmentSquared`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::world::EntityIdx;
 
@@ -318,9 +318,6 @@ pub struct Bounds {
     /// Colliders (by id) a `bounds_set` destroyed in a frame whose query still saw them: they
     /// leave the scene at the frame's end ([`Bounds::tick_recorded`]).
     dying: Vec<i32>,
-    /// Units whose view was replaced (a `ViewLink`) and whose next collider-making call is the
-    /// new view's: the old view's collider may outlive it until its destruction.
-    relinked: HashSet<EntityIdx>,
 }
 
 fn sub(a: V3, b: V3) -> V3 {
@@ -718,6 +715,17 @@ pub fn by_unit(hits: &[Hit]) -> Vec<Hit> {
     out
 }
 
+/// The result-buffer slots the colliders of a recorded unit beyond its first may take: those that
+/// may be hit (a result consistent with the recorded set holds a unit's colliders only for units
+/// in it, and none that are surely out).
+fn duplicate_slots(colliders: &[Hit], recorded: &HashSet<EntityIdx>) -> usize {
+    let mut per_unit: HashMap<EntityIdx, usize> = HashMap::new();
+    for h in colliders.iter().filter(|h| h.tri != Tri::Out && recorded.contains(&h.unit)) {
+        *per_unit.entry(h.unit).or_default() += 1;
+    }
+    per_unit.values().map(|n| n - 1).sum()
+}
+
 /// What [`differences`] found.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Differences {
@@ -738,7 +746,7 @@ pub fn differences(colliders: &[Hit], recorded: &HashSet<EntityIdx>) -> Differen
     // A unit with two colliders at once (its view replaced: the old one lives until the frame's
     // end) is in the set if either is hit; the buffer counts both.
     let hits = &by_unit(colliders);
-    let duplicates = colliders.len() - hits.len();
+    let duplicates = duplicate_slots(colliders, recorded);
     let mut out = Differences::default();
     let mut seen = HashSet::new();
     for h in hits {

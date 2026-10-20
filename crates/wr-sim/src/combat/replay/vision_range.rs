@@ -91,7 +91,7 @@ pub(super) struct RangeDriver {
     /// Each unit's recorded order as of its last `vis_order` record.
     pub(super) order_last: HashMap<EntityIdx, Vec<EntityIdx>>,
     /// Every pair of units the recorded orders have put one before the other (a before b).
-    pub(super) order_pairs: HashSet<(EntityIdx, EntityIdx)>,
+    pub(super) order_pairs: super::bounds_rec::OrderPairs,
     /// The frame the vision phase last ran in: a collider write after it is for the next query.
     pub(super) phase_ran_at: Option<i64>,
 }

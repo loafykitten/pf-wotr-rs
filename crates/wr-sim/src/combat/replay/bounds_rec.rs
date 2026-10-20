@@ -184,6 +184,8 @@ pub struct BoundsRecCounts {
     pub order_records: usize,
     pub order_equal: usize,
     pub order_differ: usize,
+    /// Units with several colliders at once, whose order constraints were suspended.
+    pub order_suspended: Vec<String>,
     pub order_taken: usize,
 }
 
@@ -657,6 +659,88 @@ fn faded_units(roots: &[Root], resolve: impl Fn(&str) -> Option<EntityIdx>) -> V
         .collect()
 }
 
+/// The pairs of units the recorded orders have put one before the other, but for the units
+/// suspended (those with several colliders at once).
+#[derive(Debug, Default)]
+pub(super) struct OrderPairs {
+    before: HashSet<(EntityIdx, EntityIdx)>,
+    suspended: HashSet<EntityIdx>,
+}
+
+impl OrderPairs {
+    /// Suspends the constraints of `units` (and forgets the ones held): returns those newly so.
+    pub(super) fn suspend(&mut self, units: &HashSet<EntityIdx>) -> Vec<EntityIdx> {
+        let mut new: Vec<EntityIdx> =
+            units.iter().copied().filter(|u| self.suspended.insert(*u)).collect();
+        new.sort();
+        if !new.is_empty() {
+            let gone = &self.suspended;
+            self.before.retain(|(a, b)| !gone.contains(a) && !gone.contains(b));
+        }
+        new
+    }
+
+    /// Records the pairs `order` puts; the first pair that an earlier record put the other way
+    /// round, if any.
+    pub(super) fn add(&mut self, order: &[EntityIdx]) -> Option<(EntityIdx, EntityIdx)> {
+        let mut conflict = None;
+        for (i, a) in order.iter().enumerate() {
+            for b in &order[i + 1..] {
+                if self.suspended.contains(a) || self.suspended.contains(b) {
+                    continue;
+                }
+                if self.before.contains(&(*b, *a)) {
+                    conflict.get_or_insert((*a, *b));
+                }
+                self.before.insert((*a, *b));
+            }
+        }
+        conflict
+    }
+}
+
+/// The colliders a frame's calls make: units' (with their units) and others'.
+#[derive(Clone, Copy)]
+struct Made<'a> {
+    units: &'a [(i32, EntityIdx)],
+    others: &'a [i32],
+}
+
+impl Made<'_> {
+    const NONE: Made<'static> = Made { units: &[], others: &[] };
+}
+
+/// What an `entity` record (`EntityDataLink.Entity`'s setter) is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntityLink {
+    /// The link of another entity's collider (a map object's, a zone's): not the bounds model's.
+    Other,
+    /// The link of a collider a call of the frame made, to its unit.
+    Made,
+    NotModelled,
+}
+
+/// An `entity` record of collider `c` from `e0` to `e`: the oracle writes it inside the making
+/// (`SetupSphereBoundsCollider`), before the call's own `bounds_tick`, so a collider is classified
+/// by the frame's calls (`made_unit`: the unit's id when a unit's call made it, `made_others`:
+/// the ids others' calls made) and by the ones the records already showed.
+fn entity_link(
+    c: i32,
+    e0: Option<&str>,
+    e: Option<&str>,
+    made_unit: Option<&str>,
+    made_others: &[i32],
+    other_ids: &HashSet<i32>,
+) -> EntityLink {
+    if other_ids.contains(&c) || made_others.contains(&c) {
+        EntityLink::Other
+    } else if e0.is_none() && e.is_some() && e == made_unit {
+        EntityLink::Made
+    } else {
+        EntityLink::NotModelled
+    }
+}
+
 impl Driver<'_> {
     /// The window's start: the bounds records and `vis_order` of the recording, validated.
     pub(super) fn bounds_rec_start(&mut self, w: &mut World, declared: &[&str]) {
@@ -737,15 +821,19 @@ impl Driver<'_> {
                 queued.into_iter().partition(|q| q.late);
             if !current && raws.is_empty() && early_q.is_empty() {
                 // A frame whose phase ran: its late writes open the next call.
-                carry.extend(self.bounds_rec_writes(w, &mut rec, late_q, &[], true));
+                carry.extend(self.bounds_rec_writes(w, &mut rec, late_q, Made::NONE, true));
                 continue;
             }
-            // The colliders this frame's calls make (an `entity` record is a link of one).
+            // The colliders this frame's calls make (an `entity` record is a link of one; the
+            // game writes it inside the making, before the call's own record).
             let made: Vec<(i32, EntityIdx)> = raws
                 .iter()
                 .filter(|t| t.made && t.kind == UNIT_KIND)
                 .filter_map(|t| Some((t.c?, *w.by_id.get(&t.e)?)))
                 .collect();
+            let made_other: Vec<i32> =
+                raws.iter().filter(|t| t.made && t.kind != UNIT_KIND).filter_map(|t| t.c).collect();
+            let made = Made { units: &made, others: &made_other };
             // The calls and the writes in the stream's order.
             let mut items: Vec<(i64, Result<TickRaw, Queued>)> = raws
                 .into_iter()
@@ -762,7 +850,7 @@ impl Driver<'_> {
                         ticks.extend(self.bounds_rec_unit(w, &mut rec, &raw));
                     }
                     Err(q) => {
-                        events.extend(self.bounds_rec_writes(w, &mut rec, vec![q], &made, false));
+                        events.extend(self.bounds_rec_writes(w, &mut rec, vec![q], made, false));
                     }
                 }
             }
@@ -770,7 +858,7 @@ impl Driver<'_> {
             let (step, units) = if current { (step, list) } else { (Step::Unknown, &[][..]) };
             let out = w.combat.vision.bounds.tick_recorded(step, &events, &ticks, units);
             self.bounds_rec_out(w, out);
-            carry = self.bounds_rec_writes(w, &mut rec, late_q, &made, true);
+            carry = self.bounds_rec_writes(w, &mut rec, late_q, made, true);
         }
         // (What came after this frame's own phase isn't queued yet.)
         debug_assert!(carry.is_empty());
@@ -793,7 +881,7 @@ impl Driver<'_> {
         w: &mut World,
         rec: &mut BoundsRec,
         queued: Vec<Queued>,
-        made: &[(i32, EntityIdx)],
+        made: Made<'_>,
         late: bool,
     ) -> Vec<Event> {
         let mut out = Vec::new();
@@ -814,23 +902,19 @@ impl Driver<'_> {
                     out.push(Event { seq: q.seq, write: Write::Sync, late });
                     continue;
                 }
-                Stream::Link { c, v, e0, e } => {
-                    // The view's collider relinked to the view's new data. With no collider
-                    // the view has none (a replaced view: the unit may get a new one); with
-                    // one, it must be live and bound to the entity named, whether the relink
-                    // changes it or not.
+                Stream::Link { c, e0, e, .. } => {
+                    // The view's collider relinked to the view's data. With no collider (the view
+                    // has none: a view attached or detached, the records can't tell which) nothing
+                    // changes and nothing is permitted; with one, it must be live and bound to the
+                    // entity named, and a relink is not modelled.
                     match c {
-                        None => {
-                            self.vis.counts.rec.links += 1;
-                            let unit = v.as_ref().and_then(|v| w.by_id.get(v).copied());
-                            if let Some(unit) = unit.filter(|u| w.unit(*u).is_some()) {
-                                out.push(Event {
-                                    seq: q.seq,
-                                    write: Write::ViewLink { unit },
-                                    late,
-                                });
-                            }
-                        }
+                        None if e0.is_none() && e.is_none() => self.vis.counts.rec.links += 1,
+                        None => Self::vis_report(
+                            w,
+                            &format!(
+                                "bounds records: a link record with no collider from {e0:?} to {e:?}"
+                            ),
+                        ),
                         Some(c) if rec.other_ids.contains(c) && e0 != e => {
                             self.vis.counts.rec.other_writes += 1;
                         }
@@ -848,20 +932,22 @@ impl Driver<'_> {
                     continue;
                 }
                 Stream::Entity { c, e0, e } => {
-                    // The link of a collider the frame's tick made: the entity of its unit.
-                    let unit = made.iter().find(|(id, _)| id == c).map(|(_, u)| *u);
-                    if rec.other_ids.contains(c) {
-                        self.vis.counts.rec.other_writes += 1;
-                    } else if e0.is_none()
-                        && unit
-                            .is_some_and(|u| e.as_deref() == Some(w.entity(u).unique_id.as_str()))
-                    {
-                        self.vis.counts.rec.links += 1;
-                    } else {
-                        Self::vis_report(
+                    let unit = made.units.iter().find(|(id, _)| id == c).map(|(_, u)| *u);
+                    let name = unit.map(|u| w.entity(u).unique_id.as_str());
+                    match entity_link(
+                        *c,
+                        e0.as_deref(),
+                        e.as_deref(),
+                        name,
+                        made.others,
+                        &rec.other_ids,
+                    ) {
+                        EntityLink::Other => self.vis.counts.rec.other_writes += 1,
+                        EntityLink::Made => self.vis.counts.rec.links += 1,
+                        EntityLink::NotModelled => Self::vis_report(
                             w,
                             &format!("a collider {c} linked from {e0:?} to {e:?}: not modelled"),
-                        );
+                        ),
                     }
                     continue;
                 }
@@ -882,7 +968,7 @@ impl Driver<'_> {
         let Some(mut rec) = self.vis.range.rec.take() else { return };
         let mut queued = std::mem::take(&mut rec.queue);
         queued.sort_by_key(|q| q.seq);
-        let late = self.bounds_rec_writes(w, &mut rec, queued, &[], true);
+        let late = self.bounds_rec_writes(w, &mut rec, queued, Made::NONE, true);
         let out = w.combat.vision.bounds.finish_recorded(&late);
         self.bounds_rec_out(w, out);
         self.vis.range.rec = Some(rec);
@@ -1080,19 +1166,16 @@ impl Driver<'_> {
             );
             return;
         };
+        // A unit with several colliders at once has several places in the result order, which a
+        // unit-level record can't tell: its constraints are suspended (named, counted).
+        let several = w.combat.vision.bounds.units_with_several_colliders();
+        for x in self.vis.range.order_pairs.suspend(&several) {
+            self.vis.counts.rec.order_suspended.push(w.entity(x).unique_id.clone());
+        }
         // One static order of the colliders (PhysX's result order, which isn't the creation
         // order everywhere): a record that puts a pair the other way round from an earlier one
         // contradicts it.
-        let mut conflict = None;
-        for (i, a) in units.iter().enumerate() {
-            for b in &units[i + 1..] {
-                if self.vis.range.order_pairs.contains(&(*b, *a)) {
-                    conflict.get_or_insert((*a, *b));
-                }
-                self.vis.range.order_pairs.insert((*a, *b));
-            }
-        }
-        if let Some((a, b)) = conflict {
+        if let Some((a, b)) = self.vis.range.order_pairs.add(&units) {
             let (a, b) = (w.entity(a).unique_id.clone(), w.entity(b).unique_id.clone());
             Self::vis_report(
                 w,
@@ -1433,5 +1516,48 @@ mod tests {
             problems.iter().any(|x| x.contains("before the bounds_init block")),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn an_entity_record_is_classified_by_the_frames_makings_in_the_oracles_order() {
+        // The oracle writes `entity` inside the making, before the call's `bounds_tick`: a map
+        // object's collider made in the frame is another entity's, a unit's is the unit's link.
+        let none: HashSet<i32> = HashSet::new();
+        assert_eq!(entity_link(-50, None, Some("obj"), None, &[-50], &none), EntityLink::Other);
+        assert_eq!(
+            entity_link(-50, None, Some("obj"), None, &[], &HashSet::from([-50])),
+            EntityLink::Other
+        );
+        assert_eq!(entity_link(-8, None, Some("a"), Some("a"), &[], &none), EntityLink::Made);
+        // A unit's collider linked to another entity, or one the frame didn't make.
+        assert_eq!(
+            entity_link(-8, None, Some("b"), Some("a"), &[], &none),
+            EntityLink::NotModelled
+        );
+        assert_eq!(entity_link(-9, None, Some("a"), None, &[-50], &none), EntityLink::NotModelled);
+        assert_eq!(
+            entity_link(-8, Some("a"), None, Some("a"), &[], &none),
+            EntityLink::NotModelled
+        );
+    }
+
+    #[test]
+    fn order_constraints_are_suspended_for_units_with_several_colliders() {
+        let (a, b, c) = (EntityIdx(1), EntityIdx(2), EntityIdx(3));
+        let mut p = OrderPairs::default();
+        assert_eq!(p.add(&[a, b]), None);
+        // The same pair the other way is a conflict...
+        assert_eq!(p.add(&[b, a]), Some((b, a)));
+        // ...unless the unit has had several colliders (old-A, B, new-A gives [A, B] and [B, A]).
+        let mut p = OrderPairs::default();
+        assert_eq!(p.add(&[a, b]), None);
+        assert_eq!(p.suspend(&HashSet::from([a])), vec![a]);
+        assert_eq!(p.add(&[b, a]), None);
+        assert_eq!(p.add(&[a, c]), None);
+        assert_eq!(p.add(&[c, a]), None);
+        // The others keep theirs, and a unit is named once.
+        assert_eq!(p.add(&[b, c]), None);
+        assert_eq!(p.add(&[c, b]), Some((c, b)));
+        assert!(p.suspend(&HashSet::from([a])).is_empty());
     }
 }
