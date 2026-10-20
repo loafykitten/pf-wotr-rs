@@ -528,6 +528,7 @@ impl Driver<'_> {
                 (r["u"].as_str().and_then(|x| w.by_id.get(x).copied()), f(&r["desired"]))
             && let Some(unit) = w.unit_mut(u)
         {
+            self.timeline_taken(u);
             unit.combat.desired_orientation = d;
         }
         if r["k"] == "obs" && r["ev"] == "path_start" {
@@ -746,6 +747,7 @@ impl Driver<'_> {
                         if fields(r, &["u", "ctl", "pos", "after"]) =>
                     {
                         self.ag_input("ground (outside TickUnit)");
+                        self.timeline_taken(u);
                         let unit = w.unit_mut(u).expect("a unit");
                         if bits3(unit.position) != bits3(pos) {
                             Self::ag_unsupported(
@@ -940,6 +942,7 @@ impl Driver<'_> {
                 "a position written outside the agent: the position before differs from the sim's",
             );
         }
+        self.timeline_taken(u);
         let unit = w.unit_mut(u).expect("a unit");
         unit.position = orientation::set_position(unit.position, v);
     }
@@ -1045,6 +1048,7 @@ impl Driver<'_> {
             self.ag_input("initial state");
         }
         self.ag_carry(&agent);
+        self.timeline_taken(u);
         let unit = w.unit_mut(u).expect("a unit");
         unit.position = upos;
         unit.orientation = orient;
@@ -1510,7 +1514,7 @@ impl Driver<'_> {
     /// A span taken from the recording, up to the unit's end record `end_ev` (`f`: a call's): the
     /// unit's agent becomes the last state the span records, and a `TickUnit`'s end gives its
     /// position, view and orientation.
-    fn ag_take_span(
+    pub(super) fn ag_take_span(
         &mut self,
         w: &mut World,
         u: EntityIdx,
@@ -1536,6 +1540,7 @@ impl Driver<'_> {
                 if end_ev == "ag_ctl_end" {
                     let (pos, view, orient) =
                         (v3(&x["pos"]), v3(&x["vpos"]), self::f(&x["orient"]));
+                    self.timeline_taken(u);
                     let unit = w.unit_mut(u).ok_or_else(|| Desync("no unit".into()))?;
                     match (pos, orient) {
                         (Some(p), Some(o)) => {
@@ -2688,6 +2693,8 @@ impl MoveInputs for Driver<'_> {
         if v3(&r["pos"]).map(bits3) != Some(bits3(pos)) {
             return Err(Desync("the place-on-ground step starts from another position".into()));
         }
+        // The recorded position after becomes the unit's (and the view's).
+        self.timeline_taken(u);
         v3(&r["after"])
             .map(|a| Some((a, a)))
             .ok_or_else(|| Desync("ag_ground without its position after".into()))
@@ -2712,6 +2719,11 @@ impl MoveInputs for Driver<'_> {
         }
         let recorded = f(&r["desired"])
             .ok_or_else(|| Desync("ag_rot without its desired orientation".into()))?;
+        // Without `look` (or where it differs, reported) the recorded desired orientation is what
+        // the unit's orientation turns towards and what it keeps.
+        if !self.ags.look.on || desired.to_bits() != recorded.to_bits() {
+            self.timeline_taken(u);
+        }
         self.look_read(w, desired, recorded)
     }
     fn paused(&mut self, w: &mut World) -> R<bool> {

@@ -737,6 +737,21 @@ impl Renderer {
         }
     }
 
+    /// Hands the units' motion to a driver (see `Skinning::set_drive`); returns the ids of tracks
+    /// with no unit in the pack.
+    pub fn set_drive(&mut self, drive: skinning::Drive) -> Vec<String> {
+        match self.skinning.as_mut() {
+            Some(sk) => sk.set_drive(drive),
+            None => drive.tracks.into_iter().map(|t| t.unit).collect(),
+        }
+    }
+
+    /// The centre and radius of what a camera should frame at the animation clock's frame.
+    #[must_use]
+    pub fn focus(&self) -> Option<(Vec3, f32)> {
+        self.skinning.as_ref().and_then(skinning::Skinning::focus)
+    }
+
     /// `GetShadowCasterBounds(i)` (native in Unity), approximated: some shadow caster
     /// whose layer the light's culling mask includes lies within the light's range, and the
     /// light is within shadow distance of the camera [I].
