@@ -105,12 +105,17 @@ impl Timeline {
     }
 
     /// Writes the timeline as gzip-compressed JSON (a run's timeline exists only if the run is
-    /// valid, so a file holds a valid run's).
+    /// valid, so a file holds a valid run's). The serialized JSON is held to the budget
+    /// [`Self::read`] enforces, [`MAX_BYTES`]; a file over it is not left behind.
     ///
     /// # Errors
     ///
-    /// I/O, or a timeline that is not consistent ([`Self::check`]).
+    /// I/O, a timeline that is not consistent ([`Self::check`]) or too big for [`Self::read`].
     pub fn write(&self, path: &Path) -> Result<()> {
+        self.write_within(path, MAX_BYTES)
+    }
+
+    fn write_within(&self, path: &Path, budget: u64) -> Result<()> {
         use std::io::Write as _;
         self.check()?;
         if let Some(d) = path.parent() {
@@ -122,9 +127,16 @@ impl Timeline {
             std::io::BufWriter::new(file),
             flate2::Compression::fast(),
         );
-        serde_json::to_writer(&mut z, &File { schema: SCHEMA.to_owned(), timeline: self.clone() })?;
-        z.finish()?.flush()?;
-        Ok(())
+        let done = serde_json::to_writer(
+            &mut LimitedWrite { inner: &mut z, left: budget, budget },
+            &File { schema: SCHEMA.to_owned(), timeline: self.clone() },
+        )
+        .map_err(anyhow::Error::from)
+        .and_then(|()| Ok(z.finish()?.flush()?));
+        if done.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        done.with_context(|| format!("write {}", path.display()))
     }
 
     /// Reads a file [`Self::write`] made. The file is not trusted: the decompressed JSON is
@@ -134,11 +146,16 @@ impl Timeline {
     ///
     /// I/O, malformed JSON, more than the limits allow, another schema or an inconsistent timeline.
     pub fn read(path: &Path) -> Result<Self> {
+        Self::read_within(path, MAX_BYTES)
+    }
+
+    fn read_within(path: &Path, budget: u64) -> Result<Self> {
         let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
         let unzipped = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
         let f: File = serde_json::from_reader(std::io::BufReader::new(Limited {
             inner: unzipped,
-            left: MAX_BYTES,
+            left: budget,
+            budget,
         }))
         .with_context(|| format!("parse {}", path.display()))?;
         ensure!(f.schema == SCHEMA, "{}: schema {} (want {SCHEMA})", path.display(), f.schema);
@@ -174,8 +191,13 @@ impl Timeline {
             self.ticks.windows(2).all(|w| w[0].checked_add(1) == Some(w[1])),
             "the frames are not consecutive"
         );
+        ensure!(
+            self.commands.iter().all(|c| c.len() <= MAX_STRING),
+            "a command class name over {MAX_STRING} bytes"
+        );
         let mut samples = 0usize;
         for t in &self.tracks {
+            ensure!(t.id.len() <= MAX_STRING, "a unit id over {MAX_STRING} bytes");
             ensure!(!t.samples.is_empty(), "{}: a track without samples", t.id);
             let end = t.first.checked_add(t.samples.len());
             ensure!(
@@ -217,18 +239,55 @@ pub const MAX_BYTES: u64 = 1 << 30;
 pub const MAX_FRAMES: usize = 4_000_000;
 pub const MAX_TRACKS: usize = 65_536;
 pub const MAX_SAMPLES: usize = 8_000_000;
+/// The longest unit id or command class name, in bytes.
+pub const MAX_STRING: usize = 256;
 
-/// A reader that fails once `left` bytes have been read.
+/// The caps the collector stops at (the constants above; tests use small ones).
+#[derive(Debug, Clone, Copy)]
+struct Caps {
+    frames: usize,
+    tracks: usize,
+    samples: usize,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self { frames: MAX_FRAMES, tracks: MAX_TRACKS, samples: MAX_SAMPLES }
+    }
+}
+
+/// A writer that fails once `left` bytes have been written (`budget` in all).
+struct LimitedWrite<W> {
+    inner: W,
+    left: u64,
+    budget: u64,
+}
+
+impl<W: std::io::Write> std::io::Write for LimitedWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.left = self.left.checked_sub(buf.len() as u64).ok_or_else(|| {
+            std::io::Error::other(format!("more than {} bytes of JSON", self.budget))
+        })?;
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// A reader that fails once `left` bytes have been read (`budget` in all).
 struct Limited<R> {
     inner: R,
     left: u64,
+    budget: u64,
 }
 
 impl<R: std::io::Read> std::io::Read for Limited<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.left = self.left.checked_sub(n as u64).ok_or_else(|| {
-            std::io::Error::other(format!("more than {MAX_BYTES} bytes after decompression"))
+            std::io::Error::other(format!("more than {} bytes after decompression", self.budget))
         })?;
         Ok(n)
     }
@@ -275,9 +334,18 @@ pub(super) struct Collector {
     /// The units whose position or orientation the replay wrote from a recorded input in the
     /// frame so far (cleared at each sample).
     taken: HashSet<EntityIdx>,
+    caps: Caps,
+    /// Samples kept so far, and why collecting stopped (a cap was reached: nothing more is
+    /// kept, the replay goes on unchanged, and the run has no timeline).
+    samples: usize,
+    over: Option<String>,
 }
 
 impl Collector {
+    fn stop(&mut self, why: String) {
+        self.over.get_or_insert(why);
+    }
+
     fn refresh(&mut self, w: &World) {
         if self.scanned == w.entities.len() {
             return;
@@ -303,6 +371,13 @@ impl Collector {
 
     /// The end of frame `tick`: one sample per unit in the game.
     fn sample(&mut self, w: &World, tick: i64, source: Source) {
+        if self.over.is_some() {
+            return;
+        }
+        if self.out.ticks.len() >= self.caps.frames {
+            self.stop(format!("more than {} frames", self.caps.frames));
+            return;
+        }
         self.refresh(w);
         let frame = self.out.ticks.len();
         self.out.ticks.push(tick);
@@ -313,6 +388,10 @@ impl Collector {
             let ti = match self.track_of.get(&e) {
                 Some(&ti) => ti,
                 None if ent.is_in_game => {
+                    if self.out.tracks.len() >= self.caps.tracks {
+                        self.stop(format!("more than {} tracks", self.caps.tracks));
+                        return;
+                    }
                     self.out.tracks.push(Track {
                         id: ent.unique_id.clone(),
                         first: frame,
@@ -335,7 +414,19 @@ impl Collector {
             } else {
                 None
             };
+            if self.samples >= self.caps.samples {
+                self.stop(format!("more than {} samples", self.caps.samples));
+                return;
+            }
+            if command.as_ref().is_some_and(|c| {
+                !self.class_of.contains_key(c)
+                    && self.out.commands.len() + 1 >= usize::from(u16::MAX)
+            }) {
+                self.stop("too many command classes".to_owned());
+                return;
+            }
             let command = command.map_or(0, |c| self.class(&c));
+            self.samples += 1;
             let track = &mut self.out.tracks[ti];
             let speed = track.samples.last().map_or(0.0, |p| {
                 let (dx, dz) = (u.position[0] - p.position[0], u.position[2] - p.position[2]);
@@ -387,8 +478,16 @@ impl Driver<'_> {
 /// timeline is there only when the run is valid and the sim computes or takes the units' positions
 /// from the recording's agent records.
 pub fn run_timeline(w: &mut World, trace: &Trace) -> (Outcome, Result<Timeline, Invalid>) {
+    run_timeline_within(w, trace, Caps::default())
+}
+
+fn run_timeline_within(
+    w: &mut World,
+    trace: &Trace,
+    caps: Caps,
+) -> (Outcome, Result<Timeline, Invalid>) {
     let mut d = Driver::start(w, trace, trace);
-    d.timeline = Some(Collector::default());
+    d.timeline = Some(Collector { caps, ..Collector::default() });
     while d.i < trace.records.len() {
         let i = d.i;
         d.i = d.record(w, i);
@@ -398,8 +497,8 @@ pub fn run_timeline(w: &mut World, trace: &Trace) -> (Outcome, Result<Timeline, 
     (out, conclude(w, collected, agents))
 }
 
-/// The timeline of a finished run, or why there is none: the run is not valid, or the replay
-/// didn't drive the movement agents (a recording without the `agent` observer and its
+/// The timeline of a finished run, or why there is none: the run is not valid, a cap was reached
+/// while collecting or the result fails [`Timeline::check`], or the replay didn't drive the movement agents (a recording without the `agent` observer and its
 /// synchronization: its observation rows are kept apart from the units, so their positions are
 /// the save's and a timeline of them would be wrong).
 fn conclude(w: &World, collected: Option<Collector>, agents: bool) -> Result<Timeline, Invalid> {
@@ -411,11 +510,18 @@ fn conclude(w: &World, collected: Option<Collector>, agents: bool) -> Result<Tim
                 .to_owned(),
         );
     }
-    if w.valid() && agents {
-        Ok(collected.map(|c| c.out).unwrap_or_default())
-    } else {
-        Err(Invalid { unsupported, rng_failures: w.rng.failures().len() })
+    if let Some(c) = collected {
+        let refused = match c.over {
+            Some(why) => Some(format!("the timeline is too big: {why}")),
+            None if w.valid() && agents => match c.out.check() {
+                Ok(()) => return Ok(c.out),
+                Err(e) => Some(format!("the timeline is not consistent: {e}")),
+            },
+            None => None,
+        };
+        unsupported.extend(refused);
     }
+    Err(Invalid { unsupported, rng_failures: w.rng.failures().len() })
 }
 
 /// [`super::run_fixture`] collecting the units' timeline.
@@ -518,6 +624,192 @@ mod tests {
         let t = c.out.track(&id).expect("track");
         let src: Vec<Source> = t.samples.iter().map(|s| s.source).collect();
         assert_eq!(src, [Source::Sim, Source::Recording, Source::Sim, Source::Recording]);
+    }
+
+    // ---- Hooks: the replay's own paths mark the units they write from recorded inputs. ----
+
+    const FRAME: i64 = 5;
+
+    /// A trace of `records` (all of frame `FRAME`), numbered.
+    fn records(mut records: Vec<serde_json::Value>) -> Trace {
+        for (n, r) in records.iter_mut().enumerate() {
+            r["seq"] = json!(n);
+            r["k"] = json!("obs");
+            r["t"] = json!(FRAME);
+        }
+        Trace { records: records.iter().map(Rv::from_json).collect(), sites: Default::default() }
+    }
+
+    /// The driver on `trace`, at frame `FRAME`, collecting.
+    fn driver<'t>(w: &mut World, trace: &'t Trace) -> Driver<'t> {
+        let mut d = Driver::start(w, trace, trace);
+        d.timeline = Some(Collector::default());
+        d.tick = FRAME;
+        d
+    }
+
+    fn marked(d: &Driver<'_>, u: EntityIdx) -> bool {
+        d.timeline.as_ref().is_some_and(|c| c.taken.contains(&u))
+    }
+
+    /// `TickUnit`'s place-on-ground step on a capture without `ground_view` returns the recorded
+    /// position after: the unit is marked.
+    #[test]
+    fn a_recorded_place_on_ground_inside_tick_unit_marks_the_unit() {
+        use crate::combat::movement::MoveInputs as _;
+        let (mut w, u) = world();
+        let id = w.entity(u).unique_id.clone();
+        let t = records(vec![json!({"ev": "ag_ground", "u": id, "ctl": true,
+            "pos": [1.0, 2.0, 3.0], "after": [1.0, 2.5, 3.0]})]);
+        let mut d = driver(&mut w, &t);
+        let got = d.place_on_ground(&mut w, u, true).expect("the step").expect("a position");
+        assert_eq!(got, ([1.0, 2.5, 3.0], [1.0, 2.5, 3.0]));
+        assert!(marked(&d, u));
+        // Without the record the step isn't taken, and nothing is marked.
+        let t = records(vec![]);
+        let mut d = driver(&mut w, &t);
+        assert!(d.place_on_ground(&mut w, u, false).expect("none").is_none());
+        assert!(!marked(&d, u));
+    }
+
+    /// Without `look`, `UpdateSlowRotation`'s desired orientation is the recording's: marked. With
+    /// `look` and equal values it is the sim's (not marked); with `look` and different values the
+    /// recorded one is used (and reported): marked.
+    #[test]
+    fn a_recorded_desired_orientation_marks_the_unit() {
+        use crate::combat::movement::MoveInputs as _;
+        let (mut w, u) = world();
+        let id = w.entity(u).unique_id.clone();
+        let t = records(vec![json!({"ev": "ag_rot", "u": id, "o": 90.0, "max": 6.0,
+            "ctl": true, "desired": 45.0})]);
+        // The sim's desired orientation is 45 (the world's).
+        let mut d = driver(&mut w, &t);
+        assert_eq!(d.desired_orientation(&mut w, u, 90.0, 45.0, 6.0).expect("read"), 45.0);
+        assert!(marked(&d, u), "without look the value is the recording's");
+        let mut d = driver(&mut w, &t);
+        d.ags.look.on = true;
+        assert_eq!(d.desired_orientation(&mut w, u, 90.0, 45.0, 6.0).expect("read"), 45.0);
+        assert!(!marked(&d, u), "with look and equal values it is the sim's");
+        let mut d = driver(&mut w, &t);
+        d.ags.look.on = true;
+        assert_eq!(d.desired_orientation(&mut w, u, 90.0, 40.0, 6.0).expect("read"), 45.0);
+        assert!(marked(&d, u), "with look and different values the recording's is used");
+    }
+
+    /// The agent records the replay processes as they come: a place-on-ground step by its own
+    /// controller (`ag_ground`, not in `TickUnit`), a position written by other code (`ag_pos`)
+    /// and an orientation written by code the sim doesn't run (`ag_look`) mark their unit.
+    #[test]
+    fn outside_writes_in_the_records_mark_their_unit() {
+        let rec = |ev: &str, id: &str, extra: serde_json::Value| {
+            let mut r = json!({"ev": ev, "u": id});
+            r.as_object_mut().expect("object").extend(extra.as_object().expect("object").clone());
+            r
+        };
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            ("ag_ground", json!({"ctl": false, "pos": [1.0, 2.0, 3.0], "after": [1.0, 2.2, 3.0]})),
+            (
+                "ag_pos",
+                json!({"pos": [1.0, 2.0, 3.0], "v": [4.0, 2.0, 3.0],
+                    "origin": "Kingmaker.Cheats.Teleport"}),
+            ),
+            (
+                "ag_look",
+                json!({"fn": "DesiredOrientation", "p": null, "v": 10.0, "pos": [1.0, 2.0, 3.0],
+                    "rider": false, "o0": 90.0, "d0": 45.0, "o": 90.0, "d": 10.0,
+                    "origin": "Kingmaker.Something.Else"}),
+            ),
+        ];
+        for (ev, extra) in cases {
+            let (mut w, u) = world();
+            let id = w.entity(u).unique_id.clone();
+            let t = records(vec![rec(ev, &id, extra)]);
+            let mut d = driver(&mut w, &t);
+            d.ag = true;
+            let next = d.record(&mut w, 0);
+            assert_eq!(next, 1, "{ev}");
+            assert!(marked(&d, u), "{ev} marks the unit");
+        }
+    }
+
+    /// A span the replay takes from the recording (`ag_ctl_end`: position and orientation) marks
+    /// its unit.
+    #[test]
+    fn a_taken_tick_unit_span_marks_the_unit() {
+        let (mut w, u) = world();
+        let id = w.entity(u).unique_id.clone();
+        let t = records(vec![json!({"ev": "ag_ctl_end", "u": id, "pos": [2.0, 2.0, 2.0],
+            "vpos": [2.0, 2.0, 2.0], "orient": 10.0})]);
+        let mut d = driver(&mut w, &t);
+        d.ag_take_span(&mut w, u, "ag_ctl_end", None).expect("the span");
+        assert!(marked(&d, u));
+        assert_eq!(w.unit(u).expect("unit").position, [2.0, 2.0, 2.0]);
+    }
+
+    /// A cap stops the collector (the replay goes on unchanged) and the run has no timeline.
+    #[test]
+    fn a_cap_stops_collecting_and_gives_no_timeline() {
+        let (mut w, _) = world();
+        let (out, tl) =
+            run_timeline_within(&mut w, &trace(5), Caps { frames: 2, ..Caps::default() });
+        let (mut w2, _) = world();
+        let plain = super::super::run(&mut w2, &trace(5));
+        assert_eq!((plain.sim, plain.oracle), (out.sim, out.oracle), "the replay is unchanged");
+        let e = tl.expect_err("capped");
+        assert!(e.unsupported.iter().any(|k| k.contains("more than 2 frames")), "{e}");
+
+        // With the agents driven, the cap alone is the reason; nothing is kept past it.
+        let (w, _) = world();
+        for (caps, what) in [
+            (Caps { frames: 2, ..Caps::default() }, "more than 2 frames"),
+            (Caps { tracks: 0, ..Caps::default() }, "more than 0 tracks"),
+            (Caps { samples: 1, ..Caps::default() }, "more than 1 samples"),
+        ] {
+            let mut c = Collector { caps, ..Collector::default() };
+            for t in 0..5 {
+                c.sample(&w, t, Source::Sim);
+            }
+            assert!(c.out.ticks.len() <= 3 && c.out.tracks.iter().all(|t| t.samples.len() <= 2));
+            let e = conclude(&w, Some(c), true).expect_err("capped");
+            assert!(e.unsupported.iter().any(|k| k.contains(what)), "{what}: {e}");
+        }
+    }
+
+    /// `conclude` applies `check`: a timeline that doesn't fit together (here a unit id past
+    /// the string bound) isn't returned.
+    #[test]
+    fn a_collected_timeline_that_fails_the_check_is_not_returned() {
+        let (mut w, u) = world();
+        w.entity_mut(u).unique_id = "x".repeat(MAX_STRING + 1);
+        let mut c = Collector::default();
+        c.sample(&w, 0, Source::Sim);
+        let e = conclude(&w, Some(c), true).expect_err("refused");
+        assert!(e.unsupported.iter().any(|k| k.contains("not consistent")), "{e}");
+    }
+
+    /// A file is held to the budget `read` enforces when it is written: over it, the write fails
+    /// and leaves no file; at it, the file reads back. Strings are bounded by `check`.
+    #[test]
+    fn a_write_is_held_to_the_read_budget() {
+        let tl = timeline();
+        let dir = std::env::temp_dir().join(format!("wr-timeline-budget-{}", std::process::id()));
+        let path = dir.join("t.json.gz");
+        let json = serde_json::to_vec(&File { schema: SCHEMA.to_owned(), timeline: tl.clone() })
+            .expect("json")
+            .len() as u64;
+        let e = tl.write_within(&path, json - 1).expect_err("over the budget");
+        assert!(format!("{e:#}").contains("bytes of JSON"), "{e:#}");
+        assert!(!path.exists(), "no file is left behind");
+        tl.write_within(&path, json).expect("at the budget");
+        assert_eq!(Timeline::read_within(&path, json).expect("reads at the budget"), tl);
+        assert!(Timeline::read_within(&path, json - 1).is_err());
+        let mut long = tl.clone();
+        long.tracks[0].id = "x".repeat(MAX_STRING + 1);
+        assert!(long.check().is_err() && long.write(&path).is_err());
+        long.tracks[0].id = "x".repeat(MAX_STRING);
+        long.commands = vec!["c".repeat(MAX_STRING + 1)];
+        assert!(long.check().is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A unit's speed is its horizontal displacement between frames, 60 to the second.
@@ -634,12 +926,12 @@ mod tests {
     #[test]
     fn a_reader_stops_at_its_limit() {
         use std::io::Read as _;
-        let mut r = Limited { inner: std::io::repeat(b'x'), left: 100 };
+        let mut r = Limited { inner: std::io::repeat(b'x'), left: 100, budget: 100 };
         let mut buf = vec![0u8; 64];
         assert_eq!(r.read(&mut buf).expect("first"), 64);
         let e = r.read(&mut buf).expect_err("past the limit");
         assert!(e.to_string().contains("after decompression"), "{e}");
-        let mut exact = Limited { inner: &[1u8, 2, 3][..], left: 3 };
+        let mut exact = Limited { inner: &[1u8, 2, 3][..], left: 3, budget: 3 };
         let mut all = Vec::new();
         assert_eq!(exact.read_to_end(&mut all).expect("exactly the limit"), 3);
     }

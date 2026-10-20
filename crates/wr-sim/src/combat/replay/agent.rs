@@ -1514,7 +1514,7 @@ impl Driver<'_> {
     /// A span taken from the recording, up to the unit's end record `end_ev` (`f`: a call's): the
     /// unit's agent becomes the last state the span records, and a `TickUnit`'s end gives its
     /// position, view and orientation.
-    fn ag_take_span(
+    pub(super) fn ag_take_span(
         &mut self,
         w: &mut World,
         u: EntityIdx,
@@ -2693,6 +2693,8 @@ impl MoveInputs for Driver<'_> {
         if v3(&r["pos"]).map(bits3) != Some(bits3(pos)) {
             return Err(Desync("the place-on-ground step starts from another position".into()));
         }
+        // The recorded position after becomes the unit's (and the view's).
+        self.timeline_taken(u);
         v3(&r["after"])
             .map(|a| Some((a, a)))
             .ok_or_else(|| Desync("ag_ground without its position after".into()))
@@ -2717,6 +2719,11 @@ impl MoveInputs for Driver<'_> {
         }
         let recorded = f(&r["desired"])
             .ok_or_else(|| Desync("ag_rot without its desired orientation".into()))?;
+        // Without `look` (or where it differs, reported) the recorded desired orientation is what
+        // the unit's orientation turns towards and what it keeps.
+        if !self.ags.look.on || desired.to_bits() != recorded.to_bits() {
+            self.timeline_taken(u);
+        }
         self.look_read(w, desired, recorded)
     }
     fn paused(&mut self, w: &mut World) -> R<bool> {

@@ -48,13 +48,14 @@ real-time stretches (the player's walk-up before each fight, the pauses between 
 where the position is the recording's observation row and the orientation what the replay took from the recording's
 writes; and, inside a turn-based frame, the unit whose position or orientation the replay *took* from the recording
 this frame. The driver marks those (`Driver::timeline_taken`, a set the collector owns; no replay decision reads it):
-a place-on-ground step by the controller itself on a capture without `ground_view` (`ag_ground`, `ag_input("ground
-(outside TickUnit)")`), a position written by code the sim doesn't run (`ag_pos`), the agents' snapshots (`ag_init`,
+a place-on-ground step on a capture without `ground_view`, by the controller itself (`ag_ground` outside `TickUnit`) or
+inside `TickUnit` (`MoveInputs::place_on_ground` returns the recorded position after), a position written by code the sim doesn't run (`ag_pos`), the agents' snapshots (`ag_init`,
 `ag_sync`: every unit's position and orientation at the window's start and where real time ends), a span the replay
-takes from the recording (`ag_ctl_end`, its `ag_rot` desired orientation), a write of orientation by code the sim
+takes from the recording (`ag_ctl_end`, its `ag_rot` desired orientation), `UpdateSlowRotation`'s desired orientation
+where the recording's value is used (without the `look` observer, or where `look` differs and is reported), a write of orientation by code the sim
 doesn't run (`ag_look` taken: the angle is computed from a recorded point, or taken), and a roaming unit's step (its
 recorded vector). A frame can hold both kinds: on `poc5-tb-113` (agent_sync, no `ground_view`) a unit is the
-recording's among sim ones (`a_position_taken_from_the_recording_in_a_sim_frame_is_labelled_so`: 1 of its 1,873 frames). Physics results
+recording's among sim ones (`a_position_taken_from_the_recording_in_a_sim_frame_is_labelled_so`: 1,063 of its 1,873 frames since the place-on-ground step inside `TickUnit` is marked too (1 before)). Physics results
 the replay takes from the recording where it doesn't compute them (`phys_taken`, `phys_span` in the coverage line)
 set a unit's ground height; they are not marked per sample [I: the heights they give are the recording's, in frames
 labelled `Sim`; the counts are 0 to a few hundred per run].
@@ -101,7 +102,11 @@ samples are the world's and a recording without agent records has none; a unit w
 the recording's for that frame only; speed is the displacement per frame; an invalid world gives none; the file
 round-trips; `check` refuses a track outside the frames (a start of `usize::MAX` doesn't overflow), an empty
 track, frames [0, 60] or [0, 0, 1], a NaN and a command past the table, on write and on read; the decompressed size is
-limited. In `wr-game`: a track of no poses with any start has none (no clamp panic), and the framing radius is the
+limited and a write is held to the same budget (a file over it isn't left behind); unit ids and command names are bounded;
+the collector stops at the caps (frames, tracks, samples, command classes) while the replay finishes unchanged, and
+`conclude` returns no timeline, with the reason, for a capped or inconsistent one (`wr-combat --timeline` and
+`run_fixture_timeline` go through it); hook-level tests drive `place_on_ground`, `desired_orientation`, `ag_ground`,
+`ag_pos`, `ag_look` and `ag_ctl_end` through the driver and check the unit is marked. In `wr-game`: a track of no poses with any start has none (no clamp panic), and the framing radius is the
 extent in x and z.
 
 ## What was learned about the data [M]
