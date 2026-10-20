@@ -850,10 +850,22 @@ view state flipped, `view#K:flip` or `view#last:flip`, which swaps that recorded
   equal. [C] `UnitTicksController` adds `GameDeltaTime` only to a living unit (`BaseUnitController.ShouldTickOnUnit`
   skips the dead) while turn-based combat is off or the unit isn't in combat, so 523B, awake, ticked one more or one
   fewer real-time frame between the reload and the window's open, which isn't pinned. Inside the window the replay
-  is exact (T0-equal tick-exact, and the end state carries the same one-frame offset). Nothing compares a replay's
-  start state with its recording's; the sim replays each run from its own start state, so it is unaffected. Next:
-  have the replay's window open compare its start state with the recording's (at least the units' timers) and
-  invalidate on a difference, or pin the frames between the reload and the window.
+  is exact (T0-equal tick-exact, and the end state carries the same one-frame offset). The sim replays each run from
+  its own start state, so it is unaffected.
+  **Measured (2026-10-19, `oracle-state-diff` on every replay's start state against its recording's, the sweep's
+  captures and `-137`/`-138`):** 34 of 83 replays differ, always in exactly these two values of 523B and nothing else,
+  and always one 1/60 s frame apart (2.01666546 or 2.033332). In every fixture but one **the replays agree with each
+  other and only the record run differs** (ahead in some fixtures, behind in others; `-95`, `-111`, `-114`, `-116`,
+  `-122`, `-123`, `-127`, `-129`, `-131`, `-133`, `-136`, `-138` and `-140` equal throughout); the exception is
+  `-135/tb-nearest`, whose third (perturbed) replay equals the record and the other two don't. The game time at the window's open is
+  equal (`-132`/tb-focus: 434,800,690,000 ticks in both), so the window doesn't open a frame early or late: 523B is
+  ticked by `UnitTicksController` in one frame more or fewer between the reload and the window, i.e. it wakes (or
+  joins the game) a frame apart after the process's first load and after the later ones [I: which of
+  `SleepingUnitsController`'s inputs, the camera's frustum or the fog of war, isn't recorded]. `scripts/oracle-record.sh`
+  now writes each replay's start-state comparison after a recording (`<capture>/start-states.txt`, one line per
+  replay), so a difference is seen without asking. Next, to pin it: record the pre-window frames' sleeping
+  decisions for the window's units (a WrathOracle observation from the reload's end to the window), then reproduce
+  the recording's wake frame in the replay as `IdlePin`/`PhysicsPhase` do.
 
 ## Records inside root rule spans (2026-10-18, stream audit)
 

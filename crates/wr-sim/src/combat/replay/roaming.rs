@@ -13,10 +13,14 @@
 //!
 //! A roaming record the sim's controller didn't pull (or one reached after its phase) is
 //! reported, and taken as before. The states at the window's start are the save's (the spawner
-//! gives the settings and origin, as at the view's attach), established only where the recording
-//! shows the controller hasn't moved on since the load: the unit runs a roaming move to its saved
-//! next point. Otherwise (and after a report) a unit's state is unknown, and the controller
-//! reaching it is reported.
+//! gives the settings and origin, as at the view's attach). With observer `roam_init`, each is
+//! checked against the game's at the window's first tick: what only the scene and the actions
+//! set (the settings, the origin, `m_Disabled`, a follow part) must equal it, and what the
+//! controller advances between the load and the window (the next point, the direction, the idle
+//! end and cutscene) is taken from it. Without `roam_init`, a state is established only where the
+//! recording shows the controller hasn't moved on since the load: the unit runs a roaming move to
+//! its saved next point. Otherwise (and after a report) a unit's state is unknown, and the
+//! controller reaching it is reported.
 //!
 //! On when the agent is driven and the recording declares the roaming producers' observer
 //! (`cutscene_progress`: `roam_roll`).
@@ -32,6 +36,7 @@ use crate::combat::commands::{Desync, LookSite, R, Target, class, ty};
 use crate::combat::oracle::Rv;
 use crate::combat::orientation::{LookArg, LookFn, V3};
 use crate::combat::roaming::{self as roam, Point, RoamInputs, Settings};
+use crate::csharp::TimeSpan;
 use crate::world::{EntityIdx, World};
 
 const TICK_ON_UNIT: &str = "Kingmaker.Controllers.Units.UnitRoamingController.TickOnUnit";
@@ -48,6 +53,33 @@ pub(super) struct RoamDriver {
     nav: Option<Result<wr_nav::world::World, String>>,
     /// The roll's draws' numeric sites in the trace's table.
     sites: Vec<i64>,
+    /// Observer `roam_init`'s block.
+    init: Init,
+}
+
+/// Observer `roam_init`: declared; the states read so far by unit, in the block's order; the
+/// count `roam_init_end` gave; the first thing wrong with the block.
+#[derive(Debug, Default)]
+struct Init {
+    declared: bool,
+    states: Vec<(String, InitState)>,
+    end: Option<usize>,
+    bad: Option<String>,
+}
+
+/// A `roam_init`: the unit's `UnitPartRoaming` at the window's first tick.
+#[derive(Debug, Clone, PartialEq)]
+struct InitState {
+    disabled: bool,
+    /// A `UnitPartFollowUnit` (`Disabled`'s other operand).
+    follow: bool,
+    /// `m_NextPoint`, or another type's name.
+    next: Result<Option<Point>, String>,
+    original: V3,
+    reverse: bool,
+    idle_cutscene: bool,
+    idle_end: TimeSpan,
+    settings: Option<Settings>,
 }
 
 /// What the replay computed of the roaming controller (the coverage line).
@@ -65,6 +97,10 @@ pub struct RoamCounts {
     /// The states the window's start established, and units left unknown.
     pub established: usize,
     pub unknown: usize,
+    /// Of the established, with `roam_init`: equal to the save's, or advanced since the load
+    /// (the next point, direction, idle end or cutscene taken from it).
+    pub init_equal: usize,
+    pub init_taken: usize,
 }
 
 /// A record the roaming controller makes (`TickOnUnit` is its caller): its `roam_roll`, a step's
@@ -103,7 +139,16 @@ impl Driver<'_> {
     pub(super) fn roam_start(&mut self, w: &mut World, declared: &[&str]) {
         let trace = self.trace;
         self.ags.roam.on = self.ag && declared.contains(&"cutscene_progress");
+        self.ags.roam.init.declared = declared.contains(&"roam_init");
         if !self.ags.roam.on {
+            if self.ags.roam.init.declared {
+                // (Its states would go unused: a damaged begin record, or a capture whose agent
+                // isn't driven.)
+                Self::roam_unsupported(
+                    w,
+                    "roam_init without the roaming controller (the driven agent and cutscene_progress)",
+                );
+            }
             return;
         }
         self.ags.roam.sites = trace
@@ -145,6 +190,11 @@ impl Driver<'_> {
     /// hasn't reached the point since: arriving would have rolled another).
     fn roam_establish(&mut self, w: &mut World) {
         self.ags.roam.started = true;
+        if self.ags.roam.init.declared {
+            self.roam_establish_init(w);
+            self.out.roam.unknown = self.ags.roam.unknown.len();
+            return;
+        }
         for u in super::super::life::all_units(w) {
             let Some(p) = w.unit(u).and_then(|x| x.combat.roaming.as_deref()) else { continue };
             if self.ags.roam.unknown.contains(&u) {
@@ -171,6 +221,145 @@ impl Driver<'_> {
             }
         }
         self.out.roam.unknown = self.ags.roam.unknown.len();
+    }
+
+    /// A `roam_init` or `roam_init_end` (the window's first tick, before the first roaming phase):
+    /// read into the block, or the block marked bad and reported (every roaming unit then unknown).
+    fn roam_init_record(&mut self, w: &mut World, r: &Rv) {
+        let init = &mut self.ags.roam.init;
+        if init.bad.is_some() {
+            return;
+        }
+        let ev = r["ev"].as_str().unwrap_or("");
+        // The window's first frame: its `tick` record reached (the window's first `t`).
+        let first =
+            self.trace.records.iter().find(|x| x["k"] == "tick").and_then(|x| x["t"].as_i64());
+        let why = if !init.declared {
+            Some(format!("a {ev} without its observer's declaration"))
+        } else if !self.ags.roam.on {
+            Some(format!("a {ev} without the roaming controller"))
+        } else if self.frame.mode.is_none() || first != Some(self.tick) {
+            Some(format!("a {ev} outside the window's first frame"))
+        } else if self.ags.roam.started || r["t"].as_i64() != Some(self.tick) {
+            Some(format!("a {ev} after the window's first roaming phase"))
+        } else if init.end.is_some() {
+            Some(format!("a {ev} after roam_init_end"))
+        } else if ev == "roam_init_end" {
+            match r["n"].as_i64().and_then(|n| usize::try_from(n).ok()) {
+                Some(n) if fields(r, &["n"]) && n == init.states.len() => {
+                    init.end = Some(n);
+                    None
+                }
+                _ => Some(format!(
+                    "roam_init_end {} after {} states",
+                    describe(r),
+                    init.states.len()
+                )),
+            }
+        } else {
+            match (r["u"].as_str(), init_state(r)) {
+                (Some(u), Some(s)) if !init.states.iter().any(|(x, _)| x == u) => {
+                    init.states.push((u.to_owned(), s));
+                    None
+                }
+                _ => Some(format!("a roam_init it can't read: {}", describe(r))),
+            }
+        };
+        if let Some(why) = &why {
+            Self::roam_unsupported(w, format!("roam_init: {why}"));
+        }
+        init.bad = why;
+    }
+
+    /// The first roaming phase with `roam_init`: each roaming unit's state against the game's.
+    /// The settings, origin, `m_Disabled` and follow part must equal it (only the scene and the
+    /// actions set them); the next point, direction, idle end and idle cutscene, which the
+    /// controller advances between the load and the window, are taken from it.
+    fn roam_establish_init(&mut self, w: &mut World) {
+        let init = std::mem::take(&mut self.ags.roam.init);
+        let units: Vec<EntityIdx> = super::super::life::all_units(w)
+            .into_iter()
+            .filter(|&u| w.entity(u).parts.iter().any(|p| p.clr == "UnitPartRoaming"))
+            .collect();
+        if init.bad.is_some() || init.end.is_none() {
+            // (A bad block was reported where it went wrong.)
+            if init.bad.is_none() {
+                Self::roam_unsupported(w, "roam_init: no roam_init_end at the window's first tick");
+            }
+            self.ags.roam.unknown.extend(units);
+            self.ags.roam.init = init;
+            return;
+        }
+        let mut states: BTreeMap<&str, &InitState> = BTreeMap::new();
+        for (id, s) in &init.states {
+            states.insert(id.as_str(), s);
+        }
+        // `StateDump.AllUnits` orders by `UniqueId` (ordinal).
+        if !init.states.windows(2).all(|p| p[0].0.as_bytes() < p[1].0.as_bytes()) {
+            Self::roam_unsupported(w, "roam_init: the states aren't in UniqueId order");
+        }
+        for &u in &units {
+            let id = w.entity(u).unique_id.clone();
+            let Some(s) = states.remove(id.as_str()) else {
+                Self::roam_unsupported(w, format!("roam_init: no state of {id}, a roaming unit"));
+                self.ags.roam.unknown.insert(u);
+                continue;
+            };
+            if self.ags.roam.unknown.contains(&u) {
+                // (No saved state, or the spawner's settings unknown: the record can't be checked,
+                // whether or not the controller reaches the unit.)
+                Self::roam_unsupported(
+                    w,
+                    format!("roam_init: {id}'s state, which the sim can't establish to check it"),
+                );
+                continue;
+            }
+            let follow = w.entity(u).parts.iter().any(|p| p.clr == "UnitPartFollowUnit");
+            let p = w.unit_mut(u).and_then(|x| x.combat.roaming.as_deref_mut());
+            let p = p.expect("a roaming state");
+            let fixed = p.disabled == s.disabled
+                && follow == s.follow
+                && bits3(p.original) == bits3(s.original)
+                && settings_bits(p.settings) == settings_bits(s.settings);
+            if !fixed {
+                Self::roam_unsupported(
+                    w,
+                    format!(
+                        "roam_init: {id}'s settings, origin, m_Disabled or follow part differ from the sim's"
+                    ),
+                );
+                self.ags.roam.unknown.insert(u);
+                continue;
+            }
+            let saved = (p.next.clone(), p.unknown_next.clone());
+            let (next, unknown_next) = match &s.next {
+                Ok(n) => (n.clone(), None),
+                Err(t) => (None, Some(t.clone())),
+            };
+            let equal = point_bits(saved.0.as_ref()) == point_bits(next.as_ref())
+                && saved.1 == unknown_next
+                && p.reverse == s.reverse
+                && p.idle_cutscene == s.idle_cutscene
+                && p.idle_end == s.idle_end;
+            p.next = next;
+            p.unknown_next = unknown_next;
+            p.reverse = s.reverse;
+            p.idle_cutscene = s.idle_cutscene;
+            p.idle_end = s.idle_end;
+            self.out.roam.established += 1;
+            if equal {
+                self.out.roam.init_equal += 1;
+            } else {
+                self.out.roam.init_taken += 1;
+            }
+        }
+        for id in states.keys() {
+            Self::roam_unsupported(
+                w,
+                format!("roam_init: a state of {id}, not a roaming unit of the sim's"),
+            );
+        }
+        self.ags.roam.init = init;
     }
 
     /// `UnitRoamingController.Tick` (`TickSleeping`): `TickOnUnit` on every unit of the pool that
@@ -222,12 +411,17 @@ impl Driver<'_> {
     /// when the frame hasn't run it yet; otherwise the sim's controller didn't make it. `None`:
     /// not a roaming record (or roaming isn't on).
     pub(super) fn roam_record(&mut self, w: &mut World, i: usize) -> Option<usize> {
-        if !self.ags.roam.on {
-            return None;
-        }
         let trace = self.trace;
         let recs = &trace.records;
         let r = &recs[i];
+        // (Read whether the controller is on or not: without it, the block is reported.)
+        if r["k"] == "obs" && matches!(r["ev"].as_str(), Some("roam_init" | "roam_init_end")) {
+            self.roam_init_record(w, r);
+            return Some(i + 1);
+        }
+        if !self.ags.roam.on {
+            return None;
+        }
         let draw = r["k"] == "draw" && self.roam_draw(r);
         // A `Run`'s `uc_new` comes right before its `uc_run`.
         let new = r["k"] == "obs"
@@ -291,6 +485,125 @@ impl Driver<'_> {
     }
 }
 
+/// The object has exactly `keys`.
+fn keys_exactly(v: &Rv, keys: &[&str]) -> bool {
+    v.as_object().is_some_and(|o| o.len() == keys.len() && keys.iter().all(|k| o.contains_key(*k)))
+}
+
+fn finite(v: &Rv) -> Option<f32> {
+    f(v).filter(|x| x.is_finite())
+}
+
+fn finite3(v: &Rv) -> Option<V3> {
+    v3(v).filter(|x| x.iter().all(|c| c.is_finite()))
+}
+
+/// A `roam_init` record exactly as WrathOracle writes it (`CommandObsRoam.cs`), or `None`.
+/// `prev` (`PreviousPosition`: the waypoints' `Advance` reads it, not the modelled controller) and
+/// the cutscenes' guids are checked for their form only.
+fn init_state(r: &Rv) -> Option<InitState> {
+    let keys = [
+        "u", "disabled", "follow", "next", "next_id", "orig", "prev", "reverse", "idle_cs",
+        "idle_end", "settings",
+    ];
+    if !fields(r, &keys) {
+        return None;
+    }
+    let guid = |v: &Rv| v.is_null() || v.as_str().is_some();
+    let next_id = r["next_id"].as_str()?;
+    let n = &r["next"];
+    // The setter keeps `m_PersistentNextPointId` with the point: a waypoint's id, else empty (a
+    // saved waypoint `OnPostLoad` didn't find leaves the point null and the id set).
+    let next = if n.is_null() {
+        Ok(None)
+    } else {
+        match n["kind"].as_str()? {
+            "RoamingPoint" => {
+                if !keys_exactly(n, &["kind", "pos", "idle", "cs"])
+                    || !guid(&n["cs"])
+                    || !next_id.is_empty()
+                {
+                    return None;
+                }
+                Ok(Some(Point::Own {
+                    position: finite3(&n["pos"])?,
+                    idle_time: finite(&n["idle"])?,
+                    idle_cutscene: !n["cs"].is_null(),
+                }))
+            }
+            "RoamingWaypointData" => {
+                let id = n["id"].as_str()?;
+                if !keys_exactly(n, &["kind", "id"]) || next_id != id {
+                    return None;
+                }
+                Ok(Some(Point::Waypoint(id.to_owned())))
+            }
+            t => {
+                if !keys_exactly(n, &["kind"]) {
+                    return None;
+                }
+                Err(t.to_owned())
+            }
+        }
+    };
+    let cs = &r["idle_cs"];
+    if !(cs.is_null()
+        || keys_exactly(cs, &["id", "cs"]) && cs["id"].as_str().is_some() && guid(&cs["cs"]))
+    {
+        return None;
+    }
+    finite3(&r["prev"])?;
+    let s = &r["settings"];
+    let settings = if s.is_null() {
+        None
+    } else {
+        let keys = ["radius", "min_idle", "max_idle", "move", "sleepless", "idle"];
+        let idle = s["idle"].as_array()?;
+        if !keys_exactly(s, &keys) || !idle.iter().all(guid) {
+            return None;
+        }
+        Some(Settings {
+            radius: finite(&s["radius"])?,
+            min_idle: finite(&s["min_idle"])?,
+            max_idle: finite(&s["max_idle"])?,
+            idle_cutscenes: idle.len(),
+            movement_type: s["move"].as_i64()?,
+            sleepless: s["sleepless"].as_bool()?,
+        })
+    };
+    Some(InitState {
+        disabled: r["disabled"].as_bool()?,
+        follow: r["follow"].as_bool()?,
+        next,
+        original: finite3(&r["orig"])?,
+        reverse: r["reverse"].as_bool()?,
+        idle_cutscene: !cs.is_null(),
+        idle_end: TimeSpan(r["idle_end"].as_i64()?),
+        settings,
+    })
+}
+
+/// A point by its floats' bits: an own point's position, idle time and cutscene, or a
+/// waypoint's id.
+type PointBits<'a> = Result<([u32; 3], u32, bool), &'a str>;
+
+fn point_bits(p: Option<&Point>) -> Option<PointBits<'_>> {
+    p.map(|p| match p {
+        Point::Own { position, idle_time, idle_cutscene } => {
+            Ok((bits3(*position), idle_time.to_bits(), *idle_cutscene))
+        }
+        Point::Waypoint(id) => Err(id.as_str()),
+    })
+}
+
+/// Settings, their floats by their bits.
+fn settings_bits(s: Option<Settings>) -> Option<([u32; 3], usize, i64, bool)> {
+    s.map(|s| {
+        let f = [s.radius, s.min_idle, s.max_idle].map(f32::to_bits);
+        (f, s.idle_cutscenes, s.movement_type, s.sleepless)
+    })
+}
+
 /// A `Range_ff` draw's arguments.
 fn range(r: &Rv) -> (f32, f32) {
     let a = r["a"].as_array();
@@ -301,7 +614,8 @@ fn range(r: &Rv) -> (f32, f32) {
 /// The spawner's `SpawnerRoamingSettings.Part.OnInitialize` (when its view attaches, at the
 /// load): `Settings` (a new one: `Radius` 1, idle times 0, no idle cutscenes; the movement type;
 /// `Radius` mode's radius and idle times, `Cutscene` mode's cutscenes and idle times) and
-/// `OriginalPoint` (the spawner's position). `Ok((None, None))`: no spawner of the unit has
+/// `OriginalPoint` (the spawner's position); `Sleepless` too (`SleepingUnitsController` reads
+/// the unit's own retained flag, not this copy). `Ok((None, None))`: no spawner of the unit has
 /// roaming settings (the saved state stands). `Err`: the spawner's view isn't known.
 fn spawner_settings(w: &World, u: EntityIdx) -> Result<(Option<Settings>, Option<V3>), String> {
     let id = &w.entity(u).unique_id;
@@ -333,6 +647,7 @@ fn spawner_settings(w: &World, u: EntityIdx) -> Result<(Option<Settings>, Option
         max_idle: 0.0,
         idle_cutscenes: 0,
         movement_type: int("MovementType")?,
+        sleepless: int("Sleepless")? != 0,
     };
     // `ModeType`: Patrol, Radius, Cutscene.
     if mode == 1 {

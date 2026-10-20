@@ -61,12 +61,40 @@ attempt() { # label save plan extra...
   fi
   return 1
 }
+# Each replay's start state against its recording's (oracle-state-diff): a replay's window can open with a
+# unit ticked one real-time frame more or less before it (docs/poc5/tb-replay.md, "a replay's window can start
+# one frame apart"), which nothing else reports. One line per replay, also in the capture's start-states.txt.
+start_states() {
+  local out="$CAP/$1/start-states.txt" f t r s n d line
+  : >"$out"
+  for f in "$CAP/$1"/fixtures/*/; do
+    # (Every replay the fixture has a trace of; a missing dump is a failure.)
+    for t in "$f"replay-*.trace.jsonl.gz; do
+      [ -e "$t" ] || continue
+      r=$(basename "$t" .trace.jsonl.gz)
+      s="${f}state-start-$r.json"
+      n="$(basename "$f") $r"
+      if [ ! -e "$s" ] || [ ! -e "${f}state-start-record.json" ]; then
+        echo "$n: start-state comparison FAILED: a start-state dump is missing" | tee -a "$out"
+        continue
+      fi
+      # (Exit 1 is "not equal"; its JSON says why. No JSON, or an invalid comparison, is a failure.)
+      d=$("$REPO/oracle/tools/oracle-state-diff" "${f}state-start-record.json" "$s" --max 4 2>&1 || true)
+      line=$([ -n "$d" ] && jq -er --arg n "$n" '
+        if .valid != true then "\($n): start-state comparison FAILED: \(.problems | tostring)"
+        elif .equal then "\($n): start state equal"
+        else "\($n): start state differs (\(.differences)): \(.first | join("; "))" end' <<<"$d" 2>/dev/null) ||
+        line="$n: start-state comparison FAILED: $(head -c 300 <<<"$d" | tr '\n' ' ')"
+      echo "$line" | tee -a "$out"
+    done
+  done
+}
 label=$1
 for try in 1 2 3; do
   wait_free
   if locked; then echo "$label: screen locked, not starting"; exit 1; fi
   echo "$label: try $try start $(date +%T)"
-  attempt "$@" && exit 0
+  attempt "$@" && { start_states "$label"; exit 0; }
   sleep 20
 done
 echo "$label: gave up"; exit 1
