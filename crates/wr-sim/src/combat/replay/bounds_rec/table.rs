@@ -166,12 +166,12 @@ fn exempt(rec: &Value, field: &str) -> Option<&'static str> {
         ("bounds_tick", "kind") if rec["made"] == true => Some(
             "taken: the making call is the first record to name a new entity's type; later records are checked against it",
         ),
-        ("bounds_tick", "pos") if rec["made"] == true => Some(
-            "taken: the making call's transform (the view's, then set to the entity's position)",
+        ("bounds_tick", "pos") if rec["made"] == true && unit => Some(
+            "a unit's making: the entity's position unless `==` the link's transform, the sim's rule (Bounds, with the link's)",
         ),
-        ("bounds_set", "pos") if f == "entity" && rec["e0"].is_null() => {
-            Some("taken: the view's transform when the link is written, before the call sets it")
-        }
+        ("bounds_set", "pos") if f == "entity" && rec["e0"].is_null() && rec["e"] == "a" => Some(
+            "a unit's creation link: the view's transform, which the making call keeps or sets to the entity's position (Bounds)",
+        ),
         ("bounds_set", "v") if f == "link" && rec["c"].is_null() => {
             Some("any entity without a view collider (a view attached or detached)")
         }
@@ -201,11 +201,102 @@ fn other(v: &Value) -> Value {
     }
 }
 
+/// What the first report of a perturbed field must be about: a substring of the check that owns
+/// the field (or of the earliest downstream check, for a field only later records can contradict),
+/// so a perturbation caught by some other check fails the test. The type-breaking variants are the
+/// parse's ("can't read").
+fn reasons(rec: &Value, field: &str) -> Vec<String> {
+    let ev = rec["ev"].as_str().unwrap_or("");
+    let f = rec["fn"].as_str().unwrap_or("");
+    let unit = rec["kind"] == UNIT;
+    let made = rec["made"] == true;
+    let create = f == "entity" && rec["e0"].is_null();
+    let mut r: Vec<&str> = vec!["can't read"];
+    match (ev, field) {
+        (_, "t") => r.extend(["claims tick"]),
+        ("bounds_init", "i") => r.extend(["out of order"]),
+        ("bounds_init", "id") => r.extend(["no record made", "two bounds_init roots"]),
+        ("bounds_init", "layer") => r.extend(["isn't a collider the game makes"]),
+        ("bounds_init", "e") => r.extend(["isn't a collider the game makes", "bound to"]),
+        ("bounds_init", "kind") => r.extend(["isn't a collider the game makes", "is a "]),
+        ("bounds_init", "r") => r.extend(["isn't a collider the game makes", "radius before"]),
+        ("bounds_init", "on") => {
+            r.extend(["isn't a collider the game makes", "shows enabled", "`on0`"])
+        }
+        ("bounds_init", "pos") => r.extend(["not a unit's"]),
+        ("bounds_init_end", "n") => r.extend(["counts"]),
+        ("bounds_init_end", "valid") => r.extend(["not valid"]),
+        ("bounds_tick", "e") => r.extend(["bound to", "no entity record linked", "is a "]),
+        ("bounds_tick", "kind") => r.extend(["is a "]),
+        ("bounds_tick", "made") => r.extend([
+            "made collider",
+            "no record made",
+            "no entity record linked",
+            "inside the making",
+        ]),
+        ("bounds_tick", "c") => r.extend([
+            "no record made",
+            "no entity record linked",
+            "in part",
+            "inside the making",
+            "names collider",
+        ]),
+        ("bounds_tick", "r0") => r.extend(["radius before"]),
+        ("bounds_tick", "r") => {
+            r.extend(["changed its radius", "radius before", "under the 0.05", "in part"])
+        }
+        ("bounds_tick", "pos") if made && !unit => r.extend(["was linked at", "in part"]),
+        ("bounds_tick", "pos") => r.extend(["changed its radius", "in part"]),
+        ("bounds_tick", "on") => {
+            r.extend(["shows enabled", "disabled", "was linked enabled", "in part"])
+        }
+        ("bounds_set", "c") if create => r.extend([
+            "no entity record linked",
+            "no call made it",
+            "not modelled",
+            "names no collider",
+        ]),
+        ("bounds_set", "e" | "e0") if f == "entity" && !create => r.extend(["not modelled"]),
+        // A moved position is any other position: the next record's `pos0` is what shows it.
+        ("bounds_set", "pos") if f == "pos" => r.extend(["`pos0`", "`pos`"]),
+        ("bounds_set", "c") => r.extend([
+            "no record made",
+            "names no collider",
+            "view collider",
+            "made it",
+            "with no collider",
+            "no entity record linked",
+            "no call made it",
+        ]),
+        ("bounds_set", "e") if create => {
+            r.extend(["bound to", "no record made it", "no entity record linked"])
+        }
+        ("bounds_set", "e0") if create => r.extend(["no record made it"]),
+        ("bounds_set", "on") if create => {
+            r.extend(["linked disabled", "was linked enabled", "lacks"])
+        }
+        ("bounds_set", "pos") if create && !unit => r.extend(["was linked at", "lacks"]),
+        ("bounds_set", "pos") if create => r.extend(["lacks"]),
+        ("bounds_set", "v" | "e0" | "e" | "on0" | "on" | "pos0" | "pos") => {
+            return [
+                format!("`{field}`"),
+                "can't read".into(),
+                "lacks".into(),
+                "no record made it".into(),
+            ]
+            .into();
+        }
+        ("phys_sync", "src") => {}
+        _ => r.push("\u{0}unlisted"),
+    }
+    r.into_iter().map(str::to_owned).collect()
+}
+
 #[test]
-fn every_field_of_every_family_is_constrained_or_named_as_taken() {
+fn every_field_of_every_family_is_constrained_for_its_reason_or_named_as_taken() {
     let base = numbered(valid());
     let mut perturbed = 0;
-    let mut silent: Vec<String> = Vec::new();
+    let mut wrong: Vec<String> = Vec::new();
     for (i, rec) in base.iter().enumerate() {
         if rec["k"] != "obs" {
             continue;
@@ -226,8 +317,22 @@ fn every_field_of_every_family_is_constrained_or_named_as_taken() {
                     }
                 }
                 perturbed += 1;
-                if reports(&recs, &DECLARED).is_empty() && exempt(rec, field).is_none() {
-                    silent.push(format!("#{i} {} {:?} {field}: {how}", rec["ev"], rec["fn"]));
+                if exempt(rec, field).is_some() {
+                    continue;
+                }
+                let out = reports(&recs, &DECLARED);
+                let ok = out.first().is_some_and(|m| {
+                    // (A removed field is the parse's.)
+                    how == "removed" && m.contains("can't read")
+                        || reasons(rec, field).iter().any(|r| m.contains(r.as_str()))
+                });
+                if !ok {
+                    wrong.push(format!(
+                        "#{i} {} {} {field} [{how}]: first report {:?}",
+                        rec["ev"],
+                        rec["fn"],
+                        out.first().map(|m| m.chars().take(140).collect::<String>())
+                    ));
                 }
             }
         }
@@ -236,13 +341,24 @@ fn every_field_of_every_family_is_constrained_or_named_as_taken() {
             let mut recs = base.clone();
             recs[i]["x"] = json!("NullReferenceException");
             perturbed += 1;
-            if reports(&recs, &DECLARED).is_empty() {
-                silent.push(format!("{} {:?} x", rec["ev"], rec["fn"]));
+            let out = reports(&recs, &DECLARED);
+            if !out.first().is_some_and(|m| m.contains("threw")) {
+                wrong.push(format!(
+                    "#{i} {} {} x: first report {:?}",
+                    rec["ev"],
+                    rec["fn"],
+                    out.first()
+                ));
             }
         }
     }
     assert!(perturbed > 400, "{perturbed}");
-    assert!(silent.is_empty(), "{} fields no check reports:\n{}", silent.len(), silent.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "{} perturbations caught by another check or by none:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
 }
 
 #[test]
@@ -287,6 +403,37 @@ fn the_phase_order_of_a_frame_is_checked_whichever_observers_are_declared() {
                 let call = recs.remove(at(recs, &|r| r["ev"] == "bounds_tick" && r["t"] == 0));
                 let end = at(recs, &|r| r["ev"] == "bounds_init_end");
                 recs.insert(end, call);
+            }),
+        ),
+        (
+            "a setter inside the init block (otherwise valid)",
+            Box::new(|recs| {
+                let end = at(recs, &|r| r["ev"] == "bounds_init_end");
+                recs.insert(
+                    end,
+                    set(
+                        0,
+                        "link",
+                        Some("a"),
+                        Some(-1),
+                        Some(true),
+                        Some(true),
+                        Some(P),
+                        Some(P),
+                        Some("a"),
+                        Some("a"),
+                    ),
+                );
+            }),
+        ),
+        (
+            "a sync inside the init block",
+            Box::new(|recs| {
+                let end = at(recs, &|r| r["ev"] == "bounds_init_end");
+                recs.insert(
+                    end,
+                    json!({"k": "obs", "t": 0, "ev": "phys_sync", "src": "DollRoom.Update"}),
+                );
             }),
         ),
         (
@@ -351,6 +498,20 @@ fn the_phase_order_of_a_frame_is_checked_whichever_observers_are_declared() {
             let recs = numbered(recs);
             let out = reports(&recs, declared);
             assert!(!out.is_empty(), "{name} (declared {}): not reported", declared.len());
+            // (Each case is otherwise valid: what is reported is its place.)
+            let placed = [
+                "claims tick",
+                "before bounds_init_end",
+                "bounds_init block",
+                "after the frame's vis",
+                "inside the making",
+                "before the end of",
+            ];
+            assert!(
+                out.iter().any(|m| placed.iter().any(|p| m.contains(p))),
+                "{name} (declared {}): reported for another reason: {out:?}",
+                declared.len()
+            );
         }
     }
 }

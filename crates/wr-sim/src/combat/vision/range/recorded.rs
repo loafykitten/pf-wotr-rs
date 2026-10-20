@@ -50,6 +50,9 @@ pub struct RecTick {
     pub pos: Option<V3>,
     pub on: Option<bool>,
     pub id: Option<i32>,
+    /// The transform the creation's link showed (for a making call): the unit's tolerant setter
+    /// rule starts from it.
+    pub link_pos: Option<V3>,
 }
 
 /// A write outside `TickEntity` (`bounds_set`, `phys_sync`).
@@ -237,6 +240,13 @@ impl Bounds {
     ) -> RecOut {
         assert!(self.recorded, "tick_recorded needs start_recorded");
         let mut out = RecOut::default();
+        if units.is_empty() {
+            // A frame the sim didn't follow: it didn't see the units move, so the update-list
+            // history is gone (the next followed frame's listing is not checked against it).
+            for c in &mut self.colliders {
+                c.seen = None;
+            }
+        }
         for id in std::mem::take(&mut self.dying) {
             self.colliders.retain(|c| c.rec_id != Some(id));
         }
@@ -463,11 +473,14 @@ impl Bounds {
                 out.counts.radius_band += 1;
             }
             if u.pos_known {
-                let expected = match existing {
-                    Some(i) => {
+                // The setter rule from the transform the call found: the collider's, or the one
+                // the creation set (the view's).
+                let expected = match (existing, t.link_pos) {
+                    (Some(i), _) => {
                         self.colliders[i].transform.map(|tr| orientation::set_position(tr, u.pos))
                     }
-                    None => None,
+                    (None, Some(lp)) => Some(orientation::set_position(lp, u.pos)),
+                    (None, None) => None,
                 };
                 let ok = expected
                     .map_or_else(|| orientation::vec3_eq(pos, u.pos), |e| bits(e) == bits(pos));
@@ -588,6 +601,7 @@ mod tests {
             pos: Some(pos),
             on: Some(true),
             id: Some(id),
+            link_pos: None,
         }
     }
 
@@ -654,6 +668,7 @@ mod tests {
             pos: Some([30.0, 0.0, 0.0]),
             on: Some(true),
             id: Some(8),
+            link_pos: None,
         };
         let out = b.tick_recorded(RAN, &[], &[made], &[]);
         assert!(out.problems.is_empty(), "{:?}", out.problems);
@@ -890,6 +905,7 @@ mod tests {
             pos: Some([0.0; 3]),
             on: Some(true),
             id: Some(id),
+            link_pos: None,
         };
         // A call that makes a second collider while the first is live: reported (a view
         // replaced is ambiguous in the records, and no permission is taken from it).
@@ -965,6 +981,7 @@ mod tests {
             pos: Some([0.0; 3]),
             on: Some(true),
             id: Some(8),
+            link_pos: None,
         };
         b.tick_recorded(RAN, &[gone(1, 7, false)], &[made], &[]);
         // (Both are in this frame's query; the new one is made at the origin.)
@@ -980,6 +997,64 @@ mod tests {
         assert_eq!(d.diffs, vec![Difference::Extra(A)]);
         // The enumeration holds the unit once, at its first hit.
         assert_eq!(by_unit(&hits).len(), 1);
+    }
+
+    #[test]
+    fn a_unit_that_moved_in_a_skipped_frame_is_not_missed_in_the_next() {
+        // Sol's round 7: the skipped frame has no units to check; the next followed one, with
+        // the unit standing, must not find the skipped frame's move a missing call.
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        let still = su(A, [0.0; 3], Some(0.5));
+        b.start_check(&[still]);
+        let call = RecTick { seq: 1, ..tick(A, 7, 0.5, 0.5, [3.0, 0.0, 0.0]) };
+        let out = b.tick_recorded(Step::Unknown, &[], &[call], &[]);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        let at3 = su(A, [3.0, 0.0, 0.0], Some(0.5));
+        let out = b.tick_recorded(RAN, &[], &[], &[at3]);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        assert_eq!(out.counts.listed_unchecked, 1);
+        // The frame after it is checked again.
+        let out = b.tick_recorded(RAN, &[], &[], &[at3]);
+        assert_eq!((out.counts.listed_agree, out.problems.len()), (1, 0));
+        // `lose_track` (the driver's gap) forgets it as well.
+        b.lose_track();
+        assert!(
+            b.tick_recorded(RAN, &[], &[], &[su(A, [9.0, 0.0, 0.0], Some(0.5))])
+                .problems
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_unit_making_follows_the_setter_rule_from_the_links_transform() {
+        // The creation sets the collider at the view's transform; the call moves it to the unit's
+        // position unless that is `==` it.
+        let make = |pos: [f32; 3], link: [f32; 3]| RecTick {
+            seq: 2,
+            unit: A,
+            made: true,
+            r0: None,
+            r: Some(0.5),
+            pos: Some(pos),
+            on: Some(true),
+            id: Some(8),
+            link_pos: Some(link),
+        };
+        let run = |pos, link| {
+            let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+            b.tick_recorded(RAN, &[], &[], &[]);
+            b.tick_recorded(
+                RAN,
+                &[gone(1, 7, false)],
+                &[make(pos, link)],
+                &[su(A, [5.0, 0.0, 0.0], Some(0.5))],
+            )
+        };
+        // The unit stands at 5: the view was elsewhere, so the call moved the collider to 5.
+        assert!(run([5.0, 0.0, 0.0], [4.0, 0.0, 0.0]).problems.is_empty());
+        assert!(!run([4.0, 0.0, 0.0], [4.0, 0.0, 0.0]).problems.is_empty());
+        // The view was at the unit's position within the tolerance: the transform stays.
+        assert!(run([5.000_004, 0.0, 0.0], [5.000_004, 0.0, 0.0]).problems.is_empty());
     }
 
     impl Bounds {

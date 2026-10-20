@@ -460,7 +460,7 @@ all of them without one). "State" is the collider's state in the machine (`enabl
 | `bounds_init` | `i` | the root's index | contiguous from 0 |
 | | `id` | the GameObject's instance id | one owner for good, across kinds |
 | | `layer` | 23 for a unit's collider, 24 for any other's | required |
-| | `e`, `kind` | the linked entity's id and type name | a unit's has `e`; an entity keeps one type; later records agree |
+| | `e`, `kind` | the linked entity's id and type name (the type comes from the entity: both set) | both required; an entity keeps one type name across roots, calls (collider or not) and makings |
 | | `r` | the collider's radius (at least 0.05) | required, finite, at least 0.05; becomes the state: the next call's `r0` must equal it |
 | | `on` | `enabled` | required; becomes the state |
 | | `pos` | the transform | a unit's: equal to the unit's position at the previous frame's end (the driver); another's: becomes the state, a later call must keep it |
@@ -469,14 +469,14 @@ all of them without one). "State" is the collider's state in the machine (`enabl
 | `bounds_tick` | `e`, `kind`, `c` | the entity, its type, the collider after the call | the entity's view collider, live, of that type |
 | | `made` | the call created the collider | needs the creation's link before it, after the previous collider's `gone` |
 | | `r0` | the radius before | null when made, else equal to the state |
-| | `r` | the radius after | making: at least 0.05 (a unit's also the sim's rule in `Bounds`); a unit's later call: the sim's rule; **another kind's: taken when made** (its bounds' extent), equal to the state after |
-| | `pos` | the transform after | a unit's: the sim's `Vector3 ==` rule (`Bounds`); another's: equal to the state; **taken when made** (the call sets the view's transform) |
+| | `r` | the radius after | at least 0.05 in every call, followed frame or not (`ScaleRadius`); a unit's: the sim's rule (`Bounds`, followed frames); another kind's: equal to the state, **taken when made** (its bounds' extent) |
+| | `pos` | the transform after | a unit's: the sim's `Vector3 ==` rule (`Bounds`, followed frames; a making's from the link's transform); another's: equal to the state, and when made to the creation link's (`TickEntity` moves a unit's collider only) |
 | | `on` | `enabled` after | making: true (`SetupSphereBoundsCollider` adds an enabled collider, a hidden entity's too) and equal to the link's; else equal to the state |
 | | `x` | an exception | absent |
 | `bounds_set` `active` | `v`, `e0`, `e` | the view's data and the link before and after | all the collider's entity |
 | | `c`, `on0`, `on` | the collider; `enabled` before and after | the view's collider, live; `on0` the state, `on` the other value (written only when changed) |
 | | `pos0`, `pos` | the transform before and after | both the state |
-| `bounds_set` `pos` | `v`, `e0`, `e`; `c`; `pos0`, `pos`; `on0`, `on` | likewise | entity as above; `pos0` the state and `pos` a changed position; `on0` and `on` the state |
+| `bounds_set` `pos` | `v`, `e0`, `e`; `c`; `pos0`, `pos`; `on0`, `on` | likewise | entity as above; `pos0` the state and `pos` a position that differs by more than Unity's `Vector3 ==` tolerance; `on0` and `on` the state |
 | `bounds_set` `gone` | `v`, `e0`; `c`; `on0`, `pos0` | the view, the link before; the collider; its state before | the entity; the view's live collider; the state |
 | | `e`, `on`, `pos` | null: the view's collider is cleared when `ColliderOf` reads it again | required null |
 | `bounds_set` `link` (a collider) | `v`, `e0`, `e` | the view's data, the link before and after | all the collider's entity (an unlink or relink is not modelled: reported) |
@@ -485,7 +485,7 @@ all of them without one). "State" is the collider's state in the machine (`enabl
 | | `c`, `on0`, `on`, `pos0`, `pos`, `e0`, `e` | null | required null |
 | `bounds_set` `entity`, creation | `c`, `e0`, `e` | the new collider, null, the entity | a new id; null; the entity, which has no view collider; inside the making interval |
 | | `on` | `enabled` | true |
-| | `pos` | the view's transform | **taken** (the call sets the transform right after) |
+| | `pos` | the view's transform | kept: a non-unit's making call must show it; a unit's making call is the entity's position unless `==` it (`Bounds`) |
 | | `v`, `on0`, `pos0` | null | required null |
 | `bounds_set` `entity`, no change | `e0`, `e`; `on`, `pos` | the entity twice; the collider's state | equal to the collider's entity; both required, equal to the state |
 | `phys_sync` | `src` | the tapped caller | one of the five |
@@ -496,8 +496,22 @@ names; the init block comes first in its frame (a `vis` or `vis_order` before it
 before its first `vis` or `vis_order` (the bounds controller precedes the vision controller); a making's `entity` record is
 inside the call, so nothing else (another creation, a call, a write, a sync) stands between it and the call's own record; making
 intervals therefore don't interleave; a unit's `vis_order` stands before its `vis`. Taken or checked outside the machine, as
-the table says: a root's `fade`, a unit's transform and radius after a call (the sim's rule), the making call's transform, a
-map object's radius at its making, the creation link's position.
+the table says: a root's `fade`, a unit's transform and radius after a call (the sim's rule, with the link's transform for a
+making), a map object's radius at its making.
+
+**Checks that depend on the simulated state, and what runs without it (frames the sim did not follow replay the records with no
+units).** Each has an intrinsic part (true whatever the sim holds: the machine, every frame) and a stateful part (needs the sim's
+units: `Bounds`, followed frames only), and what is reset across a gap:
+- radius: intrinsic, at least 0.05, a non-unit's equal to its state, a unit's radius before equal to the state (machine); stateful,
+  the rule from the sim's corpulence (`Bounds`); the recorded radius is the state, so nothing stale survives a gap;
+- transform: intrinsic, a non-unit's equal to the state and, when made, to the link's (machine); stateful, the unit's `Vector3 ==` rule
+  against the sim's position (`Bounds`), a making's from the link's transform; nothing stale (the recorded transform is the state);
+- the update list (`seen`): stateful only (the sim's units' positions); **reset to unknown across a gap** (a skipped frame's move
+  isn't a missing call in the next frame) and unchecked in the first frame after it;
+- `enabled` against `IsInGame`: stateful only; no history kept (`made_hidden` clears when the unit is next seen in the game);
+- start transform against the previous frame's end, and the creation order against the pool: the first frame only;
+- the sets against the overlap, and the orders: followed frames; a cached order carries over a gap and is keyed by the colliders
+  of the next followed frame's query.
 
 What building the table turned up (each now closed): a root's `kind` string was reduced to unit or not, so a map object's type could
 change unreported (an entity now keeps its type name across roots, calls and makings); a root with no radius or `enabled`, or a
@@ -505,7 +519,7 @@ non-unit on the units' layer or a unit off it, was not refused for every kind; `
 five callers the oracle taps); a non-unit collider's call could change its radius and transform (the game leaves them); a
 making could be disabled or under the 0.05 minimum; `active`, `pos`, `gone` and `link` records had fields discarded at parse
 (`v`, `e0`, `e`, `on0`, `pos0` and the changed value) and an `entity` record's `enabled` and position could be null; `vis`
-records weren't a phase boundary unless `vis_order` was declared; making intervals could interleave.
+records weren't a phase boundary unless `vis_order` was declared; making intervals could interleave. Round 7 added: a unit moved in a frame the sim didn't follow left a stale update-list history (now reset), the intrinsic radius floor and a non-unit's making transform were skipped or exempt, a root could have a type and no entity, a call with no collider skipped the type check, a `pos` move under Unity's tolerance passed, and setters or syncs could stand inside the init block.
 
 **How the records are used [C]/[M].**
 - `bounds_init` (one root per `GameObject` of the scene at the first tick of the window, before any controller of the tick, then

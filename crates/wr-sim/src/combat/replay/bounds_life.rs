@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 
+use crate::combat::orientation;
 use crate::combat::vision::V3;
 
 /// A collider's owner: an entity of a kind the bounds model uses (a unit) or not.
@@ -50,6 +51,9 @@ struct Life {
     radius: f32,
     /// The `enabled` the creation's `entity` record showed: the making call's must equal it.
     link_on: Option<bool>,
+    /// The transform the creation's `entity` record showed: the view's, which the making call
+    /// leaves for any entity but a unit (a unit's is set to its position unless `==` this).
+    link_pos: Option<V3>,
 }
 
 /// Which `bounds_set` record.
@@ -152,6 +156,11 @@ impl Lifecycle {
         }
     }
 
+    /// The transform a collider's creation link showed (until its call is applied).
+    pub(super) fn link_pos(&self, c: i32) -> Option<V3> {
+        self.cols.get(&c).and_then(|l| l.link_pos)
+    }
+
     /// How many colliders were ever seen.
     pub(super) fn seen(&self) -> usize {
         self.cols.len()
@@ -235,6 +244,7 @@ impl Lifecycle {
                         pos,
                         radius,
                         link_on: None,
+                        link_pos: None,
                     },
                 );
             }
@@ -259,6 +269,8 @@ impl Lifecycle {
         on: Option<bool>,
         out: &mut Vec<String>,
     ) {
+        // (The oracle writes the entity's type whether or not its view has a collider.)
+        self.type_of(entity, kind_name, out);
         let (Some(c), Some(r), Some(pos), Some(on)) = (c, r, pos, on) else {
             // No collider after the call (the entity has no view, or the view has none).
             if made || c.is_some() || r0.is_some() || r.is_some() || pos.is_some() || on.is_some() {
@@ -272,7 +284,6 @@ impl Lifecycle {
         };
         if made {
             self.making = None;
-            self.type_of(entity, kind_name, out);
             let Some(l) = self.cols.get_mut(&c) else {
                 out.push(format!(
                     "a bounds_tick of {entity} made collider {c}, which no entity record linked before the call"
@@ -303,6 +314,14 @@ impl Lifecycle {
                 out.push(format!(
                     "collider {c} was linked enabled {:?} and its making call shows {on}",
                     l.link_on
+                ));
+            }
+            // `TickEntity` moves a unit's collider only: any other kind's keeps the transform
+            // the creation set (the link showed it).
+            if kind == Kind::Other && l.link_pos.map(bits) != Some(bits(pos)) {
+                out.push(format!(
+                    "collider {c} (not a unit's) was made at {pos:?}, it was linked at {:?}",
+                    l.link_pos
                 ));
             }
             (l.state, l.kind, l.on, l.pos, l.radius) = (State::Live, Some(kind), on, pos, r);
@@ -337,6 +356,12 @@ impl Lifecycle {
             out.push(format!(
                 "a bounds_tick of collider {c} shows enabled {on}, the collider is {}",
                 l.on
+            ));
+        }
+        // `ScaleRadius` never gives less than 0.05, a unit's included.
+        if r < 0.05 {
+            out.push(format!(
+                "a bounds_tick of collider {c} left radius {r}, under the 0.05 minimum"
             ));
         }
         // `TickEntity` moves and resizes a unit's collider only: any other kind's is left as it
@@ -417,7 +442,8 @@ impl Lifecycle {
                     }
                     SetFn::Pos => {
                         want(out, what, "on", on, Some(l.on));
-                        if pos.is_none_or(|p| bits(p) == bits(l.pos)) {
+                        // (Unity's `Vector3 !=`: a smaller move isn't one, and isn't written.)
+                        if pos.is_none_or(|p| orientation::vec3_eq(p, l.pos)) {
                             out.push(format!("{what}: `pos` must be a position that changed"));
                         }
                     }
@@ -491,6 +517,7 @@ impl Lifecycle {
                         pos: [0.0; 3],
                         radius: 0.0,
                         link_on: Some(on),
+                        link_pos: Some(pos),
                     },
                 );
             }
@@ -570,7 +597,7 @@ mod tests {
             on0: None,
             on: Some(true),
             pos0: None,
-            pos: Some([0.0; 3]),
+            pos: Some(P),
             e0: None,
             e: Some(e),
         })
@@ -954,5 +981,58 @@ mod tests {
         }
         let bad = run(&mut m, &[gone(7, "a"), entity(8, "a"), call]);
         assert!(bad.iter().any(|x| x.contains("is a UnitEntityData and a")), "{bad:?}");
+    }
+
+    #[test]
+    fn the_intrinsic_constraints_hold_whatever_the_sim_knows() {
+        // Sol's round 7: a unit's collider can't shrink under 0.05 (ScaleRadius), a map object's
+        // making keeps the transform its link showed, a pos write moves by more than Unity's
+        // `Vector3 ==` tolerance, and a call with no collider still names the entity's type.
+        let mut m = started();
+        let mut small = tick(7, "a");
+        if let Ev::Tick { r, .. } = &mut small {
+            *r = Some(0.01);
+        }
+        let out = run(&mut m, &[small]);
+        assert!(out.iter().any(|x| x.contains("under the 0.05 minimum")), "{out:?}");
+        let mut m = started();
+        let mut moved = making(60, "obj2", Kind::Other);
+        if let Ev::Tick { pos, .. } = &mut moved {
+            *pos = Some(Q);
+        }
+        let out = run(&mut m, &[entity(60, "obj2"), moved]);
+        assert!(out.iter().any(|x| x.contains("was linked at")), "{out:?}");
+        // (A unit's making may move it: the sim's rule, in `Bounds`.)
+        let mut m = started();
+        let mut moved = making(8, "a", Kind::Unit);
+        if let Ev::Tick { pos, .. } = &mut moved {
+            *pos = Some(Q);
+        }
+        let out = run(&mut m, &[gone(7, "a"), entity(8, "a"), moved]);
+        assert!(out.is_empty(), "{out:?}");
+        // A move under the tolerance isn't a move.
+        let mut m = started();
+        let mut r = set(SetFn::Pos, 7, "a");
+        r.pos = Some([P[0] + 1e-7, P[1], P[2]]);
+        let out = run(&mut m, &[Ev::Set(r)]);
+        assert!(out.iter().any(|x| x.contains("a position that changed")), "{out:?}");
+        // A call with no collider, a type that differs from the entity's root.
+        let mut m = started();
+        let none = Ev::Tick {
+            entity: "obj",
+            kind: Kind::Other,
+            kind_name: "ScriptZoneData",
+            made: false,
+            c: None,
+            r0: None,
+            r: None,
+            pos: None,
+            on: None,
+        };
+        let out = run(&mut m, &[none]);
+        assert!(
+            out.iter().any(|x| x.contains("is a MapObjectEntityData and a ScriptZoneData")),
+            "{out:?}"
+        );
     }
 }

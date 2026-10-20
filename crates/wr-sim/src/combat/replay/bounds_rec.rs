@@ -343,6 +343,13 @@ fn check_frames(records: &[Rv], family: bool, orders: bool) -> (Vec<String>, Vec
                 }
                 tick_seen = true;
             }
+            "bounds_set" | "phys_sync" | "bounds_scene" if !init_end => {
+                // (`BoundsInit` writes its snapshot synchronously, with getters that write
+                // nothing, before any controller: no setter or sync is inside or before it.)
+                into.push(format!(
+                    "{prefix}: a {ev} (seq {seq:?}) before the end of the bounds_init block"
+                ));
+            }
             "bounds_init" if tick_seen || init_end => {
                 into.push(format!(
                     "{prefix}: a bounds_init (seq {seq:?}) after the window's first call or end"
@@ -466,10 +473,12 @@ fn parse_init(records: &[Rv], rec: &mut BoundsRec, out: &mut Parsed) {
                 // at least 0.05, an `enabled` flag, the units' layer for a unit's and the objects'
                 // for any other, and a unit's has its entity.
                 let unit = root.kind.as_deref() == Some(UNIT_KIND);
+                // (`BoundsInit` derives the type from the entity: both or neither, and a scene
+                // root is a collider of an entity.)
                 if root.kind.is_none()
+                    || root.e.is_none()
                     || root.r.is_none_or(|r| r < 0.05)
                     || root.on.is_none()
-                    || (unit && root.e.is_none())
                     || root.layer != if unit { UNIT_LAYER } else { OBJECT_LAYER }
                 {
                     bad(
@@ -733,6 +742,11 @@ fn order_keys(order: &[EntityIdx], hits: &[Hit]) -> (Vec<Option<i32>>, Vec<Entit
         });
     }
     (keys, ambiguous)
+}
+
+/// A `bounds_init` root as the machine takes it.
+fn link_pos(life: &Lifecycle, c: i32) -> Option<V3> {
+    life.link_pos(c)
 }
 
 /// A `bounds_init` root as the machine takes it.
@@ -1015,6 +1029,7 @@ impl Driver<'_> {
             pos: t.pos,
             on: t.on,
             id: t.c,
+            link_pos: t.c.and_then(|c| link_pos(&rec.life, c)),
         })
     }
 

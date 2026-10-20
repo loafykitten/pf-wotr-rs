@@ -544,8 +544,12 @@ impl Bounds {
     /// modelled update, and the next tick can't tell which units it updates.
     pub fn lose_track(&mut self) {
         if self.recorded {
-            // (The records show what the ticks did; a step or a sync may have run unseen.)
+            // (The records show what the ticks did; a step or a sync may have run unseen, and the
+            // units may have moved unseen: the update-list history is gone.)
             self.forget_positions();
+            for c in &mut self.colliders {
+                c.seen = None;
+            }
             return;
         }
         for c in &mut self.colliders {
