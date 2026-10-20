@@ -2,7 +2,7 @@
 # scripts/sweep.sh [OUTDIR] [CAPTURE...]: the POC-5 sweep: the driven replay (`wr-combat replay`, release build) of
 # every run of every fixture of the current captures, one after another under scripts/heavy.sh. Each run's output goes
 # to OUTDIR/<capture>.<fixture>.<run>.out (default: cache/sweep/<timestamp>); prints one line per run with its
-# `valid=` line, then the totals. The captures default to the sweep's list (PLAN.md, "Where things stand"); name
+# verdict (see verdict below) and `valid=` line, then the totals. The captures default to the sweep's list (PLAN.md, "Where things stand"); name
 # others (e.g. poc5-tb-140) to sweep only those. The save is the one the capture recorded (run.json's save_file).
 #   WR_SWEEP_BIN   the wr-combat binary (default: $CARGO_TARGET_DIR or target/, release)
 set -euo pipefail
@@ -20,6 +20,21 @@ bin=${WR_SWEEP_BIN:-"${CARGO_TARGET_DIR:-$root/target}/release/wr-combat"}
 [ -x "$bin" ] || { echo "no $bin: cargo build --release -p wr-combat" >&2; exit 1; }
 mkdir -p "$out"
 
+# A run is valid (PLAN's sense) when its summary says all of: the T0 streams equal, nothing
+# reported and no RNG failure (`valid=true`), the end state's match rate 1.0000, and no end-state
+# flag or posture difference. "ok <valid= line>", or "NOT <what failed>; <valid= line>".
+verdict() {
+  local o=$1 v bad=()
+  v=$(grep -m1 '^valid=' "$o" || true)
+  [ -n "$v" ] || { echo "NOT no summary (see $o)"; return; }
+  grep -qE '^[^ ]+: oracle [0-9]+ records, sim [0-9]+ records, equal=true' "$o" || bad+=("T0 not equal")
+  case $v in valid=true*) ;; *) bad+=("reported") ;; esac
+  grep -q '^end state vs the oracle.s: .*match rate 1\.0000' "$o" || bad+=("end state")
+  grep -q '^end-state flags .*; differences \[\]$' "$o" || bad+=("end-state flags")
+  grep -q '^end-state postures .*; differences \[\]$' "$o" || bad+=("end-state postures")
+  if [ ${#bad[@]} -eq 0 ]; then echo "ok $v"; else echo "NOT $(IFS=,; echo "${bad[*]}"); $v"; fi
+}
+
 run_all() {
   local valid=0 invalid=0
   for c in "${list[@]}"; do
@@ -32,9 +47,9 @@ run_all() {
         r=$(basename "$t" .trace.jsonl.gz)
         o="$out/$c.$(basename "$f").$r.out"
         "$bin" replay "$f" --save "$save" --run "$r" >"$o" 2>&1 || true
-        v=$(grep -m1 '^valid=' "$o" || echo "valid=? (no summary; see $o)")
+        v=$(verdict "$o")
         echo "$c $(basename "$f") $r: $v"
-        case $v in valid=true*) valid=$((valid + 1)) ;; *) invalid=$((invalid + 1)) ;; esac
+        case $v in ok\ *) valid=$((valid + 1)) ;; *) invalid=$((invalid + 1)) ;; esac
       done
     done
   done

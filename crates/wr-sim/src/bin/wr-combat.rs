@@ -426,8 +426,18 @@ fn replay(fixture: &std::path::Path, save: &str, run: &str) -> Result<()> {
     );
     let r = &out.roam;
     println!(
-        "roaming: UnitRoamingController ticks {} (waiting {}), rolls {}, sleeping steps {}, LookAts {}, moves run {}, arrivals {}; states established {}, unknown {}",
-        r.ticks, r.idle, r.rolls, r.steps, r.looks, r.moves, r.arrivals, r.established, r.unknown
+        "roaming: UnitRoamingController ticks {} (waiting {}), rolls {}, sleeping steps {}, LookAts {}, moves run {}, arrivals {}; states established {} (from roam_init: equal to the save's {}, advanced since the load {}), unknown {}",
+        r.ticks,
+        r.idle,
+        r.rolls,
+        r.steps,
+        r.looks,
+        r.moves,
+        r.arrivals,
+        r.established,
+        r.init_equal,
+        r.init_taken,
+        r.unknown
     );
     let p = &out.prone;
     println!(
