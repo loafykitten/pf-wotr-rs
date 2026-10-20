@@ -57,6 +57,9 @@ enum Cmd {
         /// stderr; stdout and the outputs are the same as without.
         #[arg(long)]
         timeline: bool,
+        /// Collect the timeline and write it here (gzip JSON), for `wr-game --fight --timeline`.
+        #[arg(long)]
+        timeline_out: Option<std::path::PathBuf>,
     },
     /// Names a blueprint (type, name, its components' types).
     Bp { guid: String },
@@ -140,8 +143,15 @@ fn read_json(p: &std::path::Path) -> Result<serde_json::Value> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Replay { fixture, save, run, out_dir, timeline } => {
-            replay(&fixture, &save, &run, out_dir, timeline)?;
+        Cmd::Replay { fixture, save, run, out_dir, timeline, timeline_out } => {
+            replay(
+                &fixture,
+                &save,
+                &run,
+                out_dir,
+                timeline || timeline_out.is_some(),
+                timeline_out.as_deref(),
+            )?;
         }
         Cmd::Bp { guid } => {
             let content = wr_sim::content::Content::open_default()?;
@@ -277,13 +287,20 @@ fn replay(
     run: &str,
     out_dir_arg: Option<std::path::PathBuf>,
     timeline: bool,
+    timeline_out: Option<&std::path::Path>,
 ) -> Result<()> {
     let t0 = Instant::now();
     let (out, w) = if timeline {
         let (out, w, tl) =
             wr_sim::combat::replay::timeline::run_fixture_timeline(save, fixture, run)?;
         match tl {
-            Ok(tl) => timeline_summary(&tl),
+            Ok(tl) => {
+                timeline_summary(&tl);
+                if let Some(p) = timeline_out {
+                    tl.write(p)?;
+                    eprintln!("timeline: written to {}", p.display());
+                }
+            }
             Err(e) => eprintln!("timeline: none: {e}"),
         }
         (out, w)

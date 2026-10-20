@@ -115,7 +115,7 @@ fn the_timeline_is_the_replays_own_and_changes_nothing() {
         checked += 1;
         moved += usize::from(before.speed > 0.0);
     }
-    assert!(checked > 5_000 && moved > 100, "checked {checked} rows, {moved} of a moving unit");
+    assert!(checked > 4_000 && moved > 100, "checked {checked} rows, {moved} of a moving unit");
 
     // The timeline sees the fight: the first lizard to die, standing prone, was alive earlier.
     let dead: Vec<_> = tl

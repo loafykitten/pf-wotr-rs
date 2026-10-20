@@ -14,6 +14,10 @@
 //! recording's observation rows (real time, which the sim doesn't compute).
 
 use std::collections::HashMap;
+use std::path::Path;
+
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 
 use super::{Driver, Outcome};
 use crate::combat::agent;
@@ -22,7 +26,7 @@ use crate::combat::oracle::Trace;
 use crate::world::{EntityIdx, World};
 
 /// Where a sample's position and orientation come from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
     /// The sim's own: turn-based combat with the movement agents synchronized (the agent, the
     /// physics, the paths and the orientation writers are ported).
@@ -33,7 +37,7 @@ pub enum Source {
 }
 
 /// One unit at the end of one frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     /// `UnitEntityData.Position` (world, metres).
     pub position: [f32; 3],
@@ -65,7 +69,7 @@ pub struct Sample {
 }
 
 /// One unit's samples, one per frame from [`Track::first`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     /// `UniqueId`.
     pub id: String,
@@ -76,7 +80,7 @@ pub struct Track {
 }
 
 /// Every frame's end state of the units in the game.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Timeline {
     /// The recording's frame numbers (`tick` records' `t`), in order. The game steps 1/60 s a frame.
     pub ticks: Vec<i64>,
@@ -98,11 +102,84 @@ impl Timeline {
         t.samples.get(frame.checked_sub(t.first)?)
     }
 
+    /// Writes the timeline as gzip-compressed JSON (a run's timeline exists only if the run is
+    /// valid, so a file holds a valid run's).
+    ///
+    /// # Errors
+    ///
+    /// I/O.
+    pub fn write(&self, path: &Path) -> Result<()> {
+        use std::io::Write as _;
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        let file =
+            std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+        let mut z = flate2::write::GzEncoder::new(
+            std::io::BufWriter::new(file),
+            flate2::Compression::fast(),
+        );
+        serde_json::to_writer(&mut z, &File { schema: SCHEMA.to_owned(), timeline: self.clone() })?;
+        z.finish()?.flush()?;
+        Ok(())
+    }
+
+    /// Reads a file [`Self::write`] made, and checks that its frames, tracks and command indices
+    /// fit together and its numbers are finite.
+    ///
+    /// # Errors
+    ///
+    /// I/O, malformed JSON, another schema or an inconsistent timeline.
+    pub fn read(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let f: File = serde_json::from_reader(std::io::BufReader::new(
+            flate2::read::GzDecoder::new(std::io::BufReader::new(file)),
+        ))
+        .with_context(|| format!("parse {}", path.display()))?;
+        ensure!(f.schema == SCHEMA, "{}: schema {} (want {SCHEMA})", path.display(), f.schema);
+        f.timeline.check().with_context(|| path.display().to_string())?;
+        Ok(f.timeline)
+    }
+
+    fn check(&self) -> Result<()> {
+        ensure!(self.ticks.windows(2).all(|w| w[0] < w[1]), "frames out of order");
+        for t in &self.tracks {
+            ensure!(
+                t.first + t.samples.len() <= self.ticks.len(),
+                "{}: more samples than frames",
+                t.id
+            );
+            for s in &t.samples {
+                let finite = s
+                    .position
+                    .iter()
+                    .chain([&s.orientation, &s.desired_orientation, &s.speed, &s.agent_speed])
+                    .all(|x| x.is_finite());
+                ensure!(finite, "{}: a sample that is not finite", t.id);
+                ensure!(
+                    usize::from(s.command) <= self.commands.len(),
+                    "{}: a command out of range",
+                    t.id
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The command class of a sample, if it has one.
     #[must_use]
     pub fn command(&self, s: &Sample) -> Option<&str> {
         usize::from(s.command).checked_sub(1).and_then(|i| self.commands.get(i)).map(String::as_str)
     }
+}
+
+/// Schema tag of a timeline file.
+pub const SCHEMA: &str = "wr-sim/timeline/1";
+
+#[derive(Serialize, Deserialize)]
+struct File {
+    schema: String,
+    timeline: Timeline,
 }
 
 /// Why a run has no timeline: it is not valid.
@@ -350,6 +427,27 @@ mod tests {
         // 3 and 4 metres in the plane (the 7 metres up don't count): 5 m in 1/60 s.
         assert!((t.samples[1].speed - 300.0).abs() < 1e-3, "{}", t.samples[1].speed);
         assert_eq!(t.samples[1].source, Source::Sim);
+    }
+
+    /// A timeline round-trips through its file, and a file that doesn't fit together is refused.
+    #[test]
+    fn a_timeline_file_round_trips_and_is_checked() {
+        let (mut w, _) = world();
+        let (_, tl) = run_timeline(&mut w, &trace(3));
+        let tl = tl.expect("valid");
+        let dir = std::env::temp_dir().join(format!("wr-timeline-test-{}", std::process::id()));
+        let path = dir.join("t.json.gz");
+        tl.write(&path).expect("write");
+        assert_eq!(Timeline::read(&path).expect("read"), tl);
+        let mut bad = tl.clone();
+        bad.tracks[0].first = 2;
+        bad.write(&path).expect("write");
+        assert!(Timeline::read(&path).is_err());
+        let mut bad = tl.clone();
+        bad.tracks[0].samples[1].position[0] = f32::NAN;
+        bad.write(&path).expect("write");
+        assert!(Timeline::read(&path).is_err(), "NaN serializes as null and fails to parse");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A run that reported something unsupported (or failed a draw) has no timeline.
