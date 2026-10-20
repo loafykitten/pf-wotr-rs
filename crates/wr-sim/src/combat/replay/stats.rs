@@ -14,7 +14,7 @@
 //!   at the same place among the stat mutations and between the same other records; the rest are differences, which make the run
 //!   invalid as well as the stream unequal.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value as J;
 
@@ -50,27 +50,41 @@ fn gap(units: &HashSet<&str>, r: &J) -> Option<&'static str> {
     }
 }
 
+/// A record other than a stat mutation, identified by its payload and its occurrence among the
+/// equal ones (the projected stream repeats identical records: a rule and its result, run twice).
+type Anchor<'a> = (&'a J, usize);
+
 /// A stat mutation with its place in the stream: the nearest other (non-stat) record before it and
-/// after it. A mutation moved across a fact attached or a damage differs in a neighbour; a
-/// difference elsewhere in the stream is no stat mutation's.
-type Placed<'a> = (&'a J, Option<&'a J>, Option<&'a J>);
+/// after it. A mutation moved across a fact attached, a damage or a repeated record differs in a
+/// neighbour; a difference elsewhere in the stream is no stat mutation's (but for the occurrence
+/// numbers of equal records after it).
+type Placed<'a> = (&'a J, Option<Anchor<'a>>, Option<Anchor<'a>>);
 
 fn placed(stream: &[J]) -> Vec<Placed<'_>> {
-    let mut next: Vec<Option<&J>> = vec![None; stream.len()];
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut anchors: Vec<Option<Anchor<'_>>> = Vec::with_capacity(stream.len());
+    for r in stream {
+        anchors.push((!is_stat(r)).then(|| {
+            let n = seen.entry(r.to_string()).or_default();
+            *n += 1;
+            (r, *n - 1)
+        }));
+    }
+    let mut next: Vec<Option<Anchor<'_>>> = vec![None; stream.len()];
     let mut after = None;
-    for (i, r) in stream.iter().enumerate().rev() {
+    for i in (0..stream.len()).rev() {
         next[i] = after;
-        if !is_stat(r) {
-            after = Some(r);
+        if anchors[i].is_some() {
+            after = anchors[i];
         }
     }
     let mut before = None;
     let mut out = Vec::new();
     for (i, r) in stream.iter().enumerate() {
-        if is_stat(r) {
-            out.push((r, before, next[i]));
+        if anchors[i].is_some() {
+            before = anchors[i];
         } else {
-            before = Some(r);
+            out.push((r, before, next[i]));
         }
     }
     out
@@ -147,6 +161,24 @@ mod tests {
         // The second moved after the fact attached.
         let moved = [stat("u", 2), damage(), fact.clone(), stat("u", 3)];
         let c = run(rec.clone(), &moved);
+        assert!(!c.agrees() && c.differing == 1, "{c:?}");
+        // The same record repeated: a mutation moved between identical rule and result pairs
+        // keeps both neighbours' payloads, not their occurrences.
+        let (r, e) = (json!({"k": "rule", "class": "R"}), json!({"k": "result", "class": "R"}));
+        let at = |n: usize| {
+            let mut v = Vec::new();
+            for k in 0..3 {
+                v.push(r.clone());
+                v.push(e.clone());
+                if k + 1 == n {
+                    v.push(stat("u", 2));
+                }
+            }
+            v
+        };
+        let (a, b) = (at(1), at(2));
+        assert_eq!(settle(&w, &mut a.clone(), &a).equal, 1);
+        let c = settle(&w, &mut a.clone(), &b);
         assert!(!c.agrees() && c.differing == 1, "{c:?}");
         // A different record elsewhere is no stat mutation's.
         let mut far = rec.clone();

@@ -80,7 +80,7 @@ fn first(recs: &[V], what: &str) -> usize {
     *of_kind(recs, what).first().expect("a record")
 }
 
-const CASES: [(&str, Change); 25] = [
+const CASES: [(&str, Change); 26] = [
     // A mutation dropped.
     ("a modifier added, dropped", |recs| {
         recs.remove(first(recs, "stat_mod_add"));
@@ -179,6 +179,20 @@ const CASES: [(&str, Change); 25] = [
         let s = (d..recs.len()).find(|&j| is_stat(&recs[j])).expect("a later stat mutation");
         let x = recs.remove(s);
         recs.insert(d, x);
+    }),
+    ("a stat mutation moved across a repeated rule and result", |recs| {
+        // The first group of stat mutations is followed by the same flat-footed check twice.
+        let at = first(recs, "stat_value");
+        let end = (at..recs.len()).find(|&j| !is_stat(&recs[j])).expect("a record after");
+        let pair = (end..recs.len())
+            .filter(|&j| recs[j]["k"] == "rule")
+            .nth(1)
+            .expect("a second rule after the group");
+        let moved: Vec<V> = recs.drain(at..end).collect();
+        let to = pair - moved.len();
+        for (n, x) in moved.into_iter().enumerate() {
+            recs.insert(to + n, x);
+        }
     }),
     // Two exchanged.
     ("a value change and its modifier, exchanged", |recs| {

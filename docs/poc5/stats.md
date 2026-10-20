@@ -16,7 +16,7 @@ else read them. A wrong stat change outside a rule passed unnoticed. They are no
 | The sweep (25 captures, 116 runs) | `scripts/sweep.sh`, 116 runs: 113 `ok` (valid, T0 equal, end state equal), 3 NOT (`poc5-tb-122` tb-nearest, the known tie; its 36 stat mutations are equal too) [M] |
 | Stat mutations compared [M] | 5,202 compared (2,616 `stat_value`, 2,580 `stat_mod_add`, 6 `stat_mod_remove`), 5,202 equal, 0 differing, 0 extra, 0 gaps; T0 equal on all 116 runs |
 | Producers [M] | the helpless condition's penalties added (426 events) and cleared (3), a buff's modifiers (3: Enlarge Person); every recorded mutation has a producer the sim ports, so there is **no gap** (below) |
-| Damage tests | 25 damaged recordings of `poc5-tb-120/tb-cast`, each reported (stream unequal, mutations differing, run invalid) |
+| Damage tests | 26 damaged recordings of `poc5-tb-120/tb-cast`, each reported (stream unequal, mutations differing, run invalid) |
 
 ## What WrathOracle records [C]
 
@@ -114,7 +114,7 @@ producer of the survey is ported, so no producer is a counted gap today.)
 
 The summary line of `wr-combat replay`: "stat mutations in the T0 stream: compared N {by kind}, equal E, differing D, sim's
 extra X; gaps G {by reason}". Equal is counted by position among the stat mutations of both streams *and* by place among the other records: a mutation
-is equal to the sim's only if the nearest non-stat record before it and the one after it are equal too, so one moved
+is equal to the sim's only if the nearest non-stat record before it and the one after it are equal too (each identified by its payload and its occurrence among the equal records, since the stream repeats identical rule and result pairs), so one moved
 across a `fact_attach` or a `damage` differs although the stat mutations alone keep their order, while a difference
 elsewhere in the stream is not blamed on them. One dropped record shows as differing from there on (the stream's first
 difference names it).
@@ -147,11 +147,11 @@ log off; bulk removal), `combat/project.rs` `stat_mutations_project_alike_from_b
 
 - `the_stat_mutations_are_the_sims`: every run of `poc5-tb-120/tb-cast` and `poc5-tb-131/tb-lizard` valid, T0 equal, every
   recorded stat mutation equal, no gap;
-- `damaged_stat_mutations_are_reported`: 25 damaged recordings of the cast, each unequal, differing and invalid: a
+- `damaged_stat_mutations_are_reported`: 26 damaged recordings of the cast, each unequal, differing and invalid: a
   modifier added, a value change, a removal and a unit's whole helpless group dropped; a new, old and permanent value, a
   modifier's value, descriptor, stack mode, source blueprint, source fact id, source component and the stat after it changed; a
   record's stat, owner and frame changed; a value change and its modifier exchanged, two units' groups exchanged; a value
-  change repeated, a removal and a temporary scope added; a mutation moved across a fact attached and across a damage; a record of a unit the sim hasn't made;
+  change repeated, a removal and a temporary scope added; a mutation moved across a fact attached, a damage and a repeated rule and result; a record of a unit the sim hasn't made;
 - unit tests in `replay/stats.rs`: a mutation moved across another record differs; a disposed unit's mutations are compared, not gaps;
 - `a_mutation_of_a_unit_the_sim_hasnt_made_is_a_counted_gap`: a recorded mutation of an unknown unit and one with no owner
   are counted as gaps, and the sim's own mutations of those stats are extra (the run invalid).
