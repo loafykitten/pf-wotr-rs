@@ -611,7 +611,7 @@ prefix rows; 7,832 radii inside the sim's rule (259 exactly `Max(0.05, Corpulenc
 physics clock" (the line is shared with the captures that have no records, and `vision bounds records:` /
 `vision_order:` lines follow it).
 
-Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 17 cases, each reported):
+Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 18 cases, each reported):
 a `bounds_init` root without a field, with a wrong count, a wrong radius, missing, swapped with another (the creation order), disabled,
 or moved; a `bounds_tick` that threw, with a radius or transform the sim's rule can't give, a wrong radius before, or a collider
 nobody made; a `bounds_scene` mid-window; a `bounds_set` the collider contradicts (`on0`) or that names an unknown collider; a

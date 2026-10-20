@@ -6714,7 +6714,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         pos(recs, |r| ev(r, "bounds_tick") && r["e"] == e && r["t"].as_i64() > Some(after))
     }
     const X: &str = "driven replay: vision:";
-    let cases: [Change; 17] = [
+    let cases: [Change; 18] = [
         // bounds_init: a field missing, the count wrong, a radius wrong, a collider missing, two
         // swapped (the creation order), a hidden-looking collider (disabled), a position moved.
         |recs| {
@@ -6777,6 +6777,12 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             let at = tick_of(recs, "558A", 300);
             recs[at]["c"] = json!(-1);
         },
+        // A bounds_tick the game made and the record lacks: the sim's update list has the unit.
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            recs.remove(at);
+            renumber(recs);
+        },
         // bounds_scene mid-window.
         |recs| {
             let at = tick_of(recs, "558A", 300);
@@ -6814,7 +6820,9 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
         let changed = trace.edited(change);
         let _ = replay::run_with_tape(&mut w, &changed, &trace);
-        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(X)) {
+        let first = w.coverage.unsupported.keys().find(|k| k.starts_with(X));
+        eprintln!("bounds case {i}: {first:?}");
+        if w.valid() || first.is_none() {
             missed
                 .push(format!("case {i}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>()));
         }
