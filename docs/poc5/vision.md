@@ -705,11 +705,19 @@ can also be absorbed:
 - The clears are matched by owner, not in `AwakeUnits` order (independent caches).
 - `CanBeInVisionRange` is the sim's on the pairs it can decide, but its inputs aren't: the corpulences (read by the fights
   only), the physics clock and the awake units are the recording's, and the colliders' state at the window's start is
-  hypothesized (above). PhysX's result order is taken to be the colliders' creation order, which every recorded `near` leaf
-  agrees with (385,005 of them) but PhysX's pruner is not ported (a scene with more colliders than 21 could order
-  differently). The capsule test is PhysX's `f32` distance, which agrees with the same test in `f64` on all 10.5 million
+  hypothesized (above) in a recording without the `bounds_*` records. PhysX's result order is taken to be the colliders' creation
+  order, which every recorded `near` leaf agrees with (385,005 of them) and `-140`'s `vis_order` in 73,534 of 73,568 sets; it
+  is **not** the order in the other 34 (one record: a collider created later enumerated before an earlier one), so the order is
+  the recorded one where a recording has `vis_order`, and the creation order, unchecked, in every older capture (PhysX's pruner is
+  not ported; a scene with more colliders than 21 could order differently). The capsule test is PhysX's `f32` distance, which agrees with the same test in `f64` on all 10.5 million
   pairs here.
-- **Can be absorbed (an equally wrong recording would pass):** the start-state hypotheses (above); the corpulence
+- **With the `bounds_*` records, what can still be absorbed** is only PhysX's copy of the transforms: the physics clock (which
+  frames ran a step) and the order of a sync inside a frame (both candidates are kept). The radii, transforms, `enabled` flags,
+  history and creation order are the game's; a record the sim's model contradicts, a dropped or invented `bounds_tick`, an `x`, a
+  remade scene and a record no phase consumed are reported. Not modelled and reported: a collider relinked to another entity,
+  and an `entity` record that isn't a made collider's link. Unexercised on data (unit-tested only): a collider made in the window,
+  a destruction, a position write, a sync, a unit hidden at the start.
+- **Can be absorbed (an equally wrong recording would pass) in a recording without them:** the start-state hypotheses (above); the corpulence
   inference: a size or view change made by code the sim doesn't run (an unported action, a mount change outside the sampled
   check, a polymorph it doesn't see) produces no invalidation, so a corpulence read before it, and a radius computed from
   it, can stay wrong while the recording (whose sets follow the true radius) disagrees only where a pair crosses the
