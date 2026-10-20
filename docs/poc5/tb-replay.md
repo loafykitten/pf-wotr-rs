@@ -850,10 +850,22 @@ view state flipped, `view#K:flip` or `view#last:flip`, which swaps that recorded
   equal. [C] `UnitTicksController` adds `GameDeltaTime` only to a living unit (`BaseUnitController.ShouldTickOnUnit`
   skips the dead) while turn-based combat is off or the unit isn't in combat, so 523B, awake, ticked one more or one
   fewer real-time frame between the reload and the window's open, which isn't pinned. Inside the window the replay
-  is exact (T0-equal tick-exact, and the end state carries the same one-frame offset). Nothing compares a replay's
-  start state with its recording's; the sim replays each run from its own start state, so it is unaffected. Next:
-  have the replay's window open compare its start state with the recording's (at least the units' timers) and
-  invalidate on a difference, or pin the frames between the reload and the window.
+  is exact (T0-equal tick-exact, and the end state carries the same one-frame offset). The sim replays each run from
+  its own start state, so it is unaffected.
+  **Measured (2026-10-19, `oracle-state-diff` on every replay's start state against its recording's, the sweep's
+  captures and `-137`/`-138`):** 34 of 83 replays differ, always in exactly these two values of 523B and nothing else,
+  and always one 1/60 s frame apart (2.01666546 or 2.033332). In every fixture but one **the replays agree with each
+  other and only the record run differs** (ahead in some fixtures, behind in others; `-95`, `-111`, `-114`, `-116`,
+  `-122`, `-123`, `-127`, `-129`, `-131`, `-133`, `-136`, `-138` and `-140` equal throughout); the exception is
+  `-135/tb-nearest`, whose third (perturbed) replay equals the record and the other two don't. The game time at the window's open is
+  equal (`-132`/tb-focus: 434,800,690,000 ticks in both), so the window doesn't open a frame early or late: 523B is
+  ticked by `UnitTicksController` in one frame more or fewer between the reload and the window, i.e. it wakes (or
+  joins the game) a frame apart after the process's first load and after the later ones [I: which of
+  `SleepingUnitsController`'s inputs, the camera's frustum or the fog of war, isn't recorded]. `scripts/oracle-record.sh`
+  now writes each replay's start-state comparison after a recording (`<capture>/start-states.txt`, one line per
+  replay), so a difference is seen without asking. Next, to pin it: record the pre-window frames' sleeping
+  decisions for the window's units (a WrathOracle observation from the reload's end to the window), then reproduce
+  the recording's wake frame in the replay as `IdlePin`/`PhysicsPhase` do.
 
 ## Records inside root rule spans (2026-10-18, stream audit)
 
@@ -978,14 +990,15 @@ sim computed, or taken as an input and counted, or reported; none is skipped):
   tick 443 (111,442 records). The trace is the game's actual run, and the sim reproduces it: 20 roots driven, T0
   equal, no report. "Valid" says the sim agrees with the game's trace; whether the game's replay stayed on its
   recording is the oracle's own verdict, the note.
-- `mut`: compared only if `project::project_records` keeps it: `damage`, `xp`, `fact_attach`, `fact_detach` and a
-  `rule_bonus` to a tracked rule (`target_rule` > 0); it drops every other `what` (`stat_value`, `stat_mod_add`,
-  `stat_mod_remove`, `rule_temp_mod`, ...), and no other checker of the replay reads those kinds. [M] Surveyed on
-  the sweep's 111 runs and `-137` to `-140`: inside root spans there are only `damage` (685), `fact_attach` (509)
-  and `rule_bonus` (4,749, every one tracked); the unprojected kinds are all outside spans (`stat_value` 2,406,
-  `stat_mod_add` 2,370, `stat_mod_remove` 6 in the sweep's captures). So a span now reports any other `mut`
-  (`spans::projected`). **Open, not the spans':** the mutations outside spans that nothing compares (the sim doesn't emit
-  them, T0 doesn't project them); the fix is for the sim to emit them and T0 to compare them, a piece of work of its own.
+- `mut`: compared only if `project::project_records` keeps it: `damage`, `xp`, `fact_attach`, `fact_detach`, a
+  `rule_bonus` to a tracked rule (`target_rule` > 0) and, since stream stats, the stat mutations (`stat_value`,
+  `stat_mod_add`, `stat_mod_remove`, `stat_temp_scope_*`: `docs/poc5/stats.md`); it drops every other `what`
+  (`rule_temp_mod`, ...), and no other checker of the replay reads those kinds. [M] Surveyed on the sweep's 116 runs:
+  inside root spans there are only `damage`, `fact_attach` and `rule_bonus` (every one tracked); the stat mutations
+  (2,616 `stat_value`, 2,580 `stat_mod_add`, 6 `stat_mod_remove`) are all outside spans, and the sim now writes them from
+  its own `ModifiableValue` port and the T0 stream compares them (with their frame). A span still reports any `mut` that
+  `spans::projected` doesn't accept, a stat mutation included (`spans::projected` says no to them: none lies inside a
+  span, and the sim writes none there).
 - Structure: one state machine, `replay/life.rs` (`Life`), shared by `span_ok` (the commands' attack spans, which check
   every field besides) and the audit of the other root spans (`spans::Open`), so the two cannot drift. A nested rule is
   pushed by the innermost rule in its `OnTrigger` or one of its handlers (its `parent`, `depth`, open `handler` and

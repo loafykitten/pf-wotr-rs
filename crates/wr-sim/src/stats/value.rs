@@ -158,6 +158,8 @@ pub struct StatValue {
     pub dependent_components: Vec<CompRef>,
     pub on_changed: Vec<ChangedHandler>,
     pub updating_internal: bool,
+    /// Inside the outermost `UpdateValue` (WrathOracle's `Hooks.Updating`).
+    pub in_update: bool,
     pub updating_dependent_facts: bool,
     pub temporary_scopes: i32,
     /// `MoraleBonusesDisabled`, `InsightBonusesDisabled` counts.
@@ -185,6 +187,7 @@ impl StatValue {
             dependent_components: Vec::new(),
             on_changed: Vec::new(),
             updating_internal: false,
+            in_update: false,
             updating_dependent_facts: false,
             temporary_scopes: 0,
             morale_disabled: 0,

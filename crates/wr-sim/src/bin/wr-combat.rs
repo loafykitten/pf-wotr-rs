@@ -535,13 +535,34 @@ fn replay(
     );
     let r = &out.roam;
     println!(
-        "roaming: UnitRoamingController ticks {} (waiting {}), rolls {}, sleeping steps {}, LookAts {}, moves run {}, arrivals {}; states established {}, unknown {}",
-        r.ticks, r.idle, r.rolls, r.steps, r.looks, r.moves, r.arrivals, r.established, r.unknown
+        "roaming: UnitRoamingController ticks {} (waiting {}), rolls {}, sleeping steps {}, LookAts {}, moves run {}, arrivals {}; states established {} (from roam_init: equal to the save's {}, advanced since the load {}), unknown {}",
+        r.ticks,
+        r.idle,
+        r.rolls,
+        r.steps,
+        r.looks,
+        r.moves,
+        r.arrivals,
+        r.established,
+        r.init_equal,
+        r.init_taken,
+        r.unknown
     );
     let p = &out.prone;
     println!(
         "prone: UnitProneController unit ticks {}, falls {}, get-ups {}, last-frame units taken as asleep {}",
         p.ticks, p.falls, p.get_ups, p.assumed_asleep
+    );
+    let st = &out.stats;
+    println!(
+        "stat mutations in the T0 stream (docs/poc5/stats.md): compared {} {:?}, equal {}, differing {}, sim's extra {}; gaps {} {:?}",
+        st.compared.values().sum::<usize>(),
+        st.compared,
+        st.equal,
+        st.differing,
+        st.extra,
+        st.gaps.values().sum::<usize>(),
+        st.gaps
     );
     let sp = &out.spans;
     println!(
