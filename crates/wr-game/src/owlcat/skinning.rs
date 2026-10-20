@@ -97,6 +97,9 @@ fn skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// sees the same cadence whatever the capture rate.
 pub const STEP: f32 = 1.0 / 60.0;
 
+/// Metres per second above which a unit counts as moving (for framing).
+pub const MOVING: f32 = 0.1;
+
 /// A unit walking a straight line: a demonstration script, not the movement agent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Walk {
@@ -492,6 +495,9 @@ impl Skinning {
                 let yaw = rot.to_euler(bevy::math::EulerRot::YXZ).0.to_degrees();
                 let diff = (yaw - p.yaw + 180.0).rem_euclid(360.0) - 180.0;
                 u.turns = diff.abs() < 1.0;
+                if !u.turns {
+                    eprintln!("fight: {} keeps its prefab's facing (ForbidRotation?)", u.id);
+                }
             }
         }
         self.drive = Some(drive);
@@ -499,24 +505,28 @@ impl Skinning {
     }
 
     /// Where the driven units are at the animation clock's frame: the centre and radius (metres,
-    /// in the plane) of the units a camera should frame: those in combat and up, else every unit
-    /// that is up. `None` without a drive or a unit.
+    /// in the plane) of the units a camera should frame: those in combat and up, else those that
+    /// are up and moving, else every unit that is up. `None` without a drive or a unit.
     #[must_use]
     pub fn focus(&self) -> Option<(Vec3, f32)> {
         let d = self.drive.as_ref()?;
         let frame = usize::try_from(self.tick).ok()?;
-        let poses: Vec<&DrivePose> = self
+        let up: Vec<&DrivePose> = self
             .units
             .iter()
             .filter_map(|u| d.pose(u.track?, frame))
             .filter(|p| p.in_game && p.up)
             .collect();
-        let fight: Vec<&&DrivePose> = poses.iter().filter(|p| p.in_combat).collect();
-        let pts: Vec<Vec3> = if fight.is_empty() {
-            poses.iter().map(|p| p.position).collect()
-        } else {
-            fight.iter().map(|p| p.position).collect()
+        let pick = |f: &dyn Fn(&DrivePose) -> bool| -> Vec<Vec3> {
+            up.iter().filter(|p| f(p)).map(|p| p.position).collect()
         };
+        let mut pts = pick(&|p| p.in_combat);
+        if pts.is_empty() {
+            pts = pick(&|p| p.speed > MOVING);
+        }
+        if pts.is_empty() {
+            pts = pick(&|_| true);
+        }
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for p in &pts {
             lo = lo.min(*p);

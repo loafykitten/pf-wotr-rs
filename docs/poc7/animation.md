@@ -181,7 +181,7 @@ its placement) and its shadow casters' bounds move with it; the draw constants (
 the start. So the picture is right, but anything reading the object's world position in a shader would not
 follow (nothing used here does), and a longer walk would need the arena's per-draw constants rewritten. The
 demo moves on a straight line over flat ground and does not consult physics or navigation: the unit follows
-nothing and may clip geometry. The movement agent, click-to-move and the sim-to-view glue are step 3.
+nothing and may clip geometry. The movement agent, click-to-move and the sim-to-view glue are step 3 (the units driven by the sim's timeline: `docs/poc7/fight.md`).
 
 ## 6. What is left
 
