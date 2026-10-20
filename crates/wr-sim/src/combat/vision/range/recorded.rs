@@ -191,6 +191,12 @@ impl Bounds {
         }
     }
 
+    /// The instance ids of a unit's colliders now (a destroyed one counts until the frame's end).
+    #[must_use]
+    pub fn collider_ids_of(&self, unit: EntityIdx) -> Vec<i32> {
+        self.colliders.iter().filter(|c| c.unit == unit).filter_map(|c| c.rec_id).collect()
+    }
+
     /// The units that have more than one collider now (a destroyed one counts until the frame's
     /// end): their colliders' places in the result order differ, which a unit-level order can't
     /// tell.
@@ -895,6 +901,7 @@ mod tests {
         let old = RecTick { seq: 2, ..tick(A, 7, 0.5, 0.5, [0.0; 3]) };
         let out = b.tick_recorded(RAN, &[], &[old], &[]);
         assert_eq!(about(&out, "current view collider"), 1, "{:?}", out.problems);
+        assert_eq!(b.collider_ids_of(A), vec![7, 8]);
         assert_eq!(b.units_with_several_colliders(), HashSet::from([A]));
         // After a destruction (the same frame or an earlier one) it is the unit's next collider.
         let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);

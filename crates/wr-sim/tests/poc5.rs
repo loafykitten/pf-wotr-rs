@@ -6835,7 +6835,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             "on0": null, "on": null, "pos0": null, "pos": null, "e0": e0, "e": e})
     }
     type Reasoned = (Change, &'static str);
-    let reasoned: [Reasoned; 9] = [
+    let reasoned: [Reasoned; 12] = [
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
@@ -6940,6 +6940,48 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             },
             "previous collider is live",
         ),
+        // A map object's collider made with its `entity` link written twice, and one written
+        // after the call; a link with no collider that carries collider state.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+                    "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+                    "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+                recs.insert(at, made);
+                recs.insert(at, link.clone());
+                recs.insert(at, link);
+                renumber(recs);
+            },
+            "a second link of a making",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+                    "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+                    "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+                recs.insert(at, link);
+                recs.insert(at, made);
+                renumber(recs);
+            },
+            "made without an entity link",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let mut l = set_rec(&t, "link", json!(null), json!(null), json!(null));
+                l["on"] = json!(true);
+                recs.insert(at, l);
+                renumber(recs);
+            },
+            "a bounds_set record it can't read",
+        ),
     ];
     for (i, (change, why)) in reasoned.into_iter().enumerate() {
         let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
@@ -6968,7 +7010,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         recs[last]["r0"] = json!(null);
         recs[last]["c"] = json!(-999);
         let link = set_rec(&t, "entity", json!(-999), json!(null), json!("558A"));
-        recs.insert(last + 1, link);
+        recs.insert(last, link);
         recs.insert(last, gone);
         renumber(recs);
     });

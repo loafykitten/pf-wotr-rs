@@ -472,10 +472,13 @@ replaces them with the game's own state, read by `replay/bounds_rec.rs` into `ra
   collider), and the records of the two are not told apart from a view cleared, so a `link` with no collider permits nothing
   and a replacement is reported (not modelled). A non-making call must name the unit's current view collider (its newest live
   one). A unit with two colliders is in a set if either is hit (the set enumerates it once, at its first), and the result buffer
-  counts the extra colliders that may be hit and belong to a recorded unit; the units' order constraints (one static order of
-  the colliders, below) are suspended for a unit that has had several colliders at once (named in the `vision_order:` line).
-  An `entity` record is written inside the making, before the call's `bounds_tick`, for a map object's collider as for a
-  unit's, so a frame's makings are indexed first. A frame the sim did not follow is replayed in the
+  counts the extra colliders that may be hit and belong to a recorded unit. The recorded orders are checked as one static
+  order of the *colliders* (keyed by instance id, so a unit's destroyed collider and its recreated one are two): the pairs the
+  records put must have no cycle, however far apart the records are (`[A,B]`, `[B,C]`, `[C,A]` is refused); a unit with several
+  colliders at once takes no part in that record (named in the `vision_order:` line). An `entity` record is written inside the making, before the call's `bounds_tick`, once, for a map object's collider as for a
+  unit's: a frame's makings are indexed first, each is linked by exactly one record that stands before its call (a second, a
+  late one, or a making with none is reported). A `link` with no collider must carry no collider state (`ColliderOf` writes
+  null for all of it). A frame the sim did not follow is replayed in the
   next phase whole, its calls and writes in the stream's order. A unit's `vis_order` must stand before its `vis`, and the frame's
   first after the `bounds_init` block.
   The writes still queued when the run ends (after the last frame's query, with no controller tick after them) are applied to the
@@ -631,7 +634,7 @@ prefix rows; 7,832 radii inside the sim's rule (259 exactly `Max(0.05, Corpulenc
 physics clock" (the line is shared with the captures that have no records, and `vision bounds records:` /
 `vision_order:` lines follow it).
 
-Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 24 cases, each reported, nine of them for a named reason):
+Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 24 cases, each reported, twelve of them for a named reason):
 a `bounds_init` root without a field, with a wrong count, a wrong radius, missing, swapped with another (the creation order), disabled,
 or moved; a `bounds_tick` that threw, with a radius or transform the sim's rule can't give, a wrong radius before, or a collider
 nobody made; a `bounds_scene` mid-window; a `bounds_set` the collider contradicts (`on0`) or that names an unknown collider; a
