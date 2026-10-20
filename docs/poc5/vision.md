@@ -431,6 +431,25 @@ a part of the family, or its records without the declaration, is reported and th
 replaces them with the game's own state, read by `replay/bounds_rec.rs` into `range::Bounds::start_recorded` / `tick_recorded`
 (`combat/vision/range/recorded.rs`).
 
+**The colliders' lives, one state machine (`replay/bounds_life.rs`).** Every record that names a collider is checked at its
+place in the stream against one machine for units' and others' colliders alike, with its whole field set against the collider's
+state: an instance id has one owner for good, across both kinds; a collider is `Live` from its `bounds_init` root or from the
+`bounds_tick` call that made it, `Linking` from the creation's `entity` record (`EntityDataLink.Entity = view.Data`, written inside
+`SetupSphereBoundsCollider`, once, before the call's own record, and only after the entity's previous view collider was
+destroyed: `gone`) to that call, `Dying` from its `gone` (the view's reference is cleared at once, `Object.Destroy` removes it at
+the frame's end) and `Gone` after. `TickEntity`, `UpdateViewActive` and the position update act on the entity's view collider
+only (its `current`). Checked: a call's radius before and `on` and its entity and kind against the collider; `active`'s `on0`
+and `pos`'s `pos0` against its state; a `link` (no-op relink) or `entity` (same to same) record's `enabled` and position against
+its state, a `link` with no collider (the view has none) against the entity having none; a making's `on` against its link's.
+Not modelled, reported: an unlink or relink (what a view replaced writes; the records of an attach and a detach with no collider
+are the same), and so a second collider for an entity whose first isn't destroyed. The creation link's position is not compared
+(the call sets the transform after it). Siblings considered: two roots of one entity, a write to a collider being made, a call
+with no collider while one is linked, a late write after a `gone`, the frame boundary (what is `Dying` is `Gone` at the next
+frame's first record, late writes included), skipped frames (the same loop), and ids of destroyed colliders (never reused).
+The recorded orders are derived from it: each frame, for each awake observer, its effective order (recorded or cached) keys every
+unit by the one collider the query may have hit (`Hit::id`), and the pairs must have no cycle, however far apart the records are;
+a unit with several colliders that may be hit can't be tied to one and is reported (counted), not dropped.
+
 **How the records are used [C]/[M].**
 - `bounds_init` (one root per `GameObject` of the scene at the first tick of the window, before any controller of the tick, then
   `bounds_init_end {n, valid}`): `r` is each unit collider's first radius (exact: no scale band, no corpulence), `on` its `enabled`,
@@ -472,10 +491,7 @@ replaces them with the game's own state, read by `replay/bounds_rec.rs` into `ra
   collider), and the records of the two are not told apart from a view cleared, so a `link` with no collider permits nothing
   and a replacement is reported (not modelled). A non-making call must name the unit's current view collider (its newest live
   one). A unit with two colliders is in a set if either is hit (the set enumerates it once, at its first), and the result buffer
-  counts the extra colliders that may be hit and belong to a recorded unit. The recorded orders are checked as one static
-  order of the *colliders* (keyed by instance id, so a unit's destroyed collider and its recreated one are two): the pairs the
-  records put must have no cycle, however far apart the records are (`[A,B]`, `[B,C]`, `[C,A]` is refused); a unit with several
-  colliders at once takes no part in that record (named in the `vision_order:` line). An `entity` record is written inside the making, before the call's `bounds_tick`, once, for a map object's collider as for a
+  counts the extra colliders that may be hit and belong to a recorded unit. An `entity` record is written inside the making, before the call's `bounds_tick`, once, for a map object's collider as for a
   unit's: a frame's makings are indexed first, each is linked by exactly one record that stands before its call (a second, a
   late one, or a making with none is reported). A `link` with no collider must carry no collider state (`ColliderOf` writes
   null for all of it). A frame the sim did not follow is replayed in the
@@ -634,11 +650,11 @@ prefix rows; 7,832 radii inside the sim's rule (259 exactly `Max(0.05, Corpulenc
 physics clock" (the line is shared with the captures that have no records, and `vision bounds records:` /
 `vision_order:` lines follow it).
 
-Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 30 cases, each reported, twelve of them for a named reason):
+Damaged records (`bounds_records_replace_the_start_hypotheses_and_damage_is_reported`, `-140`/tb-lizard, 34 cases, each reported, sixteen of them for a named reason):
 a `bounds_init` root without a field, with a wrong count, a wrong radius, missing, swapped with another (the creation order), disabled,
 or moved; a `bounds_tick` that threw, with a radius or transform the sim's rule can't give, a wrong radius before, or a collider
 nobody made; a `bounds_scene` mid-window; a `bounds_set` the collider contradicts (`on0`) or that names an unknown collider; a
-`vis_order` swapped or a unit's first one missing; a deleted `bounds_tick`; a `bounds_tick` moved across a frame boundary with its `t` kept, a duplicated one, a final-frame write naming a collider nobody made, a collider destroyed twice, and a `link` of an unknown collider or of one bound to another entity. A `phys_sync` inserted mid-window is valid and counted, and a collider destroyed and made again mid-window (`gone`, a making `bounds_tick`, its `entity` link) is accepted without a bounds report or a difference, as is a map object's collider made in a frame with its `entity` link before the call, and a frame the sim didn't follow holding a sync, a destruction, the link and the making call. Also reported for a named reason: a `link` of a destroyed collider, a `pos` after a `gone`, a making call while the unit's collider is live (a `link` with no collider before it permits nothing).
+`vis_order` swapped or a unit's first one missing; a deleted `bounds_tick`; a `bounds_tick` moved across a frame boundary with its `t` kept, a duplicated one, a final-frame write naming a collider nobody made, a collider destroyed twice, and a `link` of an unknown collider or of one bound to another entity. A `phys_sync` inserted mid-window is valid and counted, and a collider destroyed and made again mid-window (`gone`, a making `bounds_tick`, its `entity` link) is accepted without a bounds report or a difference, as is a map object's collider made in a frame with its `entity` link before the call, and a frame the sim didn't follow holding a sync, a destruction, the link and the making call. Also reported for a named reason: a `link` of a destroyed collider, a `pos` after a `gone`, a making call with no link before it (a `link` with no collider permits nothing), a creation link written before the previous collider's `gone`, a unit's making that takes a map object's id, a link claiming another state than the collider's, and a map object's creation link repeated in a later frame.
 
 ### What stays recorded
 

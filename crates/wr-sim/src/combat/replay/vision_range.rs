@@ -92,6 +92,8 @@ pub(super) struct RangeDriver {
     pub(super) order_last: HashMap<EntityIdx, Vec<EntityIdx>>,
     /// The static order of the colliders the recorded orders have put (as pairs, a before b).
     pub(super) order_pairs: super::bounds_rec::OrderGraph,
+    /// Each observer's order as last keyed by collider identity (a change is re-checked).
+    pub(super) order_keys: HashMap<EntityIdx, Vec<Option<i32>>>,
     /// The frame the vision phase last ran in: a collider write after it is for the next query.
     pub(super) phase_ran_at: Option<i64>,
 }
@@ -573,6 +575,7 @@ impl Driver<'_> {
             self.vis_tally(&hits);
             self.vis.range.expect.insert(u, hits);
             self.vis_order_apply(w, u);
+            self.vis_order_constrain(w, u);
             let id = w.entity(u).unique_id.clone();
             let last = self.vis.range.last.get(&u).cloned();
             if self.vis.range.recs.contains(&(self.tick, id)) {

@@ -511,9 +511,10 @@ fn replay(
         if b.used {
             let r = &b.rec;
             println!(
-                "vision bounds records: colliders from bounds_init (the window's start): units' {} (others' {}), creation order of {} units equal to the pool's, hidden units with a collider {}, units in the game without {}, start transforms equal to the previous frame's end {} (within the tolerance {}, not checked {}); bounds_tick: unit calls {} (made {}, other entities' {}), radii against the sim's rule: exact {}, within the band {}, corpulence unknown {}; transforms equal to the sim's rule {} (not checked {}); update list, unit-frames: agree {}, the sim's only {}, the recording's only {}, not checked {}; enabled against the sim's: equal {}, not known to the sim {}; bounds_set writes: active {}, moved {}, destroyed {}, other entities' {}, links {}; phys_sync: syncs {}, frames {} (the sim had flagged {}, had not {}), frames the sim flagged with none recorded {}; views the sim thought replaced {}",
+                "vision bounds records: colliders from bounds_init (the window's start): units' {} (others' {}; colliders the lifecycle machine saw {}), creation order of {} units equal to the pool's, hidden units with a collider {}, units in the game without {}, start transforms equal to the previous frame's end {} (within the tolerance {}, not checked {}); bounds_tick: unit calls {} (made {}, other entities' {}), radii against the sim's rule: exact {}, within the band {}, corpulence unknown {}; transforms equal to the sim's rule {} (not checked {}); update list, unit-frames: agree {}, the sim's only {}, the recording's only {}, not checked {}; enabled against the sim's: equal {}, not known to the sim {}; bounds_set writes: active {}, moved {}, destroyed {}, other entities' {}, links {}; phys_sync: syncs {}, frames {} (the sim had flagged {}, had not {}), frames the sim flagged with none recorded {}; views the sim thought replaced {}",
                 b.roots,
                 b.other_roots,
+                b.colliders,
                 b.order_units,
                 b.hidden_with_collider,
                 b.in_game_without,
@@ -549,8 +550,8 @@ fn replay(
         }
         if b.order_records > 0 {
             println!(
-                "vision_order: records {}; sets whose order the sim's colliders give: equal {}, differing {}; sets whose order the sim could not give (taken) {}; units with several colliders at once, left out of the order constraints {:?}",
-                b.order_records, b.order_equal, b.order_differ, b.order_taken, b.order_suspended
+                "vision_order: records {}; sets whose order the sim's colliders give: equal {}, differing {}; sets whose order the sim could not give (taken) {}; units with several possible colliders in a query, whose recorded place wasn't validated {}",
+                b.order_records, b.order_equal, b.order_differ, b.order_taken, b.order_ambiguous
             );
         }
     }

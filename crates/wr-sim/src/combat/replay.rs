@@ -4873,6 +4873,7 @@ fn pos_pair(at: &Rv) -> Option<([f32; 3], [f32; 3])> {
 
 mod agent;
 mod ai;
+mod bounds_life;
 mod bounds_rec;
 mod commands;
 mod corp;

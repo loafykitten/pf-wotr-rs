@@ -293,6 +293,8 @@ pub struct Hit {
     /// update the sim models, whatever the corpulence is (statistics: [`Cause::Corpulence`]
     /// names an unbounded radius, not where it comes from).
     pub lost: bool,
+    /// The collider's instance id when the records show it (`bounds_init`, `bounds_tick`).
+    pub id: Option<i32>,
 }
 
 /// What a tick found beyond updating the colliders.
@@ -643,6 +645,7 @@ impl Bounds {
                 capped: None,
                 extra_slots: c.replaced,
                 lost: c.transform.is_none(),
+                id: c.rec_id,
             });
         }
         cap(&mut out);
@@ -1442,6 +1445,7 @@ mod tests {
             capped: None,
             extra_slots: 0,
             lost: false,
+            id: None,
         };
         let hits = [
             hit(A, Tri::In, None),

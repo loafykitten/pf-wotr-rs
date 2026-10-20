@@ -6835,7 +6835,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             "on0": null, "on": null, "pos0": null, "pos": null, "e0": e0, "e": e})
     }
     type Reasoned = (Change, &'static str);
-    let reasoned: [Reasoned; 12] = [
+    let reasoned: [Reasoned; 16] = [
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
@@ -6859,7 +6859,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(end, g);
                 renumber(recs);
             },
-            "has not seen made",
+            "which no record made",
         ),
         (
             |recs| {
@@ -6880,7 +6880,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(at, g);
                 renumber(recs);
             },
-            "already destroyed",
+            "which is Dying",
         ),
         (
             |recs| {
@@ -6890,7 +6890,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(at, l);
                 renumber(recs);
             },
-            "a link record of collider -1",
+            "a link record names collider -1",
         ),
         (
             |recs| {
@@ -6915,7 +6915,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(at, g);
                 renumber(recs);
             },
-            "the collider is bound to None",
+            "a link record names collider -547392",
         ),
         (
             |recs| {
@@ -6929,7 +6929,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(at, g);
                 renumber(recs);
             },
-            "destroyed earlier in this frame",
+            "bounds_set pos names collider -547392",
         ),
         (
             |recs| {
@@ -6938,7 +6938,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs[at]["r0"] = json!(null);
                 recs[at]["c"] = json!(-998);
             },
-            "previous collider is live",
+            "no entity record linked",
         ),
         // A map object's collider made with its `entity` link written twice, and one written
         // after the call; a link with no collider that carries collider state.
@@ -6955,7 +6955,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(at, link);
                 renumber(recs);
             },
-            "a second link of a making",
+            "a second link",
         ),
         (
             |recs| {
@@ -6969,7 +6969,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 recs.insert(at, made);
                 renumber(recs);
             },
-            "made without an entity link",
+            "no entity record linked",
         ),
         (
             |recs| {
@@ -6981,6 +6981,75 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 renumber(recs);
             },
             "a bounds_set record it can't read",
+        ),
+        // Sol's round 5: the link of a new collider written while the previous one is still the
+        // view's (it is destroyed first); a unit's making that reuses a map object's id; a link
+        // that claims another state than the collider's.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let link = set_rec(&t, "entity", json!(-998), json!(null), json!("558A"));
+                let gone = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                recs[at]["made"] = json!(true);
+                recs[at]["r0"] = json!(null);
+                recs[at]["c"] = json!(-998);
+                recs.insert(at, gone);
+                recs.insert(at, link);
+                renumber(recs);
+            },
+            "is its view collider",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let gone = set_rec(&t, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let link = set_rec(&t, "entity", json!(-547_424), json!(null), json!("558A"));
+                recs[at]["made"] = json!(true);
+                recs[at]["r0"] = json!(null);
+                recs[at]["c"] = json!(-547_424);
+                recs.insert(at, link);
+                recs.insert(at, gone);
+                renumber(recs);
+            },
+            "a second link",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let mut l = set_rec(&t, "link", json!(-547_392), json!("558A"), json!("558A"));
+                l["on0"] = json!(false);
+                l["on"] = json!(false);
+                l["pos0"] = json!([99.0, 0.0, 0.0]);
+                l["pos"] = json!([99.0, 0.0, 0.0]);
+                recs.insert(at, l);
+                renumber(recs);
+            },
+            "a link record of collider -547392 shows enabled",
+        ),
+        // A map object's collider made twice-linked in a later frame.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let link = set_rec(&t, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+                    "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+                    "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+                recs.insert(at, made);
+                recs.insert(at, link);
+                let later = (at + 3..recs.len())
+                    .find(|&i| ev(&recs[i], "bounds_tick") && recs[i]["t"] != t)
+                    .expect("a later tick");
+                let t2 = recs[later]["t"].clone();
+                let again =
+                    set_rec(&t2, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                recs.insert(later, again);
+                renumber(recs);
+            },
+            "a second link",
         ),
     ];
     for (i, (change, why)) in reasoned.into_iter().enumerate() {
@@ -7039,7 +7108,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
     });
     let _ = replay::run_with_tape(&mut w, &changed, &trace);
     assert!(
-        w.coverage.unsupported.keys().any(|k| k.contains("previous collider is live")),
+        w.coverage.unsupported.keys().any(|k| k.contains("no entity record linked")),
         "{:?}",
         w.coverage.unsupported.keys().collect::<Vec<_>>()
     );

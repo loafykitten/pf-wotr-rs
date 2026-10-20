@@ -934,6 +934,7 @@ mod tests {
             capped: None,
             extra_slots: 0,
             lost: false,
+            id: None,
         };
         let mut hits: Vec<Hit> = (0..513).map(|i| hit(i, Tri::In)).collect();
         hits.push(hit(0, Tri::Out));
