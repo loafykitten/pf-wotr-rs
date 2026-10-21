@@ -316,6 +316,25 @@ impl Lifecycle {
                     l.link_on
                 ));
             }
+            // A unit's collider is made of `Max(0.05, Corpulence * view scale)` and set to
+            // `Max(0.05, Corpulence)` in the same call when that differs by more than 0.05; a
+            // unit's `Corpulence` is at least 0.5.
+            if kind == Kind::Unit && r + 0.05 < 0.5 - 1e-6 {
+                out.push(format!(
+                    "a bounds_tick made a unit's collider {c} of radius {r}: under the 0.45 its corpulence of at least 0.5 and the 0.05 hysteresis allow"
+                ));
+            }
+            // A unit's making call sets the transform to the unit's position unless `==` the
+            // creation's: a bitwise change within the tolerance is not one it can make.
+            if kind == Kind::Unit
+                && let Some(lp) = l.link_pos
+                && bits(lp) != bits(pos)
+                && orientation::vec3_eq(lp, pos)
+            {
+                out.push(format!(
+                    "collider {c} was made at {pos:?}, a change from the link's {lp:?} within the `Vector3 ==` tolerance: the call writes only beyond it"
+                ));
+            }
             // `TickEntity` moves a unit's collider only: any other kind's keeps the transform
             // the creation set (the link showed it).
             if kind == Kind::Other && l.link_pos.map(bits) != Some(bits(pos)) {
@@ -363,6 +382,22 @@ impl Lifecycle {
             out.push(format!(
                 "a bounds_tick of collider {c} left radius {r}, under the 0.05 minimum"
             ));
+        }
+        // A unit's call writes the radius `Max(0.05, Corpulence)` (at least 0.5) only when it
+        // differs from the radius by more than 0.05, and the position only beyond the tolerance.
+        if kind == Kind::Unit {
+            if r.to_bits() != l.radius.to_bits() && (r < 0.5 || (r - l.radius).abs() <= 0.05) {
+                out.push(format!(
+                    "a bounds_tick of collider {c} changed the radius {} to {r}: a call writes one of at least 0.5, and only when it differs by more than 0.05",
+                    l.radius
+                ));
+            }
+            if bits(pos) != bits(l.pos) && orientation::vec3_eq(pos, l.pos) {
+                out.push(format!(
+                    "a bounds_tick of collider {c} changed the transform {:?} to {pos:?}, within the `Vector3 ==` tolerance: a call writes only beyond it",
+                    l.pos
+                ));
+            }
         }
         // `TickEntity` moves and resizes a unit's collider only: any other kind's is left as it
         // was made.
@@ -1034,5 +1069,49 @@ mod tests {
             out.iter().any(|x| x.contains("is a MapObjectEntityData and a ScriptZoneData")),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn a_units_radius_and_transform_follow_what_a_call_can_write() {
+        // Sol's round 8, intrinsic and so also in frames the sim didn't follow: a unit's call
+        // writes `Max(0.05, Corpulence)` (at least 0.5) only when it differs by more than 0.05,
+        // and the position only beyond Unity's tolerance.
+        let call = |r: f32, pos: V3| {
+            let mut t = tick(7, "a");
+            if let Ev::Tick { r: rr, pos: pp, .. } = &mut t {
+                (*rr, *pp) = (Some(r), Some(pos));
+            }
+            t
+        };
+        for (r, ok) in
+            [(0.5, true), (0.9, true), (0.1, false), (0.51, false), (0.549, false), (0.56, true)]
+        {
+            let mut m = started();
+            let out = run(&mut m, &[call(r, P)]);
+            assert_eq!(out.is_empty(), ok, "radius {r}: {out:?}");
+        }
+        let mut m = started();
+        let out = run(&mut m, &[call(0.5, [P[0] + 1e-7, P[1], P[2]])]);
+        assert!(out.iter().any(|x| x.contains("within the `Vector3 ==` tolerance")), "{out:?}");
+        let mut m = started();
+        assert!(run(&mut m, &[call(0.5, [P[0] + 0.01, P[1], P[2]])]).is_empty());
+        // A making: within 0.05 of a corpulence of at least 0.5, and its transform from the
+        // link's.
+        let make = |r: f32, pos: V3| {
+            let mut t = making(8, "a", Kind::Unit);
+            if let Ev::Tick { r: rr, pos: pp, .. } = &mut t {
+                (*rr, *pp) = (Some(r), Some(pos));
+            }
+            t
+        };
+        for (r, ok) in [(0.5, true), (0.45, true), (0.3, false), (0.9, true)] {
+            let mut m = started();
+            let out = run(&mut m, &[gone(7, "a"), entity(8, "a"), make(r, P)]);
+            assert_eq!(out.is_empty(), ok, "making radius {r}: {out:?}");
+        }
+        let mut m = started();
+        let out =
+            run(&mut m, &[gone(7, "a"), entity(8, "a"), make(0.5, [P[0] + 1e-7, P[1], P[2]])]);
+        assert!(out.iter().any(|x| x.contains("within the `Vector3 ==` tolerance")), "{out:?}");
     }
 }

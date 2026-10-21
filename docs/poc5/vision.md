@@ -502,16 +502,28 @@ making), a map object's radius at its making.
 **Checks that depend on the simulated state, and what runs without it (frames the sim did not follow replay the records with no
 units).** Each has an intrinsic part (true whatever the sim holds: the machine, every frame) and a stateful part (needs the sim's
 units: `Bounds`, followed frames only), and what is reset across a gap:
-- radius: intrinsic, at least 0.05, a non-unit's equal to its state, a unit's radius before equal to the state (machine); stateful,
-  the rule from the sim's corpulence (`Bounds`); the recorded radius is the state, so nothing stale survives a gap;
-- transform: intrinsic, a non-unit's equal to the state and, when made, to the link's (machine); stateful, the unit's `Vector3 ==` rule
-  against the sim's position (`Bounds`), a making's from the link's transform; nothing stale (the recorded transform is the state);
+- radius: intrinsic (machine): at least 0.05 in every call; a non-unit's equal to its state; a unit's radius before equal to the
+  state; **a unit's call writes `Max(0.05, Corpulence)` (and `UnitEntityView.Corpulence` is `Max(m_Corpulence * scale, 0.5)`, a
+  rider's the mount's, so at least 0.5) only when it differs from the old radius by more than 0.05: a changed radius is at
+  least 0.5 and more than 0.05 away; a making's final radius is within 0.05 of such a value, so at least 0.45**
+  (`decompiled/.../UnitEntityView.cs` lines 401 to 411, `EntityBoundsController.TickEntity`); stateful (`Bounds`): the rule from the
+  sim's corpulence; the recorded radius is the state, so nothing stale survives a gap;
+- transform: intrinsic (machine): a non-unit's equal to the state and, when made, to the link's; **a unit's call (and a unit's
+  making, from the link's transform) writes the position only beyond the `Vector3 ==` tolerance, so a bitwise change that stays
+  within it is refused**; stateful (`Bounds`): the unit's setter rule against the sim's position, and **after each followed frame
+  the collider of a unit in the game at a position the sim knows stands within the tolerance of it** (a missing call is found
+  even where the update-list history is gone); nothing stale (the recorded transform is the state);
 - the update list (`seen`): stateful only (the sim's units' positions); **reset to unknown across a gap** (a skipped frame's move
-  isn't a missing call in the next frame) and unchecked in the first frame after it;
-- `enabled` against `IsInGame`: stateful only; no history kept (`made_hidden` clears when the unit is next seen in the game);
+  isn't a missing call in the next frame) and unchecked in the first frame after it; the transform check above is what still
+  catches a missing call there;
+- `enabled` against `IsInGame`: stateful only; the history kept is `made_hidden`: **a collider made in a frame with no unit state
+  is taken to have possibly been made after its unit left the game** (enabled, `UpdateViewActive` having run before it existed)
+  until the unit is seen in the game;
 - start transform against the previous frame's end, and the creation order against the pool: the first frame only;
 - the sets against the overlap, and the orders: followed frames; a cached order carries over a gap and is keyed by the colliders
   of the next followed frame's query.
+Looked down the list again for an intrinsic part only checked with units: none is left (the other stateful parts have no
+intrinsic content: listing, `IsInGame`, the sets).
 
 What building the table turned up (each now closed): a root's `kind` string was reduced to unit or not, so a map object's type could
 change unreported (an entity now keeps its type name across roots, calls and makings); a root with no radius or `enabled`, or a
@@ -519,7 +531,7 @@ non-unit on the units' layer or a unit off it, was not refused for every kind; `
 five callers the oracle taps); a non-unit collider's call could change its radius and transform (the game leaves them); a
 making could be disabled or under the 0.05 minimum; `active`, `pos`, `gone` and `link` records had fields discarded at parse
 (`v`, `e0`, `e`, `on0`, `pos0` and the changed value) and an `entity` record's `enabled` and position could be null; `vis`
-records weren't a phase boundary unless `vis_order` was declared; making intervals could interleave. Round 7 added: a unit moved in a frame the sim didn't follow left a stale update-list history (now reset), the intrinsic radius floor and a non-unit's making transform were skipped or exempt, a root could have a type and no entity, a call with no collider skipped the type check, a `pos` move under Unity's tolerance passed, and setters or syncs could stand inside the init block.
+records weren't a phase boundary unless `vis_order` was declared; making intervals could interleave. Round 8 added: a unit's radius change beyond the hysteresis and at least 0.5 (0.45 at its making) and its tolerant transform transitions, whichever frames; a missing call found by the collider left away from the unit after a gap; a collider made in a frame the sim did not follow may have been made after its unit left. Round 7 added: a unit moved in a frame the sim didn't follow left a stale update-list history (now reset), the intrinsic radius floor and a non-unit's making transform were skipped or exempt, a root could have a type and no entity, a call with no collider skipped the type check, a `pos` move under Unity's tolerance passed, and setters or syncs could stand inside the init block.
 
 **How the records are used [C]/[M].**
 - `bounds_init` (one root per `GameObject` of the scene at the first tick of the window, before any controller of the tick, then

@@ -6867,7 +6867,7 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
             "on0": on0, "on": on, "pos0": pos0, "pos": pos, "e0": e0, "e": e})
     }
     type Reasoned = (Change, &'static str);
-    let reasoned: [Reasoned; 16] = [
+    let reasoned: [Reasoned; 18] = [
         (
             |recs| {
                 let at = tick_of(recs, "558A", 300);
@@ -7077,6 +7077,30 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
                 renumber(recs);
             },
             "a second link",
+        ),
+        // A unit's call that writes a radius within the 0.05 hysteresis, or a transform within
+        // Unity's tolerance of the old one: neither can be written.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                recs[at]["r"] = json!(0.51);
+            },
+            "only when it differs by more than 0.05",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let prev = recs[..at]
+                    .iter()
+                    .rposition(|r| ev(r, "bounds_tick") && r["e"] == "558A")
+                    .expect("an earlier tick");
+                // (One ulp: a bitwise change well inside the tolerance of 1e-5.)
+                let mut p = recs[prev]["pos"].clone();
+                let x = p[0].as_f64().unwrap() as f32;
+                p[0] = json!(f64::from(f32::from_bits(x.to_bits() + 1)));
+                recs[at]["pos"] = p;
+            },
+            "within the `Vector3 ==` tolerance",
         ),
     ];
     for (i, (change, why)) in reasoned.into_iter().enumerate() {

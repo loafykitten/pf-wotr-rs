@@ -497,7 +497,9 @@ impl Bounds {
         if t.made {
             out.counts.made += 1;
             let mut c = Collider::recorded(&rec, true);
-            c.made_hidden = u.is_some_and(|u| !u.in_game);
+            // (Without the unit's state the game state at the creation is unknown: the collider may
+            // have been made after the unit left the game, enabled, until the unit is seen in it.)
+            c.made_hidden = u.is_none_or(|u| !u.in_game);
             self.colliders.push(c);
             self.made_later += 1;
         } else if let Some(i) = existing {
@@ -530,6 +532,20 @@ impl Bounds {
                 Some(u.unit),
                 format!("the collider's `enabled` is {rec:?} in the record, the sim's unit is {sim:?} (in the game: {})", u.in_game),
             ),
+        }
+        // A unit in the game that the sim knows the position of has its collider within
+        // `Vector3 ==`'s tolerance of it once the frame's calls are applied (a move puts it on the
+        // update list and the call sets the transform): whatever the update-list history holds,
+        // a collider left elsewhere is a call that is missing.
+        if u.pos_known
+            && u.in_game
+            && let Some(t) = c.transform
+            && !orientation::vec3_eq(t, u.pos)
+        {
+            out.problem(
+                Some(u.unit),
+                format!("the unit stands at {:?} and its collider's transform is {t:?}: no call or write moved it", u.pos),
+            );
         }
         let seen = Seen {
             pos: u.pos,
@@ -822,7 +838,7 @@ mod tests {
             &[tick(A, 7, 0.5, 0.5, [0.0; 3])],
             &[su(A, [5.0, 0.0, 0.0], Some(0.5))],
         );
-        assert_eq!(about(&bad, "transform"), 1, "{:?}", bad.problems);
+        assert_eq!(about(&bad, "after a tick, the sim's rule"), 1, "{:?}", bad.problems);
         // The update list: a unit that moved without a tick is the sim's only; the collider's
         // enabled flag against the unit's state.
         let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
@@ -831,7 +847,8 @@ mod tests {
         a.pos = [3.0, 0.0, 0.0];
         let out = b.tick_recorded(RAN, &[], &[], &[a]);
         assert_eq!((out.counts.listed_sim_only, out.counts.listed_agree), (1, 0));
-        assert_eq!(out.problems.len(), 1, "{:?}", out.problems);
+        // (Both the update list and the collider left behind say a call is missing.)
+        assert_eq!(out.problems.len(), 2, "{:?}", out.problems);
         // The same unit with a tick for its move agrees; a tick of a unit that stood still doesn't.
         let mut b2 = started(&[root(A, 7, 0.5, [0.0; 3])]);
         b2.start_check(&[su(A, [0.0; 3], Some(0.5))]);
@@ -1018,11 +1035,16 @@ mod tests {
         assert_eq!((out.counts.listed_agree, out.problems.len()), (1, 0));
         // `lose_track` (the driver's gap) forgets it as well.
         b.lose_track();
-        assert!(
-            b.tick_recorded(RAN, &[], &[], &[su(A, [9.0, 0.0, 0.0], Some(0.5))])
-                .problems
-                .is_empty()
-        );
+        assert!(b.tick_recorded(RAN, &[], &[], &[at3]).problems.is_empty());
+        // Sol's round 8, the damaged counterpart: after the gap the history is gone, but a unit
+        // that stands far from its collider with no call to move it is still a missing call.
+        let far = su(A, [9.0, 0.0, 0.0], Some(0.5));
+        let out = b.tick_recorded(RAN, &[], &[], &[far]);
+        assert_eq!(about(&out, "no call or write moved it"), 1, "{:?}", out.problems);
+        // (Within the tolerance it is the collider's place.)
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        let near = su(A, [0.000_004, 0.0, 0.0], Some(0.5));
+        assert!(b.tick_recorded(RAN, &[], &[], &[near]).problems.is_empty());
     }
 
     #[test]
@@ -1055,6 +1077,43 @@ mod tests {
         assert!(!run([4.0, 0.0, 0.0], [4.0, 0.0, 0.0]).problems.is_empty());
         // The view was at the unit's position within the tolerance: the transform stays.
         assert!(run([5.000_004, 0.0, 0.0], [5.000_004, 0.0, 0.0]).problems.is_empty());
+    }
+
+    #[test]
+    fn a_collider_made_in_a_skipped_frame_may_have_been_made_after_its_unit_left() {
+        // Sol's round 8: `UpdateViewActive` ran before the collider existed, and the making
+        // creates it enabled; with no unit state in the skipped frame that is unknown, until the
+        // unit is seen in the game.
+        let make = RecTick {
+            seq: 2,
+            unit: A,
+            made: true,
+            r0: None,
+            r: Some(0.5),
+            pos: Some([0.0; 3]),
+            on: Some(true),
+            id: Some(8),
+            link_pos: Some([0.0; 3]),
+        };
+        let mut b = started(&[root(A, 7, 0.5, [0.0; 3])]);
+        b.tick_recorded(RAN, &[], &[], &[]);
+        let out = b.tick_recorded(Step::Unknown, &[gone(1, 7, false)], &[make], &[]);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        let mut hidden = su(A, [0.0; 3], Some(0.5));
+        hidden.in_game = false;
+        hidden.enabled = Enabled::No;
+        let out = b.tick_recorded(RAN, &[], &[], &[hidden]);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        assert_eq!(out.counts.enabled_unknown, 1);
+        // Seen in the game, the exception is over: an enabled collider is then the state.
+        let back = su(A, [0.0; 3], Some(0.5));
+        // (Coming back puts the unit on the update list: a call.)
+        let ret = RecTick { seq: 3, ..tick(A, 8, 0.5, 0.5, [0.0; 3]) };
+        let out = b.tick_recorded(RAN, &[], &[ret], &[back]);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        let mut off = su(A, [0.0; 3], Some(0.5));
+        off.enabled = Enabled::No;
+        assert_eq!(b.tick_recorded(RAN, &[], &[], &[off]).problems.len(), 1);
     }
 
     impl Bounds {
