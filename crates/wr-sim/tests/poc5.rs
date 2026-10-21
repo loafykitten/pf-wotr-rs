@@ -7089,11 +7089,10 @@ fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
         ),
         (
             |recs| {
-                let at = tick_of(recs, "558A", 300);
-                let prev = recs[..at]
-                    .iter()
-                    .rposition(|r| ev(r, "bounds_tick") && r["e"] == "558A")
-                    .expect("an earlier tick");
+                let prev = tick_of(recs, "558A", 300);
+                let at = (prev + 1..recs.len())
+                    .find(|&i| ev(&recs[i], "bounds_tick") && recs[i]["e"] == "558A")
+                    .expect("a later tick");
                 // (One ulp: a bitwise change well inside the tolerance of 1e-5.)
                 let mut p = recs[prev]["pos"].clone();
                 let x = p[0].as_f64().unwrap() as f32;
