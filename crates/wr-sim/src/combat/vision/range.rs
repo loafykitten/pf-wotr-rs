@@ -60,7 +60,7 @@
 //! centre to the capsule's segment against the squared sum of the radii, in `f32`
 //! (`Gu::distancePointSegmentSquared`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::world::EntityIdx;
 
@@ -239,6 +239,9 @@ struct Collider {
     /// The unit's state at the last tick the sim modelled: what the update list reacts to; `None`
     /// after a frame the sim didn't follow (whether the next tick updates the collider isn't known).
     seen: Option<Seen>,
+    /// The collider's GameObject instance id, as the recording names it (`bounds_init`'s `id`,
+    /// `bounds_tick`'s `c`): only with the recorded colliders ([`Bounds::start_recorded`]).
+    rec_id: Option<i32>,
 }
 
 /// A unit's state at a bounds tick.
@@ -290,6 +293,8 @@ pub struct Hit {
     /// update the sim models, whatever the corpulence is (statistics: [`Cause::Corpulence`]
     /// names an unbounded radius, not where it comes from).
     pub lost: bool,
+    /// The collider's instance id when the records show it (`bounds_init`, `bounds_tick`).
+    pub id: Option<i32>,
 }
 
 /// What a tick found beyond updating the colliders.
@@ -309,6 +314,12 @@ pub struct Bounds {
     gap: bool,
     /// Colliders made after the first tick (units that joined later).
     pub made_later: usize,
+    /// The colliders' state is the game's own, from WrathOracle's `bounds_*` records
+    /// ([`Bounds::start_recorded`]): the sim's update model is only a check on them.
+    recorded: bool,
+    /// Colliders (by id) a `bounds_set` destroyed in a frame whose query still saw them: they
+    /// leave the scene at the frame's end ([`Bounds::tick_recorded`]).
+    dying: Vec<i32>,
 }
 
 fn sub(a: V3, b: V3) -> V3 {
@@ -380,30 +391,13 @@ impl Bounds {
     /// order. The first tick of a window finds the colliders where the unit stood at the
     /// frame's start.
     pub fn tick(&mut self, units: &[BoundsUnit], step: Step) -> Tick {
+        assert!(!self.recorded, "the recorded colliders are ticked by tick_recorded");
         let first = !self.started;
         self.started = true;
         // A collider first met after a gap may have been made, and synced, in a frame the sim
         // didn't follow.
         let gap = std::mem::take(&mut self.gap);
-        for c in &mut self.colliders {
-            match (step, c.transform) {
-                (Step::NotRan, _) => {}
-                // A step may have taken a transform the sim doesn't know.
-                (_, None) => c.phys_unknown = true,
-                (Step::Ran, Some(t)) => {
-                    c.phys = vec![t];
-                    c.phys_unknown = false;
-                    c.phys_fuzzy = c.fuzzy;
-                }
-                (Step::Unknown, Some(t)) => {
-                    if !c.phys.iter().any(|p| p.map(f32::to_bits) == t.map(f32::to_bits)) {
-                        c.phys.push(t);
-                    }
-                    c.phys_unknown |= c.phys.len() > MAX_CANDIDATES;
-                    c.phys_fuzzy |= c.fuzzy;
-                }
-            }
-        }
+        self.take_step(step);
         let present: HashSet<EntityIdx> = units.iter().map(|u| u.unit).collect();
         let mut out = Tick::default();
         self.colliders.retain(|c| {
@@ -458,6 +452,7 @@ impl Bounds {
                     made_hidden,
                     replaced: 0,
                     seen: u.pos_known.then_some(seen),
+                    rec_id: None,
                 };
                 if !u.in_game || !u.pos_known || unseen {
                     c.lose();
@@ -520,10 +515,43 @@ impl Bounds {
         out
     }
 
+    /// The physics step a frame ran (before its controllers): the transforms the previous ticks
+    /// set reach PhysX; when it isn't known whether one ran, the collider has both candidates.
+    fn take_step(&mut self, step: Step) {
+        for c in &mut self.colliders {
+            match (step, c.transform) {
+                (Step::NotRan, _) => {}
+                // A step may have taken a transform the sim doesn't know.
+                (_, None) => c.phys_unknown = true,
+                (Step::Ran, Some(t)) => {
+                    c.phys = vec![t];
+                    c.phys_unknown = false;
+                    c.phys_fuzzy = c.fuzzy;
+                }
+                (Step::Unknown, Some(t)) => {
+                    if !c.phys.iter().any(|p| p.map(f32::to_bits) == t.map(f32::to_bits)) {
+                        c.phys.push(t);
+                    }
+                    c.phys_unknown |= c.phys.len() > MAX_CANDIDATES;
+                    c.phys_fuzzy |= c.fuzzy;
+                }
+            }
+        }
+    }
+
     /// A frame the sim didn't follow (the bounds controller may have ticked, the units may have
     /// moved or changed size, a step may have run): every collider is lost until its next
     /// modelled update, and the next tick can't tell which units it updates.
     pub fn lose_track(&mut self) {
+        if self.recorded {
+            // (The records show what the ticks did; a step or a sync may have run unseen, and the
+            // units may have moved unseen: the update-list history is gone.)
+            self.forget_positions();
+            for c in &mut self.colliders {
+                c.seen = None;
+            }
+            return;
+        }
         for c in &mut self.colliders {
             c.lose();
             c.seen = None;
@@ -541,6 +569,10 @@ impl Bounds {
     /// A unit's view replaced (a polymorph's start or end): its collider is lost, its place in
     /// the order unknown, and its pairs the recording's from now on ([`Collider::replaced`]).
     pub fn replace_unit(&mut self, u: EntityIdx) {
+        if self.recorded {
+            // (The records show the new collider's making and the old one's destruction.)
+            return;
+        }
         for c in self.colliders.iter_mut().filter(|c| c.unit == u) {
             c.lose();
             c.seen = None;
@@ -552,6 +584,10 @@ impl Bounds {
     /// A unit's collider whose transform the sim set from a wrong position: lost until its next
     /// modelled update.
     pub fn lose_unit(&mut self, u: EntityIdx) {
+        if self.recorded {
+            // (The transform is the recording's, not the sim's from a row.)
+            return;
+        }
         for c in self.colliders.iter_mut().filter(|c| c.unit == u) {
             c.lose();
             c.seen = None;
@@ -613,6 +649,7 @@ impl Bounds {
                 capped: None,
                 extra_slots: c.replaced,
                 lost: c.transform.is_none(),
+                id: c.rec_id,
             });
         }
         cap(&mut out);
@@ -657,6 +694,45 @@ pub enum Difference {
     Count(usize),
 }
 
+/// The pairs by unit: a unit's colliders merged into the first, which is in if any is, else open
+/// if any is, else out. The order is the first hit's (the set enumerates a unit once).
+#[must_use]
+pub fn by_unit(hits: &[Hit]) -> Vec<Hit> {
+    let mut out: Vec<Hit> = Vec::with_capacity(hits.len());
+    for h in hits {
+        let Some(first) = out.iter_mut().find(|x| x.unit == h.unit) else {
+            out.push(*h);
+            continue;
+        };
+        first.extra_slots += h.extra_slots;
+        if h.capped == Some(Tri::In) {
+            first.capped = Some(Tri::In);
+        }
+        first.order_known &= h.order_known;
+        let rank = |t: Tri| match t {
+            Tri::In => 2,
+            Tri::Maybe => 1,
+            Tri::Out => 0,
+        };
+        if rank(h.tri) > rank(first.tri) {
+            first.tri = h.tri;
+            first.cause = h.cause;
+        }
+    }
+    out
+}
+
+/// The result-buffer slots the colliders of a recorded unit beyond its first may take: those that
+/// may be hit (a result consistent with the recorded set holds a unit's colliders only for units
+/// in it, and none that are surely out).
+fn duplicate_slots(colliders: &[Hit], recorded: &HashSet<EntityIdx>) -> usize {
+    let mut per_unit: HashMap<EntityIdx, usize> = HashMap::new();
+    for h in colliders.iter().filter(|h| h.tri != Tri::Out && recorded.contains(&h.unit)) {
+        *per_unit.entry(h.unit).or_default() += 1;
+    }
+    per_unit.values().map(|n| n - 1).sum()
+}
+
 /// What [`differences`] found.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Differences {
@@ -673,7 +749,11 @@ pub struct Differences {
 
 /// The differences between a query's hits and a recorded set, and the pairs the recording decided.
 #[must_use]
-pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
+pub fn differences(colliders: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
+    // A unit with two colliders at once (its view replaced: the old one lives until the frame's
+    // end) is in the set if either is hit; the buffer counts both.
+    let hits = &by_unit(colliders);
+    let duplicates = duplicate_slots(colliders, recorded);
     let mut out = Differences::default();
     let mut seen = HashSet::new();
     for h in hits {
@@ -705,7 +785,7 @@ pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
     // holds every hit that surely overlaps; only a full buffer may leave some out.
     if recorded.len() > RESULT_BUFFER {
         out.diffs.push(Difference::Count(recorded.len()));
-    } else if recorded.len() + extra_slots(hits) < RESULT_BUFFER {
+    } else if recorded.len() + extra_slots(hits) + duplicates < RESULT_BUFFER {
         // (Old colliders of replaced views may have taken slots and been dropped after.)
         out.diffs.extend(
             hits.iter()
@@ -715,6 +795,9 @@ pub fn differences(hits: &[Hit], recorded: &HashSet<EntityIdx>) -> Differences {
     }
     out
 }
+
+mod recorded;
+pub use recorded::{Event, RecCollider, RecCounts, RecOut, RecTick, Write};
 
 #[cfg(test)]
 mod tests {
@@ -1366,6 +1449,7 @@ mod tests {
             capped: None,
             extra_slots: 0,
             lost: false,
+            id: None,
         };
         let hits = [
             hit(A, Tri::In, None),

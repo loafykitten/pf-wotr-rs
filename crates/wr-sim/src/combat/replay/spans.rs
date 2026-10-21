@@ -622,6 +622,9 @@ impl Driver<'_> {
                 "a projectile launched by a rule the sim didn't fire as an attack",
             ),
             Some("invalid") => self.out.spans.oracle_invalid += 1,
+            // A collider write or a sync inside the span: queued for the frame's vision phase,
+            // where the sim's own writes of the rule stand (`bounds_rec.rs`).
+            Some("bounds_set" | "phys_sync") if self.bounds_rec_on() => self.bounds_stream(w, r),
             other => self.span_reported(
                 w,
                 format!("an {} observation", other.unwrap_or("?")),

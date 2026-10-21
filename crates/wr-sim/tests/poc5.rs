@@ -6667,3 +6667,568 @@ fn computed_line_of_sight_replays_are_valid_and_damage_is_reported() {
     assert_eq!(out.vision.as_ref().map(|v| v.probes), Some(1));
     assert!(missed.is_empty(), "{missed:#?}");
 }
+
+/// The vision range's colliders from the recording (docs/poc5/vision.md, "The window's start,
+/// from the records"): `poc5-tb-140`'s `bounds_init`, `bounds_tick`, `bounds_set`, `phys_sync`
+/// and `vis_order` replace the window-start hypotheses; every way of damaging them is reported.
+/// Needs the area's line-of-sight file and fog of war bounds (`scripts/scene-cache.sh`,
+/// `wr-rules-data`).
+#[test]
+#[ignore = "needs the game's blueprint pack, Manual_18, poc5-tb-140 and the area's line-of-sight file"]
+#[allow(clippy::too_many_lines)]
+fn bounds_records_replace_the_start_hypotheses_and_damage_is_reported() {
+    use serde_json::Value as V;
+    let Some(dir) = fixture_in("poc5-tb-140", "tb-lizard") else {
+        eprintln!("poc5-tb-140/tb-lizard not present: skipped");
+        return;
+    };
+    let (out, w) = replay::run_fixture(SAVE, &dir, "record").expect("replay");
+    assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+    assert!(out.diff.equal, "{:?}", out.diff.first_difference);
+    let v = out.vision.expect("line of sight computed");
+    let b = &v.rec;
+    assert!(b.used && b.roots == 21 && b.other_roots == 43, "{b:?}");
+    assert!(b.rec.ticks > 1000 && b.rec.radius_exact + b.rec.radius_band == b.rec.ticks, "{b:?}");
+    assert!(b.order_records > 100 && b.order_equal > 70_000 && b.order_differ < 100, "{b:?}");
+    // Nothing is left to the recording for the radii, the history or the scale band, and no set differs.
+    assert_eq!(v.range_differences, 0);
+    assert_eq!((v.range_open[0], v.range_open[2], v.range_open[3]), (0, 0, 0));
+    assert_eq!(v.records_unconsumed, 0);
+
+    type Change = fn(&mut Vec<V>);
+    fn ev(r: &V, e: &str) -> bool {
+        r["k"] == "obs" && r["ev"] == e
+    }
+    fn pos(recs: &[V], f: impl Fn(&V) -> bool) -> usize {
+        recs.iter().position(f).expect("a record to damage")
+    }
+    fn renumber(recs: &mut [V]) {
+        for (n, r) in recs.iter_mut().enumerate() {
+            r["seq"] = json!(n);
+        }
+    }
+    fn root_of(recs: &[V], e: &str) -> usize {
+        pos(recs, |r| ev(r, "bounds_init") && r["e"] == e)
+    }
+    fn tick_of(recs: &[V], e: &str, after: i64) -> usize {
+        pos(recs, |r| ev(r, "bounds_tick") && r["e"] == e && r["t"].as_i64() > Some(after))
+    }
+    const X: &str = "driven replay: vision:";
+    let cases: [Change; 18] = [
+        // bounds_init: a field missing, the count wrong, a radius wrong, a collider missing, two
+        // swapped (the creation order), a hidden-looking collider (disabled), a position moved.
+        |recs| {
+            let at = pos(recs, |r| ev(r, "bounds_init"));
+            recs[at].as_object_mut().unwrap().remove("fade");
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "bounds_init_end"));
+            recs[at]["n"] = json!(63);
+        },
+        |recs| {
+            let at = root_of(recs, "5052");
+            recs[at]["r"] = json!(0.9);
+        },
+        |recs| {
+            let at = root_of(recs, "5198");
+            recs.remove(at);
+            let end = pos(recs, |r| ev(r, "bounds_init_end"));
+            recs[end]["n"] = json!(63);
+            for (n, r) in recs.iter_mut().filter(|r| ev(r, "bounds_init")).enumerate() {
+                r["i"] = json!(n);
+            }
+            renumber(recs);
+        },
+        |recs| {
+            let (a, b) = (root_of(recs, "558A"), root_of(recs, "5671"));
+            for k in ["e", "kind", "r", "on", "pos", "fade", "layer", "id"] {
+                let t = recs[a][k].clone();
+                recs[a][k] = recs[b][k].clone();
+                recs[b][k] = t;
+            }
+        },
+        |recs| {
+            let at = root_of(recs, "5052");
+            recs[at]["on"] = json!(false);
+        },
+        |recs| {
+            let at = root_of(recs, "5052");
+            recs[at]["pos"][0] = json!(recs[at]["pos"][0].as_f64().unwrap() + 3.0);
+        },
+        // bounds_tick: one that threw, a radius the sim's rule can't give, a transform it can't
+        // give, a radius before that isn't the last one's, a collider nobody made.
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            recs[at]["x"] = json!("NullReferenceException");
+        },
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            recs[at]["r"] = json!(1.5);
+        },
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            recs[at]["pos"][2] = json!(recs[at]["pos"][2].as_f64().unwrap() + 1.0);
+        },
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            recs[at]["r0"] = json!(0.9);
+        },
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            recs[at]["c"] = json!(-1);
+        },
+        // A bounds_tick the game made and the record lacks: the sim's update list has the unit.
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            recs.remove(at);
+            renumber(recs);
+        },
+        // bounds_scene mid-window.
+        |recs| {
+            let at = tick_of(recs, "558A", 300);
+            let t = recs[at]["t"].clone();
+            recs.insert(at, json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_scene"}));
+            renumber(recs);
+        },
+        // bounds_set: an `active` the collider contradicts (it was on, the record says it was
+        // off before), one naming a collider nobody made.
+        |recs| {
+            let at = pos(recs, |r| ev(r, "bounds_set") && r["fn"] == "active");
+            recs[at]["on0"] = json!(false);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "bounds_set") && r["fn"] == "active");
+            recs[at]["c"] = json!(-1);
+        },
+        // vis_order: a unit's order swapped, and a unit's first record gone.
+        |recs| {
+            let at = pos(recs, |r| {
+                ev(r, "vis_order")
+                    && r["t"].as_i64() > Some(300)
+                    && r["v"].as_array().unwrap().len() > 2
+            });
+            recs[at]["v"].as_array_mut().unwrap().swap(0, 1);
+        },
+        |recs| {
+            let at = pos(recs, |r| ev(r, "vis_order") && r["t"] == 0);
+            recs.remove(at);
+            renumber(recs);
+        },
+    ];
+    let mut missed = Vec::new();
+    for (i, change) in cases.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let changed = trace.edited(change);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        let first = w.coverage.unsupported.keys().find(|k| k.starts_with(X));
+        eprintln!("bounds case {i}: {first:?}");
+        if w.valid() || first.is_none() {
+            missed
+                .push(format!("case {i}: {:?}", w.coverage.unsupported.keys().collect::<Vec<_>>()));
+        }
+    }
+    // Records that stand where their frame says, one tick an entity a frame, writes after the last
+    // frame's query, a collider destroyed twice, a relink of a collider the sim has not seen or
+    // of one bound to another entity: each reported, and for the reason.
+    /// A `bounds_set` record before `recs[at]`, as the oracle writes it: the collider's state is
+    /// the last call's (or its root's) before `at`.
+    fn set_rec(recs: &[V], at: usize, fun: &str, c: V, e0: V, e: V) -> V {
+        let t = recs[at]["t"].clone();
+        let (on, pos) = recs[..at]
+            .iter()
+            .rev()
+            .find_map(|r| {
+                (ev(r, "bounds_tick") && r["c"] == c).then(|| (r["on"].clone(), r["pos"].clone()))
+            })
+            .or_else(|| {
+                recs.iter().find_map(|r| {
+                    (ev(r, "bounds_init") && r["id"] == c)
+                        .then(|| (r["on"].clone(), r["pos"].clone()))
+                })
+            })
+            .unwrap_or((json!(true), json!([0.0, 0.0, 0.0])));
+        let off = json!(!on.as_bool().unwrap_or(true));
+        let moved = {
+            let mut p = pos.clone();
+            if let Some(x) = p[0].as_f64() {
+                p[0] = json!(x + 1.0);
+            }
+            p
+        };
+        let (v, on0, on, pos0, pos, e0, e) = match fun {
+            "gone" => (e0.clone(), on, V::Null, pos, V::Null, e0, V::Null),
+            "pos" => (e.clone(), on.clone(), on, pos, moved, e0, e),
+            "active" => (e.clone(), on, off, pos.clone(), pos, e0, e),
+            "entity" => (V::Null, V::Null, json!(true), V::Null, json!([1.0, 2.0, 3.0]), e0, e),
+            _ if c.is_null() => (V::Null, V::Null, V::Null, V::Null, V::Null, V::Null, V::Null),
+            _ => (e.clone(), on.clone(), on, pos.clone(), pos, e0, e),
+        };
+        json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_set", "fn": fun, "v": v, "c": c,
+            "on0": on0, "on": on, "pos0": pos0, "pos": pos, "e0": e0, "e": e})
+    }
+    type Reasoned = (Change, &'static str);
+    let reasoned: [Reasoned; 18] = [
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].as_i64().unwrap();
+                let next = pos(recs, |r| r["k"] == "tick" && r["t"].as_i64() == Some(t + 1));
+                let r = recs.remove(at);
+                recs.insert(next, r);
+                renumber(recs);
+            },
+            "claims tick",
+        ),
+        (
+            |recs| {
+                let end = recs.len() - 1;
+                let g = set_rec(recs, end, "active", json!(-1), json!("558A"), json!("558A"));
+                recs.insert(end, g);
+                renumber(recs);
+            },
+            "which no record made",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let mut d = recs[at].clone();
+                d["seq"] = json!(0);
+                recs.insert(at + 1, d);
+                renumber(recs);
+            },
+            "two bounds_tick",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let g = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                recs.insert(at, g.clone());
+                recs.insert(at, g);
+                renumber(recs);
+            },
+            "which is Dying",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let l = set_rec(recs, at, "link", json!(-1), json!("558A"), json!("558A"));
+                recs.insert(at, l);
+                renumber(recs);
+            },
+            "a link record names collider -1",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let l = set_rec(recs, at, "link", json!(-547_392), json!("558A"), json!("5671"));
+                recs.insert(at, l);
+                renumber(recs);
+            },
+            "a link record: `e`",
+        ),
+        // A link of a collider that was destroyed (the view's reference is gone), a position
+        // write to one destroyed earlier in the frame, a call that makes a second collider
+        // for a unit whose first is live.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let g = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let l = set_rec(recs, at, "link", json!(-547_392), json!("558A"), json!("558A"));
+                recs.insert(at, l);
+                recs.insert(at, g);
+                renumber(recs);
+            },
+            "a link record names collider -547392",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let g = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let mut p = set_rec(recs, at, "pos", json!(-547_392), json!("558A"), json!("558A"));
+                p["pos0"] = json!([0.0, 0.0, 0.0]);
+                p["pos"] = json!([1.0, 0.0, 0.0]);
+                recs.insert(at, p);
+                recs.insert(at, g);
+                renumber(recs);
+            },
+            "bounds_set pos names collider -547392",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                recs[at]["made"] = json!(true);
+                recs[at]["r0"] = json!(null);
+                recs[at]["c"] = json!(-998);
+            },
+            "no entity record linked",
+        ),
+        // A map object's collider made with its `entity` link written twice, and one written
+        // after the call; a link with no collider that carries collider state.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let link =
+                    set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+                    "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+                    "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+                recs.insert(at, made);
+                recs.insert(at, link.clone());
+                recs.insert(at, link);
+                renumber(recs);
+            },
+            "a second link",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let link =
+                    set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+                    "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+                    "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+                recs.insert(at, link);
+                recs.insert(at, made);
+                renumber(recs);
+            },
+            "no entity record linked",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let mut l = set_rec(recs, at, "link", json!(null), json!(null), json!(null));
+                l["on"] = json!(true);
+                recs.insert(at, l);
+                renumber(recs);
+            },
+            "a link record with no collider",
+        ),
+        // Sol's round 5: the link of a new collider written while the previous one is still the
+        // view's (it is destroyed first); a unit's making that reuses a map object's id; a link
+        // that claims another state than the collider's.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let link = set_rec(recs, at, "entity", json!(-998), json!(null), json!("558A"));
+                let gone = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                recs[at]["made"] = json!(true);
+                recs[at]["r0"] = json!(null);
+                recs[at]["c"] = json!(-998);
+                recs.insert(at, gone);
+                recs.insert(at, link);
+                renumber(recs);
+            },
+            "is its view collider",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let gone = set_rec(recs, at, "gone", json!(-547_392), json!("558A"), json!("558A"));
+                let link = set_rec(recs, at, "entity", json!(-547_424), json!(null), json!("558A"));
+                recs[at]["made"] = json!(true);
+                recs[at]["r0"] = json!(null);
+                recs[at]["c"] = json!(-547_424);
+                recs.insert(at, link);
+                recs.insert(at, gone);
+                renumber(recs);
+            },
+            "a second link",
+        ),
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let mut l =
+                    set_rec(recs, at, "link", json!(-547_392), json!("558A"), json!("558A"));
+                l["on0"] = json!(false);
+                l["on"] = json!(false);
+                l["pos0"] = json!([99.0, 0.0, 0.0]);
+                l["pos"] = json!([99.0, 0.0, 0.0]);
+                recs.insert(at, l);
+                renumber(recs);
+            },
+            "a link record: `on0`",
+        ),
+        // A map object's collider made twice-linked in a later frame.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                let t = recs[at]["t"].clone();
+                let link =
+                    set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
+                let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+                    "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+                    "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+                recs.insert(at, made);
+                recs.insert(at, link);
+                let later = (at + 3..recs.len())
+                    .find(|&i| ev(&recs[i], "bounds_tick") && recs[i]["t"] != t)
+                    .expect("a later tick");
+                let again = set_rec(
+                    recs,
+                    later,
+                    "entity",
+                    json!(-5000),
+                    json!(null),
+                    json!("a-map-object"),
+                );
+                recs.insert(later, again);
+                renumber(recs);
+            },
+            "a second link",
+        ),
+        // A unit's call that writes a radius within the 0.05 hysteresis, or a transform within
+        // Unity's tolerance of the old one: neither can be written.
+        (
+            |recs| {
+                let at = tick_of(recs, "558A", 300);
+                recs[at]["r"] = json!(0.51);
+            },
+            "only when it differs by more than 0.05",
+        ),
+        (
+            |recs| {
+                let prev = tick_of(recs, "558A", 300);
+                let at = (prev + 1..recs.len())
+                    .find(|&i| ev(&recs[i], "bounds_tick") && recs[i]["e"] == "558A")
+                    .expect("a later tick");
+                // (One ulp: a bitwise change well inside the tolerance of 1e-5.)
+                let mut p = recs[prev]["pos"].clone();
+                let x = p[0].as_f64().unwrap() as f32;
+                p[0] = json!(f64::from(f32::from_bits(x.to_bits() + 1)));
+                recs[at]["pos"] = p;
+            },
+            "within the `Vector3 ==` tolerance",
+        ),
+    ];
+    for (i, (change, why)) in reasoned.into_iter().enumerate() {
+        let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+        let changed = trace.edited(change);
+        let _ = replay::run_with_tape(&mut w, &changed, &trace);
+        if w.valid() || !w.coverage.unsupported.keys().any(|k| k.starts_with(X) && k.contains(why))
+        {
+            missed.push(format!(
+                "reasoned case {i} ({why}): {:?}",
+                w.coverage.unsupported.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+    // A collider destroyed and made again mid-window (the unit's view replaced: `gone`, a
+    // `bounds_tick` that makes the new collider, its link): the records are accepted.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let last = recs
+            .iter()
+            .rposition(|r| ev(r, "bounds_tick") && r["e"] == "558A")
+            .expect("a tick of 558A");
+        let old = recs[last]["c"].clone();
+        let gone = set_rec(recs, last, "gone", old.clone(), json!("558A"), json!("558A"));
+        recs[last]["made"] = json!(true);
+        recs[last]["r0"] = json!(null);
+        recs[last]["c"] = json!(-999);
+        let link = set_rec(recs, last, "entity", json!(-999), json!(null), json!("558A"));
+        recs.insert(last, link);
+        recs.insert(last, gone);
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    let reported: Vec<_> =
+        w.coverage.unsupported.keys().filter(|k| k.contains("bounds records:")).collect();
+    assert!(reported.is_empty(), "{reported:?}");
+    let b = out.vision.as_ref().map(|v| (v.rec.rec.made, v.rec.rec.gone));
+    assert_eq!(b, Some((1, 1)));
+    // (The unit is in its sets through the old collider, which lives to the frame's end.)
+    assert_eq!(out.vision.as_ref().map(|v| v.range_differences), Some(0));
+    // A `link` with no collider (a view attached or detached: the records can't tell which)
+    // permits nothing: a call that makes a second collider while the first is live is still
+    // reported.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = tick_of(recs, "558A", 300);
+        let mut l = set_rec(recs, at, "link", json!(null), json!(null), json!(null));
+        l["v"] = json!("558A");
+        recs[at]["made"] = json!(true);
+        recs[at]["r0"] = json!(null);
+        recs[at]["c"] = json!(-998);
+        recs.insert(at, l);
+        renumber(recs);
+    });
+    let _ = replay::run_with_tape(&mut w, &changed, &trace);
+    assert!(
+        w.coverage.unsupported.keys().any(|k| k.contains("no entity record linked")),
+        "{:?}",
+        w.coverage.unsupported.keys().collect::<Vec<_>>()
+    );
+    // A map object's collider made in a frame, its `entity` record written inside the making
+    // (before the call's `bounds_tick`, the oracle's order): not a unit's, nothing to report.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = tick_of(recs, "558A", 300);
+        let t = recs[at]["t"].clone();
+        let link = set_rec(recs, at, "entity", json!(-5000), json!(null), json!("a-map-object"));
+        let made = json!({"seq": 0, "k": "obs", "t": t, "ev": "bounds_tick", "e": "a-map-object",
+            "kind": "MapObjectEntityData", "made": true, "r0": null, "r": 0.05,
+            "pos": [1.0, 2.0, 3.0], "on": true, "c": -5000});
+        recs.insert(at, made);
+        recs.insert(at, link);
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    let reported: Vec<_> =
+        w.coverage.unsupported.keys().filter(|k| k.contains("bounds records:")).collect();
+    assert!(reported.is_empty(), "{reported:?}");
+    assert_eq!(out.vision.as_ref().map(|v| v.rec.other_ticks), Some(1));
+    // A frame the sim doesn't follow (a game mode it doesn't model: no vision phase) holding a
+    // sync, a destruction, the new collider's `entity` link (written before its call) and the
+    // call that makes it: replayed in the stream's order in the next frame's phase.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = tick_of(recs, "558A", 300);
+        let t = recs[at]["t"].clone();
+        let t_n = t.as_i64().unwrap();
+        let old = recs[at]["c"].clone();
+        let frame = pos(recs, |r| r["k"] == "tick" && r["t"].as_i64() == Some(t_n));
+        recs[frame]["mode"] = json!(99);
+        recs[at]["made"] = json!(true);
+        recs[at]["r0"] = json!(null);
+        recs[at]["c"] = json!(-998);
+        for r in recs[at + 1..].iter_mut() {
+            if r["c"] == old && (ev(r, "bounds_tick") || ev(r, "bounds_set")) {
+                r["c"] = json!(-998);
+            }
+        }
+        let sync = json!({"seq": 0, "k": "obs", "t": t, "ev": "phys_sync", "src": "UnitPlaceOnGroundController.Tick"});
+        let gone = set_rec(recs, at, "gone", old, json!("558A"), json!("558A"));
+        let link = set_rec(recs, at, "entity", json!(-998), json!(null), json!("558A"));
+        for r in [link, gone, sync] {
+            recs.insert(at, r);
+        }
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    let reported: Vec<_> =
+        w.coverage.unsupported.keys().filter(|k| k.contains("bounds records:")).collect();
+    assert!(reported.is_empty(), "{reported:?}");
+    let v = out.vision.as_ref().expect("line of sight");
+    assert_eq!((v.rec.rec.made, v.rec.rec.gone, v.rec.rec.syncs), (1, 1, 1));
+    assert!(v.range_frames_lost >= 1, "the frame was not followed");
+    assert_eq!(v.records_unconsumed, 0);
+    // A sync the game made (the shape `phys_sync` has) is a candidate set for the colliders'
+    // positions, not a contradiction: valid, counted.
+    let (mut w, trace) = replay::prepare_world(SAVE, &dir, "record").expect("prepare");
+    let changed = trace.edited(|recs| {
+        let at = tick_of(recs, "558A", 300);
+        let t = recs[at]["t"].clone();
+        recs.insert(
+            at,
+            json!({"seq": 0, "k": "obs", "t": t, "ev": "phys_sync", "src": "UnitPlaceOnGroundController.Tick"}),
+        );
+        renumber(recs);
+    });
+    let out = replay::run_with_tape(&mut w, &changed, &trace);
+    assert!(w.valid(), "{:?}", w.coverage.unsupported.keys().collect::<Vec<_>>());
+    let counted = out.vision.as_ref().map(|v| (v.rec.rec.syncs, v.rec.sync_frames));
+    assert_eq!(counted, Some((1, 1)));
+    assert!(missed.is_empty(), "{missed:#?}");
+}

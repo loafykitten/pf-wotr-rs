@@ -82,6 +82,20 @@ pub(super) struct RangeDriver {
     clock: Option<(f64, i64, f64)>,
     /// The Unity frame of each recorded tick and its scaled delta (`Time.deltaTime`).
     frames: HashMap<i64, (i64, f64)>,
+    /// WrathOracle's `bounds_*` family (`bounds_rec.rs`): the colliders as the game made and
+    /// changed them, instead of the window-start hypotheses; `None` without the observers (or
+    /// when the records were refused).
+    pub(super) rec: Option<super::bounds_rec::BoundsRec>,
+    /// `vis_order`: each unit's `CanBeInVisionRange` enumeration order, when it changed.
+    pub(super) orders: Option<super::bounds_rec::OrderRec>,
+    /// Each unit's recorded order as of its last `vis_order` record.
+    pub(super) order_last: HashMap<EntityIdx, Vec<EntityIdx>>,
+    /// The static order of the colliders the recorded orders have put (as pairs, a before b).
+    pub(super) order_pairs: super::bounds_rec::OrderGraph,
+    /// Each observer's order as last keyed by collider identity (a change is re-checked).
+    pub(super) order_keys: HashMap<EntityIdx, Vec<Option<i32>>>,
+    /// The frame the vision phase last ran in: a collider write after it is for the next query.
+    pub(super) phase_ran_at: Option<i64>,
 }
 
 impl RangeDriver {
@@ -217,18 +231,28 @@ impl Driver<'_> {
         let Some(hits) = self.vis.range.expect.remove(&u) else { return };
         // The set's enumeration order: the overlap's (the colliders' order), the set's units that
         // have no collider after it.
-        let mut order: Vec<EntityIdx> =
-            hits.iter().map(|h| h.unit).filter(|x| set.contains(x)).collect();
+        let mut order: Vec<EntityIdx> = Vec::new();
+        for h in &hits {
+            // (A unit with two colliders enters the set once, at its first.)
+            if set.contains(&h.unit) && !order.contains(&h.unit) {
+                order.push(h.unit);
+            }
+        }
         let mut rest: Vec<EntityIdx> = set.iter().copied().filter(|x| !order.contains(x)).collect();
         rest.sort();
+        let no_rest = rest.is_empty();
         order.extend(rest);
-        w.combat.vision.near_order.insert(u, order);
         // A set holding a collider of unknown place in the order has an unknown order.
-        if hits.iter().filter(|h| set.contains(&h.unit)).all(|h| h.order_known) {
+        let known = hits.iter().filter(|h| set.contains(&h.unit)).all(|h| h.order_known);
+        // With `vis_order` the unit's recorded order is checked against the sim's where the sim
+        // has one, and is the order where it has none.
+        let taken = self.vis_order_check(w, u, set, &order, known && no_rest);
+        if known || taken.is_some() {
             w.combat.vision.near_inexact.remove(&u);
         } else {
             w.combat.vision.near_inexact.insert(u);
         }
+        w.combat.vision.near_order.insert(u, taken.unwrap_or(order));
         if self.vis.ag {
             self.vis_range_judge(w, u, &hits, set, rec);
         } else {
@@ -434,6 +458,11 @@ impl Driver<'_> {
         }
         let pool = crate::scene::units_with_bounds(w);
         let mut list = Vec::with_capacity(pool.len());
+        let mut rec_on = self.bounds_rec_on();
+        if rec_on && first {
+            // (Before the list: a hidden unit with a fade-hiding view has its `enabled` unknown.)
+            self.bounds_rec_fade_marks(w);
+        }
         for &u in &pool {
             let known = self.vis_pos_known(w, u);
             let pos = known.unwrap_or_else(|| self.vis_pos(w, u, true));
@@ -443,7 +472,8 @@ impl Driver<'_> {
             let in_game = w.entity(u).is_in_game;
             // A unit not in the game at the window's first tick may be fade-hiding with its
             // collider enabled: unknown until the sim sees it in the game.
-            if first && !in_game {
+            // (With the records, the first fade state is `bounds_init`'s.)
+            if first && !in_game && !rec_on {
                 w.combat.vision.fade_hidden.insert(u);
             }
             // A view that fade-hides keeps its collider's `enabled` until the fade ends, which
@@ -469,30 +499,48 @@ impl Driver<'_> {
                 pos_known: known.is_some(),
             });
         }
-        for gone in w.combat.vision.bounds.tick(&list, step).removed {
-            let id = w.entity(gone).unique_id.clone();
-            Self::vis_report(
-                w,
-                &format!(
-                    "the entity {id} left the entities with bounds: when its view and sphere collider are destroyed isn't modelled"
-                ),
-            );
+        if rec_on {
+            self.bounds_rec_tick(w, &list, step, first);
+            rec_on = self.bounds_rec_on();
+            if !rec_on {
+                // (The records didn't fit the run: reported; the hypotheses from this tick on.)
+                for x in &mut list {
+                    if first && !x.in_game {
+                        w.combat.vision.fade_hidden.insert(x.unit);
+                        x.enabled = Enabled::Unknown;
+                    }
+                }
+            }
+        }
+        if !rec_on {
+            for gone in w.combat.vision.bounds.tick(&list, step).removed {
+                let id = w.entity(gone).unique_id.clone();
+                Self::vis_report(
+                    w,
+                    &format!(
+                        "the entity {id} left the entities with bounds: when its view and sphere collider are destroyed isn't modelled"
+                    ),
+                );
+            }
         }
         if self.vis.range.physics_unmodelled {
             w.combat.vision.bounds.forget_positions();
             self.vis.counts.range_physics_unknown += 1;
         }
-        // A `Physics.SyncTransforms()` since the last phase may have given PhysX transforms a
-        // step wouldn't have (this frame's, or the next's when it came after this phase):
-        // unknown until a step known to run.
-        for (u, polymorph) in std::mem::take(&mut w.combat.vision.views_replaced) {
-            w.combat.vision.bounds.replace_unit(u);
-            self.vis.counts.range_views_replaced += usize::from(polymorph);
+        if !rec_on {
+            // A `Physics.SyncTransforms()` since the last phase may have given PhysX transforms a
+            // step wouldn't have (this frame's, or the next's when it came after this phase):
+            // unknown until a step known to run. (With the records, `phys_sync` shows them.)
+            for (u, polymorph) in std::mem::take(&mut w.combat.vision.views_replaced) {
+                w.combat.vision.bounds.replace_unit(u);
+                self.vis.counts.range_views_replaced += usize::from(polymorph);
+            }
+            if std::mem::take(&mut w.combat.vision.explicit_sync) {
+                w.combat.vision.bounds.forget_positions();
+                self.vis.counts.range_sync_frames += 1;
+            }
         }
-        if std::mem::take(&mut w.combat.vision.explicit_sync) {
-            w.combat.vision.bounds.forget_positions();
-            self.vis.counts.range_sync_frames += 1;
-        }
+        self.vis.range.phase_ran_at = Some(self.tick);
         self.vis.range.expect.clear();
         self.vis.range.writes_at_phase = Some(w.combat.vision.pos_writes.clone());
         if m == super::mode::PAUSE {
@@ -526,6 +574,8 @@ impl Driver<'_> {
             };
             self.vis_tally(&hits);
             self.vis.range.expect.insert(u, hits);
+            self.vis_order_apply(w, u);
+            self.vis_order_constrain(w, u);
             let id = w.entity(u).unique_id.clone();
             let last = self.vis.range.last.get(&u).cloned();
             if self.vis.range.recs.contains(&(self.tick, id)) {
@@ -598,8 +648,10 @@ impl Driver<'_> {
         }
         self.vis.counts.range_moved_after += moved.len();
         for (u, mut hits, set, rec) in std::mem::take(&mut self.vis.range.pending) {
+            // (With the records a collider's transform is the game's, not a row's.)
+            let rec_on = self.bounds_rec_on();
             for h in &mut hits {
-                if moved.contains(&u) || moved.contains(&h.unit) {
+                if moved.contains(&u) || (!rec_on && moved.contains(&h.unit)) {
                     (h.tri, h.cause, h.margin, h.guess, h.capped) =
                         (range::Tri::Maybe, Some(range::Cause::Position), None, None, None);
                 }
