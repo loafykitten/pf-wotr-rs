@@ -6,7 +6,7 @@ anything**: it's the handoff, with the goal, the fidelity contract, decisions, f
 measured so far, and the proof-of-concept milestones. `docs/research/` holds the code
 survey and notes on other rewrites.
 
-- **Current status (2026-10-19, twenty-third session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
+- **Current status (2026-10-20, twenty-fourth session; PLAN.md's "Where things stand" section is the handoff, read it first):** POC-0 and **POC-1 (oracle
   certification) passed**. Ember's fixture saves exist: `Manual_18_WR_FirstBattle`,
   `Manual_19_WR_PreHorgus` and `Manual_20_WR_PreCamelia` (read-only copies in `fixtures/saves/`, gitignored).
   Where each workstream stands, with its handoff:
@@ -24,7 +24,7 @@ survey and notes on other rewrites.
     player input neutral at the source, physics phase pinned); `cert-20` certifies from this repo's layout.
   - POC-6 render round 3 (`docs/poc6/render-round3.md`): realtime shadows; FLIP 0.1246. Next: light probes.
   - POC-7 (`docs/poc7/characters.md`): stage 1 done (the save's units in the caves, composed as the game does, in rest
-    pose; `wr-game --look`) and step 2 (`docs/poc7/animation.md`: idle animation, a walk demo). Next: the units driven by the sim, then the stages the doc lists.
+    pose; `wr-game --look`) and step 2 (`docs/poc7/animation.md`: idle animation, a walk demo) and step 3a (`docs/poc7/fight.md`: the units driven by the sim's replay, `wr-game --fight`; pack format 4). Next: combat animations, the camera rig, click-to-move.
   - Nav (`docs/poc0/extraction.md` §9, `crates/wr-nav`): every path query exact, smoothing included (the native
     math ported from `UnityPlayer.dylib` and checked against it, `native_check.rs`); turn-based paths too
     (`docs/poc5/paths.md`, observer `paths`, `poc5-tb-114`: every request exact). The sim's input is the area's nav
@@ -32,8 +32,8 @@ survey and notes on other rewrites.
   - The movement agent (`docs/poc5/movement.md`): computed in the driven replay with its physics (`crates/wr-phys`:
     terrain, boxes and triangle meshes exact against the player), paths, the AI's simulation steps, place-on-ground and
     facing (`docs/poc5/orientation.md`); memory (`docs/poc5/memory.md`), spells, the combat log with its tooltips and
-    initiative ties are computed too. PLAN's "Where things stand" lists the twenty-second and twenty-third sessions' streams (line of sight, roaming, loot and prone, the view pin, the memory's leaves, the vision range), the
-    captures (`poc5-tb-111` to `-140`; `-140` records the vision range's `bounds_*`, `vis_order` and `phys_sync`, partly read so far), the audit of records inside root rule spans, and what's open (readers for `-140`'s other observers; stat mutations outside rule spans; a replay window's one-frame start offset).
+    initiative ties are computed too. PLAN's "Where things stand" lists the twenty-second to twenty-fourth sessions' streams (line of sight, roaming, loot and prone, the view pin, the memory's leaves, the vision range and its window start from `-140`'s records, the stat mutations), the
+    captures (`poc5-tb-111` to `-140`; `-140`'s new observers are all read now), the audit of records inside root rule spans, and what's open (a replay window's one-frame start offset, measured, not pinned; three review findings left in the window-start reader, `docs/poc5/vision.md`; fog of war).
   - **booklab** (`ssh booklab`, an M1, dedicated): **not available for now (Ember, 2026-10-13): plan for this Mac
     only.** When it's back: a second Mac that runs the game for correctness work in
     parallel (recordings, POC-6 render comparisons, Metal captures of the original), never timing. Setup, sync and
@@ -57,7 +57,7 @@ survey and notes on other rewrites.
 - **Toolchain:** Rust via Homebrew `rustup` (keg-only; PATH set in `~/.zshenv`; a shell
   started before that may need `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`).
   `scripts/check.sh` checks the main workspace; `scripts/check.sh spikes/<name>` a spike.
-  Disk (2026-10-14): `target/`, `cache/` and `fixtures/captures/` are symlinks onto Ember's external SSD volume (2.5 TB free; the location is in Claude's memory), so they can grow; the internal disk has ~94 GiB free and keeps the repo, `builds/` (the oracle build is an APFS clone, which only shares blocks on its own volume, and timing runs stay internal), `decompiled/` and the saves. Builds and recordings need the volume mounted. Superseded captures go to an archive folder on that volume (Ember deletes them). A POC-5 worktree has its own `target/` (internal unless linked too). A 5-minute Metal System Trace is ~22 GB, so keep traces short.
+  Disk (2026-10-14): `target/`, `cache/` and `fixtures/captures/` are symlinks onto Ember's external SSD volume (2.5 TB free; the location is in Claude's memory), so they can grow; the internal disk has ~94 GiB free and keeps the repo, `builds/` (the oracle build is an APFS clone, which only shares blocks on its own volume, and timing runs stay internal), `decompiled/` and the saves. Builds and recordings need the volume mounted. Superseded captures go to an archive folder on that volume (Ember deletes them). A POC-5 worktree has its own `target/` (internal unless linked too). **Every cargo target dir, baseline builds included, goes on the external volume, never in a temp or scratch dir or a worktree** (2026-10-19: a 73 GB baseline build in the session's temp dir filled the internal disk). A 5-minute Metal System Trace is ~22 GB, so keep traces short.
 - **Sister project, now separate:** `~/Developer/Wrath-Mac` is **pf-wotr-silicon** (the
   native arm64 build tooling and WrathPerf, made public-ready 2026-10-12). Since then
   **pf-wotr-rs doesn't use or touch it**: everything this project needs lives here. Game-side

@@ -7,10 +7,45 @@ starting; don't re-ask Ember things answered here. The oracle (WrathOracle and i
 reference and our baseline. They came from the sister project `~/Developer/Wrath-Mac`, which
 is now pf-wotr-silicon and is no longer used or touched from here (2026-10-12).
 
-## Where things stand (2026-10-18, twenty-third session): start here
+## Where things stand (2026-10-20, twenty-fourth session): start here
 
 Done and on `main`, each implementation reviewed (GPT 6 Astra (high) through round 5, gpt-6.1-sol (high) from round 6)
-until no finding was left. Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+until no finding was left (one exception, stream bstart below). Sonnet agents did the first rounds; Opus took over where Sonnet kept inferring:
+- **Twenty-fourth session (2026-10-19/20; Sonnet 5.5 (high) streams).** Merged, each reviewed by gpt-6.1-sol (high):
+  - *`roam_init` read* (`replay/roaming.rs`): the roaming states at the window's start are the game's; each record
+    validated whole in the window's first frame, the settings, origin, `m_Disabled` and follow part equal to the sim's,
+    the next point, direction, idle end and cutscene taken. `scripts/sweep.sh`: the POC-5 sweep (every run of the
+    current captures, driven, under `heavy.sh`; one line per run and totals).
+  - *The one-frame window offset, measured* (`docs/poc5/tb-replay.md`, end): 34 of 83 replays' start states differ,
+    only in 523B's round timer and always by one 1/60 s frame (523B is ticked one real-time frame more or fewer between
+    the reload and the window). `scripts/oracle-record.sh` writes each capture's `start-states.txt`. Not pinned yet.
+  - *Stat mutations* (stream stats, `stats/trace.rs`, `replay/stats.rs`, `docs/poc5/stats.md`): the sim writes
+    `stat_value`, `stat_mod_add`/`_remove` and the temporary scopes' records at WrathOracle's hook points and T0
+    compares them, each placed by its occurrence-qualified neighbours: 5,202 on 116 runs, all equal. Proposed
+    observations: an `origin` on every mutation, a `stat_mod_drop` from `PrepareForRemoval`. Sol: 3 rounds.
+  - *POC-7 step 3a* (stream drive, `replay/timeline.rs`, `docs/poc7/fight.md`, `wr-game --fight`): the units driven by
+    the sim's replay (position, facing, life, prone and speed per frame, with per-unit provenance: the sim's, or the
+    recording's where a recorded value was taken); pack format 4 adds the prefab's `ForbidRotation` (**re-pack with
+    `wr-import pack`**; the caves' POC-6 and POC-7 packs are re-packed). Sol: 4 rounds.
+  - *The vision range's window start* (stream bstart, `vision/range/recorded.rs`, `replay/bounds_rec.rs`,
+    `replay/bounds_life.rs`, `docs/poc5/vision.md`): `-140`'s `bounds_init`/`_tick`/`_set`/`_scene`, `phys_sync` and
+    `vis_order` replace the start hypotheses: 6,795,850 pairs decided, none left to the recording, 0 differences in
+    367,840 sets; PhysX's result order differs from creation order in 34 sets (taken from `vis_order`, counted). Every
+    collider's life is one state machine checked record by record with every field (a field table and a per-field
+    damage test), the checks split into intrinsic (every frame) and stateful (followed frames, reset across a gap); the
+    older captures' outputs byte-identical. Sol: 9 rounds (findings 7, 6, 5, 4, 6, 7, 7, 4, 3, each about rejecting a
+    damaged recording or a legitimate sequence no capture contains; no result changed). **Round 9's three are open**
+    (`docs/poc5/vision.md`, Limits): a dying collider in the moved-unit check (a false report), `made_hidden` not
+    cleared by an `active` write, the 0.45 radius floor not applied to `bounds_init` roots (both absorbed). Proposed
+    observers: `phys_steps` per tick, `OverlapCapsule`'s raw hit order.
+  - **Valid on every run** after the merges of 2026-10-20 (sweep: 116 runs, 113 valid; `check.sh` 876 tests; POC-5
+    suites 51/51): all but `-122/tb-nearest` (the known tie).
+  - *Disk*: a baseline build in the session's temp dir filled the internal disk (73 GB); every cargo target dir goes on
+    the external volume now (CLAUDE.md).
+  - Open: round 9's three (above); pinning the one-frame offset (record the pre-window sleeping decisions, then
+    reproduce the wake frame as `IdlePin` does); loot's proposed observers (`docs/poc5/loot-and-prone.md`); fog of war
+    (`FogOfWarController` is CPU-side, portable with `wr-los` and the bounds colliders); POC-7's combat animations,
+    camera rig and click-to-move; POC-6 light probes.
 - **Twenty-third session (2026-10-16 to 18; Opus 5.5 (high) streams, then Sonnet 5.5 (high) from 2026-10-17).** Merged,
   each reviewed by gpt-6.1-sol (high) to no findings:
   - *Drezen* (stream drezen): Manual_10's companion spawners and the capital mode; the 13 companion toggles restart at
@@ -49,7 +84,8 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
     `vis_order` and `phys_sync`. `-139` is a partial development capture of the same plan (superseded by `-140`). Read
     by the sim so far: `wcenter` (the box centres, below), `los_geom`/`los_probe` (88 segments and 1,280 probes equal a
     run) and `bounds_tick`'s radii (stream corp, below). Still unread: `roam_init`, `bounds_set`, `bounds_scene`,
-    `vis_order`, `phys_sync` (next: readers that replace the vision range's start hypotheses with them).
+    `vis_order`, `phys_sync` (next: readers that replace the vision range's start hypotheses with them; all read since the
+    twenty-fourth session).
   - *Box centres* (stream xform, `docs/poc5/movement-review-integration.md`): the importer's `TransformPoint` is
     Unity's hierarchy walk (`wr_phys::boxes::transform_point`), checked bit for bit against `-140`'s 62 `wcenter`s;
     `wr-los` format 2 (re-pack with `wr-import los-pack`).
@@ -81,7 +117,7 @@ until no finding was left. Sonnet agents did the first rounds; Opus took over wh
   - Open: a replay's window can start one frame apart (523B's `TimeToNextRoundTick`; `docs/poc5/tb-replay.md`, end);
     loot's proposed observers (`loot_drop`, `ent_created`, `prone_step`, `tt_prep` Duration, `awake_set`,
     `docs/poc5/loot-and-prone.md`); the stat mutations outside any rule span (`stat_value`, `stat_mod_add`,
-    `stat_mod_remove`: about 4,800 on the sweep) are compared by nothing yet.
+    `stat_mod_remove`: about 4,800 on the sweep) are compared by nothing yet (compared since the twenty-fourth session).
 - **Parallel streams (twenty-second session, Opus 5.5 (high) agents in git worktrees, `scripts/worktree-setup.sh`;
   only the main session builds WrathOracle and records).** Merged, each reviewed by gpt-6.1-sol (high) to no findings:
   - *The agent in the driven replay* (`combat/replay/agent.rs`; hardening A2 per
