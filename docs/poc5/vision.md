@@ -839,6 +839,15 @@ can also be absorbed:
   remade scene and a record no phase consumed are reported. Not modelled and reported: a collider relinked to another entity,
   and an `entity` record that isn't a made collider's link. Unexercised on data (unit-tested only): a collider made in the window,
   a destruction, a position write, a sync, a unit hidden at the start.
+- **Open at the merge (stream bstart, 2026-10-20):** gpt-6.1-sol (high) reviewed the window-start reader in nine rounds
+  (findings 7, 6, 5, 4, 6, 7, 7, 4, 3; every one a hole in rejecting a damaged recording or a rejection of a legitimate
+  sequence no capture contains, none a result: `-140`'s numbers above stayed the same from round 1). Round 9's three are not
+  fixed: the check that a moved, in-game unit's collider was moved also picks a collider an earlier `gone` of the frame is
+  destroying, so a legitimate destruction followed by a call with no collider is reported (a false report; restrict
+  `recorded.rs` `check_unit` to the current view collider); `made_hidden` from a skipped-frame making isn't cleared by a later
+  `active` write, so after `active(false)` a damaged `active(true)` of a hidden unit is counted as `enabled_unknown` instead of
+  reported (absorbed); a unit's `bounds_init` radius isn't held to the 0.45 floor that makings and calls are, so a stationary
+  unit rooted at 0.1 with no calls passes (absorbed).
 - **Can be absorbed (an equally wrong recording would pass) in a recording without them:** the start-state hypotheses (above); the corpulence
   inference: a size or view change made by code the sim doesn't run (an unported action, a mount change outside the sampled
   check, a polymorph it doesn't see) produces no invalidation, so a corpulence read before it, and a radius computed from
